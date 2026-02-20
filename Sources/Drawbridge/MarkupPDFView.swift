@@ -551,9 +551,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             let strokeColor = (toolMode == .highlighter) ? highlighterColor : penColor
             let strokeWidth = (toolMode == .highlighter) ? highlighterLineWidth : penLineWidth
             annotation.color = strokeColor
-            let border = PDFBorder()
-            border.lineWidth = strokeWidth
-            annotation.border = border
+            localPath.lineWidth = strokeWidth
+            assignLineWidth(strokeWidth, to: annotation)
             annotation.contents = (toolMode == .highlighter) ? "Highlighter" : "Pen"
             annotation.add(localPath)
             page.addAnnotation(annotation)
@@ -619,11 +618,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let annotation = PDFAnnotation(bounds: annotationRect, forType: .square, withProperties: nil)
         annotation.color = rectangleStrokeColor
         annotation.interiorColor = rectangleFillColor
-        annotation.border = {
-            let border = PDFBorder()
-            border.lineWidth = rectangleLineWidth
-            return border
-        }()
+        assignLineWidth(rectangleLineWidth, to: annotation)
         page.addAnnotation(annotation)
         onAnnotationAdded?(page, annotation, "Add Rectangle")
     }
@@ -645,13 +640,19 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         let annotation = PDFAnnotation(bounds: bounds, forType: .ink, withProperties: nil)
         annotation.color = penColor
-        let border = PDFBorder()
-        border.lineWidth = penLineWidth
-        annotation.border = border
+        localPath.lineWidth = penLineWidth
+        assignLineWidth(penLineWidth, to: annotation)
         annotation.contents = contents
         annotation.add(localPath)
         page.addAnnotation(annotation)
         onAnnotationAdded?(page, annotation, actionName)
+    }
+
+    private func assignLineWidth(_ lineWidth: CGFloat, to annotation: PDFAnnotation) {
+        let normalized = max(0.1, lineWidth)
+        let border = annotation.border ?? PDFBorder()
+        border.lineWidth = normalized
+        annotation.border = border
     }
 
     private func captureSnapshotImage(on page: PDFPage, in pageRect: NSRect) -> NSImage? {
@@ -762,9 +763,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         let areaAnnotation = PDFAnnotation(bounds: bounds, forType: .ink, withProperties: nil)
         areaAnnotation.color = penColor
-        let border = PDFBorder()
-        border.lineWidth = areaLineWidth
-        areaAnnotation.border = border
+        polygonPath.lineWidth = areaLineWidth
+        assignLineWidth(areaLineWidth, to: areaAnnotation)
         areaAnnotation.contents = "Area"
         areaAnnotation.add(polygonPath)
         page.addAnnotation(areaAnnotation)
@@ -1057,9 +1057,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         let line = PDFAnnotation(bounds: lineBounds, forType: .ink, withProperties: nil)
         line.color = measurementStrokeColor
-        let border = PDFBorder()
-        border.lineWidth = measurementLineWidth
-        line.border = border
+        path.lineWidth = measurementLineWidth
+        assignLineWidth(measurementLineWidth, to: line)
         line.contents = String(format: "DrawbridgeMeasure|%.8f", distance)
         line.add(path)
         page.addAnnotation(line)
@@ -1533,9 +1532,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         let annotation = PDFAnnotation(bounds: cloudBounds, forType: .ink, withProperties: nil)
         annotation.color = NSColor.systemCyan
-        let border = PDFBorder()
-        border.lineWidth = 2.0
-        annotation.border = border
+        path.lineWidth = 2.0
+        assignLineWidth(2.0, to: annotation)
         annotation.contents = "Cloud"
         annotation.add(path)
         page.addAnnotation(annotation)
@@ -1583,9 +1581,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         let annotation = PDFAnnotation(bounds: bounds, forType: .ink, withProperties: nil)
         annotation.color = calloutStrokeColor
-        let border = PDFBorder()
-        border.lineWidth = calloutLineWidth
-        annotation.border = border
+        path.lineWidth = calloutLineWidth
+        assignLineWidth(calloutLineWidth, to: annotation)
         annotation.contents = "Callout Leader"
         annotation.add(path)
         page.addAnnotation(annotation)
