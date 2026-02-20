@@ -85,6 +85,25 @@ cp -R /Users/danielnguyen/Drawbridge/dist/Drawbridge.app /Applications/
 open /Applications/Drawbridge.app
 ```
 
+## GitHub Releases (One-Click Download)
+
+This repo includes a GitHub Actions workflow that builds release artifacts for macOS when you push a version tag:
+
+- `Drawbridge-<tag>.dmg`
+- `Drawbridge-<tag>.zip`
+
+Create and publish a release build:
+
+```bash
+cd /Users/danielnguyen/Drawbridge
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+End users can download the latest release from:
+
+`https://github.com/dansc89/Drawbridge/releases/latest`
+
 ## Stress Harness
 
 Generate and benchmark a heavy synthetic PDF:
