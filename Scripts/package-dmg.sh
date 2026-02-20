@@ -22,6 +22,7 @@ cleanup() {
 trap cleanup EXIT
 
 cp -R "$APP_PATH" "$TMP_DIR/"
+ln -s /Applications "$TMP_DIR/Applications"
 rm -f "$OUTPUT_DMG"
 mkdir -p "$(dirname "$OUTPUT_DMG")"
 
