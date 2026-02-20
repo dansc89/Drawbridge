@@ -1,0 +1,51 @@
+name: Release macOS App
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build app bundle
+        run: ./Scripts/package-app.sh
+
+      - name: Prepare release artifacts
+        run: |
+          VERSION_TAG="${GITHUB_REF_NAME:-manual}"
+          APP_NAME="Drawbridge"
+          DMG_PATH="dist/${APP_NAME}-${VERSION_TAG}.dmg"
+          ZIP_PATH="dist/${APP_NAME}-${VERSION_TAG}.zip"
+
+          ./Scripts/package-dmg.sh "dist/${APP_NAME}.app" "$DMG_PATH" "$APP_NAME"
+          ditto -c -k --sequesterRsrc --keepParent "dist/${APP_NAME}.app" "$ZIP_PATH"
+
+          echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
+          echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: drawbridge-macos-${{ github.ref_name || 'manual' }}
+          path: |
+            ${{ env.DMG_PATH }}
+            ${{ env.ZIP_PATH }}
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ${{ env.DMG_PATH }}
+            ${{ env.ZIP_PATH }}
