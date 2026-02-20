@@ -267,6 +267,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         openButton.title = "Open"
         openButton.target = self
         openButton.action = #selector(openPDF)
+        emptyStateOpenButton.title = "Open Existing PDF"
+        emptyStateOpenButton.target = self
+        emptyStateOpenButton.action = #selector(openPDF)
         emptyStateSampleButton.target = self
         emptyStateSampleButton.action = #selector(createNewPDFAction)
         highlightButton.target = self
@@ -365,7 +368,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 color: annotation.color,
                 interiorColor: annotation.interiorColor,
                 fontColor: annotation.fontColor,
-                lineWidth: annotation.border?.lineWidth ?? 1.0
+                lineWidth: resolvedLineWidth(for: annotation)
             )
             self.registerAnnotationStateUndo(annotation: annotation, previous: before, actionName: "Move Markup")
             self.markPageMarkupCacheDirty(page)
@@ -1202,9 +1205,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         emptyStateView.translatesAutoresizingMaskIntoConstraints = false
 
         emptyStateTitle.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
+        emptyStateOpenButton.bezelStyle = .texturedRounded
         emptyStateSampleButton.bezelStyle = .texturedRounded
 
-        let actions = NSStackView(views: [emptyStateSampleButton])
+        let actions = NSStackView(views: [emptyStateOpenButton, emptyStateSampleButton])
         actions.orientation = .horizontal
         actions.spacing = 8
         actions.alignment = .centerY
@@ -2097,7 +2101,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
         if let url = openDocumentURL {
-            persistProjectSnapshot(document: document, for: url, busyMessage: "Saving Project…")
+            persistDocument(to: url, adoptAsPrimaryDocument: true, busyMessage: "Saving PDF…", document: document)
         } else {
             saveDocumentAsProject(document: document)
         }
@@ -2135,6 +2139,21 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private func sidecarURL(for sourcePDFURL: URL) -> URL {
         let base = sourcePDFURL.deletingPathExtension()
         return base.appendingPathExtension("drawbridge.json")
+    }
+
+    private func cleanupLegacyJSONArtifacts(for sourcePDFURL: URL) {
+        let fm = FileManager.default
+        let sidecar = sidecarURL(for: sourcePDFURL)
+        if fm.fileExists(atPath: sidecar.path) {
+            try? fm.removeItem(at: sidecar)
+        }
+
+        guard let autosaveDir = autosaveDirectoryURL() else { return }
+        let stem = sourcePDFURL.deletingPathExtension().lastPathComponent.replacingOccurrences(of: "/", with: "-")
+        let autosave = autosaveDir.appendingPathComponent("\(stem)-autosave.drawbridge.json")
+        if fm.fileExists(atPath: autosave.path) {
+            try? fm.removeItem(at: autosave)
+        }
     }
 
     private func buildSidecarSnapshot(document: PDFDocument, sourcePDFURL: URL) -> SidecarSnapshot {
@@ -2181,9 +2200,21 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let url = sidecarURL(for: sourcePDFURL)
         guard FileManager.default.fileExists(atPath: url.path),
               let data = try? Data(contentsOf: url) else { return }
+
+        // If the PDF already contains annotations, trust the PDF as source of truth.
+        // This prevents stale sidecars from overriding line weights and other properties.
+        var existingAnnotationCount = 0
+        for pageIndex in 0..<document.pageCount {
+            existingAnnotationCount += document.page(at: pageIndex)?.annotations.count ?? 0
+            if existingAnnotationCount > 0 {
+                return
+            }
+        }
+
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         guard let snapshot = try? decoder.decode(SidecarSnapshot.self, from: data) else { return }
+        guard snapshot.sourcePDFPath == sourcePDFURL.standardizedFileURL.path else { return }
         applySidecarSnapshot(snapshot, to: document)
     }
 
@@ -2360,6 +2391,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                     self.openDocumentURL = targetURL
                     self.registerSessionDocument(targetURL)
                     self.configureAutosaveURL(for: targetURL)
+                    self.cleanupLegacyJSONArtifacts(for: targetURL)
                     self.view.window?.title = "Drawbridge - \(targetURL.lastPathComponent)"
                     self.onDocumentOpened?(targetURL)
                 }
@@ -2740,6 +2772,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 }
                 try FileManager.default.copyItem(at: source, to: destination)
             }
+            sessionDocumentURLs.removeAll { $0.standardizedFileURL == source }
             openDocumentURL = destination
             registerSessionDocument(destination)
             configureAutosaveURL(for: destination)
@@ -3101,26 +3134,43 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         capRow.orientation = .horizontal
         capRow.spacing = 10
         capRow.alignment = .centerY
+        capLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        capRow.distribution = .fill
         let thresholdRow = NSStackView(views: [thresholdLabel, thresholdField])
         thresholdRow.orientation = .horizontal
         thresholdRow.spacing = 10
         thresholdRow.alignment = .centerY
+        thresholdLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        thresholdRow.distribution = .fill
 
         let help = NSTextField(labelWithString: "Watchdog logs: ~/Library/Application Support/Drawbridge/Logs/watchdog.log")
         help.textColor = .secondaryLabelColor
         help.font = NSFont.systemFont(ofSize: 11)
-        help.lineBreakMode = .byTruncatingMiddle
+        help.lineBreakMode = .byWordWrapping
+        help.maximumNumberOfLines = 2
 
         let stack = NSStackView(views: [adaptiveButton, capRow, watchdogButton, thresholdRow, help])
         stack.orientation = .vertical
         stack.spacing = 8
         stack.edgeInsets = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 160))
+        accessory.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(stack)
+        NSLayoutConstraint.activate([
+            accessory.widthAnchor.constraint(equalToConstant: 520),
+            stack.topAnchor.constraint(equalTo: accessory.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+            stack.bottomAnchor.constraint(equalTo: accessory.bottomAnchor)
+        ])
 
         let alert = NSAlert()
         alert.messageText = "Performance Settings"
         alert.informativeText = "Tune large-document indexing and watchdog behavior."
         alert.alertStyle = .informational
-        alert.accessoryView = stack
+        alert.accessoryView = accessory
         alert.addButton(withTitle: "Apply")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
@@ -3392,7 +3442,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             color: annotation.color,
             interiorColor: annotation.interiorColor,
             fontColor: annotation.fontColor,
-            lineWidth: annotation.border?.lineWidth ?? 1.0
+            lineWidth: resolvedLineWidth(for: annotation)
         )
     }
 
@@ -3402,9 +3452,35 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         annotation.color = snapshot.color
         annotation.interiorColor = snapshot.interiorColor
         annotation.fontColor = snapshot.fontColor
+        assignLineWidth(snapshot.lineWidth, to: annotation)
+    }
+
+    private func resolvedLineWidth(for annotation: PDFAnnotation) -> CGFloat {
+        let annotationType = (annotation.type ?? "").lowercased()
+        if annotationType.contains("ink"),
+           let paths = annotation.paths,
+           let maxPathWidth = paths.map(\.lineWidth).max(),
+           maxPathWidth > 0 {
+            return maxPathWidth
+        }
+        if let borderWidth = annotation.border?.lineWidth, borderWidth > 0 {
+            return borderWidth
+        }
+        return 1.0
+    }
+
+    private func assignLineWidth(_ lineWidth: CGFloat, to annotation: PDFAnnotation) {
+        let normalized = max(0.1, lineWidth)
         let border = annotation.border ?? PDFBorder()
-        border.lineWidth = snapshot.lineWidth
+        border.lineWidth = normalized
         annotation.border = border
+        let annotationType = (annotation.type ?? "").lowercased()
+        if annotationType.contains("ink"),
+           let paths = annotation.paths {
+            for path in paths {
+                path.lineWidth = normalized
+            }
+        }
     }
 
     private func registerAnnotationStateUndo(annotation: PDFAnnotation, previous: AnnotationSnapshot, actionName: String) {
@@ -3456,7 +3532,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         hasPromptedForInitialMarkupSaveCopy = false
         isPresentingInitialMarkupSaveCopyPrompt = false
         rehydrateImageAnnotationsIfNeeded(in: document)
-        loadSidecarSnapshotIfAvailable(for: url, document: document)
+        // Always trust PDF-embedded annotations on open.
+        // Sidecar replay can override stroke widths and cause mismatches after reopen.
+        repairInkPathLineWidthsIfNeeded(in: document)
         openDocumentURL = url
         registerSessionDocument(url)
         configureAutosaveURL(for: url)
@@ -3494,6 +3572,23 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 replacement.shouldPrint = annotation.shouldPrint
                 page.removeAnnotation(annotation)
                 page.addAnnotation(replacement)
+            }
+        }
+    }
+
+    private func repairInkPathLineWidthsIfNeeded(in document: PDFDocument) {
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            for annotation in page.annotations {
+                let annotationType = (annotation.type ?? "").lowercased()
+                guard annotationType.contains("ink"),
+                      let target = annotation.border?.lineWidth,
+                      target > 0,
+                      let paths = annotation.paths,
+                      !paths.isEmpty else { continue }
+                for path in paths where abs(path.lineWidth - target) > 0.01 {
+                    path.lineWidth = target
+                }
             }
         }
     }
@@ -3766,121 +3861,24 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         return try? decoder.decode(MarkupIndexSnapshot.self, from: data)
     }
 
-    private func persistMarkupIndexSnapshot(document: PDFDocument) {
-        guard let fileURL = markupIndexSnapshotURL(for: openDocumentURL) else { return }
-        let perPageCounts = pageMarkupCache.mapValues(\.count)
-        let snapshot = MarkupIndexSnapshot(
-            documentKey: markupIndexSnapshotDocumentKey(for: openDocumentURL),
-            pageCount: document.pageCount,
-            totalAnnotations: totalCachedAnnotationCount(),
-            perPageCounts: perPageCounts,
-            generatedAt: Date()
-        )
-        DispatchQueue.global(qos: .utility).async {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            encoder.dateEncodingStrategy = .iso8601
-            guard let data = try? encoder.encode(snapshot) else { return }
-            try? data.write(to: fileURL, options: .atomic)
-        }
+    private func persistMarkupIndexSnapshot(document _: PDFDocument) {
+        return
     }
 
-    private func configureAutosaveURL(for sourceURL: URL?) {
-        guard let dir = autosaveDirectoryURL() else {
-            autosaveURL = nil
-            return
-        }
-        let fileStem = sourceURL?.deletingPathExtension().lastPathComponent ?? "Untitled"
-        let safeStem = fileStem.replacingOccurrences(of: "/", with: "-")
-        autosaveURL = dir.appendingPathComponent("\(safeStem)-autosave.drawbridge.json")
+    private func configureAutosaveURL(for _: URL?) {
+        autosaveURL = nil
     }
 
     private func scheduleAutosave() {
-        if manualSaveInFlight {
-            autosaveQueued = true
-            return
-        }
-        if autosaveInFlight {
-            autosaveQueued = true
-            return
-        }
-
-        pendingAutosaveWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.performAutosaveNow()
-        }
-        pendingAutosaveWorkItem = workItem
-        let delay: TimeInterval = isSidecarAutosaveMode ? 2.0 : 20.0
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        return
     }
 
     private func performAutosaveNow() {
-        if manualSaveInFlight {
-            autosaveQueued = true
-            return
-        }
-        guard let document = pdfView.document, let sourceURL = openDocumentURL else { return }
-        let minMarkupIdle: TimeInterval = isSidecarAutosaveMode ? 0.75 : 6.0
-        if Date().timeIntervalSince(lastMarkupEditAt) < minMarkupIdle {
-            autosaveQueued = true
-            scheduleAutosave()
-            return
-        }
-        let minInteractionIdle: TimeInterval = isSidecarAutosaveMode ? 0.75 : 8.0
-        if Date().timeIntervalSince(lastUserInteractionAt) < minInteractionIdle {
-            autosaveQueued = true
-            scheduleAutosave()
-            return
-        }
-        if autosaveURL == nil {
-            configureAutosaveURL(for: openDocumentURL)
-        }
-        guard let target = autosaveURL else { return }
-        let changeVersionAtStart = markupChangeVersion
-        guard changeVersionAtStart != 0, changeVersionAtStart != lastAutosavedChangeVersion else { return }
-        let minAutosaveInterval: TimeInterval = isSidecarAutosaveMode ? 1.0 : 20.0
-        if Date().timeIntervalSince(lastAutosaveAt) < minAutosaveInterval {
-            autosaveQueued = true
-            scheduleAutosave()
-            return
-        }
-
-        autosaveInFlight = true
-        let snapshot = buildSidecarSnapshot(document: document, sourcePDFURL: sourceURL)
-
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
-            let success: Bool
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            encoder.dateEncodingStrategy = .iso8601
-            if let data = try? encoder.encode(snapshot) {
-                do {
-                    try data.write(to: target, options: .atomic)
-                    success = true
-                } catch {
-                    success = false
-                }
-            } else {
-                success = false
-            }
-
-            DispatchQueue.main.async {
-                if success {
-                    self.lastAutosavedChangeVersion = changeVersionAtStart
-                    self.lastAutosaveAt = Date()
-                }
-                self.autosaveInFlight = false
-                if self.autosaveQueued {
-                    self.autosaveQueued = false
-                    self.scheduleAutosave()
-                }
-            }
-        }
+        return
     }
 
     private var isSidecarAutosaveMode: Bool {
-        autosaveURL?.pathExtension.lowercased() == "json"
+        false
     }
 
     private func jumpToSelectedMarkup() {
@@ -4095,9 +4093,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
                     if !annotationType.contains("highlight") {
                         let inferredTool = inferredToolMode(for: annotation)
                         let updatedWidth = widthValue(for: selectedLineWeightLevel(), tool: inferredTool)
-                        let border = annotation.border ?? PDFBorder()
-                        border.lineWidth = updatedWidth
-                        annotation.border = border
+                        assignLineWidth(updatedWidth, to: annotation)
                     }
                     didEdit = true
                 }
@@ -4179,7 +4175,11 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
                 toolSettingsStrokeColorWell.color = primary.color.withAlphaComponent(1.0)
                 toolSettingsOpacitySlider.doubleValue = Double(primary.color.alphaComponent)
                 toolSettingsFillColorWell.color = (primary.interiorColor ?? NSColor.systemYellow).withAlphaComponent(1.0)
-                selectLineWeightLevel(for: primary.border?.lineWidth ?? widthValue(for: 5, tool: inferredTool), tool: inferredTool)
+                let currentLineWidth = resolvedLineWidth(for: primary)
+                selectLineWeightLevel(
+                    for: currentLineWidth > 0 ? currentLineWidth : widthValue(for: 5, tool: inferredTool),
+                    tool: inferredTool
+                )
             }
 
             toolSettingsOpacityValueLabel.stringValue = "\(Int(round(toolSettingsOpacitySlider.doubleValue * 100)))%"
