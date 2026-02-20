@@ -42,7 +42,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let splitView = NSSplitView(frame: .zero)
     private let emptyStateView = StartupDropView(frame: .zero)
     private let emptyStateTitle = NSTextField(labelWithString: "Open or create a PDF to start marking up")
-    private let emptyStateSubtitle = NSTextField(labelWithString: "Use Bluebeam-style keys: D Draw, L Line, P Polyline, A Area, H Highlighter, C Cloud, R Rect, T Text, Q Callout.")
     private let emptyStateOpenButton = NSButton(title: "Open PDF", target: nil, action: nil)
     private let emptyStateSampleButton = NSButton(title: "Create New", target: nil, action: nil)
     private let markupsTable = NSTableView(frame: .zero)
@@ -1203,11 +1202,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         emptyStateView.translatesAutoresizingMaskIntoConstraints = false
 
         emptyStateTitle.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
-        emptyStateSubtitle.font = NSFont.systemFont(ofSize: 13, weight: .regular)
-        emptyStateSubtitle.textColor = .secondaryLabelColor
-        emptyStateSubtitle.maximumNumberOfLines = 2
-        emptyStateSubtitle.alignment = .center
-
         emptyStateSampleButton.bezelStyle = .texturedRounded
 
         let actions = NSStackView(views: [emptyStateSampleButton])
@@ -1215,7 +1209,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         actions.spacing = 8
         actions.alignment = .centerY
 
-        let stack = NSStackView(views: [emptyStateTitle, emptyStateSubtitle, actions])
+        let stack = NSStackView(views: [emptyStateTitle, actions])
         stack.orientation = .vertical
         stack.spacing = 10
         stack.alignment = .centerX
@@ -3322,7 +3316,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guide.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         guide.string = """
 1) Open PDF: ⌘O
-2) Tools (Bluebeam-style keys): V Select, D Draw, L Line, P Polyline, A Area, H Highlighter, C Cloud, R Rect, T Text, Q Callout, M Measure, K Calibrate
+2) Tools (keyboard shortcuts): V Select, D Draw, L Line, P Polyline, A Area, H Highlighter, C Cloud, R Rect, T Text, Q Callout, M Measure, K Calibrate
    Mac menu keys: ⌘1 Pen, ⌘2 Highlighter, ⌘3 Cloud, ⌘4 Rect, ⌘5 Text, ⌘6 Callout
 3) Navigation:
    • Mouse wheel = zoom in/out

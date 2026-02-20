@@ -1660,7 +1660,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let normalizedDelta = abs(delta)
 
         // Tune zoom feel by input device:
-        // - Mouse wheel: more aggressive per notch (Bluebeam-like).
+        // - Mouse wheel: more aggressive per notch.
         // - Trackpad: finer increments with smooth acceleration.
         let step = isTrackpadLike ? (1.0 + min(0.035, normalizedDelta * 0.0045))
                                    : (1.0 + min(0.16, normalizedDelta * 0.03))
@@ -1675,7 +1675,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             let anchorPagePoint = convert(locationInView, to: page)
             scaleFactor = targetScale
 
-            // Bluebeam-style zoom anchor: keep the exact PDF point under cursor fixed.
+            // Keep the exact PDF point under cursor fixed while zooming.
             let pageUnderCursorAfterZoom = convert(locationInView, to: page)
             let deltaX = anchorPagePoint.x - pageUnderCursorAfterZoom.x
             let deltaY = anchorPagePoint.y - pageUnderCursorAfterZoom.y
