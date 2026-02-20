@@ -31,6 +31,16 @@ trap cleanup EXIT
 
 mkdir -p "$STAGING_DIR"
 cp -R "$APP_PATH" "$STAGING_DIR/"
+# Prefer a real Finder alias so the Applications icon renders like native installers.
+if ! osascript <<EOF >/dev/null 2>/dev/null
+tell application "Finder"
+  set targetFolder to POSIX file "$STAGING_DIR" as alias
+  make new alias file at targetFolder to POSIX file "/Applications" with properties {name:"Applications"}
+end tell
+EOF
+then
+  ln -s /Applications "$STAGING_DIR/Applications"
+fi
 swift Scripts/generate-dmg-background.swift "$BACKGROUND_PATH"
 
 rm -f "$OUTPUT_DMG"
@@ -45,7 +55,6 @@ create-dmg \
   --icon "$APP_BASENAME" 200 285 \
   --hide-extension "$APP_BASENAME" \
   --icon "Applications" 650 285 \
-  --app-drop-link 650 285 \
   "$OUTPUT_DMG" \
   "$STAGING_DIR"
 
