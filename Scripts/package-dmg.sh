@@ -24,6 +24,7 @@ fi
 TMP_DIR="$(mktemp -d)"
 STAGING_DIR="$TMP_DIR/staging"
 BACKGROUND_PATH="$TMP_DIR/background.png"
+APPS_ALIAS_PATH="$TMP_DIR/Applications.alias"
 cleanup() {
   rm -rf "$TMP_DIR"
 }
@@ -32,6 +33,17 @@ trap cleanup EXIT
 mkdir -p "$STAGING_DIR"
 cp -R "$APP_PATH" "$STAGING_DIR/"
 swift Scripts/generate-dmg-background.swift "$BACKGROUND_PATH"
+
+# Create a real Finder alias to /Applications so the icon rendering is stable.
+osascript <<EOF >/dev/null 2>/dev/null || true
+tell application "Finder"
+  set aliasContainer to POSIX file "$TMP_DIR" as alias
+  make new alias file at aliasContainer to POSIX file "/Applications" with properties {name:"Applications.alias"}
+end tell
+EOF
+if [[ ! -e "$APPS_ALIAS_PATH" ]]; then
+  ln -s /Applications "$APPS_ALIAS_PATH"
+fi
 
 rm -f "$OUTPUT_DMG"
 mkdir -p "$(dirname "$OUTPUT_DMG")"
@@ -44,7 +56,7 @@ create-dmg \
   --icon-size 128 \
   --icon "$APP_BASENAME" 200 285 \
   --hide-extension "$APP_BASENAME" \
-  --app-drop-link 650 285 \
+  --add-file "Applications" "$APPS_ALIAS_PATH" 650 285 \
   "$OUTPUT_DMG" \
   "$STAGING_DIR"
 
