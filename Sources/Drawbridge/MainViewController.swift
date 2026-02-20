@@ -62,6 +62,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let scalePresetPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let measureLabel = NSTextField(labelWithString: "Measure:")
     private let toolbarControlsStack = NSStackView(frame: .zero)
+    private let secondaryToolbarControlsStack = NSStackView(frame: .zero)
+    private let documentTabsBar = NSVisualEffectView(frame: .zero)
+    private let documentTabsStack = NSStackView(frame: .zero)
     private let statusBar = NSVisualEffectView(frame: .zero)
     private let busyOverlayView = NSVisualEffectView(frame: .zero)
     private let captureToastView = NSVisualEffectView(frame: .zero)
@@ -168,8 +171,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let markupsSectionContent = NSStackView(frame: .zero)
     private let summarySectionContent = NSStackView(frame: .zero)
     private let toolSelector: NSSegmentedControl = {
-        let control = NSSegmentedControl(labels: ["Select", "Grab", "Draw", "Line", "Polyline", "Highlighter", "Cloud", "Rect", "Text", "Callout", "Area", "Measure"], trackingMode: .selectOne, target: nil, action: nil)
+        let control = NSSegmentedControl(labels: ["Select", "Grab", "Draw", "Line", "Polyline", "Highlighter", "Cloud", "Rect", "Text", "Callout"], trackingMode: .selectOne, target: nil, action: nil)
         control.selectedSegment = 0
+        return control
+    }()
+    private let takeoffSelector: NSSegmentedControl = {
+        let control = NSSegmentedControl(labels: ["Area", "Measure"], trackingMode: .selectOne, target: nil, action: nil)
+        control.selectedSegment = -1
         return control
     }()
     private let newDocumentSizes: [(name: String, widthInches: CGFloat, heightInches: CGFloat)] = [
@@ -205,6 +213,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var newDocumentPanelCloseObserver: NSObjectProtocol?
     private var didInstallToolbarWidthConstraints = false
     private var toolSelectorWidthConstraint: NSLayoutConstraint?
+    private var takeoffSelectorWidthConstraint: NSLayoutConstraint?
     private var bookmarksWidthConstraint: NSLayoutConstraint?
     private var sidebarPreferredWidthConstraint: NSLayoutConstraint?
     private var didApplyInitialSplitLayout = false
@@ -276,6 +285,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         toolSelector.target = self
         toolSelector.action = #selector(changeTool)
+        takeoffSelector.target = self
+        takeoffSelector.action = #selector(changeTakeoffTool)
         setupToolbarControlStack()
         splitView.translatesAutoresizingMaskIntoConstraints = false
         pdfView.translatesAutoresizingMaskIntoConstraints = false
@@ -383,15 +394,22 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfView.layer?.addSublayer(selectedMarkupOverlayLayer)
 
         view.addSubview(splitView)
+        view.addSubview(documentTabsBar)
         view.addSubview(statusBar)
         view.addSubview(busyOverlayView)
         view.addSubview(captureToastView)
         view.addSubview(collapsedSidebarRevealButton)
+        configureDocumentTabsBar()
         configureBusyOverlay()
         configureCaptureToast()
 
         NSLayoutConstraint.activate([
-            splitView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            documentTabsBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            documentTabsBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            documentTabsBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            documentTabsBar.heightAnchor.constraint(equalToConstant: 34),
+
+            splitView.topAnchor.constraint(equalTo: documentTabsBar.bottomAnchor),
             splitView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             splitView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
@@ -414,6 +432,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         updateStatusBar()
         refreshRulers()
         updateEmptyStateVisibility()
+        refreshDocumentTabs()
     }
 
     private func applySplitLayoutIfPossible(force: Bool) {
@@ -1233,8 +1252,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         configureScalePresetPopup()
 
         configureToolSelectorAppearance()
+        configureTakeoffSelectorAppearance()
         toolSelector.segmentStyle = .texturedRounded
         toolSelector.controlSize = .small
+        takeoffSelector.segmentStyle = .texturedRounded
+        takeoffSelector.controlSize = .small
 
         if !didInstallToolbarWidthConstraints {
             didInstallToolbarWidthConstraints = true
@@ -1257,8 +1279,27 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         if toolbarControlsStack.arrangedSubviews.isEmpty {
             toolbarControlsStack.addArrangedSubview(toolSelector)
-            toolbarControlsStack.addArrangedSubview(scalePresetPopup)
-            toolbarControlsStack.addArrangedSubview(actionsPopup)
+        }
+
+        secondaryToolbarControlsStack.orientation = .horizontal
+        secondaryToolbarControlsStack.spacing = 10
+        secondaryToolbarControlsStack.alignment = .centerY
+        secondaryToolbarControlsStack.setHuggingPriority(.required, for: .horizontal)
+        secondaryToolbarControlsStack.setContentCompressionResistancePriority(.required, for: .horizontal)
+        takeoffSelector.translatesAutoresizingMaskIntoConstraints = false
+        let takeoffWidth = CGFloat(takeoffSelector.segmentCount) * 44.0
+        if let existing = takeoffSelectorWidthConstraint {
+            existing.constant = takeoffWidth
+        } else {
+            let widthConstraint = takeoffSelector.widthAnchor.constraint(equalToConstant: takeoffWidth)
+            widthConstraint.priority = .required
+            widthConstraint.isActive = true
+            takeoffSelectorWidthConstraint = widthConstraint
+        }
+        if secondaryToolbarControlsStack.arrangedSubviews.isEmpty {
+            secondaryToolbarControlsStack.addArrangedSubview(takeoffSelector)
+            secondaryToolbarControlsStack.addArrangedSubview(scalePresetPopup)
+            secondaryToolbarControlsStack.addArrangedSubview(actionsPopup)
         }
     }
 
@@ -1287,6 +1328,85 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         collapsedSidebarRevealButton.setContentHuggingPriority(.required, for: .horizontal)
         collapsedSidebarRevealButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         collapsedSidebarRevealButton.isHidden = !isSidebarCollapsed
+    }
+
+    private func configureDocumentTabsBar() {
+        documentTabsBar.material = .headerView
+        documentTabsBar.blendingMode = .withinWindow
+        documentTabsBar.state = .active
+        documentTabsBar.wantsLayer = true
+        documentTabsBar.layer?.borderWidth = 1
+        documentTabsBar.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+        documentTabsBar.translatesAutoresizingMaskIntoConstraints = false
+
+        documentTabsStack.orientation = .horizontal
+        documentTabsStack.alignment = .centerY
+        documentTabsStack.spacing = 6
+        documentTabsStack.edgeInsets = NSEdgeInsets(top: 2, left: 10, bottom: 2, right: 10)
+        documentTabsStack.translatesAutoresizingMaskIntoConstraints = false
+        documentTabsBar.addSubview(documentTabsStack)
+
+        NSLayoutConstraint.activate([
+            documentTabsStack.topAnchor.constraint(equalTo: documentTabsBar.topAnchor),
+            documentTabsStack.leadingAnchor.constraint(equalTo: documentTabsBar.leadingAnchor),
+            documentTabsStack.trailingAnchor.constraint(lessThanOrEqualTo: documentTabsBar.trailingAnchor),
+            documentTabsStack.bottomAnchor.constraint(equalTo: documentTabsBar.bottomAnchor)
+        ])
+    }
+
+    private func refreshDocumentTabs() {
+        for view in documentTabsStack.arrangedSubviews {
+            documentTabsStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+
+        let current = openDocumentURL?.standardizedFileURL
+        var ordered = sessionDocumentURLs.map(\.standardizedFileURL)
+        if let current, !ordered.contains(current) {
+            ordered.append(current)
+        }
+
+        if ordered.isEmpty {
+            if pdfView.document != nil {
+                let untitledTab = NSButton(title: "Untitled", target: nil, action: nil)
+                untitledTab.setButtonType(.toggle)
+                untitledTab.state = .on
+                untitledTab.bezelStyle = .texturedRounded
+                untitledTab.isEnabled = false
+                documentTabsStack.addArrangedSubview(untitledTab)
+            } else {
+                let emptyLabel = NSTextField(labelWithString: "No PDF Open")
+                emptyLabel.textColor = .secondaryLabelColor
+                emptyLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+                documentTabsStack.addArrangedSubview(emptyLabel)
+            }
+            return
+        }
+
+        for url in ordered {
+            let tab = NSButton(title: url.lastPathComponent, target: self, action: #selector(selectDocumentTab(_:)))
+            tab.setButtonType(.toggle)
+            tab.state = (url == current) ? .on : .off
+            tab.bezelStyle = .texturedRounded
+            tab.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+            tab.toolTip = url.path
+            tab.identifier = NSUserInterfaceItemIdentifier(url.path)
+            documentTabsStack.addArrangedSubview(tab)
+        }
+    }
+
+    @objc private func selectDocumentTab(_ sender: NSButton) {
+        guard let path = sender.identifier?.rawValue else { return }
+        let targetURL = URL(fileURLWithPath: path)
+        let normalizedTarget = targetURL.standardizedFileURL
+        if openDocumentURL?.standardizedFileURL == normalizedTarget {
+            return
+        }
+        guard confirmDiscardUnsavedChangesIfNeeded() else {
+            refreshDocumentTabs()
+            return
+        }
+        openDocument(at: normalizedTarget)
     }
 
     private func configureScalePresetPopup() {
@@ -1330,9 +1450,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             symbol(["cloud"], "Cloud"),
             symbol(["square"], "Rectangle"),
             symbol(["textformat"], "Text"),
-            symbol(["text.bubble", "text.bubble.fill"], "Callout"),
-            symbol(["polygon"], "Area"),
-            symbol(["ruler"], "Measure")
+            symbol(["text.bubble", "text.bubble.fill"], "Callout")
         ]
 
         toolSelector.trackingMode = .selectOne
@@ -1346,9 +1464,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSelector.setLabel("R", forSegment: 7)
         toolSelector.setLabel("T", forSegment: 8)
         toolSelector.setLabel("Q", forSegment: 9)
-        toolSelector.setLabel("A", forSegment: 10)
-        toolSelector.setLabel("M", forSegment: 11)
-        for idx in 0..<12 {
+        for idx in 0..<10 {
             if let icon = symbols[idx] {
                 toolSelector.setImage(icon, forSegment: idx)
             }
@@ -1367,16 +1483,35 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSelector.setToolTip("Rectangle (R)", forSegment: 7)
         toolSelector.setToolTip("Text (T)", forSegment: 8)
         toolSelector.setToolTip("Callout (Q)", forSegment: 9)
-        toolSelector.setToolTip("Area (A)", forSegment: 10)
-        toolSelector.setToolTip("Measure (M)", forSegment: 11)
+    }
+
+    private func configureTakeoffSelectorAppearance() {
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+        let areaIcon = NSImage(systemSymbolName: "polygon", accessibilityDescription: "Area")?.withSymbolConfiguration(symbolConfig)
+        let measureIcon = NSImage(systemSymbolName: "ruler", accessibilityDescription: "Measure")?.withSymbolConfiguration(symbolConfig)
+        takeoffSelector.trackingMode = .selectOne
+        takeoffSelector.setLabel("A", forSegment: 0)
+        takeoffSelector.setLabel("M", forSegment: 1)
+        if let areaIcon {
+            takeoffSelector.setImage(areaIcon, forSegment: 0)
+        }
+        if let measureIcon {
+            takeoffSelector.setImage(measureIcon, forSegment: 1)
+        }
+        takeoffSelector.setWidth(44, forSegment: 0)
+        takeoffSelector.setWidth(44, forSegment: 1)
+        takeoffSelector.selectedSegmentBezelColor = NSColor.systemBlue.withAlphaComponent(0.35)
+        takeoffSelector.wantsLayer = true
+        takeoffSelector.setToolTip("Area (A)", forSegment: 0)
+        takeoffSelector.setToolTip("Measure (M)", forSegment: 1)
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.drawbridgePrimaryControls, .flexibleSpace]
+        [.drawbridgePrimaryControls, .flexibleSpace, .space, .separator, .space, .drawbridgeSecondaryControls]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.drawbridgePrimaryControls]
+        [.drawbridgePrimaryControls, .flexibleSpace, .space, .separator, .space, .drawbridgeSecondaryControls]
     }
 
     func toolbar(
@@ -1384,13 +1519,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier,
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
-        guard itemIdentifier == .drawbridgePrimaryControls else { return nil }
         let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-        item.label = "Controls"
-        item.view = toolbarControlsStack
-        item.minSize = NSSize(width: 1040, height: 30)
-        item.maxSize = NSSize(width: 2600, height: 30)
-        return item
+        if itemIdentifier == .drawbridgePrimaryControls {
+            item.label = "Tools"
+            item.view = toolbarControlsStack
+            return item
+        }
+        if itemIdentifier == .drawbridgeSecondaryControls {
+            item.label = "Takeoff"
+            item.view = secondaryToolbarControlsStack
+            return item
+        }
+        return nil
     }
 
     private func buildMarkupsSidebar() -> NSView {
@@ -1500,14 +1640,26 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         case 7: requestedMode = .rectangle
         case 8: requestedMode = .text
         case 9: requestedMode = .callout
-        case 10: requestedMode = .area
-        case 11: requestedMode = .measure
         default: requestedMode = .pen
         }
+        activateTool(requestedMode)
+    }
 
+    @objc private func changeTakeoffTool() {
+        let requestedMode: ToolMode
+        switch takeoffSelector.selectedSegment {
+        case 0: requestedMode = .area
+        case 1: requestedMode = .measure
+        default: return
+        }
+        activateTool(requestedMode)
+    }
+
+    private func activateTool(_ requestedMode: ToolMode) {
         if requestedMode == .area && !isDrawingScaleConfigured() {
             showAreaScaleRequiredWarning()
             toolSelector.selectedSegment = segmentIndex(for: pdfView.toolMode)
+            takeoffSelector.selectedSegment = takeoffSegmentIndex(for: pdfView.toolMode)
             return
         }
 
@@ -1525,7 +1677,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
 
         pdfView.toolMode = requestedMode
-        if toolSelector.selectedSegment >= 0 {
+        if toolSelector.selectedSegment >= 0 || takeoffSelector.selectedSegment >= 0 {
             animateToolSelectionFeedback()
         }
         updateToolSettingsUIForCurrentTool()
@@ -1589,34 +1741,45 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         switch mode {
         case .select:
             toolSelector.selectedSegment = 0
+            takeoffSelector.selectedSegment = -1
         case .grab:
             toolSelector.selectedSegment = 1
+            takeoffSelector.selectedSegment = -1
         case .pen:
             toolSelector.selectedSegment = 2
+            takeoffSelector.selectedSegment = -1
         case .line:
             toolSelector.selectedSegment = 3
+            takeoffSelector.selectedSegment = -1
         case .polyline:
             toolSelector.selectedSegment = 4
+            takeoffSelector.selectedSegment = -1
         case .highlighter:
             toolSelector.selectedSegment = 5
+            takeoffSelector.selectedSegment = -1
         case .cloud:
             toolSelector.selectedSegment = 6
+            takeoffSelector.selectedSegment = -1
         case .rectangle:
             toolSelector.selectedSegment = 7
+            takeoffSelector.selectedSegment = -1
         case .text:
             toolSelector.selectedSegment = 8
+            takeoffSelector.selectedSegment = -1
         case .callout:
             toolSelector.selectedSegment = 9
+            takeoffSelector.selectedSegment = -1
         case .area:
-            toolSelector.selectedSegment = 10
+            toolSelector.selectedSegment = -1
+            takeoffSelector.selectedSegment = 0
             toolSettingsLineWidthPopup.selectItem(withTitle: "1")
             pdfView.areaLineWidth = widthValue(for: 1, tool: .area)
         case .measure:
-            toolSelector.selectedSegment = 11
-            changeTool()
-            return
+            toolSelector.selectedSegment = -1
+            takeoffSelector.selectedSegment = 1
         case .calibrate:
             toolSelector.selectedSegment = -1
+            takeoffSelector.selectedSegment = -1
             pdfView.cancelPendingCallout()
             pdfView.cancelPendingPolyline()
             pdfView.cancelPendingArea()
@@ -1626,7 +1789,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             updateStatusBar()
             return
         }
-        changeTool()
+        activateTool(mode)
     }
 
     private func animateToolSelectionFeedback() {
@@ -1921,6 +2084,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         refreshMarkups()
         updateEmptyStateVisibility()
         refreshRulers()
+        refreshDocumentTabs()
     }
 
     @objc private func highlightSelection() {
@@ -1946,7 +2110,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func saveDocumentAsCopy() {
-        saveDocumentAs(adoptAsPrimaryDocument: false)
+        saveDocumentAs(adoptAsPrimaryDocument: true)
     }
 
     private func saveDocumentAsProject(document: PDFDocument) {
@@ -2110,7 +2274,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let startedAt = CFAbsoluteTimeGetCurrent()
         let documentBox = PDFDocumentBox(document: document)
         let destinationAlreadyExists = FileManager.default.fileExists(atPath: targetURL.path)
-        let stagingURL = destinationAlreadyExists ? saveStagingFileURL() : targetURL
+        let stagingURL = destinationAlreadyExists ? saveStagingFileURL(for: targetURL) : targetURL
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var success = false
@@ -2194,6 +2358,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 )
 
                 if adoptAsPrimaryDocument {
+                    let previousDocumentURL = self.openDocumentURL?.standardizedFileURL
+                    let newDocumentURL = targetURL.standardizedFileURL
+                    if let previousDocumentURL, previousDocumentURL != newDocumentURL {
+                        self.sessionDocumentURLs.removeAll { $0.standardizedFileURL == previousDocumentURL }
+                    }
                     self.openDocumentURL = targetURL
                     self.registerSessionDocument(targetURL)
                     self.configureAutosaveURL(for: targetURL)
@@ -2210,10 +2379,20 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
     }
 
-    private func saveStagingFileURL() -> URL {
-        let base = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeSaveStaging", isDirectory: true)
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        return base.appendingPathComponent(UUID().uuidString).appendingPathExtension("pdf")
+    private func saveStagingFileURL(for destinationURL: URL) -> URL {
+        let destinationDirectory = destinationURL.deletingLastPathComponent()
+        let destinationFilename = destinationURL.deletingPathExtension().lastPathComponent
+        let stagingFilename = ".\(destinationFilename)-drawbridge-staging-\(UUID().uuidString).pdf"
+        let preferredURL = destinationDirectory.appendingPathComponent(stagingFilename)
+
+        // Prefer staging in the destination directory to keep commit on the same volume.
+        if FileManager.default.isWritableFile(atPath: destinationDirectory.path) {
+            return preferredURL
+        }
+
+        let fallbackDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeSaveStaging", isDirectory: true)
+        try? FileManager.default.createDirectory(at: fallbackDirectory, withIntermediateDirectories: true)
+        return fallbackDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("pdf")
     }
 
     private nonisolated static func commitStagedSave(from stagingURL: URL, to destinationURL: URL) throws {
@@ -3453,6 +3632,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         let normalized = url.standardizedFileURL
         sessionDocumentURLs.removeAll { $0.standardizedFileURL == normalized }
         sessionDocumentURLs.append(normalized)
+        refreshDocumentTabs()
     }
 
     private func clearToStartState() {
@@ -3481,6 +3661,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         updateEmptyStateVisibility()
         refreshRulers()
         updateStatusBar()
+        refreshDocumentTabs()
     }
 
     private func startMarkupsRefreshTimer() {
@@ -4304,9 +4485,16 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         case .rectangle: return 7
         case .text: return 8
         case .callout: return 9
-        case .area: return 10
-        case .measure: return 11
+        case .area, .measure: return -1
         case .calibrate: return -1
+        }
+    }
+
+    private func takeoffSegmentIndex(for mode: ToolMode) -> Int {
+        switch mode {
+        case .area: return 0
+        case .measure: return 1
+        default: return -1
         }
     }
 
