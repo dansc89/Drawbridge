@@ -44,6 +44,7 @@ create-dmg \
   --icon-size 128 \
   --icon "$APP_BASENAME" 200 285 \
   --hide-extension "$APP_BASENAME" \
+  --icon "Applications" 650 285 \
   --app-drop-link 650 285 \
   "$OUTPUT_DMG" \
   "$STAGING_DIR"
