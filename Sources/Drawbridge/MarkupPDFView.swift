@@ -117,6 +117,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }()
     private var isGridVisible = false
     private let gridSpacingInPoints: CGFloat = 24.0
+    private let maxGridLinesPerAxis = 400
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -143,12 +144,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         updateGridOverlayIfNeeded()
     }
 
-    override var document: PDFDocument? {
-        didSet {
-            updateGridOverlayIfNeeded()
-        }
-    }
-
     func setGridVisible(_ visible: Bool) {
         isGridVisible = visible
         updateGridOverlayIfNeeded()
@@ -165,8 +160,18 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let pageBounds = page.bounds(for: displayBox)
         let startInView = convert(NSPoint(x: pageBounds.minX, y: pageBounds.minY), from: page)
         let endInView = convert(NSPoint(x: pageBounds.maxX, y: pageBounds.maxY), from: page)
+        guard startInView.x.isFinite, startInView.y.isFinite, endInView.x.isFinite, endInView.y.isFinite else {
+            gridOverlayLayer.isHidden = true
+            gridOverlayLayer.path = nil
+            return
+        }
         let pageRectInView = normalizedRect(from: startInView, to: endInView)
-        guard pageRectInView.width > 1, pageRectInView.height > 1 else {
+        guard pageRectInView.width.isFinite,
+              pageRectInView.height.isFinite,
+              pageRectInView.width > 1,
+              pageRectInView.height > 1,
+              pageRectInView.width < 200_000,
+              pageRectInView.height < 200_000 else {
             gridOverlayLayer.isHidden = true
             gridOverlayLayer.path = nil
             return
@@ -175,12 +180,25 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let majorEvery = 5
         let path = CGMutablePath()
         let spacing = max(8.0, gridSpacingInPoints * scaleFactor)
+        guard spacing.isFinite, spacing > 0 else {
+            gridOverlayLayer.isHidden = true
+            gridOverlayLayer.path = nil
+            return
+        }
         let xStart = floor(pageRectInView.minX / spacing) * spacing
         let yStart = floor(pageRectInView.minY / spacing) * spacing
+        let xLineEstimate = Int(ceil(pageRectInView.width / spacing)) + 2
+        let yLineEstimate = Int(ceil(pageRectInView.height / spacing)) + 2
+        guard xLineEstimate <= maxGridLinesPerAxis, yLineEstimate <= maxGridLinesPerAxis else {
+            // Avoid extreme path sizes on atypical documents/zoom levels.
+            gridOverlayLayer.isHidden = true
+            gridOverlayLayer.path = nil
+            return
+        }
 
         var i = 0
         var x = xStart
-        while x <= pageRectInView.maxX {
+        while x <= pageRectInView.maxX, i <= maxGridLinesPerAxis {
             path.move(to: CGPoint(x: x, y: pageRectInView.minY))
             path.addLine(to: CGPoint(x: x, y: pageRectInView.maxY))
             if i % majorEvery == 0 {
@@ -193,7 +211,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         i = 0
         var y = yStart
-        while y <= pageRectInView.maxY {
+        while y <= pageRectInView.maxY, i <= maxGridLinesPerAxis {
             path.move(to: CGPoint(x: pageRectInView.minX, y: y))
             path.addLine(to: CGPoint(x: pageRectInView.maxX, y: y))
             if i % majorEvery == 0 {
