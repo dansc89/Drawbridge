@@ -46,10 +46,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var onToolShortcut: ((ToolMode) -> Void)?
     var onPageNavigationShortcut: ((Int) -> Void)?
     var onViewportChanged: (() -> Void)?
+    var onRegionCaptured: ((PDFPage, NSRect) -> Void)?
 
     private var dragStartInView: NSPoint?
     private var dragPage: PDFPage?
     private var middlePanLastWindowPoint: NSPoint?
+    private var regionCaptureStartInView: NSPoint?
+    private var regionCapturePage: PDFPage?
+    private var isRegionCaptureModeEnabled = false
+    private var didPushRegionCaptureCursor = false
     private var penPointsPage: [NSPoint] = []
     private var penPage: PDFPage?
     private var penPreviewPath: CGMutablePath?
@@ -146,6 +151,35 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     func setGridVisible(_ visible: Bool) {
         isGridVisible = visible
         updateGridOverlayIfNeeded()
+    }
+
+    func beginRegionCaptureMode() {
+        isRegionCaptureModeEnabled = true
+        regionCaptureStartInView = nil
+        regionCapturePage = nil
+        dragPreviewLayer.strokeColor = NSColor.systemBlue.cgColor
+        dragPreviewLayer.fillColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
+        dragPreviewLayer.lineWidth = 1.5
+        dragPreviewLayer.lineDashPattern = [6, 4]
+        dragPreviewLayer.isHidden = true
+        dragPreviewLayer.path = nil
+        if !didPushRegionCaptureCursor {
+            NSCursor.crosshair.push()
+            didPushRegionCaptureCursor = true
+        }
+    }
+
+    func cancelRegionCaptureMode() {
+        isRegionCaptureModeEnabled = false
+        regionCaptureStartInView = nil
+        regionCapturePage = nil
+        dragPreviewLayer.isHidden = true
+        dragPreviewLayer.path = nil
+        dragPreviewLayer.lineDashPattern = nil
+        if didPushRegionCaptureCursor {
+            NSCursor.pop()
+            didPushRegionCaptureCursor = false
+        }
     }
 
     private func updateGridOverlayIfNeeded() {
@@ -265,6 +299,18 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     override func mouseDown(with event: NSEvent) {
         let locationInView = convert(event.locationInWindow, from: nil)
+        if isRegionCaptureModeEnabled {
+            guard let page = page(for: locationInView, nearest: true) else { return }
+            regionCaptureStartInView = locationInView
+            regionCapturePage = page
+            dragPreviewLayer.strokeColor = NSColor.systemBlue.cgColor
+            dragPreviewLayer.fillColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
+            dragPreviewLayer.lineWidth = 1.5
+            dragPreviewLayer.lineDashPattern = [6, 4]
+            dragPreviewLayer.path = CGPath(rect: NSRect(origin: locationInView, size: .zero), transform: nil)
+            dragPreviewLayer.isHidden = false
+            return
+        }
         if toolMode == .callout {
             handleCalloutClick(at: locationInView)
             return
@@ -465,6 +511,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if isRegionCaptureModeEnabled {
+            guard let start = regionCaptureStartInView else { return }
+            let current = convert(event.locationInWindow, from: nil)
+            let rect = normalizedRect(from: start, to: current)
+            dragPreviewLayer.path = CGPath(rect: rect, transform: nil)
+            return
+        }
         if toolMode == .select {
             if let start = fenceStartInView {
                 let current = convert(event.locationInWindow, from: nil)
@@ -587,6 +640,28 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if isRegionCaptureModeEnabled {
+            defer {
+                regionCaptureStartInView = nil
+                regionCapturePage = nil
+                dragPreviewLayer.isHidden = true
+                dragPreviewLayer.path = nil
+                dragPreviewLayer.lineDashPattern = nil
+            }
+            guard let startInView = regionCaptureStartInView,
+                  let page = regionCapturePage else { return }
+            let endInView = convert(event.locationInWindow, from: nil)
+            let startInPage = convert(startInView, to: page)
+            let endInPage = convert(endInView, to: page)
+            let rectInPage = normalizedRect(from: startInPage, to: endInPage)
+            guard rectInPage.width > 2, rectInPage.height > 2 else {
+                NSSound.beep()
+                return
+            }
+            cancelRegionCaptureMode()
+            onRegionCaptured?(page, rectInPage)
+            return
+        }
         defer {
             dragStartInView = nil
             dragPage = nil
