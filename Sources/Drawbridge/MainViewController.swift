@@ -456,6 +456,31 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             self?.scheduleMarkupsRefresh(selecting: nil)
             self?.scheduleAutosave()
         }
+        pdfView.onAnnotationTextEdited = { [weak self] page, annotation, previousContents in
+            guard let self else { return }
+            let current = self.snapshot(for: annotation)
+            let previous = AnnotationSnapshot(
+                bounds: current.bounds,
+                contents: previousContents,
+                color: current.color,
+                interiorColor: current.interiorColor,
+                fontColor: current.fontColor,
+                fontName: current.fontName,
+                fontSize: current.fontSize,
+                lineWidth: current.lineWidth,
+                renderOpacity: current.renderOpacity,
+                renderTintColor: current.renderTintColor,
+                renderTintStrength: current.renderTintStrength,
+                tintBlendStyleRawValue: current.tintBlendStyleRawValue,
+                lineworkOnlyTint: current.lineworkOnlyTint,
+                snapshotLayerName: current.snapshotLayerName
+            )
+            self.registerAnnotationStateUndo(annotation: annotation, previous: previous, actionName: "Edit Markup Text")
+            self.markPageMarkupCacheDirty(page)
+            self.markMarkupChanged()
+            self.scheduleMarkupsRefresh(selecting: annotation)
+            self.scheduleAutosave()
+        }
         pdfView.onAnnotationMoved = { [weak self] page, annotation, startBounds in
             guard let self else { return }
             let before = AnnotationSnapshot(
