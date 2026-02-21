@@ -54,9 +54,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         var lineWeightLevel: Int
         var fontName: String
         var fontSize: CGFloat
+        var calloutArrowStyleRawValue: Int
     }
 
     private let lineWeightLevels = Array(1...10)
+    private let standardFontSizes = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 60, 72]
+    private let autosaveIntervalSeconds: TimeInterval = 120
     private let snapshotLayerOptions = [
         "ARCHITECTURAL",
         "STRUCTURAL",
@@ -143,7 +146,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let busyDetailLabel = NSTextField(labelWithString: "")
     private let busyProgressIndicator = NSProgressIndicator(frame: .zero)
     private let statusToolLabel = NSTextField(labelWithString: "Tool: Pen")
-    private let statusToolsHintLabel = NSTextField(labelWithString: "Tools: V P H C R T Q M K  |  Esc Esc: Select")
+    private let statusToolsHintLabel = NSTextField(labelWithString: "Tools: V D A L P H C R T Q M K | Shift+A Area | Esc Esc: Select")
     private let statusPageSizeLabel = NSTextField(labelWithString: "Size: -")
     private let statusPageLabel = NSTextField(labelWithString: "Page: -")
     private let statusZoomLabel = NSTextField(labelWithString: "Zoom: 100%")
@@ -164,13 +167,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let toolSettingsFillColorWell = NSColorWell(frame: .zero)
     private let toolSettingsFontTitleLabel = NSTextField(labelWithString: "Font:")
     private let toolSettingsFontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let toolSettingsFontSizeField = NSTextField(frame: .zero)
+    private let toolSettingsFontSizePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let toolSettingsArrowTitleLabel = NSTextField(labelWithString: "Arrow End:")
+    private let toolSettingsArrowPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let toolSettingsLineWidthPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let toolSettingsOpacitySlider = NSSlider(value: 0.8, minValue: 0.0, maxValue: 1.0, target: nil, action: nil)
     private let toolSettingsOpacityValueLabel = NSTextField(labelWithString: "80%")
     private let snapshotColorizeButton = NSButton(title: "Colorize Black -> Red", target: nil, action: nil)
     private let toolSettingsFillRow = NSStackView(frame: .zero)
     private let toolSettingsFontRow = NSStackView(frame: .zero)
+    private let toolSettingsArrowRow = NSStackView(frame: .zero)
     private let toolSettingsWidthRow = NSStackView(frame: .zero)
     private let selectedMarkupOverlayLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
@@ -250,7 +256,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let markupsSectionContent = NSStackView(frame: .zero)
     private let summarySectionContent = NSStackView(frame: .zero)
     private let toolSelector: NSSegmentedControl = {
-        let control = NSSegmentedControl(labels: ["Select", "Grab", "Draw", "Line", "Polyline", "Highlighter", "Cloud", "Rect", "Text", "Callout"], trackingMode: .selectOne, target: nil, action: nil)
+        let control = NSSegmentedControl(labels: ["Select", "Grab", "Draw", "Arrow", "Line", "Polyline", "Highlighter", "Cloud", "Rect", "Text", "Callout"], trackingMode: .selectOne, target: nil, action: nil)
         control.selectedSegment = 0
         return control
     }()
@@ -918,22 +924,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSettingsLineWidthPopup.addItems(withTitles: lineWeightLevels.map(String.init))
         toolSettingsLineWidthPopup.selectItem(withTitle: "5")
         toolSettingsStrokeColorWell.color = .systemRed
-        let fontFamilies = NSFontManager.shared.availableFontFamilies.sorted()
         toolSettingsFontPopup.removeAllItems()
-        toolSettingsFontPopup.addItems(withTitles: fontFamilies)
-        let defaultFontName = pdfView.textFontName
-        let defaultFamily = (NSFont(name: defaultFontName, size: pdfView.textFontSize)?.familyName) ?? "Helvetica"
-        if toolSettingsFontPopup.itemTitles.contains(defaultFamily) {
-            toolSettingsFontPopup.selectItem(withTitle: defaultFamily)
-        } else if toolSettingsFontPopup.numberOfItems > 0 {
-            toolSettingsFontPopup.selectItem(at: 0)
-        }
-        toolSettingsFontSizeField.stringValue = "\(Int(round(pdfView.textFontSize)))"
-        toolSettingsFontSizeField.alignment = .right
-        toolSettingsFontSizeField.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        toolSettingsFontSizeField.placeholderString = "Size"
-        toolSettingsFontSizeField.translatesAutoresizingMaskIntoConstraints = false
-        toolSettingsFontSizeField.widthAnchor.constraint(equalToConstant: 52).isActive = true
+        toolSettingsFontPopup.addItem(withTitle: "San Francisco")
+        toolSettingsFontPopup.selectItem(withTitle: "San Francisco")
+        toolSettingsFontPopup.isEnabled = false
+        toolSettingsFontSizePopup.removeAllItems()
+        toolSettingsFontSizePopup.addItems(withTitles: standardFontSizes.map { "\($0) pt" })
+        selectToolFontSize(pdfView.textFontSize)
+        toolSettingsFontSizePopup.translatesAutoresizingMaskIntoConstraints = false
+        toolSettingsFontSizePopup.widthAnchor.constraint(equalToConstant: 68).isActive = true
         toolSettingsOpacityValueLabel.alignment = .right
         toolSettingsOpacityValueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         toolSettingsOpacitySlider.target = self
@@ -944,8 +943,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSettingsFillColorWell.action = #selector(toolSettingsChanged)
         toolSettingsFontPopup.target = self
         toolSettingsFontPopup.action = #selector(toolSettingsChanged)
-        toolSettingsFontSizeField.target = self
-        toolSettingsFontSizeField.action = #selector(toolSettingsChanged)
+        toolSettingsFontSizePopup.target = self
+        toolSettingsFontSizePopup.action = #selector(toolSettingsChanged)
+        toolSettingsArrowPopup.removeAllItems()
+        toolSettingsArrowPopup.addItems(withTitles: ["Solid Arrow", "Open Arrow", "Filled Dot", "Open Dot"])
+        toolSettingsArrowPopup.selectItem(at: 0)
+        toolSettingsArrowPopup.target = self
+        toolSettingsArrowPopup.action = #selector(toolSettingsChanged)
         toolSettingsLineWidthPopup.target = self
         toolSettingsLineWidthPopup.action = #selector(toolSettingsChanged)
         snapshotColorizeButton.target = self
@@ -1433,6 +1437,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 self.lastUserInteractionAt = Date()
                 self.setTool(.pen)
                 return nil
+            case "a":
+                self.lastUserInteractionAt = Date()
+                if event.modifierFlags.contains(.shift) {
+                    self.setTool(.area)
+                } else {
+                    self.setTool(.arrow)
+                }
+                return nil
             case "l":
                 self.lastUserInteractionAt = Date()
                 self.setTool(.line)
@@ -1464,10 +1476,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             case "m":
                 self.lastUserInteractionAt = Date()
                 self.setTool(.measure)
-                return nil
-            case "a":
-                self.lastUserInteractionAt = Date()
-                self.setTool(.area)
                 return nil
             case "k":
                 self.lastUserInteractionAt = Date()
@@ -1840,6 +1848,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             symbol(["cursorarrow"], "Select"),
             symbol(["camera.viewfinder", "camera"], "Grab"),
             symbol(["pencil.tip", "pencil"], "Pen"),
+            symbol(["arrow.up.right"], "Arrow"),
             symbol(["line.diagonal"], "Line"),
             symbol(["point.3.filled.connected.trianglepath.dotted"], "Polyline"),
             symbol(["highlighter", "pencil.and.scribble", "scribble"], "Highlighter"),
@@ -1853,14 +1862,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSelector.setLabel("V", forSegment: 0)
         toolSelector.setLabel("G", forSegment: 1)
         toolSelector.setLabel("D", forSegment: 2)
-        toolSelector.setLabel("L", forSegment: 3)
-        toolSelector.setLabel("P", forSegment: 4)
-        toolSelector.setLabel("H", forSegment: 5)
-        toolSelector.setLabel("C", forSegment: 6)
-        toolSelector.setLabel("R", forSegment: 7)
-        toolSelector.setLabel("T", forSegment: 8)
-        toolSelector.setLabel("Q", forSegment: 9)
-        for idx in 0..<10 {
+        toolSelector.setLabel("A", forSegment: 3)
+        toolSelector.setLabel("L", forSegment: 4)
+        toolSelector.setLabel("P", forSegment: 5)
+        toolSelector.setLabel("H", forSegment: 6)
+        toolSelector.setLabel("C", forSegment: 7)
+        toolSelector.setLabel("R", forSegment: 8)
+        toolSelector.setLabel("T", forSegment: 9)
+        toolSelector.setLabel("Q", forSegment: 10)
+        for idx in 0..<11 {
             if let icon = symbols[idx] {
                 toolSelector.setImage(icon, forSegment: idx)
             }
@@ -1872,13 +1882,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSelector.setToolTip("Select (V)", forSegment: 0)
         toolSelector.setToolTip("Grab (G)", forSegment: 1)
         toolSelector.setToolTip("Draw (D)", forSegment: 2)
-        toolSelector.setToolTip("Line (L)", forSegment: 3)
-        toolSelector.setToolTip("Polyline (P)", forSegment: 4)
-        toolSelector.setToolTip("Highlighter (H)", forSegment: 5)
-        toolSelector.setToolTip("Cloud (C)", forSegment: 6)
-        toolSelector.setToolTip("Rectangle (R)", forSegment: 7)
-        toolSelector.setToolTip("Text (T)", forSegment: 8)
-        toolSelector.setToolTip("Callout (Q)", forSegment: 9)
+        toolSelector.setToolTip("Arrow (A)", forSegment: 3)
+        toolSelector.setToolTip("Line (L)", forSegment: 4)
+        toolSelector.setToolTip("Polyline (P)", forSegment: 5)
+        toolSelector.setToolTip("Highlighter (H)", forSegment: 6)
+        toolSelector.setToolTip("Cloud (C)", forSegment: 7)
+        toolSelector.setToolTip("Rectangle (R)", forSegment: 8)
+        toolSelector.setToolTip("Text (T)", forSegment: 9)
+        toolSelector.setToolTip("Callout (Q)", forSegment: 10)
     }
 
     private func configureTakeoffSelectorAppearance() {
@@ -1898,7 +1909,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         takeoffSelector.setWidth(44, forSegment: 1)
         takeoffSelector.selectedSegmentBezelColor = NSColor.systemBlue.withAlphaComponent(0.35)
         takeoffSelector.wantsLayer = true
-        takeoffSelector.setToolTip("Area (A)", forSegment: 0)
+        takeoffSelector.setToolTip("Area (Shift+A)", forSegment: 0)
         takeoffSelector.setToolTip("Measure (M)", forSegment: 1)
     }
 
@@ -1953,7 +1964,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSettingsFontRow.alignment = .centerY
         toolSettingsFontRow.addArrangedSubview(toolSettingsFontTitleLabel)
         toolSettingsFontRow.addArrangedSubview(toolSettingsFontPopup)
-        toolSettingsFontRow.addArrangedSubview(toolSettingsFontSizeField)
+        toolSettingsFontRow.addArrangedSubview(toolSettingsFontSizePopup)
+
+        toolSettingsArrowRow.orientation = .horizontal
+        toolSettingsArrowRow.spacing = 8
+        toolSettingsArrowRow.alignment = .centerY
+        toolSettingsArrowRow.addArrangedSubview(toolSettingsArrowTitleLabel)
+        toolSettingsArrowRow.addArrangedSubview(toolSettingsArrowPopup)
 
         toolSettingsWidthRow.orientation = .horizontal
         toolSettingsWidthRow.spacing = 8
@@ -1976,6 +1993,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSettingsSectionContent.addArrangedSubview(toolStrokeRow)
         toolSettingsSectionContent.addArrangedSubview(toolSettingsFillRow)
         toolSettingsSectionContent.addArrangedSubview(toolSettingsFontRow)
+        toolSettingsSectionContent.addArrangedSubview(toolSettingsArrowRow)
         toolSettingsSectionContent.addArrangedSubview(toolSettingsWidthRow)
         toolSettingsSectionContent.addArrangedSubview(toolOpacityRow)
         toolSettingsSectionContent.addArrangedSubview(snapshotColorizeButton)
@@ -2046,13 +2064,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         case 0: requestedMode = .select
         case 1: requestedMode = .grab
         case 2: requestedMode = .pen
-        case 3: requestedMode = .line
-        case 4: requestedMode = .polyline
-        case 5: requestedMode = .highlighter
-        case 6: requestedMode = .cloud
-        case 7: requestedMode = .rectangle
-        case 8: requestedMode = .text
-        case 9: requestedMode = .callout
+        case 3: requestedMode = .arrow
+        case 4: requestedMode = .line
+        case 5: requestedMode = .polyline
+        case 6: requestedMode = .highlighter
+        case 7: requestedMode = .cloud
+        case 8: requestedMode = .rectangle
+        case 9: requestedMode = .text
+        case 10: requestedMode = .callout
         default: requestedMode = .pen
         }
         activateTool(requestedMode)
@@ -2086,6 +2105,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if requestedMode != .polyline {
             pdfView.cancelPendingPolyline()
         }
+        if requestedMode != .arrow {
+            pdfView.cancelPendingArrow()
+        }
         if requestedMode != .area {
             pdfView.cancelPendingArea()
         }
@@ -2110,6 +2132,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     @objc func selectLineTool(_ sender: Any?) {
         setTool(.line)
+    }
+
+    @objc func selectArrowTool(_ sender: Any?) {
+        setTool(.arrow)
     }
 
     @objc func selectPolylineTool(_ sender: Any?) {
@@ -2163,26 +2189,29 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         case .pen:
             toolSelector.selectedSegment = 2
             takeoffSelector.selectedSegment = -1
-        case .line:
+        case .arrow:
             toolSelector.selectedSegment = 3
             takeoffSelector.selectedSegment = -1
-        case .polyline:
+        case .line:
             toolSelector.selectedSegment = 4
             takeoffSelector.selectedSegment = -1
-        case .highlighter:
+        case .polyline:
             toolSelector.selectedSegment = 5
             takeoffSelector.selectedSegment = -1
-        case .cloud:
+        case .highlighter:
             toolSelector.selectedSegment = 6
             takeoffSelector.selectedSegment = -1
-        case .rectangle:
+        case .cloud:
             toolSelector.selectedSegment = 7
             takeoffSelector.selectedSegment = -1
-        case .text:
+        case .rectangle:
             toolSelector.selectedSegment = 8
             takeoffSelector.selectedSegment = -1
-        case .callout:
+        case .text:
             toolSelector.selectedSegment = 9
+            takeoffSelector.selectedSegment = -1
+        case .callout:
+            toolSelector.selectedSegment = 10
             takeoffSelector.selectedSegment = -1
         case .area:
             toolSelector.selectedSegment = -1
@@ -2197,6 +2226,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             takeoffSelector.selectedSegment = -1
             pdfView.cancelPendingCallout()
             pdfView.cancelPendingPolyline()
+            pdfView.cancelPendingArrow()
             pdfView.cancelPendingArea()
             pdfView.toolMode = .calibrate
             updateToolSettingsUIForCurrentTool()
@@ -4052,7 +4082,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guide.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         guide.string = """
 1) Open PDF: ⌘O
-2) Tools (keyboard shortcuts): V Select, D Draw, L Line, P Polyline, A Area, H Highlighter, C Cloud, R Rect, T Text, Q Callout, M Measure, K Calibrate
+2) Tools (keyboard shortcuts): V Select, D Draw, A Arrow, L Line, P Polyline, Shift+A Area, H Highlighter, C Cloud, R Rect, T Text, Q Callout, M Measure, K Calibrate
    Mac menu keys: ⌘1 Pen, ⌘2 Highlighter, ⌘3 Cloud, ⌘4 Rect, ⌘5 Text, ⌘6 Callout
 3) Navigation:
    • Mouse wheel = zoom in/out
@@ -4272,6 +4302,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         rehydrateCustomSnapshotAnnotationsIfNeeded(in: document)
         loadSidecarSnapshotIfAvailable(for: url, document: document)
         repairInkPathLineWidthsIfNeeded(in: document)
+        normalizeMarkupFontsIfNeeded(in: document)
         applySnapshotLayerVisibility()
         openDocumentURL = url
         registerSessionDocument(url)
@@ -4292,6 +4323,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         onDocumentOpened?(url)
         DispatchQueue.main.async { [weak self] in
             self?.profileOpenedDocumentAndWarn(document: document, sourceURL: url)
+        }
+    }
+
+    private func normalizeMarkupFontsIfNeeded(in document: PDFDocument) {
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            for annotation in page.annotations {
+                let type = (annotation.type ?? "").lowercased()
+                guard type.contains("freetext") else { continue }
+                let size = max(6.0, annotation.font?.pointSize ?? 15.0)
+                annotation.font = resolveFont(family: defaultToolFontName(), size: size)
+            }
         }
     }
 
@@ -4640,16 +4683,92 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         return
     }
 
-    private func configureAutosaveURL(for _: URL?) {
-        autosaveURL = nil
+    private func configureAutosaveURL(for url: URL?) {
+        autosaveURL = url
     }
 
     private func scheduleAutosave() {
-        return
+        guard hasPromptedForInitialMarkupSaveCopy,
+              let _ = autosaveURL ?? openDocumentURL,
+              pdfView.document != nil else {
+            pendingAutosaveWorkItem?.cancel()
+            pendingAutosaveWorkItem = nil
+            autosaveQueued = false
+            return
+        }
+        guard markupChangeVersion > 0 else {
+            pendingAutosaveWorkItem?.cancel()
+            pendingAutosaveWorkItem = nil
+            return
+        }
+        guard !manualSaveInFlight else {
+            autosaveQueued = true
+            return
+        }
+        pendingAutosaveWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.performAutosaveNow()
+        }
+        pendingAutosaveWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + autosaveIntervalSeconds, execute: workItem)
     }
 
     private func performAutosaveNow() {
-        return
+        pendingAutosaveWorkItem?.cancel()
+        pendingAutosaveWorkItem = nil
+        guard hasPromptedForInitialMarkupSaveCopy,
+              !manualSaveInFlight,
+              !autosaveInFlight,
+              let document = pdfView.document,
+              let targetURL = autosaveURL ?? openDocumentURL else {
+            return
+        }
+        guard markupChangeVersion > 0 else { return }
+
+        autosaveInFlight = true
+        let snapshotVersion = markupChangeVersion
+        let sidecar = sidecarURL(for: targetURL)
+        let snapshot = buildSidecarSnapshot(document: document, sourcePDFURL: targetURL)
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let encoder = PropertyListEncoder()
+            encoder.outputFormat = .binary
+            let success: Bool
+            if let data = try? encoder.encode(snapshot) {
+                do {
+                    try data.write(to: sidecar, options: .atomic)
+                    success = true
+                } catch {
+                    success = false
+                }
+            } else {
+                success = false
+            }
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.autosaveInFlight = false
+
+                if success {
+                    self.lastAutosaveAt = Date()
+                    if self.markupChangeVersion <= snapshotVersion {
+                        self.markupChangeVersion = 0
+                        self.lastAutosavedChangeVersion = 0
+                        self.lastMarkupEditAt = .distantPast
+                        self.lastUserInteractionAt = .distantPast
+                        self.view.window?.isDocumentEdited = false
+                        self.updateStatusBar()
+                    } else {
+                        self.lastAutosavedChangeVersion = snapshotVersion
+                    }
+                }
+
+                if self.autosaveQueued || self.markupChangeVersion > 0 {
+                    self.autosaveQueued = false
+                    self.scheduleAutosave()
+                }
+            }
+        }
     }
 
     private var isSidecarAutosaveMode: Bool {
@@ -4913,6 +5032,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         let stroke = toolSettingsStrokeColorWell.color.withAlphaComponent(opacity)
         let fill = toolSettingsFillColorWell.color.withAlphaComponent(opacity)
         let textFont = resolvedToolSettingsFont()
+        let calloutArrowStyle = resolvedCalloutArrowStyleFromUI()
         let selectedItems = currentSelectedMarkupItems()
 
         if pdfView.toolMode == .select, !selectedItems.isEmpty {
@@ -4975,6 +5095,10 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         case .pen, .line, .polyline:
             pdfView.penColor = stroke
             pdfView.penLineWidth = currentWidth
+        case .arrow:
+            pdfView.arrowStrokeColor = stroke
+            pdfView.arrowLineWidth = currentWidth
+            pdfView.calloutArrowStyle = calloutArrowStyle
         case .area:
             pdfView.penColor = stroke
             pdfView.areaLineWidth = currentWidth
@@ -4993,6 +5117,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         case .callout:
             pdfView.calloutStrokeColor = stroke
             pdfView.calloutLineWidth = currentWidth
+            pdfView.calloutArrowStyle = calloutArrowStyle
             pdfView.textForegroundColor = fill
             pdfView.textBackgroundColor = stroke.withAlphaComponent(opacity * 0.5)
             pdfView.textFontName = textFont.fontName
@@ -5008,25 +5133,45 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
     }
 
     private func resolvedToolSettingsFont() -> NSFont {
-        let family = toolSettingsFontPopup.titleOfSelectedItem ?? "Helvetica"
-        let rawSize = toolSettingsFontSizeField.doubleValue
-        let size = max(6.0, min(256.0, rawSize > 0 ? CGFloat(rawSize) : 15.0))
-        if Int(round(size)) != Int(round(rawSize)) {
-            toolSettingsFontSizeField.stringValue = "\(Int(round(size)))"
+        let size = selectedToolFontSize()
+        return resolveFont(family: defaultToolFontName(), size: size)
+    }
+
+    private func defaultToolFontName() -> String {
+        NSFont.systemFont(ofSize: 15, weight: .regular).fontName
+    }
+
+    private func selectedToolFontSize() -> CGFloat {
+        let fallback: CGFloat = 15
+        guard let title = toolSettingsFontSizePopup.titleOfSelectedItem,
+              let raw = Double(title.replacingOccurrences(of: " pt", with: "")) else {
+            selectToolFontSize(fallback)
+            return fallback
         }
-        return resolveFont(family: family, size: size)
+        let size = max(6.0, min(256.0, CGFloat(raw)))
+        selectToolFontSize(size)
+        return size
+    }
+
+    private func selectToolFontSize(_ size: CGFloat) {
+        let nearest = standardFontSizes.min { lhs, rhs in
+            abs(CGFloat(lhs) - size) < abs(CGFloat(rhs) - size)
+        } ?? 15
+        toolSettingsFontSizePopup.selectItem(withTitle: "\(nearest) pt")
+    }
+
+    private func resolvedCalloutArrowStyleFromUI() -> MarkupPDFView.ArrowEndStyle {
+        switch toolSettingsArrowPopup.indexOfSelectedItem {
+        case 1: return .openArrow
+        case 2: return .filledDot
+        case 3: return .openDot
+        default: return .solidArrow
+        }
     }
 
     private func resolveFont(family: String, size: CGFloat) -> NSFont {
-        if let exact = NSFont(name: family, size: size) {
-            return exact
-        }
-        if let members = NSFontManager.shared.availableMembers(ofFontFamily: family),
-           let postScriptName = members.first?[0] as? String,
-           let resolved = NSFont(name: postScriptName, size: size) {
-            return resolved
-        }
-        return NSFont.systemFont(ofSize: size, weight: .medium)
+        _ = family
+        return NSFont.systemFont(ofSize: size, weight: .regular)
     }
 
     private func updateToolSettingsUIForCurrentTool() {
@@ -5036,6 +5181,8 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             let annotationType = (primary.type ?? "").lowercased()
             let count = selectedItems.count
             toolSettingsToolLabel.stringValue = count == 1 ? "Selected Markup" : "Selected Markups: \(count)"
+            toolSettingsArrowRow.isHidden = true
+            toolSettingsArrowPopup.isEnabled = false
 
             if annotationType.contains("freetext") {
                 toolSettingsStrokeTitleLabel.stringValue = "Background:"
@@ -5049,12 +5196,9 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
                 toolSettingsStrokeColorWell.color = background.withAlphaComponent(1.0)
                 toolSettingsOpacitySlider.doubleValue = 1.0
                 toolSettingsFillColorWell.color = (primary.fontColor ?? NSColor.labelColor).withAlphaComponent(1.0)
-                let font = primary.font ?? NSFont.systemFont(ofSize: 15, weight: .medium)
-                let family = font.familyName ?? font.fontName
-                if toolSettingsFontPopup.itemTitles.contains(family) {
-                    toolSettingsFontPopup.selectItem(withTitle: family)
-                }
-                toolSettingsFontSizeField.stringValue = "\(Int(round(font.pointSize)))"
+                let font = primary.font ?? NSFont.systemFont(ofSize: 15, weight: .regular)
+                toolSettingsFontPopup.selectItem(withTitle: "San Francisco")
+                selectToolFontSize(font.pointSize)
             } else if let snapshot = primary as? PDFSnapshotAnnotation {
                 toolSettingsStrokeTitleLabel.stringValue = "Linework:"
                 toolSettingsFillTitleLabel.stringValue = "Fill:"
@@ -5069,8 +5213,16 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             } else {
                 toolSettingsStrokeTitleLabel.stringValue = "Color:"
                 toolSettingsFillTitleLabel.stringValue = "Fill:"
+                let contents = (primary.contents ?? "").lowercased()
+                let isArrowMarkup = contents.contains("arrow|style:") || contents.contains("arrow dot|style:")
                 toolSettingsFillRow.isHidden = !(annotationType.contains("square") || annotationType.contains("circle"))
                 toolSettingsFontRow.isHidden = true
+                toolSettingsArrowRow.isHidden = !isArrowMarkup
+                toolSettingsArrowPopup.isEnabled = isArrowMarkup
+                if isArrowMarkup,
+                   let style = pdfView.calloutArrowStyle(for: primary) {
+                    toolSettingsArrowPopup.selectItem(at: min(max(style.rawValue, 0), 3))
+                }
                 toolSettingsWidthRow.isHidden = false
                 toolSettingsLineWidthPopup.isEnabled = true
                 toolSettingsStrokeColorWell.color = primary.color.withAlphaComponent(1.0)
@@ -5087,8 +5239,8 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             toolSettingsOpacitySlider.isEnabled = !annotationType.contains("freetext")
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = !toolSettingsFillRow.isHidden
-            toolSettingsFontPopup.isEnabled = !toolSettingsFontRow.isHidden
-            toolSettingsFontSizeField.isEnabled = !toolSettingsFontRow.isHidden
+            toolSettingsFontPopup.isEnabled = false
+            toolSettingsFontSizePopup.isEnabled = !toolSettingsFontRow.isHidden
             if !(primary is PDFSnapshotAnnotation) {
                 snapshotColorizeButton.isHidden = true
                 snapshotColorizeButton.isEnabled = false
@@ -5100,6 +5252,8 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         toolSettingsOpacityValueLabel.stringValue = "\(Int(round(toolSettingsOpacitySlider.doubleValue * 100)))%"
         snapshotColorizeButton.isHidden = true
         snapshotColorizeButton.isEnabled = false
+        toolSettingsArrowRow.isHidden = true
+        toolSettingsArrowPopup.isEnabled = false
 
         switch pdfView.toolMode {
         case .grab:
@@ -5113,8 +5267,28 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             toolSettingsStrokeColorWell.isEnabled = false
             toolSettingsFillColorWell.isEnabled = false
             toolSettingsFontPopup.isEnabled = false
-            toolSettingsFontSizeField.isEnabled = false
+            toolSettingsFontSizePopup.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = false
+        case .arrow:
+            toolSettingsStrokeColorWell.color = pdfView.arrowStrokeColor.withAlphaComponent(1.0)
+            toolSettingsOpacitySlider.doubleValue = Double(pdfView.arrowStrokeColor.alphaComponent)
+            toolSettingsOpacityValueLabel.stringValue = "\(Int(round(toolSettingsOpacitySlider.doubleValue * 100)))%"
+            selectLineWeightLevel(for: pdfView.arrowLineWidth, tool: .arrow)
+            toolSettingsStrokeTitleLabel.stringValue = "Color:"
+            toolSettingsFillTitleLabel.stringValue = "Fill:"
+            toolSettingsFontTitleLabel.stringValue = "Text Size:"
+            toolSettingsFillRow.isHidden = true
+            toolSettingsFontRow.isHidden = true
+            toolSettingsArrowRow.isHidden = false
+            toolSettingsArrowPopup.isEnabled = true
+            toolSettingsArrowPopup.selectItem(at: min(max(pdfView.calloutArrowStyle.rawValue, 0), 3))
+            toolSettingsWidthRow.isHidden = false
+            toolSettingsOpacitySlider.isEnabled = true
+            toolSettingsStrokeColorWell.isEnabled = true
+            toolSettingsFillColorWell.isEnabled = false
+            toolSettingsFontPopup.isEnabled = false
+            toolSettingsFontSizePopup.isEnabled = false
+            toolSettingsLineWidthPopup.isEnabled = true
         case .select:
             toolSettingsStrokeTitleLabel.stringValue = "Color:"
             toolSettingsFillTitleLabel.stringValue = "Fill:"
@@ -5126,7 +5300,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             toolSettingsStrokeColorWell.isEnabled = false
             toolSettingsFillColorWell.isEnabled = false
             toolSettingsFontPopup.isEnabled = false
-            toolSettingsFontSizeField.isEnabled = false
+            toolSettingsFontSizePopup.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = false
         case .pen, .line, .polyline:
             toolSettingsStrokeColorWell.color = pdfView.penColor.withAlphaComponent(1.0)
@@ -5142,7 +5316,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = true
             toolSettingsFontPopup.isEnabled = false
-            toolSettingsFontSizeField.isEnabled = false
+            toolSettingsFontSizePopup.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = true
         case .area:
             toolSettingsStrokeColorWell.color = pdfView.penColor.withAlphaComponent(1.0)
@@ -5158,7 +5332,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = true
             toolSettingsFontPopup.isEnabled = false
-            toolSettingsFontSizeField.isEnabled = false
+            toolSettingsFontSizePopup.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = true
         case .highlighter:
             toolSettingsStrokeColorWell.color = pdfView.highlighterColor.withAlphaComponent(1.0)
@@ -5174,7 +5348,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = true
             toolSettingsFontPopup.isEnabled = false
-            toolSettingsFontSizeField.isEnabled = false
+            toolSettingsFontSizePopup.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = true
         case .cloud, .rectangle:
             selectLineWeightLevel(for: pdfView.rectangleLineWidth, tool: .rectangle)
@@ -5187,56 +5361,51 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = true
             toolSettingsFontPopup.isEnabled = false
-            toolSettingsFontSizeField.isEnabled = false
+            toolSettingsFontSizePopup.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = true
         case .text:
             let state = toolSettingsByTool[.text] ?? defaultToolSettings(for: .text)
             toolSettingsStrokeColorWell.color = state.strokeColor.withAlphaComponent(1.0)
             toolSettingsFillColorWell.color = state.fillColor.withAlphaComponent(1.0)
-            let font = resolveFont(family: state.fontName, size: state.fontSize)
-            let family = font.familyName ?? state.fontName
-            if toolSettingsFontPopup.itemTitles.contains(family) {
-                toolSettingsFontPopup.selectItem(withTitle: family)
-            }
-            toolSettingsFontSizeField.stringValue = "\(Int(round(state.fontSize)))"
+            toolSettingsFontPopup.selectItem(withTitle: "San Francisco")
+            selectToolFontSize(state.fontSize)
             toolSettingsOpacitySlider.doubleValue = 1.0
             toolSettingsOpacityValueLabel.stringValue = "100%"
             toolSettingsStrokeTitleLabel.stringValue = "Background:"
             toolSettingsFillTitleLabel.stringValue = "Text:"
-            toolSettingsFontTitleLabel.stringValue = "Font:"
+            toolSettingsFontTitleLabel.stringValue = "Text Size:"
             toolSettingsFillRow.isHidden = false
             toolSettingsFontRow.isHidden = false
             toolSettingsWidthRow.isHidden = true
             toolSettingsOpacitySlider.isEnabled = false
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = true
-            toolSettingsFontPopup.isEnabled = true
-            toolSettingsFontSizeField.isEnabled = true
+            toolSettingsFontPopup.isEnabled = false
+            toolSettingsFontSizePopup.isEnabled = true
             toolSettingsLineWidthPopup.isEnabled = false
         case .callout:
             let state = toolSettingsByTool[.callout] ?? defaultToolSettings(for: .callout)
             toolSettingsStrokeColorWell.color = state.strokeColor.withAlphaComponent(1.0)
             toolSettingsFillColorWell.color = state.fillColor.withAlphaComponent(1.0)
-            let font = resolveFont(family: state.fontName, size: state.fontSize)
-            let family = font.familyName ?? state.fontName
-            if toolSettingsFontPopup.itemTitles.contains(family) {
-                toolSettingsFontPopup.selectItem(withTitle: family)
-            }
-            toolSettingsFontSizeField.stringValue = "\(Int(round(state.fontSize)))"
+            toolSettingsFontPopup.selectItem(withTitle: "San Francisco")
+            selectToolFontSize(state.fontSize)
             toolSettingsOpacitySlider.doubleValue = 1.0
             toolSettingsOpacityValueLabel.stringValue = "100%"
             selectLineWeightLevel(for: widthValue(for: state.lineWeightLevel, tool: .callout), tool: .callout)
             toolSettingsStrokeTitleLabel.stringValue = "Leader:"
             toolSettingsFillTitleLabel.stringValue = "Text:"
-            toolSettingsFontTitleLabel.stringValue = "Font:"
+            toolSettingsFontTitleLabel.stringValue = "Text Size:"
             toolSettingsFillRow.isHidden = false
             toolSettingsFontRow.isHidden = false
+            toolSettingsArrowRow.isHidden = false
+            toolSettingsArrowPopup.isEnabled = true
+            toolSettingsArrowPopup.selectItem(at: min(max(state.calloutArrowStyleRawValue, 0), 3))
             toolSettingsWidthRow.isHidden = false
             toolSettingsOpacitySlider.isEnabled = false
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = true
-            toolSettingsFontPopup.isEnabled = true
-            toolSettingsFontSizeField.isEnabled = true
+            toolSettingsFontPopup.isEnabled = false
+            toolSettingsFontSizePopup.isEnabled = true
             toolSettingsLineWidthPopup.isEnabled = true
         case .measure, .calibrate:
             selectLineWeightLevel(for: pdfView.measurementLineWidth, tool: .measure)
@@ -5249,7 +5418,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = true
             toolSettingsFontPopup.isEnabled = false
-            toolSettingsFontSizeField.isEnabled = false
+            toolSettingsFontSizePopup.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = true
         }
     }
@@ -5272,6 +5441,8 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         case .grab:
             return 1
         case .area:
+            return interpolateLevel(level, lowAt1: 1, midAt5: 2, highAt10: 4)
+        case .arrow:
             return interpolateLevel(level, lowAt1: 1, midAt5: 2, highAt10: 4)
         case .pen, .line, .polyline:
             return interpolateLevel(level, lowAt1: 6, midAt5: 15, highAt10: 25)
@@ -5303,38 +5474,41 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
     }
 
     private func defaultToolSettings(for tool: ToolMode) -> ToolSettingsState {
-        let defaultFontName = pdfView.textFontName
+        let defaultFontName = defaultToolFontName()
         let defaultFontSize = max(6.0, pdfView.textFontSize)
+        let defaultArrowRaw = MarkupPDFView.ArrowEndStyle.solidArrow.rawValue
         switch tool {
         case .pen:
-            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw)
+        case .arrow:
+            return ToolSettingsState(strokeColor: pdfView.arrowStrokeColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.arrowStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: pdfView.calloutArrowStyle.rawValue)
         case .line:
-            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw)
         case .polyline:
-            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw)
         case .highlighter:
-            return ToolSettingsState(strokeColor: pdfView.highlighterColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.highlighterColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+            return ToolSettingsState(strokeColor: pdfView.highlighterColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.highlighterColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw)
         case .cloud:
-            return ToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+            return ToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw)
         case .rectangle:
-            return ToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+            return ToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw)
         case .text:
-            return ToolSettingsState(strokeColor: pdfView.textBackgroundColor.withAlphaComponent(1.0), fillColor: pdfView.textForegroundColor.withAlphaComponent(1.0), opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+            return ToolSettingsState(strokeColor: pdfView.textBackgroundColor.withAlphaComponent(1.0), fillColor: pdfView.textForegroundColor.withAlphaComponent(1.0), opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw)
         case .callout:
-            return ToolSettingsState(strokeColor: pdfView.calloutStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.textForegroundColor.withAlphaComponent(1.0), opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+            return ToolSettingsState(strokeColor: pdfView.calloutStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.textForegroundColor.withAlphaComponent(1.0), opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: pdfView.calloutArrowStyle.rawValue)
         case .area:
-            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 1, fontName: defaultFontName, fontSize: defaultFontSize)
+            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 1, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw)
         case .measure:
-            return ToolSettingsState(strokeColor: pdfView.measurementStrokeColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.measurementStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+            return ToolSettingsState(strokeColor: pdfView.measurementStrokeColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.measurementStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw)
         case .calibrate:
-            return ToolSettingsState(strokeColor: pdfView.calibrationStrokeColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.calibrationStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+            return ToolSettingsState(strokeColor: pdfView.calibrationStrokeColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.calibrationStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw)
         case .select, .grab:
-            return ToolSettingsState(strokeColor: .systemRed, fillColor: .systemYellow, opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+            return ToolSettingsState(strokeColor: .systemRed, fillColor: .systemYellow, opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw)
         }
     }
 
     private func initializePerToolSettings() {
-        let tools: [ToolMode] = [.pen, .line, .polyline, .highlighter, .cloud, .rectangle, .text, .callout, .area, .measure, .calibrate]
+        let tools: [ToolMode] = [.pen, .arrow, .line, .polyline, .highlighter, .cloud, .rectangle, .text, .callout, .area, .measure, .calibrate]
         for tool in tools {
             toolSettingsByTool[tool] = defaultToolSettings(for: tool)
         }
@@ -5350,6 +5524,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         let font = resolvedToolSettingsFont()
         state.fontName = font.fontName
         state.fontSize = font.pointSize
+        state.calloutArrowStyleRawValue = resolvedCalloutArrowStyleFromUI().rawValue
         toolSettingsByTool[tool] = state
     }
 
@@ -5363,6 +5538,10 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         case .pen:
             pdfView.penColor = stroke
             pdfView.penLineWidth = widthValue(for: state.lineWeightLevel, tool: .pen)
+        case .arrow:
+            pdfView.arrowStrokeColor = stroke
+            pdfView.arrowLineWidth = widthValue(for: state.lineWeightLevel, tool: .arrow)
+            pdfView.calloutArrowStyle = MarkupPDFView.ArrowEndStyle(rawValue: state.calloutArrowStyleRawValue) ?? .solidArrow
         case .line:
             pdfView.penColor = stroke
             pdfView.penLineWidth = widthValue(for: state.lineWeightLevel, tool: .line)
@@ -5388,6 +5567,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         case .callout:
             pdfView.calloutStrokeColor = state.strokeColor.withAlphaComponent(1.0)
             pdfView.calloutLineWidth = widthValue(for: state.lineWeightLevel, tool: .callout)
+            pdfView.calloutArrowStyle = MarkupPDFView.ArrowEndStyle(rawValue: state.calloutArrowStyleRawValue) ?? .solidArrow
             pdfView.textForegroundColor = state.fillColor.withAlphaComponent(1.0)
             pdfView.textBackgroundColor = state.strokeColor.withAlphaComponent(1.0)
             pdfView.textFontName = state.fontName
@@ -5419,6 +5599,9 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         }
         if type.contains("ink") {
             let contents = (annotation.contents ?? "").lowercased()
+            if contents.contains("arrow|style:") {
+                return .arrow
+            }
             if contents.contains("highlighter") {
                 return .highlighter
             }
@@ -5528,6 +5711,8 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             return "Grab"
         case .pen:
             return "Draw"
+        case .arrow:
+            return "Arrow"
         case .line:
             return "Line"
         case .polyline:
@@ -5556,13 +5741,14 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         case .select: return 0
         case .grab: return 1
         case .pen: return 2
-        case .line: return 3
-        case .polyline: return 4
-        case .highlighter: return 5
-        case .cloud: return 6
-        case .rectangle: return 7
-        case .text: return 8
-        case .callout: return 9
+        case .arrow: return 3
+        case .line: return 4
+        case .polyline: return 5
+        case .highlighter: return 6
+        case .cloud: return 7
+        case .rectangle: return 8
+        case .text: return 9
+        case .callout: return 10
         case .area, .measure: return -1
         case .calibrate: return -1
         }

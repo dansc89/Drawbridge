@@ -16,10 +16,18 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let labelOffset: CGFloat
     }
     private static let calloutGroupPrefix = "DrawbridgeCallout:"
+    enum ArrowEndStyle: Int {
+        case solidArrow = 0
+        case openArrow = 1
+        case filledDot = 2
+        case openDot = 3
+    }
 
     var toolMode: ToolMode = .pen
     var penColor: NSColor = .systemRed
     var penLineWidth: CGFloat = 15.0
+    var arrowStrokeColor: NSColor = .systemRed
+    var arrowLineWidth: CGFloat = 2.0
     var areaLineWidth: CGFloat = 1.0
     var highlighterColor: NSColor = NSColor.systemYellow.withAlphaComponent(0.5)
     var highlighterLineWidth: CGFloat = 31.0
@@ -28,10 +36,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var rectangleLineWidth: CGFloat = 50.0
     var textForegroundColor: NSColor = .labelColor
     var textBackgroundColor: NSColor = NSColor.systemOrange.withAlphaComponent(0.25)
-    var textFontName: String = NSFont.systemFont(ofSize: 15, weight: .medium).fontName
+    var textFontName: String = ".SFNS-Regular"
     var textFontSize: CGFloat = 15.0
     var calloutStrokeColor: NSColor = .systemRed
     var calloutLineWidth: CGFloat = 2.0
+    var calloutArrowStyle: ArrowEndStyle = .solidArrow
     var measurementStrokeColor: NSColor = .systemBlue
     var calibrationStrokeColor: NSColor = .systemGreen
     var measurementLineWidth: CGFloat = 2.0
@@ -80,6 +89,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var pendingCalloutGroupID: String?
     private var pendingPolylinePage: PDFPage?
     private var pendingPolylinePointsInPage: [NSPoint] = []
+    private var pendingArrowPage: PDFPage?
+    private var pendingArrowStartInPage: NSPoint?
     private var pendingAreaPage: PDFPage?
     private var pendingAreaPointsInPage: [NSPoint] = []
     private var pendingMeasurePage: PDFPage?
@@ -289,6 +300,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             updatePolylinePreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
             return
         }
+        if toolMode == .arrow {
+            let locationInView = convert(event.locationInWindow, from: nil)
+            updateArrowPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
+            return
+        }
         if toolMode == .area {
             let locationInView = convert(event.locationInWindow, from: nil)
             updateAreaPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
@@ -318,7 +334,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         let createsMarkupTool: Bool
         switch toolMode {
-        case .pen, .highlighter, .line, .polyline, .area, .cloud, .rectangle, .text, .callout, .measure, .calibrate:
+        case .pen, .arrow, .highlighter, .line, .polyline, .area, .cloud, .rectangle, .text, .callout, .measure, .calibrate:
             createsMarkupTool = true
         default:
             createsMarkupTool = false
@@ -391,6 +407,32 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             dragPreviewLayer.lineWidth = strokeWidth
             dragPreviewLayer.path = path
             dragPreviewLayer.isHidden = false
+        case .arrow:
+            if inlineTextField != nil {
+                _ = commitInlineTextEditor(cancel: false)
+            }
+            guard let page = page(for: locationInView, nearest: true) else {
+                super.mouseDown(with: event)
+                return
+            }
+            let pointInPage = convert(locationInView, to: page)
+            if pendingArrowPage == nil || pendingArrowPage !== page || pendingArrowStartInPage == nil {
+                pendingArrowPage = page
+                pendingArrowStartInPage = pointInPage
+                updateArrowPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
+            } else if let start = pendingArrowStartInPage {
+                let endInPage: NSPoint
+                if event.modifierFlags.contains(.shift) {
+                    let startInView = convert(start, from: page)
+                    let snapped = orthogonalSnapPoint(anchor: startInView, current: locationInView)
+                    endInPage = convert(snapped, to: page)
+                } else {
+                    endInPage = pointInPage
+                }
+                addArrowAnnotation(from: start, to: endInPage, on: page)
+                clearPendingArrow()
+            }
+            return
         case .line:
             if inlineTextField != nil {
                 _ = commitInlineTextEditor(cancel: false)
@@ -567,6 +609,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             updatePolylinePreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
             return
         }
+        if toolMode == .arrow {
+            let locationInView = convert(event.locationInWindow, from: nil)
+            updateArrowPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
+            return
+        }
         if toolMode == .area {
             let locationInView = convert(event.locationInWindow, from: nil)
             updateAreaPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
@@ -693,6 +740,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             fenceStartInView = nil
             fencePage = nil
             if (toolMode != .measure || pendingMeasureStartInPage == nil) &&
+                !(toolMode == .arrow && pendingArrowStartInPage != nil) &&
                 !(toolMode == .polyline && !pendingPolylinePointsInPage.isEmpty) &&
                 !(toolMode == .area && !pendingAreaPointsInPage.isEmpty) {
                 dragPreviewLayer.isHidden = true
@@ -842,6 +890,76 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         onAnnotationAdded?(page, annotation, actionName)
     }
 
+    private func addArrowAnnotation(from start: NSPoint, to end: NSPoint, on page: PDFPage) {
+        let distance = hypot(end.x - start.x, end.y - start.y)
+        guard distance > 1.0 else { return }
+
+        let minX = min(start.x, end.x)
+        let minY = min(start.y, end.y)
+        let maxX = max(start.x, end.x)
+        let maxY = max(start.y, end.y)
+        let pad = max(6.0, arrowLineWidth * 2.5)
+        let bounds = NSRect(x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2.0, height: (maxY - minY) + pad * 2.0)
+
+        let path = NSBezierPath()
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        let localStart = NSPoint(x: start.x - bounds.origin.x, y: start.y - bounds.origin.y)
+        let localEnd = NSPoint(x: end.x - bounds.origin.x, y: end.y - bounds.origin.y)
+        path.move(to: localStart)
+        path.line(to: localEnd)
+
+        let dx = localEnd.x - localStart.x
+        let dy = localEnd.y - localStart.y
+        let len = hypot(dx, dy)
+        if len > 0.001 {
+            let ux = dx / len
+            let uy = dy / len
+            let arrowLength = max(10.0, arrowLineWidth * 3.0)
+            let halfAngle = CGFloat.pi / 7.0
+            let left = NSPoint(
+                x: localEnd.x - arrowLength * (ux * cos(halfAngle) - uy * sin(halfAngle)),
+                y: localEnd.y - arrowLength * (uy * cos(halfAngle) + ux * sin(halfAngle))
+            )
+            let right = NSPoint(
+                x: localEnd.x - arrowLength * (ux * cos(-halfAngle) - uy * sin(-halfAngle)),
+                y: localEnd.y - arrowLength * (uy * cos(-halfAngle) + ux * sin(-halfAngle))
+            )
+            switch calloutArrowStyle {
+            case .solidArrow, .openArrow:
+                path.move(to: left)
+                path.line(to: localEnd)
+                path.line(to: right)
+                if calloutArrowStyle == .solidArrow {
+                    path.line(to: left)
+                }
+            case .filledDot, .openDot:
+                break
+            }
+        }
+
+        let annotation = PDFAnnotation(bounds: bounds, forType: .ink, withProperties: nil)
+        annotation.color = arrowStrokeColor
+        path.lineWidth = arrowLineWidth
+        assignLineWidth(arrowLineWidth, to: annotation)
+        annotation.contents = "Arrow|Style:\(calloutArrowStyle.rawValue)"
+        annotation.add(path)
+        page.addAnnotation(annotation)
+        onAnnotationAdded?(page, annotation, "Add Arrow")
+
+        if calloutArrowStyle == .filledDot || calloutArrowStyle == .openDot {
+            let radius = max(3.0, arrowLineWidth * 1.8)
+            let dotBounds = NSRect(x: end.x - radius, y: end.y - radius, width: radius * 2.0, height: radius * 2.0)
+            let dot = PDFAnnotation(bounds: dotBounds, forType: .circle, withProperties: nil)
+            dot.color = arrowStrokeColor
+            dot.interiorColor = (calloutArrowStyle == .filledDot) ? arrowStrokeColor : .clear
+            assignLineWidth(max(1.0, arrowLineWidth), to: dot)
+            dot.contents = "Arrow Dot|Style:\(calloutArrowStyle.rawValue)"
+            page.addAnnotation(dot)
+            onAnnotationAdded?(page, dot, "Add Arrow")
+        }
+    }
+
     private func assignLineWidth(_ lineWidth: CGFloat, to annotation: PDFAnnotation) {
         let normalized = max(0.1, lineWidth)
         let border = annotation.border ?? PDFBorder()
@@ -948,6 +1066,45 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         clearPendingPolyline()
     }
 
+    private func updateArrowPreview(at locationInView: NSPoint?, orthogonal: Bool) {
+        guard toolMode == .arrow,
+              let page = pendingArrowPage,
+              let start = pendingArrowStartInPage else {
+            return
+        }
+        let startInView = convert(start, from: page)
+        let targetInView: NSPoint
+        if let locationInView,
+           self.page(for: locationInView, nearest: true) == page {
+            targetInView = orthogonal ? orthogonalSnapPoint(anchor: startInView, current: locationInView) : locationInView
+        } else {
+            targetInView = startInView
+        }
+
+        let path = CGMutablePath()
+        path.move(to: startInView)
+        path.addLine(to: targetInView)
+        addArrowDecoration(to: path, tip: targetInView, from: startInView, style: calloutArrowStyle, lineWidth: arrowLineWidth)
+
+        dragPreviewLayer.strokeColor = arrowStrokeColor.cgColor
+        dragPreviewLayer.fillColor = NSColor.clear.cgColor
+        dragPreviewLayer.lineWidth = arrowLineWidth
+        dragPreviewLayer.lineDashPattern = [6, 4]
+        dragPreviewLayer.path = path
+        dragPreviewLayer.isHidden = false
+    }
+
+    private func clearPendingArrow() {
+        pendingArrowPage = nil
+        pendingArrowStartInPage = nil
+        dragPreviewLayer.path = nil
+        dragPreviewLayer.isHidden = true
+    }
+
+    func cancelPendingArrow() {
+        clearPendingArrow()
+    }
+
     private func updateAreaPreview(at locationInView: NSPoint?, orthogonal: Bool) {
         guard toolMode == .area,
               let page = pendingAreaPage,
@@ -1024,7 +1181,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let labelBounds = NSRect(x: centroid.x - 72, y: centroid.y - 12, width: 144, height: 24)
         let label = PDFAnnotation(bounds: labelBounds, forType: .freeText, withProperties: nil)
         label.contents = "Area: \(formatAreaValue(scaledArea)) \(measurementUnitLabel)\u{00B2}"
-        label.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         label.fontColor = penColor
         label.color = NSColor.white.withAlphaComponent(0.88)
         page.addAnnotation(label)
@@ -1101,7 +1258,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         // Use an offscreen capture field so typing updates only the live PDF annotation.
         let field = NSTextField(frame: NSRect(x: -10_000, y: -10_000, width: 1, height: 1))
         let resolvedFont = NSFont(name: textFontName, size: max(6.0, textFontSize))
-            ?? NSFont.systemFont(ofSize: max(6.0, textFontSize), weight: .medium)
+            ?? NSFont.systemFont(ofSize: max(6.0, textFontSize), weight: .regular)
         field.font = resolvedFont
         field.textColor = .clear
         field.drawsBackground = false
@@ -1323,7 +1480,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let labelBounds = NSRect(x: geometry.labelAnchor.x - 52, y: geometry.labelAnchor.y - 10, width: 116, height: 22)
         let label = PDFAnnotation(bounds: labelBounds, forType: .freeText, withProperties: nil)
         label.contents = labelText
-        label.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+        label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         label.fontColor = measurementStrokeColor
         label.color = NSColor.white.withAlphaComponent(0.88)
         page.addAnnotation(label)
@@ -1490,11 +1647,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             path.move(to: anchor)
             path.addLine(to: elbowInView)
             path.addLine(to: tipInView)
-            addArrowHead(to: path, tip: tipInView, from: elbowInView, length: max(10.0, calloutLineWidth * 3.0))
+            addArrowDecoration(to: path, tip: tipInView, from: elbowInView, style: calloutArrowStyle, lineWidth: calloutLineWidth)
         } else {
             path.move(to: hoverInView)
             path.addLine(to: tipInView)
-            addArrowHead(to: path, tip: tipInView, from: hoverInView, length: max(10.0, calloutLineWidth * 3.0))
+            addArrowDecoration(to: path, tip: tipInView, from: hoverInView, style: calloutArrowStyle, lineWidth: calloutLineWidth)
         }
 
         dragPreviewLayer.strokeColor = calloutStrokeColor.cgColor
@@ -1518,13 +1675,14 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return normalizedRect(from: v1, to: v2)
     }
 
-    private func addArrowHead(to path: CGMutablePath, tip: NSPoint, from base: NSPoint, length: CGFloat) {
+    private func addArrowDecoration(to path: CGMutablePath, tip: NSPoint, from base: NSPoint, style: ArrowEndStyle, lineWidth: CGFloat) {
         let dx = tip.x - base.x
         let dy = tip.y - base.y
         let dist = hypot(dx, dy)
         guard dist > 0.001 else { return }
         let ux = dx / dist
         let uy = dy / dist
+        let length = max(10.0, lineWidth * 3.0)
         let halfAngle = CGFloat.pi / 7.0
         let left = NSPoint(
             x: tip.x - length * (ux * cos(halfAngle) - uy * sin(halfAngle)),
@@ -1534,9 +1692,19 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             x: tip.x - length * (ux * cos(-halfAngle) - uy * sin(-halfAngle)),
             y: tip.y - length * (uy * cos(-halfAngle) + ux * sin(-halfAngle))
         )
-        path.move(to: left)
-        path.addLine(to: tip)
-        path.addLine(to: right)
+        switch style {
+        case .solidArrow, .openArrow:
+            path.move(to: left)
+            path.addLine(to: tip)
+            path.addLine(to: right)
+            if style == .solidArrow {
+                path.addLine(to: left)
+            }
+        case .filledDot, .openDot:
+            let radius = max(3.0, lineWidth * 1.8)
+            let dotRect = NSRect(x: tip.x - radius, y: tip.y - radius, width: radius * 2.0, height: radius * 2.0)
+            path.addEllipse(in: dotRect)
+        }
     }
 
     private func normalizedRect(from p1: NSPoint, to p2: NSPoint) -> NSRect {
@@ -1852,22 +2020,45 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 x: tip.x - arrowLength * (ux * cos(-halfAngle) - uy * sin(-halfAngle)),
                 y: tip.y - arrowLength * (uy * cos(-halfAngle) + ux * sin(-halfAngle))
             )
-            path.move(to: NSPoint(x: left.x - bounds.origin.x, y: left.y - bounds.origin.y))
-            path.line(to: NSPoint(x: tip.x - bounds.origin.x, y: tip.y - bounds.origin.y))
-            path.line(to: NSPoint(x: right.x - bounds.origin.x, y: right.y - bounds.origin.y))
+            switch calloutArrowStyle {
+            case .solidArrow, .openArrow:
+                path.move(to: NSPoint(x: left.x - bounds.origin.x, y: left.y - bounds.origin.y))
+                path.line(to: NSPoint(x: tip.x - bounds.origin.x, y: tip.y - bounds.origin.y))
+                path.line(to: NSPoint(x: right.x - bounds.origin.x, y: right.y - bounds.origin.y))
+                if calloutArrowStyle == .solidArrow {
+                    path.line(to: NSPoint(x: left.x - bounds.origin.x, y: left.y - bounds.origin.y))
+                }
+            case .filledDot, .openDot:
+                break
+            }
         }
 
         let annotation = PDFAnnotation(bounds: bounds, forType: .ink, withProperties: nil)
         annotation.color = calloutStrokeColor
         path.lineWidth = calloutLineWidth
         assignLineWidth(calloutLineWidth, to: annotation)
-        annotation.contents = "Callout Leader"
+        annotation.contents = "Callout Leader|Arrow:\(calloutArrowStyle.rawValue)"
         if let calloutGroupID = calloutGroupID(for: textAnnotation) {
             annotation.userName = Self.calloutGroupPrefix + calloutGroupID
         }
         annotation.add(path)
         page.addAnnotation(annotation)
         onAnnotationAdded?(page, annotation, "Add Callout")
+
+        if calloutArrowStyle == .filledDot || calloutArrowStyle == .openDot {
+            let radius = max(3.0, calloutLineWidth * 1.8)
+            let dotBounds = NSRect(x: tip.x - radius, y: tip.y - radius, width: radius * 2.0, height: radius * 2.0)
+            let dot = PDFAnnotation(bounds: dotBounds, forType: .circle, withProperties: nil)
+            dot.color = calloutStrokeColor
+            dot.interiorColor = (calloutArrowStyle == .filledDot) ? calloutStrokeColor : .clear
+            assignLineWidth(max(1.0, calloutLineWidth), to: dot)
+            dot.contents = "Callout Arrow Dot|Arrow:\(calloutArrowStyle.rawValue)"
+            if let calloutGroupID = calloutGroupID(for: textAnnotation) {
+                dot.userName = Self.calloutGroupPrefix + calloutGroupID
+            }
+            page.addAnnotation(dot)
+            onAnnotationAdded?(page, dot, "Add Callout")
+        }
     }
 
     func calloutGroupID(for annotation: PDFAnnotation) -> String? {
@@ -1877,6 +2068,20 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         let value = String(userName.dropFirst(Self.calloutGroupPrefix.count))
         return value.isEmpty ? nil : value
+    }
+
+    func calloutArrowStyle(for annotation: PDFAnnotation) -> ArrowEndStyle? {
+        guard let contents = annotation.contents else { return nil }
+        if let range = contents.range(of: "Arrow:") {
+            let raw = contents[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+            if let value = Int(raw), let style = ArrowEndStyle(rawValue: value) {
+                return style
+            }
+        }
+        if contents.lowercased().contains("callout leader") {
+            return .solidArrow
+        }
+        return nil
     }
 
     private func nearestPointOnRectBoundary(_ rect: NSRect, toward point: NSPoint) -> NSPoint {
@@ -1919,7 +2124,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let disallowed: NSEvent.ModifierFlags = [.command, .option, .control]
         if event.modifierFlags.intersection(.deviceIndependentFlagsMask).isDisjoint(with: disallowed),
            let chars = event.charactersIgnoringModifiers?.lowercased(),
-           let mode = shortcutMode(for: chars) {
+           let mode = shortcutMode(for: chars, isShift: event.modifierFlags.contains(.shift)) {
             onToolShortcut?(mode)
             return
         }
@@ -2019,7 +2224,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         NSCursor.pop()
     }
 
-    private func shortcutMode(for chars: String) -> ToolMode? {
+    private func shortcutMode(for chars: String, isShift: Bool) -> ToolMode? {
         switch chars {
         case "v":
             return .select
@@ -2041,10 +2246,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return .text
         case "q":
             return .callout
+        case "a":
+            return isShift ? .area : .arrow
         case "m":
             return .measure
-        case "a":
-            return .area
         case "k":
             return .calibrate
         default:
