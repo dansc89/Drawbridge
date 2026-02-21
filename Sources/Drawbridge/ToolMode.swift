@@ -4,6 +4,7 @@ enum ToolMode {
     case select
     case grab
     case pen
+    case arrow
     case line
     case polyline
     case area
