@@ -32,7 +32,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.title = "Drawbridge"
         window.titlebarAppearsTransparent = false
         window.titleVisibility = .hidden
-        window.toolbarStyle = .unified
+        window.toolbarStyle = .expanded
+        window.isOpaque = true
+        window.backgroundColor = .windowBackgroundColor
         let mainViewController = MainViewController()
         loadRecentFiles()
         mainViewController.onDocumentOpened = { [weak self] url in
@@ -44,6 +46,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         window.contentViewController = mainViewController
         window.toolbar = mainViewController.makeToolbar()
+        window.contentView?.wantsLayer = true
+        window.contentView?.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         window.delegate = self
         window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
         window.minSize = NSSize(width: 1360, height: 700)

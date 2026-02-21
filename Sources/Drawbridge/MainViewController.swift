@@ -534,7 +534,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
 
-        bookmarksContainer.material = .sidebar
+        bookmarksContainer.material = .windowBackground
         bookmarksContainer.blendingMode = .withinWindow
         bookmarksContainer.state = .active
         bookmarksContainer.wantsLayer = true
@@ -873,9 +873,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func configureStatusBar() {
-        statusBar.material = .sidebar
+        statusBar.material = .windowBackground
         statusBar.blendingMode = .withinWindow
         statusBar.state = .active
+        statusBar.wantsLayer = true
+        statusBar.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
         let labels = [statusPageSizeLabel, statusPageLabel, statusZoomLabel, statusScaleLabel]
         labels.forEach {
@@ -899,11 +901,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func configureBusyOverlay() {
-        busyOverlayView.material = .hudWindow
+        busyOverlayView.material = .windowBackground
         busyOverlayView.blendingMode = .withinWindow
         busyOverlayView.state = .active
         busyOverlayView.wantsLayer = true
         busyOverlayView.layer?.cornerRadius = 10
+        busyOverlayView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         busyOverlayView.translatesAutoresizingMaskIntoConstraints = false
         busyOverlayView.isHidden = true
 
@@ -939,11 +942,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func configureCaptureToast() {
-        captureToastView.material = .hudWindow
+        captureToastView.material = .windowBackground
         captureToastView.blendingMode = .withinWindow
         captureToastView.state = .active
         captureToastView.wantsLayer = true
         captureToastView.layer?.cornerRadius = 8
+        captureToastView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         captureToastView.translatesAutoresizingMaskIntoConstraints = false
         captureToastView.alphaValue = 0
         captureToastView.isHidden = true
@@ -1229,11 +1233,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func configureEmptyStateView() {
-        emptyStateView.material = .hudWindow
+        emptyStateView.material = .windowBackground
         emptyStateView.blendingMode = .withinWindow
         emptyStateView.state = .active
         emptyStateView.wantsLayer = true
         emptyStateView.layer?.cornerRadius = 12
+        emptyStateView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         emptyStateView.translatesAutoresizingMaskIntoConstraints = false
 
         emptyStateTitle.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
@@ -1377,19 +1382,20 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         collapsedSidebarRevealButton.isBordered = true
         collapsedSidebarRevealButton.wantsLayer = true
         collapsedSidebarRevealButton.layer?.cornerRadius = 6
-        collapsedSidebarRevealButton.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.95).cgColor
+        collapsedSidebarRevealButton.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         collapsedSidebarRevealButton.setContentHuggingPriority(.required, for: .horizontal)
         collapsedSidebarRevealButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         collapsedSidebarRevealButton.isHidden = !isSidebarCollapsed
     }
 
     private func configureDocumentTabsBar() {
-        documentTabsBar.material = .headerView
+        documentTabsBar.material = .windowBackground
         documentTabsBar.blendingMode = .withinWindow
         documentTabsBar.state = .active
         documentTabsBar.wantsLayer = true
         documentTabsBar.layer?.borderWidth = 1
         documentTabsBar.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+        documentTabsBar.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         documentTabsBar.translatesAutoresizingMaskIntoConstraints = false
 
         documentTabsStack.orientation = .horizontal
