@@ -22,6 +22,7 @@ Download the `.dmg`, open it, then drag **Drawbridge.app** into **Applications**
 
 ## Requirements
 
+- Apple Silicon Mac (M1/M2/M3/M4)
 - macOS 13.0 or newer
 
 ## Support

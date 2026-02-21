@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let recentFilesDefaultsKey = "DrawbridgeRecentFiles"
     private let restoreLastDocumentDefaultsKey = "DrawbridgeRestoreLastDocument"
     private let maxRecentFiles = 10
+    private let minimumSupportedMacOSVersion = "13.0"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1600, height: 1000)
@@ -141,6 +142,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appItem.title = "Drawbridge"
         mainMenu.addItem(appItem)
         let appMenu = NSMenu()
+        let aboutItem = appMenu.addItem(withTitle: "About Drawbridge", action: #selector(showAboutPanel(_:)), keyEquivalent: "")
+        aboutItem.target = self
+        appMenu.addItem(NSMenuItem.separator())
         let prefsItem = appMenu.addItem(withTitle: "Performance Settings…", action: #selector(MainViewController.commandPerformanceSettings(_:)), keyEquivalent: ",")
         prefsItem.target = controller
         appMenu.addItem(NSMenuItem.separator())
@@ -255,6 +259,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         helpItem.submenu = helpMenu
 
         NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func showAboutPanel(_ sender: Any?) {
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
+        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "-"
+        let alert = NSAlert()
+        alert.messageText = "About Drawbridge"
+        alert.informativeText = """
+Drawbridge
+Version \(version) (\(build))
+
+Native macOS PDF markup and takeoff app for architects and designers.
+
+System Requirements:
+• Apple Silicon Mac (M1/M2/M3/M4)
+• macOS \(minimumSupportedMacOSVersion) or newer
+"""
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func handleOpenRequests(_ urls: [URL]) {
