@@ -2976,13 +2976,34 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
 
+        var annotationsToDelete: [(page: PDFPage, annotation: PDFAnnotation)] = []
+        var seen = Set<ObjectIdentifier>()
+
         for row in selectedRows.sorted(by: >) {
             guard row >= 0, row < markupItems.count else { continue }
             let item = markupItems[row]
             guard let page = pdfView.document?.page(at: item.pageIndex) else { continue }
-            registerAnnotationPresenceUndo(page: page, annotation: item.annotation, shouldExist: true, actionName: "Delete Markup")
-            page.removeAnnotation(item.annotation)
-            markPageMarkupCacheDirty(page)
+
+            let primaryID = ObjectIdentifier(item.annotation)
+            if seen.insert(primaryID).inserted {
+                annotationsToDelete.append((page: page, annotation: item.annotation))
+            }
+
+            if let groupID = pdfView.calloutGroupID(for: item.annotation) {
+                for sibling in page.annotations where sibling !== item.annotation {
+                    guard pdfView.calloutGroupID(for: sibling) == groupID else { continue }
+                    let siblingID = ObjectIdentifier(sibling)
+                    if seen.insert(siblingID).inserted {
+                        annotationsToDelete.append((page: page, annotation: sibling))
+                    }
+                }
+            }
+        }
+
+        for entry in annotationsToDelete {
+            registerAnnotationPresenceUndo(page: entry.page, annotation: entry.annotation, shouldExist: true, actionName: "Delete Markup")
+            entry.page.removeAnnotation(entry.annotation)
+            markPageMarkupCacheDirty(entry.page)
         }
         markMarkupChanged()
         performRefreshMarkups(selecting: nil, forceImmediate: true)
@@ -3967,9 +3988,24 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         if !markupItems.contains(where: { $0.pageIndex == pageIndex && $0.annotation === annotation }) {
             performRefreshMarkups(selecting: annotation)
         }
+        if let groupID = pdfView.calloutGroupID(for: annotation) {
+            let rows = IndexSet(markupItems.enumerated().compactMap { idx, item in
+                guard item.pageIndex == pageIndex else { return nil }
+                return pdfView.calloutGroupID(for: item.annotation) == groupID ? idx : nil
+            })
+            if !rows.isEmpty {
+                markupsTable.selectRowIndexes(rows, byExtendingSelection: false)
+                if let first = rows.first {
+                    markupsTable.scrollRowToVisible(first)
+                }
+                updateToolSettingsUIForCurrentTool()
+                updateStatusBar()
+                return
+            }
+        }
+
         let targetRow = markupItems.firstIndex(where: { $0.pageIndex == pageIndex && $0.annotation === annotation })
             ?? nearestMarkupRow(to: annotation.bounds, onPageIndex: pageIndex)
-
         if let row = targetRow {
             markupsTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             markupsTable.scrollRowToVisible(row)
@@ -4171,7 +4207,13 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         let pageIndex = document.index(for: page)
         guard pageIndex >= 0 else { return }
 
-        let selected = Set(annotations.map(ObjectIdentifier.init))
+        var selected = Set(annotations.map(ObjectIdentifier.init))
+        for annotation in annotations {
+            guard let groupID = pdfView.calloutGroupID(for: annotation) else { continue }
+            for sibling in page.annotations where pdfView.calloutGroupID(for: sibling) == groupID {
+                selected.insert(ObjectIdentifier(sibling))
+            }
+        }
         performRefreshMarkups(selecting: nil)
         let rows = IndexSet(markupItems.enumerated().compactMap { idx, item in
             guard item.pageIndex == pageIndex else { return nil }
