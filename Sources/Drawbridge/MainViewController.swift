@@ -68,6 +68,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let applyScaleButton = NSButton(title: "Apply Scale", target: nil, action: nil)
     private let actionsPopup = NSPopUpButton(frame: .zero, pullsDown: true)
     private let openButton = NSButton(title: "Open", target: nil, action: nil)
+    private let autoNameSheetsButton = NSButton(title: "", target: nil, action: nil)
     private let highlightButton = NSButton(title: "Highlight Selection", target: nil, action: nil)
     private let exportButton = NSButton(title: "Save As PDF", target: nil, action: nil)
     private let gridToggleButton = NSButton(title: "", target: nil, action: nil)
@@ -291,6 +292,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         openButton.title = "Open"
         openButton.target = self
         openButton.action = #selector(openPDF)
+        autoNameSheetsButton.target = self
+        autoNameSheetsButton.action = #selector(commandAutoGenerateSheetNames(_:))
         emptyStateOpenButton.title = "Open Existing PDF"
         emptyStateOpenButton.target = self
         emptyStateOpenButton.action = #selector(openPDF)
@@ -1270,6 +1273,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         openButton.bezelStyle = .texturedRounded
         openButton.toolTip = "Open PDF"
 
+        autoNameSheetsButton.image = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: "Auto-Generate Sheet Names and Bookmarks")
+            ?? NSImage(systemSymbolName: "wand.and.stars", accessibilityDescription: "Auto-Generate Sheet Names and Bookmarks")
+        autoNameSheetsButton.imagePosition = .imageOnly
+        autoNameSheetsButton.bezelStyle = .texturedRounded
+        autoNameSheetsButton.toolTip = "Auto-Generate Sheet Names/Bookmarks"
+
         actionsPopup.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "Actions")
         actionsPopup.imagePosition = .imageOnly
         actionsPopup.bezelStyle = .texturedRounded
@@ -1314,6 +1323,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             toolSelectorWidthConstraint = widthConstraint
         }
         if toolbarControlsStack.arrangedSubviews.isEmpty {
+            toolbarControlsStack.addArrangedSubview(openButton)
+            toolbarControlsStack.addArrangedSubview(autoNameSheetsButton)
             toolbarControlsStack.addArrangedSubview(toolSelector)
         }
 
@@ -4585,6 +4596,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
                 }
             }
             pageJumpField.isEnabled = false
+            autoNameSheetsButton.isEnabled = true
         } else {
             statusPageSizeLabel.stringValue = "Size: -"
             statusPageLabel.stringValue = "Page: -"
@@ -4596,6 +4608,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             }
             pagesTableView.deselectAll(nil)
             pageJumpField.isEnabled = false
+            autoNameSheetsButton.isEnabled = false
         }
 
         let zoomPercent = Int(round(pdfView.scaleFactor * 100))
