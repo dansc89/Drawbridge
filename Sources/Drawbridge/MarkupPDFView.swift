@@ -102,10 +102,26 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         layer.isHidden = true
         return layer
     }()
+    private let gridOverlayLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.strokeColor = NSColor.systemBlue.withAlphaComponent(0.22).cgColor
+        layer.fillColor = NSColor.clear.cgColor
+        layer.lineWidth = 0.8
+        layer.zPosition = 1
+        layer.isHidden = true
+        layer.actions = [
+            "path": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
+    private var isGridVisible = false
+    private let gridSpacingInPoints: CGFloat = 24.0
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        layer?.addSublayer(gridOverlayLayer)
         layer?.addSublayer(dragPreviewLayer)
         layer?.addSublayer(dropHighlightLayer)
         autoScales = true
@@ -124,6 +140,72 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         super.layout()
         let insetBounds = bounds.insetBy(dx: 24, dy: 24)
         dropHighlightLayer.path = CGPath(roundedRect: insetBounds, cornerWidth: 14, cornerHeight: 14, transform: nil)
+        updateGridOverlayIfNeeded()
+    }
+
+    override var document: PDFDocument? {
+        didSet {
+            updateGridOverlayIfNeeded()
+        }
+    }
+
+    func setGridVisible(_ visible: Bool) {
+        isGridVisible = visible
+        updateGridOverlayIfNeeded()
+    }
+
+    private func updateGridOverlayIfNeeded() {
+        guard isGridVisible,
+              let page = currentPage else {
+            gridOverlayLayer.isHidden = true
+            gridOverlayLayer.path = nil
+            return
+        }
+
+        let pageBounds = page.bounds(for: displayBox)
+        let startInView = convert(NSPoint(x: pageBounds.minX, y: pageBounds.minY), from: page)
+        let endInView = convert(NSPoint(x: pageBounds.maxX, y: pageBounds.maxY), from: page)
+        let pageRectInView = normalizedRect(from: startInView, to: endInView)
+        guard pageRectInView.width > 1, pageRectInView.height > 1 else {
+            gridOverlayLayer.isHidden = true
+            gridOverlayLayer.path = nil
+            return
+        }
+
+        let majorEvery = 5
+        let path = CGMutablePath()
+        let spacing = max(8.0, gridSpacingInPoints * scaleFactor)
+        let xStart = floor(pageRectInView.minX / spacing) * spacing
+        let yStart = floor(pageRectInView.minY / spacing) * spacing
+
+        var i = 0
+        var x = xStart
+        while x <= pageRectInView.maxX {
+            path.move(to: CGPoint(x: x, y: pageRectInView.minY))
+            path.addLine(to: CGPoint(x: x, y: pageRectInView.maxY))
+            if i % majorEvery == 0 {
+                path.move(to: CGPoint(x: x + 0.25, y: pageRectInView.minY))
+                path.addLine(to: CGPoint(x: x + 0.25, y: pageRectInView.maxY))
+            }
+            x += spacing
+            i += 1
+        }
+
+        i = 0
+        var y = yStart
+        while y <= pageRectInView.maxY {
+            path.move(to: CGPoint(x: pageRectInView.minX, y: y))
+            path.addLine(to: CGPoint(x: pageRectInView.maxX, y: y))
+            if i % majorEvery == 0 {
+                path.move(to: CGPoint(x: pageRectInView.minX, y: y + 0.25))
+                path.addLine(to: CGPoint(x: pageRectInView.maxX, y: y + 0.25))
+            }
+            y += spacing
+            i += 1
+        }
+
+        gridOverlayLayer.path = path
+        gridOverlayLayer.isHidden = false
     }
 
     override func updateTrackingAreas() {
@@ -1730,9 +1812,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             let base = currentDestination?.point ?? convert(NSPoint(x: bounds.midX, y: bounds.midY), to: page)
             let destination = NSPoint(x: base.x + deltaX, y: base.y + deltaY)
             go(to: PDFDestination(page: page, at: destination))
+            updateGridOverlayIfNeeded()
             onViewportChanged?()
         } else {
             scaleFactor = targetScale
+            updateGridOverlayIfNeeded()
             onViewportChanged?()
         }
     }
@@ -1765,6 +1849,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let destination = PDFDestination(page: page, at: NSPoint(x: anchor.x - dx, y: anchor.y - dy))
         go(to: destination)
         middlePanLastWindowPoint = event.locationInWindow
+        updateGridOverlayIfNeeded()
         onViewportChanged?()
     }
 

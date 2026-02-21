@@ -54,6 +54,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let openButton = NSButton(title: "Open", target: nil, action: nil)
     private let highlightButton = NSButton(title: "Highlight Selection", target: nil, action: nil)
     private let exportButton = NSButton(title: "Save As PDF", target: nil, action: nil)
+    private let gridToggleButton = NSButton(title: "", target: nil, action: nil)
     private let refreshMarkupsButton = NSButton(title: "Refresh Markups", target: nil, action: nil)
     private let deleteMarkupButton = NSButton(title: "Delete Markup", target: nil, action: nil)
     private let editMarkupButton = NSButton(title: "Edit Markup Text", target: nil, action: nil)
@@ -161,6 +162,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var bookmarkLabelOverrides: [String: String] = [:]
     private var hasPromptedForInitialMarkupSaveCopy = false
     private var isPresentingInitialMarkupSaveCopyPrompt = false
+    private var isGridVisible = false
     var onDocumentOpened: ((URL) -> Void)?
     private var sidebarContainerView: NSView?
     private var lastSidebarExpandedWidth: CGFloat = 240
@@ -1248,6 +1250,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         actionsPopup.bezelStyle = .texturedRounded
         actionsPopup.toolTip = "Actions"
 
+        gridToggleButton.setButtonType(.toggle)
+        gridToggleButton.image = NSImage(systemSymbolName: "grid", accessibilityDescription: "Toggle Grid")
+        gridToggleButton.imagePosition = .imageOnly
+        gridToggleButton.bezelStyle = .texturedRounded
+        gridToggleButton.toolTip = "Show/Hide Grid"
+        gridToggleButton.target = self
+        gridToggleButton.action = #selector(toggleGridOverlay)
+        gridToggleButton.state = isGridVisible ? .on : .off
+
         pageJumpField.isHidden = true
         configureScalePresetPopup()
 
@@ -1299,8 +1310,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if secondaryToolbarControlsStack.arrangedSubviews.isEmpty {
             secondaryToolbarControlsStack.addArrangedSubview(takeoffSelector)
             secondaryToolbarControlsStack.addArrangedSubview(scalePresetPopup)
+            secondaryToolbarControlsStack.addArrangedSubview(gridToggleButton)
             secondaryToolbarControlsStack.addArrangedSubview(actionsPopup)
         }
+    }
+
+    @objc private func toggleGridOverlay() {
+        isGridVisible = (gridToggleButton.state == .on)
+        pdfView.setGridVisible(isGridVisible)
     }
 
     private func configureCollapsedSidebarRevealButton() {
