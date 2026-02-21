@@ -2,9 +2,7 @@
   <img src="Assets/readme/drawbridge-hero-v015.png" alt="Drawbridge" width="100%" />
 </p>
 
-# Drawbridge
-
-Drawbridge is a native macOS PDF markup app.
+drawbridge is a native macOS PDF markup app.
 
 ## Download
 
