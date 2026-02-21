@@ -48,6 +48,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var measurementUnitLabel: String = "pt"
     var onCalibrationDistanceMeasured: ((CGFloat) -> Void)?
     var onAnnotationAdded: ((PDFPage, PDFAnnotation, String) -> Void)?
+    var onAnnotationTextEdited: ((PDFPage, PDFAnnotation, String) -> Void)?
     var onAnnotationClicked: ((PDFPage, PDFAnnotation) -> Void)?
     var onAnnotationsBoxSelected: ((PDFPage, [PDFAnnotation]) -> Void)?
     var onAnnotationMoved: ((PDFPage, PDFAnnotation, NSRect) -> Void)?
@@ -76,6 +77,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var inlineTextPage: PDFPage?
     private var inlineTextAnchorInPage: NSPoint?
     private var inlineLiveTextAnnotation: PDFAnnotation?
+    private var inlineEditingExistingAnnotation = false
+    private var inlineOriginalTextContents: String?
     private var movingAnnotation: PDFAnnotation?
     private var movingAnnotationPage: PDFPage?
     private var movingAnnotationStartBounds: NSRect?
@@ -351,6 +354,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             let pointInPage = convert(locationInView, to: page)
             if let hit = nearestAnnotation(to: pointInPage, on: page, maxDistance: 10) {
                 onAnnotationClicked?(page, hit)
+                if event.clickCount >= 2, isEditableTextAnnotation(hit) {
+                    beginInlineTextEditing(for: hit, on: page)
+                    return
+                }
                 movingAnnotation = hit
                 movingAnnotationPage = page
                 movingAnnotationStartBounds = hit.bounds
@@ -1272,6 +1279,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         inlineTextField = field
         inlineTextPage = page
         inlineTextAnchorInPage = convert(locationInView, to: page)
+        inlineEditingExistingAnnotation = false
+        inlineOriginalTextContents = nil
 
         let anchor = inlineTextAnchorInPage!
         let bounds = calloutTextAnnotationBounds(forAnchorInPage: anchor)
@@ -1290,14 +1299,52 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         window?.makeFirstResponder(field)
     }
 
+    private func beginInlineTextEditing(for annotation: PDFAnnotation, on page: PDFPage) {
+        _ = commitInlineTextEditor(cancel: false)
+        guard isEditableTextAnnotation(annotation) else {
+            NSSound.beep()
+            return
+        }
+
+        let field = NSTextField(frame: NSRect(x: -10_000, y: -10_000, width: 1, height: 1))
+        let size = max(6.0, annotation.font?.pointSize ?? textFontSize)
+        let resolvedFont = NSFont(name: textFontName, size: size)
+            ?? NSFont.systemFont(ofSize: size, weight: .regular)
+        field.font = resolvedFont
+        field.textColor = .clear
+        field.drawsBackground = false
+        field.isBordered = false
+        field.isBezeled = false
+        field.focusRingType = .none
+        field.delegate = self
+        field.stringValue = annotation.contents ?? ""
+
+        addSubview(field)
+        inlineTextField = field
+        inlineTextPage = page
+        inlineTextAnchorInPage = nil
+        inlineLiveTextAnnotation = annotation
+        inlineEditingExistingAnnotation = true
+        inlineOriginalTextContents = annotation.contents ?? ""
+
+        window?.makeFirstResponder(field)
+        if let editor = window?.fieldEditor(true, for: field) as? NSTextView {
+            editor.selectAll(nil)
+        }
+    }
+
     private func commitInlineTextEditor(cancel: Bool) -> PDFAnnotation? {
         guard let field = inlineTextField else { return nil }
+        let wasEditingExisting = inlineEditingExistingAnnotation
+        let originalText = inlineOriginalTextContents
         defer {
             field.removeFromSuperview()
             inlineTextField = nil
             inlineTextPage = nil
             inlineTextAnchorInPage = nil
             inlineLiveTextAnnotation = nil
+            inlineEditingExistingAnnotation = false
+            inlineOriginalTextContents = nil
         }
 
         guard let page = inlineTextPage else { return nil }
@@ -1305,7 +1352,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         if cancel {
             if let annotation {
-                page.removeAnnotation(annotation)
+                if wasEditingExisting {
+                    annotation.contents = originalText
+                } else {
+                    page.removeAnnotation(annotation)
+                }
             }
             return nil
         }
@@ -1313,11 +1364,22 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let annotation else { return nil }
         if text.isEmpty {
-            page.removeAnnotation(annotation)
+            if wasEditingExisting {
+                annotation.contents = originalText
+            } else {
+                page.removeAnnotation(annotation)
+            }
             return nil
         }
         annotation.contents = text
-        onAnnotationAdded?(page, annotation, "Add Text")
+        if wasEditingExisting {
+            let previousText = originalText ?? ""
+            if previousText != text {
+                onAnnotationTextEdited?(page, annotation, previousText)
+            }
+        } else {
+            onAnnotationAdded?(page, annotation, "Add Text")
+        }
         return annotation
     }
 
@@ -1357,6 +1419,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
               pendingCalloutPage == page else { return }
         addCalloutLeader(on: page, textAnnotation: annotation, elbow: elbow, tip: tip)
         clearPendingCallout()
+    }
+
+    private func isEditableTextAnnotation(_ annotation: PDFAnnotation) -> Bool {
+        let type = (annotation.type ?? "").lowercased()
+        return type.contains("freetext")
     }
 
     private func handleCalloutClick(at locationInView: NSPoint) {
