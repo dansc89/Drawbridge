@@ -1975,6 +1975,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return min(max(proposedPosition, minCanvasWidth), maxCanvasWidth)
     }
 
+    func splitView(_ splitView: NSSplitView, effectiveRect proposedEffectiveRect: NSRect, forDrawnRect drawnRect: NSRect, ofDividerAt dividerIndex: Int) -> NSRect {
+        guard splitView === self.splitView, dividerIndex == 0 else {
+            return proposedEffectiveRect
+        }
+        // Disable mouse hit-testing on the right Tool Settings divider.
+        // We only allow resizing via the left Navigation grabber.
+        return .zero
+    }
+
     @objc private func openPDF() {
         guard confirmDiscardUnsavedChangesIfNeeded() else {
             return
