@@ -951,7 +951,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 context.timingFunction = CAMediaTimingFunction(name: .easeIn)
                 self.captureToastView.animator().alphaValue = 0
             }, completionHandler: { [weak self] in
-                self?.captureToastView.isHidden = true
+                DispatchQueue.main.async {
+                    self?.captureToastView.isHidden = true
+                }
             })
         }
         captureToastHideWorkItem = hideWork
@@ -1505,11 +1507,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.drawbridgePrimaryControls, .flexibleSpace, .space, .separator, .space, .drawbridgeSecondaryControls]
+        [.drawbridgePrimaryControls, .flexibleSpace, .space, .drawbridgeSecondaryControls]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.drawbridgePrimaryControls, .flexibleSpace, .space, .separator, .space, .drawbridgeSecondaryControls]
+        [.drawbridgePrimaryControls, .flexibleSpace, .space, .drawbridgeSecondaryControls]
     }
 
     func toolbar(
@@ -2173,7 +2175,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         for pageIndex in 0..<document.pageCount {
             guard let page = document.page(at: pageIndex) else { continue }
             for annotation in page.annotations {
-                guard let data = try? NSKeyedArchiver.archivedData(withRootObject: annotation, requiringSecureCoding: false) else {
+                let archivedData = (try? NSKeyedArchiver.archivedData(withRootObject: annotation, requiringSecureCoding: true))
+                    ?? (try? NSKeyedArchiver.archivedData(withRootObject: annotation, requiringSecureCoding: false))
+                guard let data = archivedData else {
                     continue
                 }
                 records.append(
@@ -2206,7 +2210,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             guard record.pageIndex >= 0,
                   record.pageIndex < document.pageCount,
                   let page = document.page(at: record.pageIndex),
-                  let annotation = try? NSKeyedUnarchiver.unarchiveTopLevelObjectWithData(record.archivedAnnotation) as? PDFAnnotation else {
+                  let annotation = decodeAnnotation(from: record.archivedAnnotation) else {
                 continue
             }
             if let lineWidth = record.lineWidth, lineWidth > 0 {
@@ -2525,6 +2529,19 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private nonisolated static func writePDFDocument(_ document: PDFDocument, to url: URL) -> Bool {
         // `write(to:withOptions:)` is materially faster than `write(to:)` on large drawing sets.
         return document.write(to: url, withOptions: nil)
+    }
+
+    private func decodeAnnotation(from data: Data) -> PDFAnnotation? {
+        if let secure = try? NSKeyedUnarchiver.unarchivedObject(ofClass: PDFAnnotation.self, from: data) {
+            return secure
+        }
+        guard let unarchiver = try? NSKeyedUnarchiver(forReadingFrom: data) else {
+            return nil
+        }
+        unarchiver.requiresSecureCoding = false
+        let insecure = unarchiver.decodeObject(of: PDFAnnotation.self, forKey: NSKeyedArchiveRootObjectKey)
+        unarchiver.finishDecoding()
+        return insecure
     }
 
     private func startSaveProgressTracking(phase: String) {
