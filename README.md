@@ -2,7 +2,7 @@
   <img src="Assets/readme/drawbridge-hero-v017.png" alt="Drawbridge" width="100%" />
 </p>
 
-Drawbridge is a native macOS PDF markup and takeoff app built for architects and designers, with cloud markups, text annotations, highlights, freehand drawing, callouts, measurements, and fast save/export workflows.
+Drawbridge is a native macOS PDF markup and takeoff app built for architects, designers, and engineers, with cloud markups, text annotations, highlights, freehand drawing, callouts, measurements, and fast save/export workflows.
 
 ## Requirements
 

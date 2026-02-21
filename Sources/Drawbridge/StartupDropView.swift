@@ -1,7 +1,7 @@
 import AppKit
 import UniformTypeIdentifiers
 
-final class StartupDropView: NSVisualEffectView {
+final class StartupDropView: NSView {
     var onOpenDroppedPDF: ((URL) -> Void)?
 
     override init(frame frameRect: NSRect) {
