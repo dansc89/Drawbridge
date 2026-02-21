@@ -33,7 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.styleMask.remove(.fullSizeContentView)
         window.titlebarAppearsTransparent = false
         window.titleVisibility = .hidden
-        window.toolbarStyle = .preference
+        window.toolbarStyle = .unifiedCompact
         window.isOpaque = true
         window.alphaValue = 1.0
         window.backgroundColor = .windowBackgroundColor
