@@ -2873,6 +2873,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             configureAutosaveURL(for: destination)
             view.window?.title = "Drawbridge - \(destination.lastPathComponent)"
             onDocumentOpened?(destination)
+            // User explicitly chose a markup file; persist current in-memory markups immediately.
+            if let document = pdfView.document {
+                persistProjectSnapshot(document: document, for: destination, busyMessage: "Saving Changes…")
+            }
             return true
         } catch {
             let alert = NSAlert()
