@@ -4,6 +4,29 @@ import PDFKit
 import UniformTypeIdentifiers
 import Vision
 
+private final class NavigationResizeHandleView: NSView {
+    private var trackingAreaRef: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingAreaRef {
+            removeTrackingArea(trackingAreaRef)
+        }
+        let tracking = NSTrackingArea(
+            rect: bounds,
+            options: [.activeInKeyWindow, .inVisibleRect, .cursorUpdate],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(tracking)
+        trackingAreaRef = tracking
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        NSCursor.resizeLeftRight.set()
+    }
+}
+
 @MainActor
 final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemValidation, NSSplitViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate {
     private struct PDFDocumentBox: @unchecked Sendable {
@@ -43,6 +66,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let pdfView = MarkupPDFView(frame: .zero)
     private let pdfCanvasContainer = StartupDropView(frame: .zero)
     private let bookmarksContainer = NSVisualEffectView(frame: .zero)
+    private let navigationResizeHandle = NavigationResizeHandleView(frame: .zero)
     private let navigationTitleLabel = NSTextField(labelWithString: "Navigation")
     private let navigationModeControl = NSSegmentedControl(labels: ["Pages", "Bookmarks"], trackingMode: .selectOne, target: nil, action: nil)
     private let pagesTableView = NSTableView(frame: .zero)
@@ -239,6 +263,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var toolSelectorWidthConstraint: NSLayoutConstraint?
     private var takeoffSelectorWidthConstraint: NSLayoutConstraint?
     private var bookmarksWidthConstraint: NSLayoutConstraint?
+    private var navigationWidthAtDragStart: CGFloat = 220
+    private var navigationWidth: CGFloat = 220
+    private let navigationWidthMin: CGFloat = 160
+    private let navigationWidthMax: CGFloat = 420
     private var sidebarPreferredWidthConstraint: NSLayoutConstraint?
     private var didApplyInitialSplitLayout = false
 
@@ -510,16 +538,23 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfCanvasContainer.wantsLayer = true
         pdfCanvasContainer.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         bookmarksContainer.translatesAutoresizingMaskIntoConstraints = false
+        navigationResizeHandle.translatesAutoresizingMaskIntoConstraints = false
 
         pdfCanvasContainer.addSubview(bookmarksContainer)
+        pdfCanvasContainer.addSubview(navigationResizeHandle)
         pdfCanvasContainer.addSubview(pdfView)
 
-        let bookmarksWidth = bookmarksContainer.widthAnchor.constraint(equalToConstant: showNavigationPane ? 220 : 0)
+        let bookmarksWidth = bookmarksContainer.widthAnchor.constraint(equalToConstant: showNavigationPane ? navigationWidth : 0)
         NSLayoutConstraint.activate([
             bookmarksContainer.topAnchor.constraint(equalTo: pdfCanvasContainer.topAnchor),
             bookmarksContainer.leadingAnchor.constraint(equalTo: pdfCanvasContainer.leadingAnchor),
             bookmarksContainer.bottomAnchor.constraint(equalTo: pdfCanvasContainer.bottomAnchor),
             bookmarksWidth,
+
+            navigationResizeHandle.topAnchor.constraint(equalTo: pdfCanvasContainer.topAnchor),
+            navigationResizeHandle.bottomAnchor.constraint(equalTo: pdfCanvasContainer.bottomAnchor),
+            navigationResizeHandle.leadingAnchor.constraint(equalTo: bookmarksContainer.trailingAnchor, constant: -3),
+            navigationResizeHandle.widthAnchor.constraint(equalToConstant: 6),
 
             pdfView.topAnchor.constraint(equalTo: pdfCanvasContainer.topAnchor),
             pdfView.leadingAnchor.constraint(equalTo: bookmarksContainer.trailingAnchor),
@@ -527,6 +562,29 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             pdfView.bottomAnchor.constraint(equalTo: pdfCanvasContainer.bottomAnchor)
         ])
         bookmarksWidthConstraint = bookmarksWidth
+
+        navigationResizeHandle.wantsLayer = true
+        navigationResizeHandle.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.35).cgColor
+        let resizePan = NSPanGestureRecognizer(target: self, action: #selector(handleNavigationResizePan(_:)))
+        navigationResizeHandle.addGestureRecognizer(resizePan)
+        navigationResizeHandle.isHidden = !showNavigationPane
+    }
+
+    @objc private func handleNavigationResizePan(_ recognizer: NSPanGestureRecognizer) {
+        guard showNavigationPane else { return }
+        switch recognizer.state {
+        case .began:
+            navigationWidthAtDragStart = bookmarksWidthConstraint?.constant ?? navigationWidth
+        case .changed:
+            let deltaX = recognizer.translation(in: pdfCanvasContainer).x
+            let proposed = navigationWidthAtDragStart + deltaX
+            let clamped = min(max(proposed, navigationWidthMin), navigationWidthMax)
+            navigationWidth = clamped
+            bookmarksWidthConstraint?.constant = clamped
+            view.layoutSubtreeIfNeeded()
+        default:
+            break
+        }
     }
 
     private func configureBookmarksSidebar() {
@@ -5180,7 +5238,8 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         emptyStateSampleButton.isEnabled = true
         pdfView.isHidden = !hasDocument
         bookmarksContainer.isHidden = !showNavigationPane
-        bookmarksWidthConstraint?.constant = showNavigationPane ? 220 : 0
+        navigationResizeHandle.isHidden = !showNavigationPane
+        bookmarksWidthConstraint?.constant = showNavigationPane ? navigationWidth : 0
         didApplyInitialSplitLayout = false
         applySplitLayoutIfPossible(force: true)
         view.layoutSubtreeIfNeeded()
