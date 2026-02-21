@@ -4795,10 +4795,10 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         autoNamePreviousToolMode = pdfView.toolMode
         setTool(.select)
         let alert = NSAlert()
-        alert.messageText = "Capture Sheet Number Zone"
-        alert.informativeText = "Drag a rectangle over the sheet number area on the current page, then release."
+        alert.messageText = "Step 1 of 2: Capture SHEET NUMBER"
+        alert.informativeText = "Drag a rectangle over the SHEET NUMBER area on the current page, then release."
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "Start Capture")
+        alert.addButton(withTitle: "Capture SHEET NUMBER")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else {
             cancelAutoNameCapture()
@@ -4849,10 +4849,10 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             pendingSheetNumberZone = normalized
             autoNameCapturePhase = .sheetTitle
             let alert = NSAlert()
-            alert.messageText = "Capture Sheet Title Zone"
-            alert.informativeText = "Now drag a rectangle over the sheet title/name area, then release."
+            alert.messageText = "Step 2 of 2: Capture SHEET NAME"
+            alert.informativeText = "Now drag a rectangle over the SHEET NAME area, then release."
             alert.alertStyle = .informational
-            alert.addButton(withTitle: "Start Capture")
+            alert.addButton(withTitle: "Capture SHEET NAME")
             alert.addButton(withTitle: "Cancel")
             if alert.runModal() == .alertFirstButtonReturn {
                 beginRegionCaptureForAutoName()
@@ -4923,17 +4923,32 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         confirmation.messageText = "Apply Auto-Generated Sheet Names?"
         confirmation.informativeText = previewLines.joined(separator: "\n") + overflowNote
         confirmation.alertStyle = .informational
-        confirmation.addButton(withTitle: "Apply")
+        confirmation.addButton(withTitle: "Continue")
         confirmation.addButton(withTitle: "Cancel")
         guard confirmation.runModal() == .alertFirstButtonReturn else { return }
 
-        applyAutoNamedSheets(generated, to: document)
+        let applyPagesPrompt = NSAlert()
+        applyPagesPrompt.messageText = "Apply to Pages too?"
+        applyPagesPrompt.informativeText = "Would you like to apply detected SHEET NUMBER values to the Pages list labels as well?"
+        applyPagesPrompt.alertStyle = .informational
+        applyPagesPrompt.addButton(withTitle: "Apply to Bookmarks + Pages")
+        applyPagesPrompt.addButton(withTitle: "Apply to Bookmarks Only")
+        applyPagesPrompt.addButton(withTitle: "Cancel")
+
+        let applyPagesResponse = applyPagesPrompt.runModal()
+        if applyPagesResponse == .alertThirdButtonReturn {
+            return
+        }
+        let applyPageLabels = (applyPagesResponse == .alertFirstButtonReturn)
+        applyAutoNamedSheets(generated, to: document, applyPageLabels: applyPageLabels)
     }
 
-    private func applyAutoNamedSheets(_ sheets: [AutoNamedSheet], to document: PDFDocument) {
-        pageLabelOverrides.removeAll()
-        for sheet in sheets {
-            pageLabelOverrides[sheet.pageIndex] = sheet.sheetNumber
+    private func applyAutoNamedSheets(_ sheets: [AutoNamedSheet], to document: PDFDocument, applyPageLabels: Bool) {
+        if applyPageLabels {
+            pageLabelOverrides.removeAll()
+            for sheet in sheets {
+                pageLabelOverrides[sheet.pageIndex] = sheet.sheetNumber
+            }
         }
 
         let root = PDFOutline()
@@ -4955,7 +4970,11 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
 
         let alert = NSAlert()
         alert.messageText = "Sheet Names Updated"
-        alert.informativeText = "Applied page labels and bookmarks for \(sheets.count) pages."
+        if applyPageLabels {
+            alert.informativeText = "Applied bookmarks and page labels for \(sheets.count) pages."
+        } else {
+            alert.informativeText = "Applied bookmarks for \(sheets.count) pages."
+        }
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.runModal()
