@@ -10,6 +10,10 @@ https://github.com/dansc89/Drawbridge/releases/latest
 
 Download the `.dmg`, open it, then drag **Drawbridge.app** into **Applications**.
 
+<p align="center">
+  <img src="Assets/readme/drawbridge-hero.png" alt="Drawbridge" width="420" />
+</p>
+
 ## Quick Start
 
 1. Open Drawbridge.
