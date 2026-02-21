@@ -16,13 +16,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let labelOffset: CGFloat
     }
 
-    var toolMode: ToolMode = .pen {
-        didSet {
-            guard toolMode != oldValue else { return }
-            window?.invalidateCursorRects(for: self)
-            updateToolCursorIfNeeded()
-        }
-    }
+    var toolMode: ToolMode = .pen
     var penColor: NSColor = .systemRed
     var penLineWidth: CGFloat = 15.0
     var areaLineWidth: CGFloat = 1.0
@@ -86,7 +80,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var pendingMeasurePage: PDFPage?
     private var pendingMeasureStartInPage: NSPoint?
     private var mouseTrackingArea: NSTrackingArea?
-    private var toolCursorCache: [ToolMode: NSCursor] = [:]
     private let dragPreviewLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
         layer.strokeColor = NSColor.systemRed.cgColor
@@ -187,7 +180,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             NSCursor.pop()
             didPushRegionCaptureCursor = false
         }
-        updateToolCursorIfNeeded()
     }
 
     private func updateGridOverlayIfNeeded() {
@@ -274,7 +266,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         let tracking = NSTrackingArea(
             rect: bounds,
-            options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved, .cursorUpdate],
+            options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved],
             owner: self,
             userInfo: nil
         )
@@ -282,17 +274,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         mouseTrackingArea = tracking
     }
 
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        addCursorRect(bounds, cursor: cursorForCurrentTool())
-    }
-
-    override func cursorUpdate(with event: NSEvent) {
-        updateToolCursorIfNeeded()
-    }
-
     override func mouseMoved(with event: NSEvent) {
-        updateToolCursorIfNeeded()
         if toolMode == .measure {
             updateMeasurePreview(with: event)
             return
@@ -1970,70 +1952,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         middlePanLastWindowPoint = nil
         NSCursor.pop()
-        updateToolCursorIfNeeded()
-    }
-
-    private func updateToolCursorIfNeeded() {
-        guard !isRegionCaptureModeEnabled,
-              middlePanLastWindowPoint == nil else { return }
-        cursorForCurrentTool().set()
-    }
-
-    private func cursorForCurrentTool() -> NSCursor {
-        if let cached = toolCursorCache[toolMode] {
-            return cached
-        }
-
-        let cursor: NSCursor
-        switch toolMode {
-        case .select:
-            cursor = .arrow
-        case .grab:
-            cursor = .openHand
-        case .text:
-            cursor = .iBeam
-        case .pen:
-            cursor = makeSymbolCursor(symbolNames: ["pencil.tip", "pencil"], fallback: .crosshair)
-        case .line:
-            cursor = makeSymbolCursor(symbolNames: ["line.diagonal"], fallback: .crosshair)
-        case .polyline:
-            cursor = makeSymbolCursor(symbolNames: ["point.3.filled.connected.trianglepath.dotted"], fallback: .crosshair)
-        case .area:
-            cursor = makeSymbolCursor(symbolNames: ["polygon"], fallback: .crosshair)
-        case .highlighter:
-            cursor = makeSymbolCursor(symbolNames: ["highlighter", "scribble"], fallback: .crosshair)
-        case .cloud:
-            cursor = makeSymbolCursor(symbolNames: ["cloud"], fallback: .crosshair)
-        case .rectangle:
-            cursor = makeSymbolCursor(symbolNames: ["square"], fallback: .crosshair)
-        case .callout:
-            cursor = makeSymbolCursor(symbolNames: ["text.bubble", "text.bubble.fill"], fallback: .crosshair)
-        case .measure:
-            cursor = makeSymbolCursor(symbolNames: ["ruler"], fallback: .crosshair)
-        case .calibrate:
-            cursor = makeSymbolCursor(symbolNames: ["gauge.medium", "ruler"], fallback: .crosshair)
-        }
-        toolCursorCache[toolMode] = cursor
-        return cursor
-    }
-
-    private func makeSymbolCursor(symbolNames: [String], fallback: NSCursor) -> NSCursor {
-        guard let symbol = symbolNames.lazy.compactMap({ NSImage(systemSymbolName: $0, accessibilityDescription: nil) }).first else {
-            return fallback
-        }
-
-        let size: CGFloat = 26
-        let image = NSImage(size: NSSize(width: size, height: size))
-        image.lockFocus()
-        NSColor.controlBackgroundColor.withAlphaComponent(0.92).setFill()
-        NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: size - 2, height: size - 2)).fill()
-        NSColor.separatorColor.withAlphaComponent(0.7).setStroke()
-        NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: size - 2, height: size - 2)).stroke()
-        symbol.isTemplate = true
-        NSColor.labelColor.set()
-        symbol.draw(in: NSRect(x: 6, y: 6, width: size - 12, height: size - 12))
-        image.unlockFocus()
-        return NSCursor(image: image, hotSpot: NSPoint(x: size * 0.5, y: size * 0.5))
     }
 
     private func shortcutMode(for chars: String) -> ToolMode? {
