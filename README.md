@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Assets/readme/drawbridge-hero-v015.png" alt="Drawbridge" width="420" />
+  <img src="Assets/readme/drawbridge-hero-v015.png" alt="Drawbridge" width="100%" />
 </p>
 
 # Drawbridge
