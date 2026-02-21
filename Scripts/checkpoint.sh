@@ -38,6 +38,10 @@ timestamp_id() {
   date "+%Y%m%d-%H%M%S"
 }
 
+default_version_label() {
+  git describe --tags --abbrev=0 2>/dev/null || echo ""
+}
+
 ensure_dirs() {
   mkdir -p "$CHECKPOINTS_DIR" "$APPS_DIR" "$SRC_DIR"
 }
@@ -65,6 +69,9 @@ prune_old_checkpoints() {
 
 create_checkpoint() {
   local label="${1:-}"
+  if [[ -z "$label" ]]; then
+    label="$(default_version_label)"
+  fi
   local slug=""
   if [[ -n "$label" ]]; then
     slug="$(slugify "$label")"

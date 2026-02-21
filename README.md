@@ -30,9 +30,11 @@ open /Users/danielnguyen/Drawbridge/dist/Drawbridge.app
 
 Every time you run `./Scripts/package-app.sh`, Drawbridge now saves:
 
-- versioned app checkpoint: `dist/checkpoints/apps/<timestamp>-<optional-label>.app`
-- source snapshot: `dist/checkpoints/src/<timestamp>-<optional-label>.tar.gz`
+- versioned app checkpoint: `dist/checkpoints/apps/<timestamp>-<git-tag-or-label>.app`
+- source snapshot: `dist/checkpoints/src/<timestamp>-<git-tag-or-label>.tar.gz`
 - `dist/checkpoints/latest.app` pointer
+
+If no label is provided, the current Git tag (for example `v0.1.4`) is used automatically.
 
 Optional label on package:
 
