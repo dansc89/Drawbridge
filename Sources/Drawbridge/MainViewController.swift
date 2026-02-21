@@ -3551,6 +3551,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
    • Use right panel to edit, filter, delete
 5) Export:
    • Export CSV from Actions or File menu
+6) System Requirements:
+   • Apple Silicon Mac (M1/M2/M3/M4)
+   • macOS 13.0 or newer
 """
         alert.accessoryView = guide
         alert.addButton(withTitle: "Done")
