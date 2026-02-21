@@ -1,6 +1,6 @@
 import Foundation
 
-enum ToolMode {
+enum ToolMode: Hashable {
     case select
     case grab
     case pen
