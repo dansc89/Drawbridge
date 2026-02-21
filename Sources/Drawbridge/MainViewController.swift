@@ -1358,8 +1358,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             view.removeFromSuperview()
         }
 
-        let current = openDocumentURL?.standardizedFileURL
-        var ordered = sessionDocumentURLs.map(\.standardizedFileURL)
+        let current = openDocumentURL.map { canonicalDocumentURL($0) }
+        var ordered = sessionDocumentURLs.map { canonicalDocumentURL($0) }
         if let current, !ordered.contains(current) {
             ordered.append(current)
         }
@@ -1396,8 +1396,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     @objc private func selectDocumentTab(_ sender: NSButton) {
         guard let path = sender.identifier?.rawValue else { return }
         let targetURL = URL(fileURLWithPath: path)
-        let normalizedTarget = targetURL.standardizedFileURL
-        if openDocumentURL?.standardizedFileURL == normalizedTarget {
+        let normalizedTarget = canonicalDocumentURL(targetURL)
+        if openDocumentURL.map({ canonicalDocumentURL($0) }) == normalizedTarget {
             return
         }
         guard confirmDiscardUnsavedChangesIfNeeded() else {
@@ -2101,7 +2101,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
         if let url = openDocumentURL {
-            persistDocument(to: url, adoptAsPrimaryDocument: true, busyMessage: "Saving PDF…", document: document)
+            // Keep Save fast for iterative markup work; full PDF rewrite stays on Save As PDF.
+            persistProjectSnapshot(document: document, for: url, busyMessage: "Saving Changes…")
         } else {
             saveDocumentAsProject(document: document)
         }
@@ -2137,15 +2138,25 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func sidecarURL(for sourcePDFURL: URL) -> URL {
-        let base = sourcePDFURL.deletingPathExtension()
-        return base.appendingPathExtension("drawbridge.json")
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            let fallback = sourcePDFURL.deletingPathExtension()
+            return fallback.appendingPathExtension("drawbridge.json")
+        }
+        let dir = appSupport.appendingPathComponent("Drawbridge").appendingPathComponent("ProjectSnapshots")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let key = Data(sourcePDFURL.standardizedFileURL.path.utf8).base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "=", with: "")
+        let filename = (key.isEmpty ? UUID().uuidString : key) + ".drawbridge.snapshot"
+        return dir.appendingPathComponent(filename)
     }
 
     private func cleanupLegacyJSONArtifacts(for sourcePDFURL: URL) {
         let fm = FileManager.default
-        let sidecar = sidecarURL(for: sourcePDFURL)
-        if fm.fileExists(atPath: sidecar.path) {
-            try? fm.removeItem(at: sidecar)
+        let legacySidecar = sourcePDFURL.deletingPathExtension().appendingPathExtension("drawbridge.json")
+        if fm.fileExists(atPath: legacySidecar.path) {
+            try? fm.removeItem(at: legacySidecar)
         }
 
         guard let autosaveDir = autosaveDirectoryURL() else { return }
@@ -2165,7 +2176,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 guard let data = try? NSKeyedArchiver.archivedData(withRootObject: annotation, requiringSecureCoding: false) else {
                     continue
                 }
-                records.append(SidecarAnnotationRecord(pageIndex: pageIndex, archivedAnnotation: data))
+                records.append(
+                    SidecarAnnotationRecord(
+                        pageIndex: pageIndex,
+                        archivedAnnotation: data,
+                        lineWidth: resolvedLineWidth(for: annotation)
+                    )
+                )
             }
         }
         return SidecarSnapshot(
@@ -2192,6 +2209,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                   let annotation = try? NSKeyedUnarchiver.unarchiveTopLevelObjectWithData(record.archivedAnnotation) as? PDFAnnotation else {
                 continue
             }
+            if let lineWidth = record.lineWidth, lineWidth > 0 {
+                assignLineWidth(lineWidth, to: annotation)
+            }
             page.addAnnotation(annotation)
         }
     }
@@ -2201,19 +2221,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guard FileManager.default.fileExists(atPath: url.path),
               let data = try? Data(contentsOf: url) else { return }
 
-        // If the PDF already contains annotations, trust the PDF as source of truth.
-        // This prevents stale sidecars from overriding line weights and other properties.
-        var existingAnnotationCount = 0
-        for pageIndex in 0..<document.pageCount {
-            existingAnnotationCount += document.page(at: pageIndex)?.annotations.count ?? 0
-            if existingAnnotationCount > 0 {
-                return
-            }
+        // Apply snapshot only when it is at least as new as the PDF file on disk.
+        if let pdfModifiedAt = try? sourcePDFURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+           let snapshotModifiedAt = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+           snapshotModifiedAt < pdfModifiedAt {
+            return
         }
 
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let snapshot = try? decoder.decode(SidecarSnapshot.self, from: data) else { return }
+        let plistDecoder = PropertyListDecoder()
+        let jsonDecoder = JSONDecoder()
+        jsonDecoder.dateDecodingStrategy = .iso8601
+        guard let snapshot = (try? plistDecoder.decode(SidecarSnapshot.self, from: data))
+            ?? (try? jsonDecoder.decode(SidecarSnapshot.self, from: data)) else { return }
         guard snapshot.sourcePDFPath == sourcePDFURL.standardizedFileURL.path else { return }
         applySidecarSnapshot(snapshot, to: document)
     }
@@ -2232,9 +2251,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         updateBusyIndicatorDetail("Writing project file…")
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            encoder.dateEncodingStrategy = .iso8601
+            let encoder = PropertyListEncoder()
+            encoder.outputFormat = .binary
             let success: Bool
             if let data = try? encoder.encode(snapshot) {
                 do {
@@ -2288,6 +2306,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             NSSound.beep()
             return
         }
+        // Prevent expensive markup-list rebuild work from competing with save completion on main.
+        pendingMarkupsRefreshWorkItem?.cancel()
+        pendingMarkupsRefreshWorkItem = nil
+        markupsScanGeneration += 1
         pendingAutosaveWorkItem?.cancel()
         pendingAutosaveWorkItem = nil
         autosaveQueued = false
@@ -2296,37 +2318,84 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         beginBusyIndicator(busyMessage, detail: "Generating PDF…", lockInteraction: false)
         startSaveProgressTracking(phase: "Generating")
         let targetURL = url
+        let originDocumentURLForAdoption = openDocumentURL.map { canonicalDocumentURL($0) }
         let startedAt = CFAbsoluteTimeGetCurrent()
         let documentBox = PDFDocumentBox(document: document)
         let destinationAlreadyExists = FileManager.default.fileExists(atPath: targetURL.path)
-        let stagingURL = destinationAlreadyExists ? saveStagingFileURL(for: targetURL) : targetURL
+        let destinationIsFileProvider = Self.isLikelyFileProviderURL(targetURL)
+        let fallbackStagingURL = destinationAlreadyExists ? saveStagingFileURL(for: targetURL) : targetURL
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var success = false
             var errorDescription: String?
-            let generateStartedAt = CFAbsoluteTimeGetCurrent()
-            success = documentBox.document.write(to: stagingURL)
-            let generateElapsed = CFAbsoluteTimeGetCurrent() - generateStartedAt
-
+            var writeElapsed: Double = 0
             var commitElapsed: Double = 0
-            if success && destinationAlreadyExists {
-                Task { @MainActor [weak self] in
-                    self?.saveGenerateElapsed = generateElapsed
-                    self?.updateSaveProgressPhase("Committing")
-                }
-                let commitStartedAt = CFAbsoluteTimeGetCurrent()
-                do {
-                    try Self.commitStagedSave(from: stagingURL, to: targetURL)
-                    success = true
-                } catch {
-                    success = false
-                    errorDescription = error.localizedDescription
-                }
-                commitElapsed = CFAbsoluteTimeGetCurrent() - commitStartedAt
-            }
 
-            if destinationAlreadyExists && FileManager.default.fileExists(atPath: stagingURL.path) {
-                try? FileManager.default.removeItem(at: stagingURL)
+            if destinationIsFileProvider {
+                // File-provider volumes (iCloud/CloudStorage/Drive) are often very slow when PDFKit writes directly.
+                // Render locally first, then do a single commit to the destination path.
+                let localStagingURL = Self.temporaryLocalSaveURL(for: targetURL)
+                let stagedWriteStartedAt = CFAbsoluteTimeGetCurrent()
+                success = Self.writePDFDocument(documentBox.document, to: localStagingURL)
+                writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
+
+                if success {
+                    Task { @MainActor [weak self] in
+                        self?.saveGenerateElapsed = writeElapsed
+                        self?.updateSaveProgressPhase("Committing")
+                    }
+                    let commitStartedAt = CFAbsoluteTimeGetCurrent()
+                    do {
+                        try Self.commitStagedSave(from: localStagingURL, to: targetURL)
+                        success = true
+                    } catch {
+                        success = false
+                        errorDescription = error.localizedDescription
+                    }
+                    commitElapsed = CFAbsoluteTimeGetCurrent() - commitStartedAt
+                }
+
+                if FileManager.default.fileExists(atPath: localStagingURL.path) {
+                    try? FileManager.default.removeItem(at: localStagingURL)
+                }
+            } else if destinationAlreadyExists {
+                // Fast path: overwrite directly to avoid expensive replace/copy on file-provider volumes.
+                let directWriteStartedAt = CFAbsoluteTimeGetCurrent()
+                success = Self.writePDFDocument(documentBox.document, to: targetURL)
+                writeElapsed = CFAbsoluteTimeGetCurrent() - directWriteStartedAt
+
+                if !success {
+                    // Fallback path: stage + commit if direct overwrite fails.
+                    Task { @MainActor [weak self] in
+                        self?.updateSaveProgressPhase("Retrying")
+                    }
+                    let stagingURL = fallbackStagingURL
+                    let stagedWriteStartedAt = CFAbsoluteTimeGetCurrent()
+                    success = Self.writePDFDocument(documentBox.document, to: stagingURL)
+                    writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
+                    if success {
+                        Task { @MainActor [weak self] in
+                            self?.saveGenerateElapsed = writeElapsed
+                            self?.updateSaveProgressPhase("Committing")
+                        }
+                        let commitStartedAt = CFAbsoluteTimeGetCurrent()
+                        do {
+                            try Self.commitStagedSave(from: stagingURL, to: targetURL)
+                            success = true
+                        } catch {
+                            success = false
+                            errorDescription = error.localizedDescription
+                        }
+                        commitElapsed = CFAbsoluteTimeGetCurrent() - commitStartedAt
+                    }
+                    if FileManager.default.fileExists(atPath: stagingURL.path) {
+                        try? FileManager.default.removeItem(at: stagingURL)
+                    }
+                }
+            } else {
+                let writeStartedAt = CFAbsoluteTimeGetCurrent()
+                success = Self.writePDFDocument(documentBox.document, to: targetURL)
+                writeElapsed = CFAbsoluteTimeGetCurrent() - writeStartedAt
             }
             let elapsed = CFAbsoluteTimeGetCurrent() - startedAt
 
@@ -2343,11 +2412,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                     }
                 }
 
-                self.saveGenerateElapsed = generateElapsed
+                self.saveGenerateElapsed = writeElapsed
                 guard success else {
-                    if generateElapsed > 0, commitElapsed > 0 {
+                    if writeElapsed > 0, commitElapsed > 0 {
                         self.updateBusyIndicatorDetail(
-                            String(format: "Gen %.2fs • Commit %.2fs • Failed", generateElapsed, commitElapsed)
+                            String(format: "Write %.2fs • Commit %.2fs • Failed", writeElapsed, commitElapsed)
                         )
                     } else {
                         self.updateBusyIndicatorDetail(String(format: "Failed after %.2fs", elapsed))
@@ -2366,34 +2435,35 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
                 self.updateBusyIndicatorDetail(
                     String(
-                        format: "Generated %.2fs • Committed %.2fs • Total %.2fs",
-                        generateElapsed,
+                        format: "Write %.2fs • Commit %.2fs • Total %.2fs",
+                        writeElapsed,
                         commitElapsed,
                         elapsed
                     )
                 )
                 print(
                     String(
-                        format: "Drawbridge save completed in %.2fs (gen %.2fs + commit %.2fs) (%@)",
+                        format: "Drawbridge save completed in %.2fs (write %.2fs + commit %.2fs) (%@)",
                         elapsed,
-                        generateElapsed,
+                        writeElapsed,
                         commitElapsed,
                         targetURL.lastPathComponent
                     )
                 )
 
                 if adoptAsPrimaryDocument {
-                    let previousDocumentURL = self.openDocumentURL?.standardizedFileURL
-                    let newDocumentURL = targetURL.standardizedFileURL
-                    if let previousDocumentURL, previousDocumentURL != newDocumentURL {
-                        self.sessionDocumentURLs.removeAll { $0.standardizedFileURL == previousDocumentURL }
+                    let newDocumentURL = self.canonicalDocumentURL(targetURL)
+                    if let originDocumentURLForAdoption, originDocumentURLForAdoption != newDocumentURL {
+                        self.sessionDocumentURLs.removeAll {
+                            self.canonicalDocumentURL($0) == originDocumentURLForAdoption
+                        }
                     }
-                    self.openDocumentURL = targetURL
-                    self.registerSessionDocument(targetURL)
-                    self.configureAutosaveURL(for: targetURL)
-                    self.cleanupLegacyJSONArtifacts(for: targetURL)
-                    self.view.window?.title = "Drawbridge - \(targetURL.lastPathComponent)"
-                    self.onDocumentOpened?(targetURL)
+                    self.openDocumentURL = newDocumentURL
+                    self.registerSessionDocument(newDocumentURL)
+                    self.configureAutosaveURL(for: newDocumentURL)
+                    self.cleanupLegacyJSONArtifacts(for: newDocumentURL)
+                    self.view.window?.title = "Drawbridge - \(newDocumentURL.lastPathComponent)"
+                    self.onDocumentOpened?(newDocumentURL)
                 }
                 self.markupChangeVersion = 0
                 self.lastAutosavedChangeVersion = 0
@@ -2401,6 +2471,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 self.lastUserInteractionAt = .distantPast
                 self.view.window?.isDocumentEdited = false
                 self.updateStatusBar()
+                self.scheduleMarkupsRefresh(selecting: self.currentSelectedAnnotation())
             }
         }
     }
@@ -2421,6 +2492,22 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return fallbackDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("pdf")
     }
 
+    private nonisolated static func temporaryLocalSaveURL(for destinationURL: URL) -> URL {
+        let stem = destinationURL.deletingPathExtension().lastPathComponent
+        let safeStem = stem.replacingOccurrences(of: "/", with: "-")
+        let filename = "\(safeStem)-drawbridge-local-save-\(UUID().uuidString).pdf"
+        return FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+    }
+
+    private nonisolated static func isLikelyFileProviderURL(_ url: URL) -> Bool {
+        let path = url.standardizedFileURL.path.lowercased()
+        return path.contains("/library/cloudstorage/")
+            || path.contains("/google drive/")
+            || path.contains("/onedrive/")
+            || path.contains("/dropbox/")
+            || path.contains("/box/")
+    }
+
     private nonisolated static func commitStagedSave(from stagingURL: URL, to destinationURL: URL) throws {
         let fm = FileManager.default
         if fm.fileExists(atPath: destinationURL.path) {
@@ -2433,6 +2520,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             try fm.copyItem(at: stagingURL, to: destinationURL)
             try? fm.removeItem(at: stagingURL)
         }
+    }
+
+    private nonisolated static func writePDFDocument(_ document: PDFDocument, to url: URL) -> Bool {
+        // `write(to:withOptions:)` is materially faster than `write(to:)` on large drawing sets.
+        return document.write(to: url, withOptions: nil)
     }
 
     private func startSaveProgressTracking(phase: String) {
@@ -2475,6 +2567,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func performRefreshMarkups(selecting selectedAnnotation: PDFAnnotation?, forceImmediate: Bool = false) {
+        if isSavingDocumentOperation && !forceImmediate {
+            return
+        }
         guard let document = pdfView.document else {
             clearMarkupCache()
             lastKnownTotalMatchingMarkups = 0
@@ -2764,15 +2859,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         defer { endBusyIndicator() }
 
         do {
-            let source = sourceURL.standardizedFileURL
-            let destination = destinationURL.standardizedFileURL
+            let source = canonicalDocumentURL(sourceURL)
+            let destination = canonicalDocumentURL(destinationURL)
             if source != destination {
                 if FileManager.default.fileExists(atPath: destination.path) {
                     try FileManager.default.removeItem(at: destination)
                 }
                 try FileManager.default.copyItem(at: source, to: destination)
             }
-            sessionDocumentURLs.removeAll { $0.standardizedFileURL == source }
+            sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == source }
             openDocumentURL = destination
             registerSessionDocument(destination)
             configureAutosaveURL(for: destination)
@@ -3196,8 +3291,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
 
-        if let current = openDocumentURL?.standardizedFileURL {
-            sessionDocumentURLs.removeAll { $0.standardizedFileURL == current }
+        if let current = openDocumentURL.map({ canonicalDocumentURL($0) }) {
+            sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == current }
         }
 
         while let fallback = sessionDocumentURLs.last {
@@ -3222,9 +3317,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
 
-        let normalizedCurrent = openDocumentURL?.standardizedFileURL
+        let normalizedCurrent = openDocumentURL.map { canonicalDocumentURL($0) }
         let currentIndex = normalizedCurrent.flatMap { current in
-            sessionDocumentURLs.firstIndex(where: { $0.standardizedFileURL == current })
+            sessionDocumentURLs.firstIndex(where: { canonicalDocumentURL($0) == current })
         } ?? (sessionDocumentURLs.count - 1)
 
         let count = sessionDocumentURLs.count
@@ -3532,8 +3627,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         hasPromptedForInitialMarkupSaveCopy = false
         isPresentingInitialMarkupSaveCopyPrompt = false
         rehydrateImageAnnotationsIfNeeded(in: document)
-        // Always trust PDF-embedded annotations on open.
-        // Sidecar replay can override stroke widths and cause mismatches after reopen.
+        loadSidecarSnapshotIfAvailable(for: url, document: document)
         repairInkPathLineWidthsIfNeeded(in: document)
         openDocumentURL = url
         registerSessionDocument(url)
@@ -3718,10 +3812,14 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
     }
 
     private func registerSessionDocument(_ url: URL) {
-        let normalized = url.standardizedFileURL
-        sessionDocumentURLs.removeAll { $0.standardizedFileURL == normalized }
+        let normalized = canonicalDocumentURL(url)
+        sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == normalized }
         sessionDocumentURLs.append(normalized)
         refreshDocumentTabs()
+    }
+
+    private func canonicalDocumentURL(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
     }
 
     private func clearToStartState() {

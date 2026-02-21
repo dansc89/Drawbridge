@@ -429,7 +429,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 let dx = rawCurrent.x - last.x
                 let dy = rawCurrent.y - last.y
                 let distance = hypot(dx, dy)
-                let steps = max(1, Int(distance / 2.0))
+                let steps = max(1, Int(distance / 4.0))
                 for step in 1...steps {
                     let t = CGFloat(step) / CGFloat(steps)
                     let pointInView = NSPoint(x: last.x + dx * t, y: last.y + dy * t)
@@ -533,12 +533,17 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         if toolMode == .pen || toolMode == .highlighter {
             guard let page = penPage, penPointsPage.count >= 2 else { return }
-            let xs = penPointsPage.map(\.x)
-            let ys = penPointsPage.map(\.y)
+            let strokeWidth = (toolMode == .highlighter) ? highlighterLineWidth : penLineWidth
+            let simplifyTolerance = max(0.9, strokeWidth * 0.08)
+            let simplifiedPoints = simplifyPolyline(penPointsPage, tolerance: simplifyTolerance)
+            guard simplifiedPoints.count >= 2 else { return }
+
+            let xs = simplifiedPoints.map(\.x)
+            let ys = simplifiedPoints.map(\.y)
             guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else { return }
             let inkBounds = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY).insetBy(dx: -4, dy: -4)
             let localPath = NSBezierPath()
-            for (idx, point) in penPointsPage.enumerated() {
+            for (idx, point) in simplifiedPoints.enumerated() {
                 let local = NSPoint(x: point.x - inkBounds.origin.x, y: point.y - inkBounds.origin.y)
                 if idx == 0 {
                     localPath.move(to: local)
@@ -549,7 +554,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
             let annotation = PDFAnnotation(bounds: inkBounds, forType: .ink, withProperties: nil)
             let strokeColor = (toolMode == .highlighter) ? highlighterColor : penColor
-            let strokeWidth = (toolMode == .highlighter) ? highlighterLineWidth : penLineWidth
             annotation.color = strokeColor
             localPath.lineWidth = strokeWidth
             assignLineWidth(strokeWidth, to: annotation)
@@ -653,6 +657,53 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let border = annotation.border ?? PDFBorder()
         border.lineWidth = normalized
         annotation.border = border
+    }
+
+    private func simplifyPolyline(_ points: [NSPoint], tolerance: CGFloat) -> [NSPoint] {
+        guard points.count > 2 else { return points }
+        let epsilon = max(0.1, tolerance)
+
+        var keep = Array(repeating: false, count: points.count)
+        keep[0] = true
+        keep[points.count - 1] = true
+
+        func perpendicularDistance(_ point: NSPoint, _ lineStart: NSPoint, _ lineEnd: NSPoint) -> CGFloat {
+            let dx = lineEnd.x - lineStart.x
+            let dy = lineEnd.y - lineStart.y
+            let lengthSquared = dx * dx + dy * dy
+            if lengthSquared <= 0.0001 {
+                return hypot(point.x - lineStart.x, point.y - lineStart.y)
+            }
+            let t = max(0, min(1, ((point.x - lineStart.x) * dx + (point.y - lineStart.y) * dy) / lengthSquared))
+            let projection = NSPoint(x: lineStart.x + t * dx, y: lineStart.y + t * dy)
+            return hypot(point.x - projection.x, point.y - projection.y)
+        }
+
+        func simplifySegment(start: Int, end: Int) {
+            guard end - start > 1 else { return }
+            var maxDistance: CGFloat = 0
+            var maxIndex = -1
+            for i in (start + 1)..<end {
+                let distance = perpendicularDistance(points[i], points[start], points[end])
+                if distance > maxDistance {
+                    maxDistance = distance
+                    maxIndex = i
+                }
+            }
+            guard maxIndex >= 0, maxDistance > epsilon else { return }
+            keep[maxIndex] = true
+            simplifySegment(start: start, end: maxIndex)
+            simplifySegment(start: maxIndex, end: end)
+        }
+
+        simplifySegment(start: 0, end: points.count - 1)
+
+        var simplified: [NSPoint] = []
+        simplified.reserveCapacity(points.count / 2)
+        for (index, point) in points.enumerated() where keep[index] {
+            simplified.append(point)
+        }
+        return simplified.count >= 2 ? simplified : [points.first!, points.last!]
     }
 
     private func captureSnapshotImage(on page: PDFPage, in pageRect: NSRect) -> NSImage? {
