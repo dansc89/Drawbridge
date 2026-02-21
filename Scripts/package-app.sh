@@ -17,6 +17,12 @@ PLIST_PATH="$CONTENTS_DIR/Info.plist"
 ICONSET_DIR="Assets/AppIcon.iconset"
 ICON_FILE_NAME="Drawbridge"
 ICON_ICNS_PATH="$RESOURCES_DIR/$ICON_FILE_NAME.icns"
+VERSION_TAG="${DRAWBRIDGE_VERSION_TAG:-$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")}"
+APP_VERSION="${VERSION_TAG#v}"
+if [[ ! "$APP_VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
+  APP_VERSION="0.0.0"
+fi
+BUILD_NUMBER="${DRAWBRIDGE_BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo "1")}"
 
 echo "Building release binary..."
 swift build -c release
@@ -66,9 +72,9 @@ cat > "$PLIST_PATH" <<EOF
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.1.0</string>
+  <string>$APP_VERSION</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>$BUILD_NUMBER</string>
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>
@@ -104,7 +110,7 @@ CHECKPOINT_LABEL="${CHECKPOINT_LABEL:-}"
 if [[ -n "$CHECKPOINT_LABEL" ]]; then
   ./Scripts/checkpoint.sh create "$CHECKPOINT_LABEL"
 else
-  ./Scripts/checkpoint.sh create
+  ./Scripts/checkpoint.sh create "$VERSION_TAG"
 fi
 
 echo "Done: $APP_DIR"
