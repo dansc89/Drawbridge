@@ -541,8 +541,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         navigationResizeHandle.translatesAutoresizingMaskIntoConstraints = false
 
         pdfCanvasContainer.addSubview(bookmarksContainer)
-        pdfCanvasContainer.addSubview(navigationResizeHandle)
         pdfCanvasContainer.addSubview(pdfView)
+        // Keep the navigation grabber above the PDF view so drag events are never blocked.
+        pdfCanvasContainer.addSubview(navigationResizeHandle)
 
         let bookmarksWidth = bookmarksContainer.widthAnchor.constraint(equalToConstant: showNavigationPane ? navigationWidth : 0)
         NSLayoutConstraint.activate([
@@ -553,8 +554,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
             navigationResizeHandle.topAnchor.constraint(equalTo: pdfCanvasContainer.topAnchor),
             navigationResizeHandle.bottomAnchor.constraint(equalTo: pdfCanvasContainer.bottomAnchor),
-            navigationResizeHandle.leadingAnchor.constraint(equalTo: bookmarksContainer.trailingAnchor, constant: -3),
-            navigationResizeHandle.widthAnchor.constraint(equalToConstant: 6),
+            navigationResizeHandle.centerXAnchor.constraint(equalTo: bookmarksContainer.trailingAnchor),
+            navigationResizeHandle.widthAnchor.constraint(equalToConstant: 10),
 
             pdfView.topAnchor.constraint(equalTo: pdfCanvasContainer.topAnchor),
             pdfView.leadingAnchor.constraint(equalTo: bookmarksContainer.trailingAnchor),
@@ -564,7 +565,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         bookmarksWidthConstraint = bookmarksWidth
 
         navigationResizeHandle.wantsLayer = true
-        navigationResizeHandle.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.35).cgColor
+        navigationResizeHandle.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
+        navigationResizeHandle.layer?.cornerRadius = 1
         let resizePan = NSPanGestureRecognizer(target: self, action: #selector(handleNavigationResizePan(_:)))
         navigationResizeHandle.addGestureRecognizer(resizePan)
         navigationResizeHandle.isHidden = !showNavigationPane
