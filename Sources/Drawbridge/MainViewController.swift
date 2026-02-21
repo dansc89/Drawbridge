@@ -2989,13 +2989,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 annotationsToDelete.append((page: page, annotation: item.annotation))
             }
 
-            if let groupID = pdfView.calloutGroupID(for: item.annotation) {
-                for sibling in page.annotations where sibling !== item.annotation {
-                    guard pdfView.calloutGroupID(for: sibling) == groupID else { continue }
-                    let siblingID = ObjectIdentifier(sibling)
-                    if seen.insert(siblingID).inserted {
-                        annotationsToDelete.append((page: page, annotation: sibling))
-                    }
+            for sibling in relatedCalloutAnnotations(for: item.annotation, on: page) where sibling !== item.annotation {
+                let siblingID = ObjectIdentifier(sibling)
+                if seen.insert(siblingID).inserted {
+                    annotationsToDelete.append((page: page, annotation: sibling))
                 }
             }
         }
@@ -3988,20 +3985,19 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         if !markupItems.contains(where: { $0.pageIndex == pageIndex && $0.annotation === annotation }) {
             performRefreshMarkups(selecting: annotation)
         }
-        if let groupID = pdfView.calloutGroupID(for: annotation) {
-            let rows = IndexSet(markupItems.enumerated().compactMap { idx, item in
-                guard item.pageIndex == pageIndex else { return nil }
-                return pdfView.calloutGroupID(for: item.annotation) == groupID ? idx : nil
-            })
-            if !rows.isEmpty {
-                markupsTable.selectRowIndexes(rows, byExtendingSelection: false)
-                if let first = rows.first {
-                    markupsTable.scrollRowToVisible(first)
-                }
-                updateToolSettingsUIForCurrentTool()
-                updateStatusBar()
-                return
+        let related = Set(relatedCalloutAnnotations(for: annotation, on: page).map(ObjectIdentifier.init))
+        let relatedRows = IndexSet(markupItems.enumerated().compactMap { idx, item in
+            guard item.pageIndex == pageIndex else { return nil }
+            return related.contains(ObjectIdentifier(item.annotation)) ? idx : nil
+        })
+        if !relatedRows.isEmpty {
+            markupsTable.selectRowIndexes(relatedRows, byExtendingSelection: false)
+            if let first = relatedRows.first {
+                markupsTable.scrollRowToVisible(first)
             }
+            updateToolSettingsUIForCurrentTool()
+            updateStatusBar()
+            return
         }
 
         let targetRow = markupItems.firstIndex(where: { $0.pageIndex == pageIndex && $0.annotation === annotation })
@@ -4209,8 +4205,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
 
         var selected = Set(annotations.map(ObjectIdentifier.init))
         for annotation in annotations {
-            guard let groupID = pdfView.calloutGroupID(for: annotation) else { continue }
-            for sibling in page.annotations where pdfView.calloutGroupID(for: sibling) == groupID {
+            for sibling in relatedCalloutAnnotations(for: annotation, on: page) {
                 selected.insert(ObjectIdentifier(sibling))
             }
         }
@@ -4232,6 +4227,55 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         updateSelectionOverlay()
         updateToolSettingsUIForCurrentTool()
         updateStatusBar()
+    }
+
+    private func relatedCalloutAnnotations(for annotation: PDFAnnotation, on page: PDFPage) -> [PDFAnnotation] {
+        if let groupID = pdfView.calloutGroupID(for: annotation) {
+            let grouped = page.annotations.filter { pdfView.calloutGroupID(for: $0) == groupID }
+            return grouped.isEmpty ? [annotation] : grouped
+        }
+
+        let annotationType = (annotation.type ?? "").lowercased()
+        let contents = (annotation.contents ?? "").lowercased()
+        let isLeader = contents.contains("callout leader")
+        let isFreeText = annotationType.contains("free") && annotationType.contains("text")
+        guard isLeader || isFreeText else { return [annotation] }
+
+        func centerDistance(_ a: NSRect, _ b: NSRect) -> CGFloat {
+            let ac = NSPoint(x: a.midX, y: a.midY)
+            let bc = NSPoint(x: b.midX, y: b.midY)
+            return hypot(ac.x - bc.x, ac.y - bc.y)
+        }
+
+        if isLeader {
+            let searchRect = annotation.bounds.insetBy(dx: -30, dy: -30)
+            let partner = page.annotations
+                .filter { candidate in
+                    let type = (candidate.type ?? "").lowercased()
+                    guard type.contains("free") && type.contains("text") else { return false }
+                    let center = NSPoint(x: candidate.bounds.midX, y: candidate.bounds.midY)
+                    return candidate.bounds.intersects(searchRect) || searchRect.contains(center)
+                }
+                .min(by: { centerDistance($0.bounds, annotation.bounds) < centerDistance($1.bounds, annotation.bounds) })
+            if let partner {
+                return [annotation, partner]
+            }
+            return [annotation]
+        }
+
+        let expandedTextRect = annotation.bounds.insetBy(dx: -30, dy: -30)
+        let partner = page.annotations
+            .filter { candidate in
+                let candidateContents = (candidate.contents ?? "").lowercased()
+                guard candidateContents.contains("callout leader") else { return false }
+                let center = NSPoint(x: candidate.bounds.midX, y: candidate.bounds.midY)
+                return candidate.bounds.intersects(expandedTextRect) || expandedTextRect.contains(center)
+            }
+            .min(by: { centerDistance($0.bounds, annotation.bounds) < centerDistance($1.bounds, annotation.bounds) })
+        if let partner {
+            return [annotation, partner]
+        }
+        return [annotation]
     }
 
     private func baseUnitsPerPoint(for unit: String) -> CGFloat {
