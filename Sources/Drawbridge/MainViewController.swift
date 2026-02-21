@@ -4947,7 +4947,8 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         if applyPageLabels {
             pageLabelOverrides.removeAll()
             for sheet in sheets {
-                pageLabelOverrides[sheet.pageIndex] = sheet.sheetNumber
+                let cleanedTitle = sheet.sheetTitle.isEmpty ? "Untitled" : sheet.sheetTitle
+                pageLabelOverrides[sheet.pageIndex] = "\(sheet.sheetNumber) - \(cleanedTitle)"
             }
         }
 
