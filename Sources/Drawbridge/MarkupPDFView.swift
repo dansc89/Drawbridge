@@ -2,7 +2,6 @@ import AppKit
 import PDFKit
 import UniformTypeIdentifiers
 
-@MainActor
 final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private typealias Segment = (start: NSPoint, end: NSPoint)
     private struct DimensionGeometry {
