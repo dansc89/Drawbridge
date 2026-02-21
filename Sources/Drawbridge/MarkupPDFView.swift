@@ -15,6 +15,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let tickAngle: CGFloat
         let labelOffset: CGFloat
     }
+    private static let calloutGroupPrefix = "DrawbridgeCallout:"
 
     var toolMode: ToolMode = .pen
     var penColor: NSColor = .systemRed
@@ -73,6 +74,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var pendingCalloutPage: PDFPage?
     private var pendingCalloutTipInPage: NSPoint?
     private var pendingCalloutElbowInPage: NSPoint?
+    private var pendingCalloutGroupID: String?
     private var pendingPolylinePage: PDFPage?
     private var pendingPolylinePointsInPage: [NSPoint] = []
     private var pendingAreaPage: PDFPage?
@@ -1099,6 +1101,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         annotation.fontColor = textForegroundColor
         annotation.color = textBackgroundColor
         annotation.alignment = .left
+        if toolMode == .callout, let calloutGroupID = pendingCalloutGroupID {
+            annotation.userName = Self.calloutGroupPrefix + calloutGroupID
+        }
         page.addAnnotation(annotation)
         inlineLiveTextAnnotation = annotation
 
@@ -1199,6 +1204,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             clearPendingCallout()
             pendingCalloutPage = page
             pendingCalloutTipInPage = pointInPage
+            pendingCalloutGroupID = UUID().uuidString
             updateCalloutPreview(at: locationInView)
             return
         }
@@ -1222,6 +1228,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         pendingCalloutPage = nil
         pendingCalloutTipInPage = nil
         pendingCalloutElbowInPage = nil
+        pendingCalloutGroupID = nil
         hideCalloutPreview()
     }
 
@@ -1809,9 +1816,21 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         path.lineWidth = calloutLineWidth
         assignLineWidth(calloutLineWidth, to: annotation)
         annotation.contents = "Callout Leader"
+        if let calloutGroupID = calloutGroupID(for: textAnnotation) {
+            annotation.userName = Self.calloutGroupPrefix + calloutGroupID
+        }
         annotation.add(path)
         page.addAnnotation(annotation)
         onAnnotationAdded?(page, annotation, "Add Callout")
+    }
+
+    func calloutGroupID(for annotation: PDFAnnotation) -> String? {
+        guard let userName = annotation.userName,
+              userName.hasPrefix(Self.calloutGroupPrefix) else {
+            return nil
+        }
+        let value = String(userName.dropFirst(Self.calloutGroupPrefix.count))
+        return value.isEmpty ? nil : value
     }
 
     private func nearestPointOnRectBoundary(_ rect: NSRect, toward point: NSPoint) -> NSPoint {
