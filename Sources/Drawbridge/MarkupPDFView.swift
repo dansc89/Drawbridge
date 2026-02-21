@@ -28,6 +28,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var rectangleLineWidth: CGFloat = 50.0
     var textForegroundColor: NSColor = .labelColor
     var textBackgroundColor: NSColor = NSColor.systemOrange.withAlphaComponent(0.25)
+    var textFontName: String = NSFont.systemFont(ofSize: 15, weight: .medium).fontName
+    var textFontSize: CGFloat = 15.0
     var calloutStrokeColor: NSColor = .systemRed
     var calloutLineWidth: CGFloat = 2.0
     var measurementStrokeColor: NSColor = .systemBlue
@@ -41,13 +43,14 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var onAnnotationsBoxSelected: ((PDFPage, [PDFAnnotation]) -> Void)?
     var onAnnotationMoved: ((PDFPage, PDFAnnotation, NSRect) -> Void)?
     var onDeleteKeyPressed: (() -> Void)?
-    var onSnapshotCaptured: ((NSImage, NSRect) -> Void)?
+    var onSnapshotCaptured: ((Data, NSRect) -> Void)?
     var onOpenDroppedPDF: ((URL) -> Void)?
     var onImageDropped: ((PDFPage, PDFAnnotation, NSRect) -> Void)?
     var onToolShortcut: ((ToolMode) -> Void)?
     var onPageNavigationShortcut: ((Int) -> Void)?
     var onViewportChanged: (() -> Void)?
     var onRegionCaptured: ((PDFPage, NSRect) -> Void)?
+    var shouldBeginMarkupInteraction: (() -> Bool)?
 
     private var dragStartInView: NSPoint?
     private var dragPage: PDFPage?
@@ -313,6 +316,17 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             dragPreviewLayer.isHidden = false
             return
         }
+        let createsMarkupTool: Bool
+        switch toolMode {
+        case .pen, .highlighter, .line, .polyline, .area, .cloud, .rectangle, .text, .callout, .measure, .calibrate:
+            createsMarkupTool = true
+        default:
+            createsMarkupTool = false
+        }
+        if createsMarkupTool, (shouldBeginMarkupInteraction?() == false) {
+            return
+        }
+
         if toolMode == .callout {
             handleCalloutClick(at: locationInView)
             return
@@ -760,8 +774,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             let p1 = convert(rectInView.origin, to: page)
             let p2 = convert(NSPoint(x: rectInView.maxX, y: rectInView.maxY), to: page)
             let pageRect = normalizedRect(from: p1, to: p2)
-            if let snapshot = captureSnapshotImage(on: page, in: pageRect) {
-                onSnapshotCaptured?(snapshot, pageRect)
+            if let snapshotData = captureSnapshotVectorData(on: page, in: pageRect) {
+                onSnapshotCaptured?(snapshotData, pageRect)
             }
             return
         }
@@ -882,20 +896,27 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return simplified.count >= 2 ? simplified : [points.first!, points.last!]
     }
 
-    private func captureSnapshotImage(on page: PDFPage, in pageRect: NSRect) -> NSImage? {
+    private func captureSnapshotVectorData(on page: PDFPage, in pageRect: NSRect) -> Data? {
         guard pageRect.width > 1, pageRect.height > 1 else { return nil }
-        let image = NSImage(size: pageRect.size)
-        image.lockFocus()
-        guard let ctx = NSGraphicsContext.current?.cgContext else {
-            image.unlockFocus()
+
+        let buffer = NSMutableData()
+        guard let consumer = CGDataConsumer(data: buffer as CFMutableData) else {
             return nil
         }
-        ctx.saveGState()
-        ctx.translateBy(x: -pageRect.minX, y: -pageRect.minY)
-        page.draw(with: .mediaBox, to: ctx)
-        ctx.restoreGState()
-        image.unlockFocus()
-        return image
+
+        var mediaBox = CGRect(origin: .zero, size: pageRect.size)
+        guard let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
+            return nil
+        }
+
+        context.beginPDFPage(nil)
+        context.saveGState()
+        context.translateBy(x: -pageRect.minX, y: -pageRect.minY)
+        page.draw(with: .mediaBox, to: context)
+        context.restoreGState()
+        context.endPDFPage()
+        context.closePDF()
+        return buffer as Data
     }
 
     private func clearPendingPolyline() {
@@ -1079,7 +1100,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         // Use an offscreen capture field so typing updates only the live PDF annotation.
         let field = NSTextField(frame: NSRect(x: -10_000, y: -10_000, width: 1, height: 1))
-        field.font = NSFont.systemFont(ofSize: 15, weight: .medium)
+        let resolvedFont = NSFont(name: textFontName, size: max(6.0, textFontSize))
+            ?? NSFont.systemFont(ofSize: max(6.0, textFontSize), weight: .medium)
+        field.font = resolvedFont
         field.textColor = .clear
         field.drawsBackground = false
         field.isBordered = false
@@ -1094,10 +1117,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         inlineTextAnchorInPage = convert(locationInView, to: page)
 
         let anchor = inlineTextAnchorInPage!
-        let bounds = NSRect(x: anchor.x, y: anchor.y - 32, width: 240, height: 42)
+        let bounds = calloutTextAnnotationBounds(forAnchorInPage: anchor)
         let annotation = PDFAnnotation(bounds: bounds, forType: .freeText, withProperties: nil)
         annotation.contents = " "
-        annotation.font = NSFont.systemFont(ofSize: 15, weight: .medium)
+        annotation.font = resolvedFont
         annotation.fontColor = textForegroundColor
         annotation.color = textBackgroundColor
         annotation.alignment = .left
@@ -1460,9 +1483,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let path = CGMutablePath()
         if let elbowInPage = pendingCalloutElbowInPage {
             let elbowInView = convert(elbowInPage, from: page)
-            let textRect = NSRect(x: hoverInView.x, y: hoverInView.y - 24, width: 170, height: 34)
+            let textRectInPage = calloutTextAnnotationBounds(forAnchorInPage: hoverInPage)
+            let textRect = rectInView(fromPageRect: textRectInPage, on: page)
             let anchor = nearestPointOnRectBoundary(textRect, toward: elbowInView)
-            path.addRect(textRect)
+            path.addRect(textRect.integral)
             path.move(to: anchor)
             path.addLine(to: elbowInView)
             path.addLine(to: tipInView)
@@ -1479,6 +1503,19 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         dragPreviewLayer.lineDashPattern = [6, 4]
         dragPreviewLayer.path = path
         dragPreviewLayer.isHidden = false
+    }
+
+    private func calloutTextAnnotationBounds(forAnchorInPage anchor: NSPoint) -> NSRect {
+        let size = max(6.0, textFontSize)
+        let width = max(240.0, size * 12.0)
+        let height = max(42.0, size * 2.2)
+        return NSRect(x: anchor.x, y: anchor.y - (height * 0.75), width: width, height: height)
+    }
+
+    private func rectInView(fromPageRect pageRect: NSRect, on page: PDFPage) -> NSRect {
+        let v1 = convert(pageRect.origin, from: page)
+        let v2 = convert(NSPoint(x: pageRect.maxX, y: pageRect.maxY), from: page)
+        return normalizedRect(from: v1, to: v2)
     }
 
     private func addArrowHead(to path: CGMutablePath, tip: NSPoint, from base: NSPoint, length: CGFloat) {
@@ -1509,9 +1546,18 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func nearestAnnotation(to point: NSPoint, on page: PDFPage, maxDistance: CGFloat) -> PDFAnnotation? {
+        // Prefer visible vector snapshot overlays directly under the cursor.
+        for annotation in page.annotations.reversed() {
+            guard annotation.shouldDisplay else { continue }
+            if annotation is PDFSnapshotAnnotation, annotation.bounds.contains(point) {
+                return annotation
+            }
+        }
+
         var best: PDFAnnotation?
         var bestDistance = maxDistance
         for annotation in page.annotations {
+            guard annotation.shouldDisplay else { continue }
             let annotationType = (annotation.type ?? "").lowercased()
             let isInkLike = annotationType.contains("ink")
             let d: CGFloat

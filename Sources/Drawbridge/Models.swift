@@ -13,7 +13,15 @@ struct AnnotationSnapshot {
     let color: NSColor
     let interiorColor: NSColor?
     let fontColor: NSColor?
+    let fontName: String?
+    let fontSize: CGFloat?
     let lineWidth: CGFloat
+    let renderOpacity: CGFloat?
+    let renderTintColor: NSColor?
+    let renderTintStrength: CGFloat?
+    let tintBlendStyleRawValue: Int?
+    let lineworkOnlyTint: Bool?
+    let snapshotLayerName: String?
 }
 
 struct MarkupIndexSnapshot: Codable {

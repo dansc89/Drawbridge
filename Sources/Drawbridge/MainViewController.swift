@@ -47,8 +47,25 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         case sheetNumber
         case sheetTitle
     }
+    private struct ToolSettingsState {
+        var strokeColor: NSColor
+        var fillColor: NSColor
+        var opacity: CGFloat
+        var lineWeightLevel: Int
+        var fontName: String
+        var fontSize: CGFloat
+    }
 
     private let lineWeightLevels = Array(1...10)
+    private let snapshotLayerOptions = [
+        "ARCHITECTURAL",
+        "STRUCTURAL",
+        "MECHANICAL",
+        "ELECTRICAL",
+        "PLUMBING",
+        "CIVL",
+        "LANDSCAPE"
+    ]
 
     private static let defaultsAdaptiveIndexCapEnabledKey = "DrawbridgeAdaptiveIndexCapEnabled"
     private static let defaultsIndexCapKey = "DrawbridgeIndexCap"
@@ -137,15 +154,23 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let toolSettingsSidebarToggleButton = NSButton(title: "", target: nil, action: nil)
     private let collapsedSidebarRevealButton = NSButton(title: "", target: nil, action: nil)
     private let toolSettingsSectionContent = NSStackView(frame: .zero)
+    private let layersSectionButton = NSButton(title: "", target: nil, action: nil)
+    private let layersSectionContent = NSStackView(frame: .zero)
+    private let layersRowsStack = NSStackView(frame: .zero)
     private let toolSettingsToolLabel = NSTextField(labelWithString: "Active Tool: Pen")
     private let toolSettingsStrokeTitleLabel = NSTextField(labelWithString: "Color:")
     private let toolSettingsFillTitleLabel = NSTextField(labelWithString: "Fill:")
     private let toolSettingsStrokeColorWell = NSColorWell(frame: .zero)
     private let toolSettingsFillColorWell = NSColorWell(frame: .zero)
+    private let toolSettingsFontTitleLabel = NSTextField(labelWithString: "Font:")
+    private let toolSettingsFontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let toolSettingsFontSizeField = NSTextField(frame: .zero)
     private let toolSettingsLineWidthPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let toolSettingsOpacitySlider = NSSlider(value: 0.8, minValue: 0.0, maxValue: 1.0, target: nil, action: nil)
     private let toolSettingsOpacityValueLabel = NSTextField(labelWithString: "80%")
+    private let snapshotColorizeButton = NSButton(title: "Colorize Black -> Red", target: nil, action: nil)
     private let toolSettingsFillRow = NSStackView(frame: .zero)
+    private let toolSettingsFontRow = NSStackView(frame: .zero)
     private let toolSettingsWidthRow = NSStackView(frame: .zero)
     private let selectedMarkupOverlayLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
@@ -198,8 +223,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var isSavingDocumentOperation = false
     private var busyInteractionLocked = false
     private var captureToastHideWorkItem: DispatchWorkItem?
-    private var grabClipboardImage: NSImage?
+    private var grabClipboardPDFData: Data?
     private var grabClipboardPageRect: NSRect?
+    private var grabClipboardTintBlendStyle: PDFSnapshotAnnotation.TintBlendStyle = .screen
+    private weak var lastDirectlySelectedAnnotation: PDFAnnotation?
     private var sidebarCurrentPageIndex: Int = -1
     private var bookmarkLabelOverrides: [String: String] = [:]
     private var pageLabelOverrides: [Int: String] = [:]
@@ -211,6 +238,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var pendingSheetNumberZone: NormalizedPageRect?
     private var pendingSheetTitleZone: NormalizedPageRect?
     private var autoNamePreviousToolMode: ToolMode?
+    private var toolSettingsByTool: [ToolMode: ToolSettingsState] = [:]
+    private var layerVisibilityByName: [String: Bool] = [:]
+    private var layerToggleSwitches: [String: NSSwitch] = [:]
     var onDocumentOpened: ((URL) -> Void)?
     private var sidebarContainerView: NSView?
     private var lastSidebarExpandedWidth: CGFloat = 240
@@ -341,6 +371,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         editMarkupButton.target = self
         editMarkupButton.action = #selector(editSelectedMarkupText)
         configureMeasurementScaleState()
+        initializePerToolSettings()
+        ensureLayerVisibilityDefaults()
         configureActionsPopup(highlightButton: highlightButton, exportButton: exportButton, refreshMarkupsButton: refreshMarkupsButton, deleteMarkupButton: deleteMarkupButton, editMarkupButton: editMarkupButton)
 
         toolSelector.target = self
@@ -426,7 +458,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 color: annotation.color,
                 interiorColor: annotation.interiorColor,
                 fontColor: annotation.fontColor,
-                lineWidth: resolvedLineWidth(for: annotation)
+                fontName: annotation.font?.fontName,
+                fontSize: annotation.font?.pointSize,
+                lineWidth: resolvedLineWidth(for: annotation),
+                renderOpacity: (annotation as? PDFSnapshotAnnotation)?.renderOpacity,
+                renderTintColor: (annotation as? PDFSnapshotAnnotation)?.renderTintColor,
+                renderTintStrength: (annotation as? PDFSnapshotAnnotation)?.renderTintStrength,
+                tintBlendStyleRawValue: (annotation as? PDFSnapshotAnnotation)?.tintBlendStyle.rawValue,
+                lineworkOnlyTint: (annotation as? PDFSnapshotAnnotation)?.lineworkOnlyTint,
+                snapshotLayerName: (annotation as? PDFSnapshotAnnotation)?.snapshotLayerName
             )
             self.registerAnnotationStateUndo(annotation: annotation, previous: before, actionName: "Move Markup")
             self.markPageMarkupCacheDirty(page)
@@ -446,13 +486,20 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfView.onImageDropped = { [weak self] page, annotation, baseBounds in
             self?.presentDroppedImageScaleDialog(page: page, annotation: annotation, baseBounds: baseBounds)
         }
-        pdfView.onSnapshotCaptured = { [weak self] image, pageRect in
-            self?.grabClipboardImage = image
+        pdfView.onSnapshotCaptured = { [weak self] pdfData, pageRect in
+            self?.grabClipboardPDFData = pdfData
             self?.grabClipboardPageRect = pageRect
-            self?.showCaptureToast("Captured - Shift+Command+V to paste")
+            self?.grabClipboardTintBlendStyle = self?.preferredSnapshotTintBlendStyle(for: pdfData) ?? .screen
+            let board = NSPasteboard.general
+            board.clearContents()
+            board.setData(pdfData, forType: .pdf)
+            self?.showCaptureToast("Captured - Cmd+Shift+V to paste in place")
         }
         pdfView.onRegionCaptured = { [weak self] page, rectInPage in
             self?.handleAutoNameRegionCaptured(on: page, rectInPage: rectInPage)
+        }
+        pdfView.shouldBeginMarkupInteraction = { [weak self] in
+            self?.ensureWorkingCopyBeforeFirstMarkup() ?? true
         }
         pdfView.layer?.addSublayer(selectedMarkupOverlayLayer)
 
@@ -655,6 +702,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         bookmarksOutlineView.target = self
         bookmarksOutlineView.action = #selector(selectBookmarkFromSidebar)
         bookmarksOutlineView.doubleAction = #selector(renameBookmarkFromSidebar)
+        let bookmarksContextMenu = NSMenu(title: "Bookmarks")
+        let renameBookmarkItem = NSMenuItem(title: "Rename Bookmark…", action: #selector(renameBookmarkFromSidebar), keyEquivalent: "")
+        renameBookmarkItem.target = self
+        bookmarksContextMenu.addItem(renameBookmarkItem)
+        bookmarksOutlineView.menu = bookmarksContextMenu
 
         bookmarksScrollView.borderType = .noBorder
         bookmarksScrollView.hasVerticalScroller = true
@@ -781,8 +833,26 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         let updated = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !updated.isEmpty else { return }
+        outline.label = updated
         bookmarkLabelOverrides[bookmarkKey(for: outline)] = updated
+
+        if let pageIndex = destinationPageIndex(for: outline) {
+            let syncPrompt = NSAlert()
+            syncPrompt.messageText = "Update matching page label too?"
+            syncPrompt.informativeText = "Apply \"\(updated)\" to Page \(pageIndex + 1) in the Pages list as well?"
+            syncPrompt.alertStyle = .informational
+            syncPrompt.addButton(withTitle: "Update Page Label")
+            syncPrompt.addButton(withTitle: "Keep Current Page Label")
+            if syncPrompt.runModal() == .alertFirstButtonReturn {
+                pageLabelOverrides[pageIndex] = updated
+                pagesTableView.reloadData()
+                updateStatusBar()
+            }
+        }
+
         bookmarksOutlineView.reloadData()
+        markMarkupChanged()
+        scheduleAutosave()
     }
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
@@ -848,6 +918,22 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSettingsLineWidthPopup.addItems(withTitles: lineWeightLevels.map(String.init))
         toolSettingsLineWidthPopup.selectItem(withTitle: "5")
         toolSettingsStrokeColorWell.color = .systemRed
+        let fontFamilies = NSFontManager.shared.availableFontFamilies.sorted()
+        toolSettingsFontPopup.removeAllItems()
+        toolSettingsFontPopup.addItems(withTitles: fontFamilies)
+        let defaultFontName = pdfView.textFontName
+        let defaultFamily = (NSFont(name: defaultFontName, size: pdfView.textFontSize)?.familyName) ?? "Helvetica"
+        if toolSettingsFontPopup.itemTitles.contains(defaultFamily) {
+            toolSettingsFontPopup.selectItem(withTitle: defaultFamily)
+        } else if toolSettingsFontPopup.numberOfItems > 0 {
+            toolSettingsFontPopup.selectItem(at: 0)
+        }
+        toolSettingsFontSizeField.stringValue = "\(Int(round(pdfView.textFontSize)))"
+        toolSettingsFontSizeField.alignment = .right
+        toolSettingsFontSizeField.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        toolSettingsFontSizeField.placeholderString = "Size"
+        toolSettingsFontSizeField.translatesAutoresizingMaskIntoConstraints = false
+        toolSettingsFontSizeField.widthAnchor.constraint(equalToConstant: 52).isActive = true
         toolSettingsOpacityValueLabel.alignment = .right
         toolSettingsOpacityValueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         toolSettingsOpacitySlider.target = self
@@ -856,11 +942,20 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSettingsStrokeColorWell.action = #selector(toolSettingsChanged)
         toolSettingsFillColorWell.target = self
         toolSettingsFillColorWell.action = #selector(toolSettingsChanged)
+        toolSettingsFontPopup.target = self
+        toolSettingsFontPopup.action = #selector(toolSettingsChanged)
+        toolSettingsFontSizeField.target = self
+        toolSettingsFontSizeField.action = #selector(toolSettingsChanged)
         toolSettingsLineWidthPopup.target = self
         toolSettingsLineWidthPopup.action = #selector(toolSettingsChanged)
+        snapshotColorizeButton.target = self
+        snapshotColorizeButton.action = #selector(colorizeSnapshotsBlackToRed)
+        snapshotColorizeButton.bezelStyle = .texturedRounded
+        snapshotColorizeButton.isHidden = true
 
         measurementCountLabel.textColor = .secondaryLabelColor
         measurementTotalLabel.textColor = .secondaryLabelColor
+        configureLayersSectionUI()
         configureSectionButtons()
         updateToolSettingsUIForCurrentTool()
         applyToolSettingsToPDFView()
@@ -871,6 +966,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         markupsSectionButton.action = #selector(toggleMarkupsSection)
         summarySectionButton.target = self
         summarySectionButton.action = #selector(toggleSummarySection)
+        layersSectionButton.target = self
+        layersSectionButton.action = #selector(toggleLayersSection)
 
         toolSettingsSectionButton.isBordered = false
         toolSettingsSectionButton.isEnabled = false
@@ -878,7 +975,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSettingsSectionButton.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
         toolSettingsSectionButton.contentTintColor = .secondaryLabelColor
 
-        [markupsSectionButton, summarySectionButton].forEach {
+        [markupsSectionButton, summarySectionButton, layersSectionButton].forEach {
             $0.setButtonType(.momentaryPushIn)
             $0.bezelStyle = .recessed
             $0.alignment = .left
@@ -902,10 +999,142 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         updateSectionHeaders()
     }
 
+    @objc private func toggleLayersSection() {
+        layersSectionContent.isHidden.toggle()
+        updateSectionHeaders()
+    }
+
     private func updateSectionHeaders() {
         toolSettingsSectionButton.title = "Tool Settings"
         markupsSectionButton.title = "\(markupsSectionContent.isHidden ? "▸" : "▾") Markups"
         summarySectionButton.title = "\(summarySectionContent.isHidden ? "▸" : "▾") Takeoff Summary"
+        layersSectionButton.title = "\(layersSectionContent.isHidden ? "▸" : "▾") Layers"
+    }
+
+    private func ensureLayerVisibilityDefaults() {
+        for layer in snapshotLayerOptions where layerVisibilityByName[layer] == nil {
+            layerVisibilityByName[layer] = true
+        }
+    }
+
+    private func tintColor(forSnapshotLayer layer: String) -> NSColor {
+        switch layer {
+        case "ARCHITECTURAL":
+            return NSColor(calibratedWhite: 0.72, alpha: 1.0) // light gray
+        case "STRUCTURAL":
+            return .systemRed
+        case "MECHANICAL":
+            return .systemGreen
+        case "ELECTRICAL":
+            return .systemOrange
+        case "PLUMBING":
+            return .systemBlue
+        case "CIVL":
+            return .systemTeal
+        case "LANDSCAPE":
+            return NSColor.systemGreen.blended(withFraction: 0.35, of: .systemBrown) ?? .systemGreen
+        default:
+            return .systemRed
+        }
+    }
+
+    private func promptSnapshotLayerSelection(defaultLayer: String = "ARCHITECTURAL") -> String? {
+        ensureLayerVisibilityDefaults()
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 28), pullsDown: false)
+        popup.addItems(withTitles: snapshotLayerOptions)
+        if let idx = snapshotLayerOptions.firstIndex(of: defaultLayer) {
+            popup.selectItem(at: idx)
+        } else {
+            popup.selectItem(at: 0)
+        }
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 40))
+        popup.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(popup)
+        NSLayoutConstraint.activate([
+            popup.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
+            popup.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+            popup.centerYAnchor.constraint(equalTo: accessory.centerYAnchor)
+        ])
+
+        let alert = NSAlert()
+        alert.messageText = "What layer?"
+        alert.informativeText = "Choose the layer for this pasted grab."
+        alert.alertStyle = .informational
+        alert.accessoryView = accessory
+        alert.addButton(withTitle: "Apply")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        return popup.titleOfSelectedItem
+    }
+
+    private func configureLayersSectionUI() {
+        ensureLayerVisibilityDefaults()
+        layersSectionContent.orientation = .vertical
+        layersSectionContent.spacing = 6
+        layersRowsStack.orientation = .vertical
+        layersRowsStack.spacing = 4
+
+        for view in layersRowsStack.arrangedSubviews {
+            layersRowsStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        layerToggleSwitches.removeAll()
+
+        for layer in snapshotLayerOptions {
+            let label = NSTextField(labelWithString: layer)
+            label.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+            label.lineBreakMode = .byTruncatingTail
+
+            let toggle = NSSwitch(frame: .zero)
+            toggle.state = (layerVisibilityByName[layer] ?? true) ? .on : .off
+            toggle.target = self
+            toggle.action = #selector(layerToggleChanged(_:))
+            toggle.identifier = NSUserInterfaceItemIdentifier(layer)
+            layerToggleSwitches[layer] = toggle
+
+            let row = NSStackView(views: [label, NSView(), toggle])
+            row.orientation = .horizontal
+            row.spacing = 8
+            row.alignment = .centerY
+            layersRowsStack.addArrangedSubview(row)
+        }
+
+        layersSectionContent.addArrangedSubview(layersRowsStack)
+    }
+
+    @objc private func layerToggleChanged(_ sender: NSSwitch) {
+        guard let layer = sender.identifier?.rawValue, !layer.isEmpty else { return }
+        layerVisibilityByName[layer] = (sender.state == .on)
+        applySnapshotLayerVisibility()
+    }
+
+    private func applySnapshotLayerVisibility() {
+        guard let document = pdfView.document else { return }
+        ensureLayerVisibilityDefaults()
+        var hidSelectedSnapshot = false
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            for annotation in page.annotations {
+                guard let snapshot = annotation as? PDFSnapshotAnnotation else { continue }
+                let layer = snapshot.snapshotLayerName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let isVisible = layer.isEmpty ? true : (layerVisibilityByName[layer] ?? true)
+                snapshot.shouldDisplay = isVisible
+                snapshot.shouldPrint = isVisible
+                if !isVisible, lastDirectlySelectedAnnotation === snapshot {
+                    hidSelectedSnapshot = true
+                }
+            }
+        }
+        if hidSelectedSnapshot {
+            clearMarkupSelection()
+        } else {
+            updateSelectionOverlay()
+            updateToolSettingsUIForCurrentTool()
+            updateStatusBar()
+        }
+        pdfView.needsDisplay = true
     }
 
     private func configureActionsPopup(highlightButton: NSButton, exportButton: NSButton, refreshMarkupsButton: NSButton, deleteMarkupButton: NSButton, editMarkupButton: NSButton) {
@@ -1266,6 +1495,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 return
             }
             if pdfView.toolMode == .select {
+                promptSnapshotLayerAssignmentIfNeeded()
                 clearMarkupSelection()
             } else {
                 setTool(.select)
@@ -1278,9 +1508,50 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     private func clearMarkupSelection() {
         markupsTable.deselectAll(nil)
+        lastDirectlySelectedAnnotation = nil
         selectedMarkupOverlayLayer.isHidden = true
         updateToolSettingsUIForCurrentTool()
         updateStatusBar()
+    }
+
+    private func promptSnapshotLayerAssignmentIfNeeded() {
+        let snapshots = currentSelectedMarkupItems().compactMap { $0.annotation as? PDFSnapshotAnnotation }
+        guard snapshots.count == 1, let selectedSnapshot = snapshots.first else { return }
+        let currentLayer = selectedSnapshot.snapshotLayerName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard currentLayer.isEmpty else { return }
+
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 28), pullsDown: false)
+        popup.addItems(withTitles: snapshotLayerOptions)
+        popup.selectItem(at: 0)
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 40))
+        popup.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(popup)
+        NSLayoutConstraint.activate([
+            popup.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
+            popup.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+            popup.centerYAnchor.constraint(equalTo: accessory.centerYAnchor)
+        ])
+
+        let alert = NSAlert()
+        alert.messageText = "Assign Snapshot Layer"
+        alert.informativeText = "Choose the layer for this pasted grab markup."
+        alert.alertStyle = .informational
+        alert.accessoryView = accessory
+        alert.addButton(withTitle: "Assign Layer")
+        alert.addButton(withTitle: "Skip")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard let layer = popup.titleOfSelectedItem, !layer.isEmpty else { return }
+
+        let previous = snapshot(for: selectedSnapshot)
+        selectedSnapshot.snapshotLayerName = layer
+        registerAnnotationStateUndo(annotation: selectedSnapshot, previous: previous, actionName: "Assign Snapshot Layer")
+        markPageMarkupCacheDirty(selectedSnapshot.page)
+        markMarkupChanged()
+        applySnapshotLayerVisibility()
+        performRefreshMarkups(selecting: selectedSnapshot)
+        scheduleAutosave()
     }
 
     private func configureEmptyStateView() {
@@ -1677,6 +1948,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSettingsFillRow.addArrangedSubview(toolSettingsFillTitleLabel)
         toolSettingsFillRow.addArrangedSubview(toolSettingsFillColorWell)
 
+        toolSettingsFontRow.orientation = .horizontal
+        toolSettingsFontRow.spacing = 8
+        toolSettingsFontRow.alignment = .centerY
+        toolSettingsFontRow.addArrangedSubview(toolSettingsFontTitleLabel)
+        toolSettingsFontRow.addArrangedSubview(toolSettingsFontPopup)
+        toolSettingsFontRow.addArrangedSubview(toolSettingsFontSizeField)
+
         toolSettingsWidthRow.orientation = .horizontal
         toolSettingsWidthRow.spacing = 8
         toolSettingsWidthRow.alignment = .centerY
@@ -1697,8 +1975,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSettingsSectionContent.addArrangedSubview(toolSettingsToolLabel)
         toolSettingsSectionContent.addArrangedSubview(toolStrokeRow)
         toolSettingsSectionContent.addArrangedSubview(toolSettingsFillRow)
+        toolSettingsSectionContent.addArrangedSubview(toolSettingsFontRow)
         toolSettingsSectionContent.addArrangedSubview(toolSettingsWidthRow)
         toolSettingsSectionContent.addArrangedSubview(toolOpacityRow)
+        toolSettingsSectionContent.addArrangedSubview(snapshotColorizeButton)
 
         markupsSectionContent.orientation = .vertical
         markupsSectionContent.spacing = 6
@@ -1724,9 +2004,17 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSettingsHeaderRow.spacing = 6
         toolSettingsHeaderRow.alignment = .centerY
 
+        let sidebarSpacer = NSView(frame: .zero)
+        sidebarSpacer.translatesAutoresizingMaskIntoConstraints = false
+        sidebarSpacer.setContentHuggingPriority(.defaultLow, for: .vertical)
+        sidebarSpacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+
         let sidebar = NSStackView(views: [
             toolSettingsHeaderRow,
-            toolSettingsSectionContent
+            toolSettingsSectionContent,
+            sidebarSpacer,
+            layersSectionButton,
+            layersSectionContent
         ])
         sidebar.orientation = .vertical
         sidebar.spacing = 8
@@ -1781,6 +2069,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func activateTool(_ requestedMode: ToolMode) {
+        persistToolSettingsFromControls(for: pdfView.toolMode)
         if requestedMode == .area && !isDrawingScaleConfigured() {
             showAreaScaleRequiredWarning()
             toolSelector.selectedSegment = segmentIndex(for: pdfView.toolMode)
@@ -1802,6 +2091,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
 
         pdfView.toolMode = requestedMode
+        applyStoredToolSettings(to: requestedMode)
         if toolSelector.selectedSegment >= 0 || takeoffSelector.selectedSegment >= 0 {
             animateToolSelectionFeedback()
         }
@@ -2139,36 +2429,45 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func pasteGrabSnapshotInPlace() {
-        guard let image = grabClipboardImage,
+        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
+        guard let pdfData = grabClipboardPDFData,
               let sourceRect = grabClipboardPageRect,
               let page = pdfView.currentPage else {
             NSSound.beep()
             return
         }
+        guard let selectedLayer = promptSnapshotLayerSelection() else {
+            return
+        }
 
-        guard let imageURL = persistGrabSnapshotImage(image) else {
+        guard let snapshotURL = persistGrabSnapshotPDFData(pdfData) else {
             NSSound.beep()
             return
         }
 
-        let annotation = ImageMarkupAnnotation(bounds: sourceRect, imageURL: imageURL)
-        annotation.renderOpacity = 0.2
-        annotation.renderTintColor = .systemRed
-        annotation.renderTintStrength = 0.65
+        let annotation = PDFSnapshotAnnotation(bounds: sourceRect, snapshotURL: snapshotURL)
+        annotation.renderOpacity = 1.0
+        annotation.renderTintColor = tintColor(forSnapshotLayer: selectedLayer)
+        annotation.renderTintStrength = 1.0
+        annotation.tintBlendStyle = grabClipboardTintBlendStyle
+        annotation.lineworkOnlyTint = true
+        annotation.snapshotLayerName = selectedLayer
         page.addAnnotation(annotation)
         registerAnnotationPresenceUndo(page: page, annotation: annotation, shouldExist: false, actionName: "Paste Grab Snapshot")
         markPageMarkupCacheDirty(page)
         markMarkupChanged()
+        applySnapshotLayerVisibility()
+        setTool(.select)
+        lastDirectlySelectedAnnotation = annotation
+        markupsTable.deselectAll(nil)
         performRefreshMarkups(selecting: annotation)
+        updateSelectionOverlay()
+        updateToolSettingsUIForCurrentTool()
+        updateStatusBar()
         scheduleAutosave()
     }
 
-    private func persistGrabSnapshotImage(_ image: NSImage) -> URL? {
-        guard let tiff = image.tiffRepresentation,
-              let bitmap = NSBitmapImageRep(data: tiff),
-              let data = bitmap.representation(using: .png, properties: [:]) else {
-            return nil
-        }
+    private func persistGrabSnapshotPDFData(_ data: Data) -> URL? {
         do {
             let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             let directory = root?
@@ -2176,12 +2475,64 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 .appendingPathComponent("GrabSnapshots", isDirectory: true)
             guard let directory else { return nil }
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let url = directory.appendingPathComponent("grab-\(UUID().uuidString).png")
+            let url = directory.appendingPathComponent("grab-\(UUID().uuidString).pdf")
             try data.write(to: url, options: .atomic)
             return url
         } catch {
             return nil
         }
+    }
+
+    private func preferredSnapshotTintBlendStyle(for pdfData: Data) -> PDFSnapshotAnnotation.TintBlendStyle {
+        guard let provider = CGDataProvider(data: pdfData as CFData),
+              let doc = CGPDFDocument(provider),
+              let page = doc.page(at: 1) else {
+            return .screen
+        }
+        let sample = 48
+        guard let ctx = CGContext(
+            data: nil,
+            width: sample,
+            height: sample,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else {
+            return .screen
+        }
+        ctx.setFillColor(gray: 1.0, alpha: 1.0)
+        ctx.fill(CGRect(x: 0, y: 0, width: sample, height: sample))
+        let mediaBox = page.getBoxRect(.mediaBox)
+        guard mediaBox.width > 0.1, mediaBox.height > 0.1 else {
+            return .screen
+        }
+        ctx.saveGState()
+        ctx.scaleBy(x: CGFloat(sample) / mediaBox.width, y: CGFloat(sample) / mediaBox.height)
+        ctx.drawPDFPage(page)
+        ctx.restoreGState()
+        guard let image = ctx.makeImage(),
+              let data = image.dataProvider?.data,
+              let bytes = CFDataGetBytePtr(data) else {
+            return .screen
+        }
+        let bytesPerRow = max(1, image.bytesPerRow)
+        func intensity(x: Int, y: Int) -> Double {
+            let clampedX = min(max(x, 0), sample - 1)
+            let clampedY = min(max(y, 0), sample - 1)
+            let idx = clampedY * bytesPerRow + clampedX
+            return Double(bytes[idx]) / 255.0
+        }
+
+        let margin = max(2, sample / 8)
+        let cornerValues: [Double] = [
+            intensity(x: margin, y: margin),
+            intensity(x: sample - 1 - margin, y: margin),
+            intensity(x: margin, y: sample - 1 - margin),
+            intensity(x: sample - 1 - margin, y: sample - 1 - margin)
+        ]
+        let cornerAverage = cornerValues.reduce(0, +) / Double(cornerValues.count)
+        return cornerAverage < 0.45 ? .multiply : .screen
     }
 
     private func createBlankDocument(sizeInches: (name: String, widthInches: CGFloat, heightInches: CGFloat), landscape: Bool) {
@@ -2222,6 +2573,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc private func highlightSelection() {
+        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
         pdfView.addHighlightForCurrentSelection()
         refreshMarkups()
         scheduleAutosave()
@@ -2992,6 +3344,26 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         hasPromptedForInitialMarkupSaveCopy = didCreateWorkingCopy
     }
 
+    private func ensureWorkingCopyBeforeFirstMarkup() -> Bool {
+        guard !hasPromptedForInitialMarkupSaveCopy,
+              !isPresentingInitialMarkupSaveCopyPrompt,
+              !manualSaveInFlight,
+              let sourceURL = openDocumentURL,
+              pdfView.document != nil else {
+            return true
+        }
+        let name = sourceURL.lastPathComponent.lowercased()
+        if name.contains(" - markups ") {
+            hasPromptedForInitialMarkupSaveCopy = true
+            return true
+        }
+        isPresentingInitialMarkupSaveCopyPrompt = true
+        defer { isPresentingInitialMarkupSaveCopyPrompt = false }
+        let didCreateWorkingCopy = promptForInitialMarkupWorkingCopy(from: sourceURL)
+        hasPromptedForInitialMarkupSaveCopy = didCreateWorkingCopy
+        return didCreateWorkingCopy
+    }
+
     private func suggestedMarkupCopyFilename(for sourceURL: URL) -> String {
         let datePrefix = Self.markupCopyDateFormatter.string(from: Date())
         return "\(datePrefix) - markups \(sourceURL.lastPathComponent)"
@@ -3064,30 +3436,32 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     @objc private func deleteSelectedMarkup() {
         let selectedRows = markupsTable.selectedRowIndexes
-        guard !selectedRows.isEmpty else {
-            NSSound.beep()
-            return
-        }
-
         var annotationsToDelete: [(page: PDFPage, annotation: PDFAnnotation)] = []
         var seen = Set<ObjectIdentifier>()
 
-        for row in selectedRows.sorted(by: >) {
-            guard row >= 0, row < markupItems.count else { continue }
-            let item = markupItems[row]
-            guard let page = pdfView.document?.page(at: item.pageIndex) else { continue }
+        if !selectedRows.isEmpty {
+            for row in selectedRows.sorted(by: >) {
+                guard row >= 0, row < markupItems.count else { continue }
+                let item = markupItems[row]
+                guard let page = pdfView.document?.page(at: item.pageIndex) else { continue }
 
-            let primaryID = ObjectIdentifier(item.annotation)
-            if seen.insert(primaryID).inserted {
-                annotationsToDelete.append((page: page, annotation: item.annotation))
-            }
+                let primaryID = ObjectIdentifier(item.annotation)
+                if seen.insert(primaryID).inserted {
+                    annotationsToDelete.append((page: page, annotation: item.annotation))
+                }
 
-            for sibling in relatedCalloutAnnotations(for: item.annotation, on: page) where sibling !== item.annotation {
-                let siblingID = ObjectIdentifier(sibling)
-                if seen.insert(siblingID).inserted {
-                    annotationsToDelete.append((page: page, annotation: sibling))
+                for sibling in relatedCalloutAnnotations(for: item.annotation, on: page) where sibling !== item.annotation {
+                    let siblingID = ObjectIdentifier(sibling)
+                    if seen.insert(siblingID).inserted {
+                        annotationsToDelete.append((page: page, annotation: sibling))
+                    }
                 }
             }
+        } else if let direct = lastDirectlySelectedAnnotation, let page = direct.page {
+            annotationsToDelete.append((page: page, annotation: direct))
+        } else {
+            NSSound.beep()
+            return
         }
 
         for entry in annotationsToDelete {
@@ -3095,6 +3469,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             entry.page.removeAnnotation(entry.annotation)
             markPageMarkupCacheDirty(entry.page)
         }
+        lastDirectlySelectedAnnotation = nil
         markMarkupChanged()
         performRefreshMarkups(selecting: nil, forceImmediate: true)
         scheduleAutosave()
@@ -3147,6 +3522,27 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     @objc private func toolSettingsChanged() {
         applyToolSettingsToPDFView()
+    }
+
+    @objc private func colorizeSnapshotsBlackToRed() {
+        let snapshots = currentSelectedMarkupItems().compactMap { $0.annotation as? PDFSnapshotAnnotation }
+        guard !snapshots.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        var first: PDFSnapshotAnnotation?
+        for snap in snapshots {
+            let previous = snapshot(for: snap)
+            snap.renderTintColor = .systemRed
+            snap.renderTintStrength = 1.0
+            snap.lineworkOnlyTint = true
+            registerAnnotationStateUndo(annotation: snap, previous: previous, actionName: "Colorize Black to Red")
+            markPageMarkupCacheDirty(snap.page)
+            if first == nil { first = snap }
+        }
+        markMarkupChanged()
+        performRefreshMarkups(selecting: first)
+        scheduleAutosave()
     }
 
     @objc private func applyMeasurementScale() {
@@ -3712,14 +4108,36 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private func navigatePage(delta: Int) {
         guard let document = pdfView.document else { return }
         let current = pdfView.currentPage.map { document.index(for: $0) } ?? 0
-        goToPageIndex(current + delta)
+        let anchor = currentPageNavigationAnchor()
+        goToPageIndex(current + delta, anchor: anchor)
     }
 
-    private func goToPageIndex(_ index: Int) {
+    private func currentPageNavigationAnchor() -> (x: CGFloat, y: CGFloat)? {
+        guard let page = pdfView.currentPage else { return nil }
+        let bounds = page.bounds(for: pdfView.displayBox)
+        guard bounds.width > 0.01, bounds.height > 0.01 else { return nil }
+        let viewCenter = NSPoint(x: pdfView.bounds.midX, y: pdfView.bounds.midY)
+        let point = pdfView.currentDestination?.point ?? pdfView.convert(viewCenter, to: page)
+        let x = min(max((point.x - bounds.minX) / bounds.width, 0), 1)
+        let y = min(max((point.y - bounds.minY) / bounds.height, 0), 1)
+        return (x: x, y: y)
+    }
+
+    private func goToPageIndex(_ index: Int, anchor: (x: CGFloat, y: CGFloat)? = nil) {
         guard let document = pdfView.document else { return }
         let clamped = min(max(0, index), max(0, document.pageCount - 1))
         guard let page = document.page(at: clamped) else { return }
-        let destination = PDFDestination(page: page, at: NSPoint(x: page.bounds(for: .cropBox).midX, y: page.bounds(for: .cropBox).midY))
+        let pageBounds = page.bounds(for: pdfView.displayBox)
+        let destinationPoint: NSPoint
+        if let anchor {
+            destinationPoint = NSPoint(
+                x: pageBounds.minX + pageBounds.width * anchor.x,
+                y: pageBounds.minY + pageBounds.height * anchor.y
+            )
+        } else {
+            destinationPoint = NSPoint(x: pageBounds.midX, y: pageBounds.midY)
+        }
+        let destination = PDFDestination(page: page, at: destinationPoint)
         pdfView.go(to: destination)
         updateStatusBar()
     }
@@ -3729,13 +4147,22 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func snapshot(for annotation: PDFAnnotation) -> AnnotationSnapshot {
-        AnnotationSnapshot(
+        let vectorSnapshot = annotation as? PDFSnapshotAnnotation
+        return AnnotationSnapshot(
             bounds: annotation.bounds,
             contents: annotation.contents,
             color: annotation.color,
             interiorColor: annotation.interiorColor,
             fontColor: annotation.fontColor,
-            lineWidth: resolvedLineWidth(for: annotation)
+            fontName: annotation.font?.fontName,
+            fontSize: annotation.font?.pointSize,
+            lineWidth: resolvedLineWidth(for: annotation),
+            renderOpacity: vectorSnapshot?.renderOpacity,
+            renderTintColor: vectorSnapshot?.renderTintColor,
+            renderTintStrength: vectorSnapshot?.renderTintStrength,
+            tintBlendStyleRawValue: vectorSnapshot?.tintBlendStyle.rawValue,
+            lineworkOnlyTint: vectorSnapshot?.lineworkOnlyTint,
+            snapshotLayerName: vectorSnapshot?.snapshotLayerName
         )
     }
 
@@ -3745,7 +4172,23 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         annotation.color = snapshot.color
         annotation.interiorColor = snapshot.interiorColor
         annotation.fontColor = snapshot.fontColor
+        if let fontName = snapshot.fontName, let fontSize = snapshot.fontSize {
+            annotation.font = resolveFont(family: fontName, size: fontSize)
+        }
         assignLineWidth(snapshot.lineWidth, to: annotation)
+        if let vectorSnapshot = annotation as? PDFSnapshotAnnotation {
+            vectorSnapshot.renderOpacity = snapshot.renderOpacity ?? vectorSnapshot.renderOpacity
+            vectorSnapshot.renderTintColor = snapshot.renderTintColor
+            vectorSnapshot.renderTintStrength = snapshot.renderTintStrength ?? vectorSnapshot.renderTintStrength
+            if let raw = snapshot.tintBlendStyleRawValue,
+               let style = PDFSnapshotAnnotation.TintBlendStyle(rawValue: raw) {
+                vectorSnapshot.tintBlendStyle = style
+            }
+            if let lineworkOnly = snapshot.lineworkOnlyTint {
+                vectorSnapshot.lineworkOnlyTint = lineworkOnly
+            }
+            vectorSnapshot.snapshotLayerName = snapshot.snapshotLayerName
+        }
     }
 
     private func resolvedLineWidth(for annotation: PDFAnnotation) -> CGFloat {
@@ -3826,9 +4269,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pageLabelOverrides.removeAll()
         hasPromptedForInitialMarkupSaveCopy = false
         isPresentingInitialMarkupSaveCopyPrompt = false
-        rehydrateImageAnnotationsIfNeeded(in: document)
+        rehydrateCustomSnapshotAnnotationsIfNeeded(in: document)
         loadSidecarSnapshotIfAvailable(for: url, document: document)
         repairInkPathLineWidthsIfNeeded(in: document)
+        applySnapshotLayerVisibility()
         openDocumentURL = url
         registerSessionDocument(url)
         configureAutosaveURL(for: url)
@@ -3851,21 +4295,33 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
     }
 
-    private func rehydrateImageAnnotationsIfNeeded(in document: PDFDocument) {
+    private func rehydrateCustomSnapshotAnnotationsIfNeeded(in document: PDFDocument) {
         for pageIndex in 0..<document.pageCount {
             guard let page = document.page(at: pageIndex) else { continue }
             let existing = page.annotations
             for annotation in existing {
-                guard !(annotation is ImageMarkupAnnotation),
-                      let contents = annotation.contents,
-                      contents.hasPrefix(ImageMarkupAnnotation.contentsPrefix) else { continue }
-                let replacement = ImageMarkupAnnotation(bounds: annotation.bounds, imageURL: URL(fileURLWithPath: String(contents.dropFirst(ImageMarkupAnnotation.contentsPrefix.count))), contents: contents)
-                replacement.border = annotation.border
-                replacement.color = annotation.color
-                replacement.shouldDisplay = annotation.shouldDisplay
-                replacement.shouldPrint = annotation.shouldPrint
-                page.removeAnnotation(annotation)
-                page.addAnnotation(replacement)
+                guard let contents = annotation.contents else { continue }
+                if !(annotation is ImageMarkupAnnotation),
+                   contents.hasPrefix(ImageMarkupAnnotation.contentsPrefix) {
+                    let replacement = ImageMarkupAnnotation(bounds: annotation.bounds, imageURL: URL(fileURLWithPath: String(contents.dropFirst(ImageMarkupAnnotation.contentsPrefix.count))), contents: contents)
+                    replacement.border = annotation.border
+                    replacement.color = annotation.color
+                    replacement.shouldDisplay = annotation.shouldDisplay
+                    replacement.shouldPrint = annotation.shouldPrint
+                    page.removeAnnotation(annotation)
+                    page.addAnnotation(replacement)
+                    continue
+                }
+                if !(annotation is PDFSnapshotAnnotation),
+                   contents.hasPrefix(PDFSnapshotAnnotation.contentsPrefix) {
+                    let replacement = PDFSnapshotAnnotation(bounds: annotation.bounds, snapshotURL: URL(fileURLWithPath: String(contents.dropFirst(PDFSnapshotAnnotation.contentsPrefix.count))), contents: contents)
+                    replacement.border = annotation.border
+                    replacement.color = annotation.color
+                    replacement.shouldDisplay = annotation.shouldDisplay
+                    replacement.shouldPrint = annotation.shouldPrint
+                    page.removeAnnotation(annotation)
+                    page.addAnnotation(replacement)
+                }
             }
         }
     }
@@ -4068,6 +4524,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
     }
 
     private func selectMarkupFromPageClick(page: PDFPage, annotation: PDFAnnotation) {
+        lastDirectlySelectedAnnotation = annotation
         guard let document = pdfView.document else { return }
         let pageIndex = document.index(for: page)
         if pageIndex < 0 {
@@ -4102,7 +4559,11 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             updateStatusBar()
             return
         }
-        NSSound.beep()
+        // Keep the clicked annotation selected even when the table is filtered/capped and has no matching row.
+        markupsTable.deselectAll(nil)
+        updateSelectionOverlay()
+        updateToolSettingsUIForCurrentTool()
+        updateStatusBar()
     }
 
     private func nearestMarkupRow(to bounds: NSRect, onPageIndex pageIndex: Int) -> Int? {
@@ -4208,18 +4669,27 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
     }
 
     private func currentSelectedMarkupItem() -> MarkupItem? {
-        let row = markupsTable.selectedRow
-        guard row >= 0, row < markupItems.count else {
-            return nil
-        }
-        return markupItems[row]
+        currentSelectedMarkupItems().first
     }
 
     private func currentSelectedMarkupItems() -> [MarkupItem] {
-        markupsTable.selectedRowIndexes.compactMap { row in
-            guard row >= 0, row < markupItems.count else { return nil }
-            return markupItems[row]
+        var selectedFromTable: [MarkupItem] = []
+        selectedFromTable.reserveCapacity(markupsTable.numberOfSelectedRows)
+        for row in markupsTable.selectedRowIndexes {
+            guard row >= 0, row < markupItems.count else { continue }
+            selectedFromTable.append(markupItems[row])
         }
+        if !selectedFromTable.isEmpty {
+            return selectedFromTable
+        }
+        guard let direct = lastDirectlySelectedAnnotation,
+              let page = direct.page,
+              let document = pdfView.document else {
+            return []
+        }
+        let pageIndex = document.index(for: page)
+        guard pageIndex >= 0 else { return [] }
+        return [MarkupItem(pageIndex: pageIndex, annotation: direct)]
     }
 
     private func currentSelectedAnnotation() -> PDFAnnotation? {
@@ -4434,10 +4904,15 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
     }
 
     private func applyToolSettingsToPDFView() {
-        let opacity = max(0.0, min(1.0, CGFloat(toolSettingsOpacitySlider.doubleValue)))
+        let opacity = normalizedOpacity(CGFloat(toolSettingsOpacitySlider.doubleValue), for: pdfView.toolMode)
+        if toolSettingsOpacitySlider.doubleValue != Double(opacity) {
+            toolSettingsOpacitySlider.doubleValue = Double(opacity)
+            toolSettingsOpacityValueLabel.stringValue = "\(Int(round(toolSettingsOpacitySlider.doubleValue * 100)))%"
+        }
         let currentWidth = widthValue(for: selectedLineWeightLevel(), tool: pdfView.toolMode)
         let stroke = toolSettingsStrokeColorWell.color.withAlphaComponent(opacity)
         let fill = toolSettingsFillColorWell.color.withAlphaComponent(opacity)
+        let textFont = resolvedToolSettingsFont()
         let selectedItems = currentSelectedMarkupItems()
 
         if pdfView.toolMode == .select, !selectedItems.isEmpty {
@@ -4452,6 +4927,17 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
                 if annotationType.contains("freetext") {
                     annotation.color = stroke.withAlphaComponent(opacity * 0.5)
                     annotation.fontColor = fill
+                    annotation.font = textFont
+                    didEdit = true
+                } else if let snapshot = annotation as? PDFSnapshotAnnotation {
+                    if let sourceURL = snapshot.snapshotURL,
+                       let sourceData = try? Data(contentsOf: sourceURL) {
+                        snapshot.tintBlendStyle = preferredSnapshotTintBlendStyle(for: sourceData)
+                    }
+                    snapshot.renderOpacity = opacity
+                    snapshot.renderTintColor = toolSettingsStrokeColorWell.color.withAlphaComponent(1.0)
+                    snapshot.renderTintStrength = 1.0
+                    snapshot.lineworkOnlyTint = true
                     didEdit = true
                 } else {
                     annotation.color = stroke
@@ -4502,11 +4988,15 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         case .text:
             pdfView.textForegroundColor = fill
             pdfView.textBackgroundColor = stroke.withAlphaComponent(opacity * 0.5)
+            pdfView.textFontName = textFont.fontName
+            pdfView.textFontSize = textFont.pointSize
         case .callout:
             pdfView.calloutStrokeColor = stroke
             pdfView.calloutLineWidth = currentWidth
             pdfView.textForegroundColor = fill
             pdfView.textBackgroundColor = stroke.withAlphaComponent(opacity * 0.5)
+            pdfView.textFontName = textFont.fontName
+            pdfView.textFontSize = textFont.pointSize
         case .measure, .calibrate:
             pdfView.measurementStrokeColor = stroke
             pdfView.calibrationStrokeColor = stroke
@@ -4514,6 +5004,29 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         case .select:
             break
         }
+        persistToolSettingsFromControls(for: pdfView.toolMode)
+    }
+
+    private func resolvedToolSettingsFont() -> NSFont {
+        let family = toolSettingsFontPopup.titleOfSelectedItem ?? "Helvetica"
+        let rawSize = toolSettingsFontSizeField.doubleValue
+        let size = max(6.0, min(256.0, rawSize > 0 ? CGFloat(rawSize) : 15.0))
+        if Int(round(size)) != Int(round(rawSize)) {
+            toolSettingsFontSizeField.stringValue = "\(Int(round(size)))"
+        }
+        return resolveFont(family: family, size: size)
+    }
+
+    private func resolveFont(family: String, size: CGFloat) -> NSFont {
+        if let exact = NSFont(name: family, size: size) {
+            return exact
+        }
+        if let members = NSFontManager.shared.availableMembers(ofFontFamily: family),
+           let postScriptName = members.first?[0] as? String,
+           let resolved = NSFont(name: postScriptName, size: size) {
+            return resolved
+        }
+        return NSFont.systemFont(ofSize: size, weight: .medium)
     }
 
     private func updateToolSettingsUIForCurrentTool() {
@@ -4527,17 +5040,37 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             if annotationType.contains("freetext") {
                 toolSettingsStrokeTitleLabel.stringValue = "Background:"
                 toolSettingsFillTitleLabel.stringValue = "Text:"
+                toolSettingsFontTitleLabel.stringValue = "Font:"
                 toolSettingsFillRow.isHidden = false
+                toolSettingsFontRow.isHidden = false
                 toolSettingsWidthRow.isHidden = true
                 toolSettingsLineWidthPopup.isEnabled = false
                 let background = primary.color
                 toolSettingsStrokeColorWell.color = background.withAlphaComponent(1.0)
-                toolSettingsOpacitySlider.doubleValue = Double(background.alphaComponent)
+                toolSettingsOpacitySlider.doubleValue = 1.0
                 toolSettingsFillColorWell.color = (primary.fontColor ?? NSColor.labelColor).withAlphaComponent(1.0)
+                let font = primary.font ?? NSFont.systemFont(ofSize: 15, weight: .medium)
+                let family = font.familyName ?? font.fontName
+                if toolSettingsFontPopup.itemTitles.contains(family) {
+                    toolSettingsFontPopup.selectItem(withTitle: family)
+                }
+                toolSettingsFontSizeField.stringValue = "\(Int(round(font.pointSize)))"
+            } else if let snapshot = primary as? PDFSnapshotAnnotation {
+                toolSettingsStrokeTitleLabel.stringValue = "Linework:"
+                toolSettingsFillTitleLabel.stringValue = "Fill:"
+                toolSettingsFillRow.isHidden = true
+                toolSettingsFontRow.isHidden = true
+                toolSettingsWidthRow.isHidden = true
+                toolSettingsLineWidthPopup.isEnabled = false
+                toolSettingsStrokeColorWell.color = (snapshot.renderTintColor ?? NSColor.systemRed).withAlphaComponent(1.0)
+                toolSettingsOpacitySlider.doubleValue = Double(snapshot.renderOpacity)
+                snapshotColorizeButton.isHidden = false
+                snapshotColorizeButton.isEnabled = true
             } else {
                 toolSettingsStrokeTitleLabel.stringValue = "Color:"
                 toolSettingsFillTitleLabel.stringValue = "Fill:"
                 toolSettingsFillRow.isHidden = !(annotationType.contains("square") || annotationType.contains("circle"))
+                toolSettingsFontRow.isHidden = true
                 toolSettingsWidthRow.isHidden = false
                 toolSettingsLineWidthPopup.isEnabled = true
                 toolSettingsStrokeColorWell.color = primary.color.withAlphaComponent(1.0)
@@ -4551,33 +5084,49 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             }
 
             toolSettingsOpacityValueLabel.stringValue = "\(Int(round(toolSettingsOpacitySlider.doubleValue * 100)))%"
-            toolSettingsOpacitySlider.isEnabled = true
+            toolSettingsOpacitySlider.isEnabled = !annotationType.contains("freetext")
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = !toolSettingsFillRow.isHidden
+            toolSettingsFontPopup.isEnabled = !toolSettingsFontRow.isHidden
+            toolSettingsFontSizeField.isEnabled = !toolSettingsFontRow.isHidden
+            if !(primary is PDFSnapshotAnnotation) {
+                snapshotColorizeButton.isHidden = true
+                snapshotColorizeButton.isEnabled = false
+            }
             return
         }
 
         toolSettingsToolLabel.stringValue = "Active Tool: \(currentToolName())"
         toolSettingsOpacityValueLabel.stringValue = "\(Int(round(toolSettingsOpacitySlider.doubleValue * 100)))%"
+        snapshotColorizeButton.isHidden = true
+        snapshotColorizeButton.isEnabled = false
 
         switch pdfView.toolMode {
         case .grab:
             toolSettingsStrokeTitleLabel.stringValue = "Color:"
             toolSettingsFillTitleLabel.stringValue = "Fill:"
+            toolSettingsFontTitleLabel.stringValue = "Font:"
             toolSettingsFillRow.isHidden = true
+            toolSettingsFontRow.isHidden = true
             toolSettingsWidthRow.isHidden = true
             toolSettingsOpacitySlider.isEnabled = false
             toolSettingsStrokeColorWell.isEnabled = false
             toolSettingsFillColorWell.isEnabled = false
+            toolSettingsFontPopup.isEnabled = false
+            toolSettingsFontSizeField.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = false
         case .select:
             toolSettingsStrokeTitleLabel.stringValue = "Color:"
             toolSettingsFillTitleLabel.stringValue = "Fill:"
+            toolSettingsFontTitleLabel.stringValue = "Font:"
             toolSettingsFillRow.isHidden = true
+            toolSettingsFontRow.isHidden = true
             toolSettingsWidthRow.isHidden = true
             toolSettingsOpacitySlider.isEnabled = false
             toolSettingsStrokeColorWell.isEnabled = false
             toolSettingsFillColorWell.isEnabled = false
+            toolSettingsFontPopup.isEnabled = false
+            toolSettingsFontSizeField.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = false
         case .pen, .line, .polyline:
             toolSettingsStrokeColorWell.color = pdfView.penColor.withAlphaComponent(1.0)
@@ -4587,10 +5136,13 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             toolSettingsStrokeTitleLabel.stringValue = "Color:"
             toolSettingsFillTitleLabel.stringValue = "Fill:"
             toolSettingsFillRow.isHidden = true
+            toolSettingsFontRow.isHidden = true
             toolSettingsWidthRow.isHidden = false
             toolSettingsOpacitySlider.isEnabled = true
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = true
+            toolSettingsFontPopup.isEnabled = false
+            toolSettingsFontSizeField.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = true
         case .area:
             toolSettingsStrokeColorWell.color = pdfView.penColor.withAlphaComponent(1.0)
@@ -4600,10 +5152,13 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             toolSettingsStrokeTitleLabel.stringValue = "Color:"
             toolSettingsFillTitleLabel.stringValue = "Fill:"
             toolSettingsFillRow.isHidden = true
+            toolSettingsFontRow.isHidden = true
             toolSettingsWidthRow.isHidden = false
             toolSettingsOpacitySlider.isEnabled = true
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = true
+            toolSettingsFontPopup.isEnabled = false
+            toolSettingsFontSizeField.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = true
         case .highlighter:
             toolSettingsStrokeColorWell.color = pdfView.highlighterColor.withAlphaComponent(1.0)
@@ -4613,49 +5168,88 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             toolSettingsStrokeTitleLabel.stringValue = "Color:"
             toolSettingsFillTitleLabel.stringValue = "Fill:"
             toolSettingsFillRow.isHidden = true
+            toolSettingsFontRow.isHidden = true
             toolSettingsWidthRow.isHidden = false
             toolSettingsOpacitySlider.isEnabled = true
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = true
+            toolSettingsFontPopup.isEnabled = false
+            toolSettingsFontSizeField.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = true
         case .cloud, .rectangle:
             selectLineWeightLevel(for: pdfView.rectangleLineWidth, tool: .rectangle)
             toolSettingsStrokeTitleLabel.stringValue = "Stroke:"
             toolSettingsFillTitleLabel.stringValue = "Fill:"
             toolSettingsFillRow.isHidden = false
+            toolSettingsFontRow.isHidden = true
             toolSettingsWidthRow.isHidden = false
             toolSettingsOpacitySlider.isEnabled = true
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = true
+            toolSettingsFontPopup.isEnabled = false
+            toolSettingsFontSizeField.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = true
         case .text:
+            let state = toolSettingsByTool[.text] ?? defaultToolSettings(for: .text)
+            toolSettingsStrokeColorWell.color = state.strokeColor.withAlphaComponent(1.0)
+            toolSettingsFillColorWell.color = state.fillColor.withAlphaComponent(1.0)
+            let font = resolveFont(family: state.fontName, size: state.fontSize)
+            let family = font.familyName ?? state.fontName
+            if toolSettingsFontPopup.itemTitles.contains(family) {
+                toolSettingsFontPopup.selectItem(withTitle: family)
+            }
+            toolSettingsFontSizeField.stringValue = "\(Int(round(state.fontSize)))"
+            toolSettingsOpacitySlider.doubleValue = 1.0
+            toolSettingsOpacityValueLabel.stringValue = "100%"
             toolSettingsStrokeTitleLabel.stringValue = "Background:"
             toolSettingsFillTitleLabel.stringValue = "Text:"
+            toolSettingsFontTitleLabel.stringValue = "Font:"
             toolSettingsFillRow.isHidden = false
+            toolSettingsFontRow.isHidden = false
             toolSettingsWidthRow.isHidden = true
-            toolSettingsOpacitySlider.isEnabled = true
+            toolSettingsOpacitySlider.isEnabled = false
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = true
+            toolSettingsFontPopup.isEnabled = true
+            toolSettingsFontSizeField.isEnabled = true
             toolSettingsLineWidthPopup.isEnabled = false
         case .callout:
-            selectLineWeightLevel(for: pdfView.calloutLineWidth, tool: .callout)
+            let state = toolSettingsByTool[.callout] ?? defaultToolSettings(for: .callout)
+            toolSettingsStrokeColorWell.color = state.strokeColor.withAlphaComponent(1.0)
+            toolSettingsFillColorWell.color = state.fillColor.withAlphaComponent(1.0)
+            let font = resolveFont(family: state.fontName, size: state.fontSize)
+            let family = font.familyName ?? state.fontName
+            if toolSettingsFontPopup.itemTitles.contains(family) {
+                toolSettingsFontPopup.selectItem(withTitle: family)
+            }
+            toolSettingsFontSizeField.stringValue = "\(Int(round(state.fontSize)))"
+            toolSettingsOpacitySlider.doubleValue = 1.0
+            toolSettingsOpacityValueLabel.stringValue = "100%"
+            selectLineWeightLevel(for: widthValue(for: state.lineWeightLevel, tool: .callout), tool: .callout)
             toolSettingsStrokeTitleLabel.stringValue = "Leader:"
             toolSettingsFillTitleLabel.stringValue = "Text:"
+            toolSettingsFontTitleLabel.stringValue = "Font:"
             toolSettingsFillRow.isHidden = false
+            toolSettingsFontRow.isHidden = false
             toolSettingsWidthRow.isHidden = false
-            toolSettingsOpacitySlider.isEnabled = true
+            toolSettingsOpacitySlider.isEnabled = false
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = true
+            toolSettingsFontPopup.isEnabled = true
+            toolSettingsFontSizeField.isEnabled = true
             toolSettingsLineWidthPopup.isEnabled = true
         case .measure, .calibrate:
             selectLineWeightLevel(for: pdfView.measurementLineWidth, tool: .measure)
             toolSettingsStrokeTitleLabel.stringValue = "Line:"
             toolSettingsFillTitleLabel.stringValue = "Fill:"
             toolSettingsFillRow.isHidden = true
+            toolSettingsFontRow.isHidden = true
             toolSettingsWidthRow.isHidden = false
             toolSettingsOpacitySlider.isEnabled = true
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = true
+            toolSettingsFontPopup.isEnabled = false
+            toolSettingsFontSizeField.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = true
         }
     }
@@ -4689,6 +5283,126 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             return interpolateLevel(level, lowAt1: 1, midAt5: 2, highAt10: 4)
         case .select, .text:
             return 1
+        }
+    }
+
+    private func supportsStoredToolSettings(_ tool: ToolMode) -> Bool {
+        switch tool {
+        case .select, .grab:
+            return false
+        default:
+            return true
+        }
+    }
+
+    private func normalizedOpacity(_ value: CGFloat, for tool: ToolMode) -> CGFloat {
+        if tool == .text || tool == .callout {
+            return 1.0
+        }
+        return min(max(value, 0.0), 1.0)
+    }
+
+    private func defaultToolSettings(for tool: ToolMode) -> ToolSettingsState {
+        let defaultFontName = pdfView.textFontName
+        let defaultFontSize = max(6.0, pdfView.textFontSize)
+        switch tool {
+        case .pen:
+            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+        case .line:
+            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+        case .polyline:
+            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+        case .highlighter:
+            return ToolSettingsState(strokeColor: pdfView.highlighterColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.highlighterColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+        case .cloud:
+            return ToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+        case .rectangle:
+            return ToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+        case .text:
+            return ToolSettingsState(strokeColor: pdfView.textBackgroundColor.withAlphaComponent(1.0), fillColor: pdfView.textForegroundColor.withAlphaComponent(1.0), opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+        case .callout:
+            return ToolSettingsState(strokeColor: pdfView.calloutStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.textForegroundColor.withAlphaComponent(1.0), opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+        case .area:
+            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 1, fontName: defaultFontName, fontSize: defaultFontSize)
+        case .measure:
+            return ToolSettingsState(strokeColor: pdfView.measurementStrokeColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.measurementStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+        case .calibrate:
+            return ToolSettingsState(strokeColor: pdfView.calibrationStrokeColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.calibrationStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+        case .select, .grab:
+            return ToolSettingsState(strokeColor: .systemRed, fillColor: .systemYellow, opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize)
+        }
+    }
+
+    private func initializePerToolSettings() {
+        let tools: [ToolMode] = [.pen, .line, .polyline, .highlighter, .cloud, .rectangle, .text, .callout, .area, .measure, .calibrate]
+        for tool in tools {
+            toolSettingsByTool[tool] = defaultToolSettings(for: tool)
+        }
+    }
+
+    private func persistToolSettingsFromControls(for tool: ToolMode) {
+        guard supportsStoredToolSettings(tool), pdfView.toolMode != .select else { return }
+        var state = toolSettingsByTool[tool] ?? defaultToolSettings(for: tool)
+        state.strokeColor = toolSettingsStrokeColorWell.color.withAlphaComponent(1.0)
+        state.fillColor = toolSettingsFillColorWell.color.withAlphaComponent(1.0)
+        state.opacity = normalizedOpacity(CGFloat(toolSettingsOpacitySlider.doubleValue), for: tool)
+        state.lineWeightLevel = selectedLineWeightLevel()
+        let font = resolvedToolSettingsFont()
+        state.fontName = font.fontName
+        state.fontSize = font.pointSize
+        toolSettingsByTool[tool] = state
+    }
+
+    private func applyStoredToolSettings(to tool: ToolMode) {
+        guard supportsStoredToolSettings(tool) else { return }
+        let state = toolSettingsByTool[tool] ?? defaultToolSettings(for: tool)
+        let opacity = normalizedOpacity(state.opacity, for: tool)
+        let stroke = state.strokeColor.withAlphaComponent(opacity)
+        let fill = state.fillColor.withAlphaComponent(opacity)
+        switch tool {
+        case .pen:
+            pdfView.penColor = stroke
+            pdfView.penLineWidth = widthValue(for: state.lineWeightLevel, tool: .pen)
+        case .line:
+            pdfView.penColor = stroke
+            pdfView.penLineWidth = widthValue(for: state.lineWeightLevel, tool: .line)
+        case .polyline:
+            pdfView.penColor = stroke
+            pdfView.penLineWidth = widthValue(for: state.lineWeightLevel, tool: .polyline)
+        case .highlighter:
+            pdfView.highlighterColor = stroke
+            pdfView.highlighterLineWidth = widthValue(for: state.lineWeightLevel, tool: .highlighter)
+        case .cloud:
+            pdfView.rectangleStrokeColor = stroke
+            pdfView.rectangleFillColor = fill
+            pdfView.rectangleLineWidth = widthValue(for: state.lineWeightLevel, tool: .cloud)
+        case .rectangle:
+            pdfView.rectangleStrokeColor = stroke
+            pdfView.rectangleFillColor = fill
+            pdfView.rectangleLineWidth = widthValue(for: state.lineWeightLevel, tool: .rectangle)
+        case .text:
+            pdfView.textForegroundColor = state.fillColor.withAlphaComponent(1.0)
+            pdfView.textBackgroundColor = state.strokeColor.withAlphaComponent(1.0)
+            pdfView.textFontName = state.fontName
+            pdfView.textFontSize = state.fontSize
+        case .callout:
+            pdfView.calloutStrokeColor = state.strokeColor.withAlphaComponent(1.0)
+            pdfView.calloutLineWidth = widthValue(for: state.lineWeightLevel, tool: .callout)
+            pdfView.textForegroundColor = state.fillColor.withAlphaComponent(1.0)
+            pdfView.textBackgroundColor = state.strokeColor.withAlphaComponent(1.0)
+            pdfView.textFontName = state.fontName
+            pdfView.textFontSize = state.fontSize
+        case .area:
+            pdfView.penColor = stroke
+            pdfView.areaLineWidth = widthValue(for: state.lineWeightLevel, tool: .area)
+        case .measure:
+            pdfView.measurementStrokeColor = stroke
+            pdfView.measurementLineWidth = widthValue(for: state.lineWeightLevel, tool: .measure)
+        case .calibrate:
+            pdfView.calibrationStrokeColor = stroke
+            pdfView.measurementLineWidth = widthValue(for: state.lineWeightLevel, tool: .calibrate)
+        case .select, .grab:
+            break
         }
     }
 
