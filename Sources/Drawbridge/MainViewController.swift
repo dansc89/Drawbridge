@@ -43,6 +43,21 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let sheetNumber: String
         let sheetTitle: String
     }
+    private enum AnnotationReorderAction: String {
+        case bringToFront
+        case sendToBack
+        case bringForward
+        case sendBackward
+
+        var undoTitle: String {
+            switch self {
+            case .bringToFront: return "Bring Markup to Front"
+            case .sendToBack: return "Send Markup to Back"
+            case .bringForward: return "Bring Markup Forward"
+            case .sendBackward: return "Send Markup Backward"
+            }
+        }
+    }
     private enum AutoNameCapturePhase {
         case sheetNumber
         case sheetTitle
@@ -55,6 +70,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         var fontName: String
         var fontSize: CGFloat
         var calloutArrowStyleRawValue: Int
+    }
+    private enum SearchHit {
+        case document(selection: PDFSelection, pageIndex: Int, preview: String)
+        case markup(pageIndex: Int, annotation: PDFAnnotation, preview: String)
     }
 
     private let lineWeightLevels = Array(1...10)
@@ -89,6 +108,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let navigationResizeHandle = NavigationResizeHandleView(frame: .zero)
     private let navigationTitleLabel = NSTextField(labelWithString: "Navigation")
     private let navigationModeControl = NSSegmentedControl(labels: ["Pages", "Bookmarks"], trackingMode: .selectOne, target: nil, action: nil)
+    private let addPageButton = NSButton(title: "", target: nil, action: nil)
     private let pagesTableView = NSTableView(frame: .zero)
     private let thumbnailView = PDFThumbnailView(frame: .zero)
     private let thumbnailScrollView = NSScrollView(frame: .zero)
@@ -125,6 +145,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let measureLabel = NSTextField(labelWithString: "Measure:")
     private let toolbarControlsStack = NSStackView(frame: .zero)
     private let secondaryToolbarControlsStack = NSStackView(frame: .zero)
+    private let toolbarSearchField = NSSearchField(frame: .zero)
+    private let toolbarSearchPrevButton = NSButton(title: "", target: nil, action: nil)
+    private let toolbarSearchNextButton = NSButton(title: "", target: nil, action: nil)
+    private let toolbarSearchCountLabel = NSTextField(labelWithString: "")
+    private var searchPanel: NSPanel?
     private let documentTabsBar = NSView(frame: .zero)
     private let documentTabsStack = NSStackView(frame: .zero)
     private let statusBar = NSView(frame: .zero)
@@ -192,6 +217,19 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         ]
         return layer
     }()
+    private let selectedTextOverlayLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.strokeColor = NSColor.systemBlue.cgColor
+        layer.fillColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
+        layer.lineWidth = 2.25
+        layer.zPosition = 21
+        layer.isHidden = true
+        layer.actions = [
+            "path": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
     var markupItems: [MarkupItem] = []
     private var markupsTimer: Timer?
     private var scrollEventMonitor: Any?
@@ -206,6 +244,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var autosaveURL: URL?
     private var pendingAutosaveWorkItem: DispatchWorkItem?
     private var pendingMarkupsRefreshWorkItem: DispatchWorkItem?
+    private var pendingSearchWorkItem: DispatchWorkItem?
+    private var searchHits: [SearchHit] = []
+    private var searchHitIndex: Int = -1
     private var markupsScanGeneration = 0
     private var cachedMarkupDocumentID: ObjectIdentifier?
     private var pageMarkupCache: [Int: [MarkupItem]] = [:]
@@ -533,6 +574,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             self?.ensureWorkingCopyBeforeFirstMarkup() ?? true
         }
         pdfView.layer?.addSublayer(selectedMarkupOverlayLayer)
+        pdfView.layer?.addSublayer(selectedTextOverlayLayer)
 
         view.addSubview(splitView)
         view.addSubview(documentTabsBar)
@@ -686,6 +728,27 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         navigationModeControl.controlSize = .small
         navigationModeControl.target = self
         navigationModeControl.action = #selector(changeNavigationMode)
+        if let plus = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Page") {
+            addPageButton.image = plus
+            addPageButton.title = ""
+            addPageButton.imagePosition = .imageOnly
+        } else {
+            addPageButton.title = "+"
+            addPageButton.image = nil
+            addPageButton.imagePosition = .noImage
+        }
+        addPageButton.bezelStyle = .texturedRounded
+        addPageButton.controlSize = .small
+        addPageButton.toolTip = "Add Page"
+        addPageButton.target = self
+        addPageButton.action = #selector(addPageFromNavigation)
+        addPageButton.setContentHuggingPriority(.required, for: .horizontal)
+        addPageButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let pagesControlRow = NSStackView(views: [navigationModeControl, NSView(), addPageButton])
+        pagesControlRow.orientation = .horizontal
+        pagesControlRow.spacing = 6
+        pagesControlRow.alignment = .centerY
 
         let pagesColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("pages"))
         pagesColumn.title = "Pages"
@@ -760,7 +823,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         let stack = NSStackView(views: [
             navigationTitleLabel,
-            navigationModeControl,
+            pagesControlRow,
             thumbnailScrollView,
             thumbnailsEmptyLabel,
             bookmarksScrollView,
@@ -792,6 +855,102 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         thumbnailsEmptyLabel.isHidden = !showingPages || (pdfView.document != nil)
         bookmarksScrollView.isHidden = showingPages
         bookmarksEmptyLabel.isHidden = showingPages || !(bookmarksOutlineView.numberOfRows == 0)
+        addPageButton.isHidden = !showingPages
+        addPageButton.isEnabled = showingPages && (pdfView.document != nil)
+    }
+
+    @objc private func addPageFromNavigation() {
+        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
+        guard let document = pdfView.document else {
+            NSSound.beep()
+            return
+        }
+        guard let targetSize = preferredPageSizeForInsertion(in: document) else {
+            return
+        }
+        let page = makeBlankPDFPage(size: targetSize)
+        document.insert(page, at: max(0, document.pageCount))
+        markMarkupChanged()
+        scheduleAutosave()
+        refreshMarkups()
+        reloadBookmarks()
+        pdfView.go(to: page)
+        updateStatusBar()
+        refreshRulers()
+    }
+
+    private func preferredPageSizeForInsertion(in document: PDFDocument) -> NSSize? {
+        var unique: [(size: NSSize, label: String, representativeIndex: Int)] = []
+        func signature(for size: NSSize) -> String {
+            let w = (size.width * 10.0).rounded() / 10.0
+            let h = (size.height * 10.0).rounded() / 10.0
+            return "\(w)x\(h)"
+        }
+        var seen = Set<String>()
+        for index in 0..<document.pageCount {
+            guard let page = document.page(at: index) else { continue }
+            let bounds = page.bounds(for: .mediaBox)
+            let size = NSSize(width: max(1.0, bounds.width), height: max(1.0, bounds.height))
+            let key = signature(for: size)
+            if seen.insert(key).inserted {
+                let label = "Page \(index + 1): \(formatInches(size.width / 72.0)) x \(formatInches(size.height / 72.0))"
+                unique.append((size: size, label: label, representativeIndex: index))
+            }
+        }
+
+        if unique.isEmpty {
+            return NSSize(width: 612, height: 792)
+        }
+        if unique.count == 1 {
+            return unique[0].size
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "This PDF has mixed page sizes"
+        alert.informativeText = "Choose the page size for the new page."
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 24), pullsDown: false)
+        popup.addItems(withTitles: unique.map(\.label))
+        if let current = pdfView.currentPage {
+            let currentIndex = max(0, document.index(for: current))
+            if let preferred = unique.firstIndex(where: { $0.representativeIndex == currentIndex }) {
+                popup.selectItem(at: preferred)
+            }
+        }
+        alert.accessoryView = popup
+        alert.addButton(withTitle: "Add Page")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return nil
+        }
+        let selected = max(0, popup.indexOfSelectedItem)
+        return unique[min(selected, unique.count - 1)].size
+    }
+
+    private func makeBlankPDFPage(size: NSSize) -> PDFPage {
+        let safeSize = NSSize(width: max(1, size.width), height: max(1, size.height))
+        let image = NSImage(size: safeSize)
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSBezierPath(rect: NSRect(origin: .zero, size: safeSize)).fill()
+        image.unlockFocus()
+        if let page = PDFPage(image: image) {
+            return page
+        }
+        let fallbackImage = NSImage(size: NSSize(width: 612, height: 792))
+        fallbackImage.lockFocus()
+        NSColor.white.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 612, height: 792)).fill()
+        fallbackImage.unlockFocus()
+        if let fallbackPage = PDFPage(image: fallbackImage) {
+            return fallbackPage
+        }
+        let tiny = NSImage(size: NSSize(width: 1, height: 1))
+        tiny.lockFocus()
+        NSColor.white.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 1, height: 1)).fill()
+        tiny.unlockFocus()
+        return PDFPage(image: tiny)!
     }
 
     private func reloadBookmarks() {
@@ -1183,6 +1342,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         menu.item(at: menu.numberOfItems - 1)?.keyEquivalentModifierMask = []
         menu.addItem(withTitle: editMarkupButton.title, action: editMarkupButton.action, keyEquivalent: "e")
         menu.item(at: menu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command]
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(withTitle: "Bring to Front", action: #selector(commandBringMarkupToFront(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Send to Back", action: #selector(commandSendMarkupToBack(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Bring Forward", action: #selector(commandBringMarkupForward(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Send Backward", action: #selector(commandSendMarkupBackward(_:)), keyEquivalent: "")
 
         for item in menu.items {
             item.target = self
@@ -1706,6 +1870,34 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             toolbarControlsStack.addArrangedSubview(toolSelector)
         }
 
+        toolbarSearchField.placeholderString = "Search document + markups"
+        toolbarSearchField.sendsWholeSearchString = false
+        toolbarSearchField.maximumRecents = 0
+        toolbarSearchField.recentsAutosaveName = nil
+        toolbarSearchField.target = self
+        toolbarSearchField.action = #selector(searchFieldChanged)
+        toolbarSearchField.translatesAutoresizingMaskIntoConstraints = false
+        toolbarSearchField.widthAnchor.constraint(equalToConstant: 330).isActive = true
+        toolbarSearchPrevButton.title = "◀"
+        toolbarSearchPrevButton.bezelStyle = .texturedRounded
+        toolbarSearchPrevButton.target = self
+        toolbarSearchPrevButton.action = #selector(selectPreviousSearchHit)
+        toolbarSearchPrevButton.toolTip = "Previous Result"
+        toolbarSearchPrevButton.setButtonType(.momentaryPushIn)
+        toolbarSearchPrevButton.controlSize = .small
+        toolbarSearchNextButton.title = "▶"
+        toolbarSearchNextButton.bezelStyle = .texturedRounded
+        toolbarSearchNextButton.target = self
+        toolbarSearchNextButton.action = #selector(selectNextSearchHit)
+        toolbarSearchNextButton.toolTip = "Next Result"
+        toolbarSearchNextButton.setButtonType(.momentaryPushIn)
+        toolbarSearchNextButton.controlSize = .small
+        toolbarSearchCountLabel.textColor = .secondaryLabelColor
+        toolbarSearchCountLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        toolbarSearchCountLabel.stringValue = "0"
+        ensureSearchPanel()
+        updateSearchControlsState()
+
         secondaryToolbarControlsStack.orientation = .horizontal
         secondaryToolbarControlsStack.spacing = 10
         secondaryToolbarControlsStack.alignment = .centerY
@@ -1939,11 +2131,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.drawbridgePrimaryControls, .flexibleSpace, .space, .drawbridgeSecondaryControls]
+        [.drawbridgePrimaryControls, .drawbridgeSecondaryControls, .flexibleSpace, .space]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.drawbridgePrimaryControls, .flexibleSpace, .space, .drawbridgeSecondaryControls]
+        [.drawbridgePrimaryControls, .flexibleSpace, .drawbridgeSecondaryControls]
     }
 
     func toolbar(
@@ -1963,6 +2155,41 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return item
         }
         return nil
+    }
+
+    private func ensureSearchPanel() {
+        guard searchPanel == nil else { return }
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 56),
+            styleMask: [.titled, .closable, .utilityWindow],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Find"
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.level = .floating
+        panel.collectionBehavior = [.fullScreenAuxiliary]
+        panel.center()
+
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 56))
+        content.translatesAutoresizingMaskIntoConstraints = false
+        panel.contentView = content
+
+        let row = NSStackView(views: [toolbarSearchField, toolbarSearchPrevButton, toolbarSearchNextButton, toolbarSearchCountLabel])
+        row.orientation = .horizontal
+        row.spacing = 8
+        row.alignment = .centerY
+        row.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(row)
+
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: content.topAnchor, constant: 10),
+            row.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            row.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            row.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10)
+        ])
+        searchPanel = panel
     }
 
     private func buildMarkupsSidebar() -> NSView {
@@ -3377,6 +3604,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         lastMarkupEditAt = Date()
         lastUserInteractionAt = Date()
         view.window?.isDocumentEdited = true
+        refreshSearchIfNeeded()
     }
 
     private func promptInitialMarkupSaveCopyIfNeeded() {
@@ -3974,7 +4202,22 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     @objc func commandHighlight(_ sender: Any?) { highlightSelection() }
     @objc func commandRefreshMarkups(_ sender: Any?) { refreshMarkups() }
     @objc func commandDeleteMarkup(_ sender: Any?) { deleteSelectedMarkup() }
+    @objc func commandBringMarkupToFront(_ sender: Any?) { reorderSelectedMarkups(.bringToFront) }
+    @objc func commandSendMarkupToBack(_ sender: Any?) { reorderSelectedMarkups(.sendToBack) }
+    @objc func commandBringMarkupForward(_ sender: Any?) { reorderSelectedMarkups(.bringForward) }
+    @objc func commandSendMarkupBackward(_ sender: Any?) { reorderSelectedMarkups(.sendBackward) }
     @objc func commandSelectAll(_ sender: Any?) {
+        if pdfView.selectAllInlineTextIfEditing() {
+            return
+        }
+        if let textField = view.window?.firstResponder as? NSTextField {
+            textField.currentEditor()?.selectAll(nil)
+            return
+        }
+        if let textView = view.window?.firstResponder as? NSTextView {
+            textView.selectAll(nil)
+            return
+        }
         guard let document = pdfView.document, let page = pdfView.currentPage else {
             NSSound.beep()
             return
@@ -4002,6 +4245,23 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     @objc func commandEditMarkup(_ sender: Any?) { editSelectedMarkupText() }
     @objc func commandToggleSidebar(_ sender: Any?) { toggleSidebar() }
     @objc func commandQuickStart(_ sender: Any?) { showQuickStartGuide() }
+    @objc func commandFocusSearch(_ sender: Any?) {
+        guard pdfView.document != nil else {
+            NSSound.beep()
+            return
+        }
+        ensureSearchPanel()
+        if let panel = searchPanel {
+            if let window = view.window {
+                window.addChildWindow(panel, ordered: .above)
+            }
+            panel.makeKeyAndOrderFront(nil)
+            panel.orderFrontRegardless()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        searchPanel?.makeFirstResponder(toolbarSearchField)
+        toolbarSearchField.currentEditor()?.selectAll(nil)
+    }
     @objc func commandZoomIn(_ sender: Any?) { zoom(by: 1.12) }
     @objc func commandZoomOut(_ sender: Any?) { zoom(by: 1.0 / 1.12) }
     @objc func commandPreviousPage(_ sender: Any?) { navigatePage(delta: -1) }
@@ -4069,7 +4329,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if action == #selector(commandDeleteMarkup(_:)) || action == #selector(commandEditMarkup(_:)) {
             return hasSelection
         }
+        if action == #selector(commandBringMarkupToFront(_:)) ||
+            action == #selector(commandSendMarkupToBack(_:)) ||
+            action == #selector(commandBringMarkupForward(_:)) ||
+            action == #selector(commandSendMarkupBackward(_:)) {
+            return hasSelection
+        }
         if action == #selector(commandSelectAll(_:)) {
+            return hasDocument
+        }
+        if action == #selector(commandFocusSearch(_:)) {
             return hasDocument
         }
         if action == #selector(selectSelectionTool(_:)) ||
@@ -4305,6 +4574,110 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         undo.setActionName(actionName)
     }
 
+    private func reorderSelectedMarkups(_ action: AnnotationReorderAction) {
+        guard let document = pdfView.document else {
+            NSSound.beep()
+            return
+        }
+        let selectedItems = currentSelectedMarkupItems()
+        guard !selectedItems.isEmpty else {
+            NSSound.beep()
+            return
+        }
+
+        var groupedByPage: [ObjectIdentifier: (page: PDFPage, ids: Set<ObjectIdentifier>)] = [:]
+        for item in selectedItems {
+            guard let page = document.page(at: item.pageIndex) else { continue }
+            let pageID = ObjectIdentifier(page)
+            if groupedByPage[pageID] == nil {
+                groupedByPage[pageID] = (page, [])
+            }
+            groupedByPage[pageID]?.ids.insert(ObjectIdentifier(item.annotation))
+            for sibling in relatedCalloutAnnotations(for: item.annotation, on: page) {
+                groupedByPage[pageID]?.ids.insert(ObjectIdentifier(sibling))
+            }
+        }
+
+        var changedAny = false
+        var firstSelected: PDFAnnotation?
+        for (_, group) in groupedByPage {
+            let page = group.page
+            let before = page.annotations
+            let after = reorderedAnnotations(before, selectedIDs: group.ids, action: action)
+            guard !before.elementsEqual(after, by: { $0 === $1 }) else { continue }
+            applyAnnotationOrder(after, on: page)
+            registerAnnotationOrderUndo(page: page, before: before, after: after, actionName: action.undoTitle)
+            markPageMarkupCacheDirty(page)
+            changedAny = true
+            if firstSelected == nil {
+                firstSelected = after.first(where: { group.ids.contains(ObjectIdentifier($0)) })
+            }
+        }
+
+        guard changedAny else {
+            NSSound.beep()
+            return
+        }
+        markMarkupChanged()
+        performRefreshMarkups(selecting: firstSelected ?? currentSelectedAnnotation())
+        scheduleAutosave()
+    }
+
+    private func reorderedAnnotations(_ annotations: [PDFAnnotation], selectedIDs: Set<ObjectIdentifier>, action: AnnotationReorderAction) -> [PDFAnnotation] {
+        guard !annotations.isEmpty, !selectedIDs.isEmpty else { return annotations }
+        let isSelected: (PDFAnnotation) -> Bool = { selectedIDs.contains(ObjectIdentifier($0)) }
+        switch action {
+        case .bringToFront:
+            let others = annotations.filter { !isSelected($0) }
+            let selected = annotations.filter(isSelected)
+            return others + selected
+        case .sendToBack:
+            let selected = annotations.filter(isSelected)
+            let others = annotations.filter { !isSelected($0) }
+            return selected + others
+        case .bringForward:
+            var ordered = annotations
+            guard ordered.count > 1 else { return ordered }
+            for i in stride(from: ordered.count - 2, through: 0, by: -1) {
+                if isSelected(ordered[i]) && !isSelected(ordered[i + 1]) {
+                    ordered.swapAt(i, i + 1)
+                }
+            }
+            return ordered
+        case .sendBackward:
+            var ordered = annotations
+            guard ordered.count > 1 else { return ordered }
+            for i in 1..<ordered.count {
+                if isSelected(ordered[i]) && !isSelected(ordered[i - 1]) {
+                    ordered.swapAt(i - 1, i)
+                }
+            }
+            return ordered
+        }
+    }
+
+    private func applyAnnotationOrder(_ ordered: [PDFAnnotation], on page: PDFPage) {
+        for existing in page.annotations {
+            page.removeAnnotation(existing)
+        }
+        for annotation in ordered {
+            page.addAnnotation(annotation)
+        }
+    }
+
+    private func registerAnnotationOrderUndo(page: PDFPage, before: [PDFAnnotation], after: [PDFAnnotation], actionName: String) {
+        guard let undo = activeUndoManager() else { return }
+        undo.registerUndo(withTarget: self) { target in
+            target.applyAnnotationOrder(before, on: page)
+            target.markPageMarkupCacheDirty(page)
+            target.markMarkupChanged()
+            target.performRefreshMarkups(selecting: before.first)
+            target.scheduleAutosave()
+            target.registerAnnotationOrderUndo(page: page, before: after, after: before, actionName: actionName)
+        }
+        undo.setActionName(actionName)
+    }
+
 
     private func openDocument(at url: URL) {
         cancelAutoNameCapture()
@@ -4332,6 +4705,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         openDocumentURL = url
         registerSessionDocument(url)
         configureAutosaveURL(for: url)
+        resetSearchState(clearQuery: false)
+        refreshSearchIfNeeded()
         if let snapshot = loadMarkupIndexSnapshot(for: url), snapshot.pageCount == document.pageCount {
             markupsCountLabel.stringValue = "Indexed \(snapshot.totalAnnotations) (refreshing…)"
         }
@@ -4559,6 +4934,8 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         pendingAutosaveWorkItem = nil
         pendingMarkupsRefreshWorkItem?.cancel()
         pendingMarkupsRefreshWorkItem = nil
+        pendingSearchWorkItem?.cancel()
+        pendingSearchWorkItem = nil
         autosaveURL = nil
         autosaveInFlight = false
         autosaveQueued = false
@@ -4569,6 +4946,7 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         markupsTable.deselectAll(nil)
         selectedMarkupOverlayLayer.isHidden = true
         refreshMarkups()
+        resetSearchState(clearQuery: true)
         view.window?.title = "Drawbridge"
         view.window?.isDocumentEdited = false
         updateEmptyStateVisibility()
@@ -4861,18 +5239,22 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
         let selectedItems = currentSelectedMarkupItems()
         guard !selectedItems.isEmpty else {
             selectedMarkupOverlayLayer.isHidden = true
+            selectedTextOverlayLayer.isHidden = true
             return
         }
 
-        let path = CGMutablePath()
-        var addedAny = false
+        let genericPath = CGMutablePath()
+        let textPath = CGMutablePath()
+        var addedGeneric = false
+        var addedText = false
         for item in selectedItems {
             guard let page = pdfView.document?.page(at: item.pageIndex) else { continue }
             let bounds = item.annotation.bounds
             let p1 = pdfView.convert(bounds.origin, from: page)
             let p2 = pdfView.convert(NSPoint(x: bounds.maxX, y: bounds.maxY), from: page)
             let annotationType = (item.annotation.type ?? "").lowercased()
-            let overlayInset: CGFloat = annotationType.contains("ink") ? -1 : -3
+            let isFreeText = annotationType.contains("freetext")
+            let overlayInset: CGFloat = isFreeText ? -4 : (annotationType.contains("ink") ? -1 : -3)
             let rect = NSRect(
                 x: min(p1.x, p2.x),
                 y: min(p1.y, p2.y),
@@ -4881,10 +5263,15 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             ).insetBy(dx: overlayInset, dy: overlayInset)
 
             guard rect.width > 2, rect.height > 2 else { continue }
-            addedAny = true
-            path.addRoundedRect(in: rect, cornerWidth: 4, cornerHeight: 4)
+            if isFreeText {
+                addedText = true
+                textPath.addRoundedRect(in: rect, cornerWidth: 6, cornerHeight: 6)
+            } else {
+                addedGeneric = true
+                genericPath.addRoundedRect(in: rect, cornerWidth: 4, cornerHeight: 4)
+            }
 
-            let handleSize: CGFloat = 6
+            let handleSize: CGFloat = isFreeText ? 8 : 6
             let handles = [
                 NSRect(x: rect.minX - handleSize * 0.5, y: rect.minY - handleSize * 0.5, width: handleSize, height: handleSize),
                 NSRect(x: rect.maxX - handleSize * 0.5, y: rect.minY - handleSize * 0.5, width: handleSize, height: handleSize),
@@ -4892,17 +5279,18 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
                 NSRect(x: rect.maxX - handleSize * 0.5, y: rect.maxY - handleSize * 0.5, width: handleSize, height: handleSize)
             ]
             for h in handles {
-                path.addRect(h)
+                if isFreeText {
+                    textPath.addEllipse(in: h)
+                } else {
+                    genericPath.addRect(h)
+                }
             }
         }
 
-        guard addedAny else {
-            selectedMarkupOverlayLayer.isHidden = true
-            return
-        }
-
-        selectedMarkupOverlayLayer.path = path
-        selectedMarkupOverlayLayer.isHidden = false
+        selectedMarkupOverlayLayer.path = genericPath
+        selectedMarkupOverlayLayer.isHidden = !addedGeneric
+        selectedTextOverlayLayer.path = textPath
+        selectedTextOverlayLayer.isHidden = !addedText
     }
 
     private func selectMarkupsFromFence(page: PDFPage, annotations: [PDFAnnotation]) {
@@ -6184,6 +6572,176 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
             text = text.replacingOccurrences(of: "  ", with: " ")
         }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @objc private func searchFieldChanged() {
+        scheduleSearchRefresh()
+    }
+
+    @objc private func selectNextSearchHit() {
+        guard !searchHits.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        searchHitIndex = (searchHitIndex + 1) % searchHits.count
+        revealCurrentSearchHit()
+    }
+
+    @objc private func selectPreviousSearchHit() {
+        guard !searchHits.isEmpty else {
+            NSSound.beep()
+            return
+        }
+        searchHitIndex = (searchHitIndex - 1 + searchHits.count) % searchHits.count
+        revealCurrentSearchHit()
+    }
+
+    private func scheduleSearchRefresh() {
+        pendingSearchWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            self?.runUnifiedSearchNow()
+        }
+        pendingSearchWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: item)
+    }
+
+    private func refreshSearchIfNeeded() {
+        let query = toolbarSearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return }
+        scheduleSearchRefresh()
+    }
+
+    private func resetSearchState(clearQuery: Bool = false) {
+        pendingSearchWorkItem?.cancel()
+        pendingSearchWorkItem = nil
+        searchHits.removeAll()
+        searchHitIndex = -1
+        if clearQuery {
+            toolbarSearchField.stringValue = ""
+        }
+        if pdfView.currentSelection != nil {
+            pdfView.setCurrentSelection(nil, animate: false)
+        }
+        updateSearchControlsState()
+    }
+
+    private func runUnifiedSearchNow() {
+        pendingSearchWorkItem?.cancel()
+        pendingSearchWorkItem = nil
+        guard let document = pdfView.document else {
+            resetSearchState(clearQuery: false)
+            return
+        }
+
+        let query = toolbarSearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            resetSearchState(clearQuery: false)
+            return
+        }
+
+        let loweredQuery = query.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        var hits: [SearchHit] = []
+        hits.reserveCapacity(256)
+
+        // Markup-text search: fast pass through annotation contents across the full PDF.
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            for annotation in page.annotations {
+                guard let raw = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !raw.isEmpty else { continue }
+                let normalized = raw.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                guard normalized.contains(loweredQuery) else { continue }
+                hits.append(.markup(pageIndex: pageIndex, annotation: annotation, preview: raw))
+                if hits.count >= 2500 { break }
+            }
+            if hits.count >= 2500 { break }
+        }
+
+        // Document-text search: iterate PDFKit selections with cap for responsiveness.
+        let options: NSString.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        var cursor: PDFSelection?
+        var seenSelectionKeys = Set<String>()
+        var textHitCount = 0
+        while textHitCount < 1500,
+              let match = document.findString(query, fromSelection: cursor, withOptions: options),
+              let page = match.pages.first {
+            let pageIndex = document.index(for: page)
+            let bounds = match.bounds(for: page).integral
+            let key = "\(pageIndex)|\(bounds.origin.x)|\(bounds.origin.y)|\(bounds.width)|\(bounds.height)"
+            if seenSelectionKeys.contains(key) {
+                break
+            }
+            seenSelectionKeys.insert(key)
+            let preview = match.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? query
+            hits.append(.document(selection: match, pageIndex: max(0, pageIndex), preview: preview))
+            cursor = match
+            textHitCount += 1
+            if hits.count >= 2500 { break }
+        }
+
+        hits.sort { lhs, rhs in
+            let l: Int
+            let r: Int
+            switch lhs {
+            case let .document(_, pageIndex, _): l = pageIndex
+            case let .markup(pageIndex, _, _): l = pageIndex
+            }
+            switch rhs {
+            case let .document(_, pageIndex, _): r = pageIndex
+            case let .markup(pageIndex, _, _): r = pageIndex
+            }
+            return l < r
+        }
+
+        searchHits = hits
+        searchHitIndex = hits.isEmpty ? -1 : 0
+        updateSearchControlsState()
+        if !hits.isEmpty {
+            revealCurrentSearchHit()
+        }
+    }
+
+    private func revealCurrentSearchHit() {
+        guard searchHitIndex >= 0, searchHitIndex < searchHits.count else {
+            updateSearchControlsState()
+            return
+        }
+        switch searchHits[searchHitIndex] {
+        case let .document(selection, _, preview):
+            pdfView.go(to: selection)
+            pdfView.setCurrentSelection(selection, animate: true)
+            updateSearchControlsState(overridePreview: preview)
+        case let .markup(pageIndex, annotation, preview):
+            if let page = pdfView.document?.page(at: pageIndex) {
+                let destination = PDFDestination(page: page, at: NSPoint(x: annotation.bounds.minX, y: annotation.bounds.maxY))
+                pdfView.go(to: destination)
+                selectMarkupFromPageClick(page: page, annotation: annotation)
+            }
+            updateSearchControlsState(overridePreview: preview)
+        }
+    }
+
+    private func updateSearchControlsState(overridePreview: String? = nil) {
+        let hasDocument = (pdfView.document != nil)
+        toolbarSearchField.isEnabled = hasDocument
+        let hasResults = !searchHits.isEmpty
+        toolbarSearchPrevButton.isEnabled = hasResults
+        toolbarSearchNextButton.isEnabled = hasResults
+
+        if hasResults, searchHitIndex >= 0 {
+            let index = min(searchHitIndex + 1, searchHits.count)
+            toolbarSearchCountLabel.stringValue = "\(index)/\(searchHits.count)"
+            let preview = (overridePreview ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !preview.isEmpty {
+                toolbarSearchCountLabel.toolTip = preview
+            } else {
+                toolbarSearchCountLabel.toolTip = nil
+            }
+        } else {
+            let hasQuery = !toolbarSearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            toolbarSearchCountLabel.stringValue = hasQuery ? "0" : ""
+            toolbarSearchCountLabel.toolTip = nil
+        }
     }
 
 

@@ -77,6 +77,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var inlineTextPage: PDFPage?
     private var inlineTextAnchorInPage: NSPoint?
     private var inlineLiveTextAnnotation: PDFAnnotation?
+    private var inlineAnnotationWasDisplayed = true
     private var inlineEditingExistingAnnotation = false
     private var inlineOriginalTextContents: String?
     private var movingAnnotation: PDFAnnotation?
@@ -138,6 +139,20 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         ]
         return layer
     }()
+    private let textEditCaretLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.strokeColor = NSColor.systemBlue.cgColor
+        layer.fillColor = NSColor.clear.cgColor
+        layer.lineWidth = 1.25
+        layer.zPosition = 25
+        layer.isHidden = true
+        layer.actions = [
+            "path": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
+    private var textEditCaretTimer: Timer?
     private var isGridVisible = false
     private let gridSpacingInPoints: CGFloat = 24.0
     private let maxGridLinesPerAxis = 400
@@ -148,6 +163,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         layer?.addSublayer(gridOverlayLayer)
         layer?.addSublayer(dragPreviewLayer)
         layer?.addSublayer(dropHighlightLayer)
+        layer?.addSublayer(textEditCaretLayer)
         autoScales = true
         displayMode = .singlePage
         displayDirection = .vertical
@@ -1262,12 +1278,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return
         }
 
-        // Use an offscreen capture field so typing updates only the live PDF annotation.
-        let field = NSTextField(frame: NSRect(x: -10_000, y: -10_000, width: 1, height: 1))
+        let field = NSTextField(frame: .zero)
         let resolvedFont = NSFont(name: textFontName, size: max(6.0, textFontSize))
             ?? NSFont.systemFont(ofSize: max(6.0, textFontSize), weight: .regular)
         field.font = resolvedFont
-        field.textColor = .clear
+        field.textColor = textForegroundColor
         field.drawsBackground = false
         field.isBordered = false
         field.isBezeled = false
@@ -1295,6 +1310,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         page.addAnnotation(annotation)
         inlineLiveTextAnnotation = annotation
+        inlineAnnotationWasDisplayed = annotation.shouldDisplay
+        annotation.shouldDisplay = false
+        field.frame = inlineEditorFrame(for: annotation, on: page)
+        startTextEditCaretBlink(for: annotation, page: page)
 
         window?.makeFirstResponder(field)
     }
@@ -1306,12 +1325,12 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return
         }
 
-        let field = NSTextField(frame: NSRect(x: -10_000, y: -10_000, width: 1, height: 1))
+        let field = NSTextField(frame: .zero)
         let size = max(6.0, annotation.font?.pointSize ?? textFontSize)
         let resolvedFont = NSFont(name: textFontName, size: size)
             ?? NSFont.systemFont(ofSize: size, weight: .regular)
         field.font = resolvedFont
-        field.textColor = .clear
+        field.textColor = annotation.fontColor ?? textForegroundColor
         field.drawsBackground = false
         field.isBordered = false
         field.isBezeled = false
@@ -1326,10 +1345,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         inlineLiveTextAnnotation = annotation
         inlineEditingExistingAnnotation = true
         inlineOriginalTextContents = annotation.contents ?? ""
+        inlineAnnotationWasDisplayed = annotation.shouldDisplay
+        annotation.shouldDisplay = false
+        field.frame = inlineEditorFrame(for: annotation, on: page)
+        startTextEditCaretBlink(for: annotation, page: page)
 
         window?.makeFirstResponder(field)
         if let editor = window?.fieldEditor(true, for: field) as? NSTextView {
-            editor.selectAll(nil)
+            let end = (field.stringValue as NSString).length
+            editor.setSelectedRange(NSRange(location: end, length: 0))
         }
     }
 
@@ -1338,6 +1362,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let wasEditingExisting = inlineEditingExistingAnnotation
         let originalText = inlineOriginalTextContents
         defer {
+            stopTextEditCaretBlink()
             field.removeFromSuperview()
             inlineTextField = nil
             inlineTextPage = nil
@@ -1354,6 +1379,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             if let annotation {
                 if wasEditingExisting {
                     annotation.contents = originalText
+                    annotation.shouldDisplay = inlineAnnotationWasDisplayed
                 } else {
                     page.removeAnnotation(annotation)
                 }
@@ -1366,12 +1392,14 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         if text.isEmpty {
             if wasEditingExisting {
                 annotation.contents = originalText
+                annotation.shouldDisplay = inlineAnnotationWasDisplayed
             } else {
                 page.removeAnnotation(annotation)
             }
             return nil
         }
         annotation.contents = text
+        annotation.shouldDisplay = inlineAnnotationWasDisplayed
         if wasEditingExisting {
             let previousText = originalText ?? ""
             if previousText != text {
@@ -1379,7 +1407,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             }
         } else {
             onAnnotationAdded?(page, annotation, "Add Text")
+            // After placing a textbox note, return to Select (V) to avoid accidental extra text boxes.
+            if toolMode == .text {
+                toolMode = .select
+                onToolShortcut?(.select)
+            }
         }
+        onAnnotationClicked?(page, annotation)
         return annotation
     }
 
@@ -1393,6 +1427,12 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
               let annotation = inlineLiveTextAnnotation else { return }
         let text = field.stringValue
         annotation.contents = text.isEmpty ? " " : text
+        if let page = inlineTextPage {
+            field.frame = inlineEditorFrame(for: annotation, on: page)
+        }
+        if let page = inlineTextPage {
+            updateTextEditCaret(for: annotation, page: page)
+        }
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -1424,6 +1464,61 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private func isEditableTextAnnotation(_ annotation: PDFAnnotation) -> Bool {
         let type = (annotation.type ?? "").lowercased()
         return type.contains("freetext")
+    }
+
+    private func startTextEditCaretBlink(for annotation: PDFAnnotation, page: PDFPage) {
+        updateTextEditCaret(for: annotation, page: page)
+        textEditCaretLayer.isHidden = false
+        textEditCaretTimer?.invalidate()
+        textEditCaretTimer = Timer.scheduledTimer(timeInterval: 0.5, target: self, selector: #selector(toggleTextEditCaretVisibility), userInfo: nil, repeats: true)
+        if let timer = textEditCaretTimer {
+            RunLoop.main.add(timer, forMode: .common)
+        }
+    }
+
+    private func stopTextEditCaretBlink() {
+        textEditCaretTimer?.invalidate()
+        textEditCaretTimer = nil
+        textEditCaretLayer.isHidden = true
+        textEditCaretLayer.path = nil
+    }
+
+    private func updateTextEditCaret(for annotation: PDFAnnotation, page: PDFPage) {
+        let text = (annotation.contents ?? "").replacingOccurrences(of: "\n", with: " ")
+        let font = annotation.font ?? NSFont.systemFont(ofSize: max(6.0, textFontSize), weight: .regular)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font]
+        let measured = (text as NSString).size(withAttributes: attrs)
+        let padding: CGFloat = 4
+        let caretHeight = max(12, min(annotation.bounds.height - 4, font.ascender - font.descender))
+        var x = annotation.bounds.minX + padding + measured.width
+        x = min(max(x, annotation.bounds.minX + padding), annotation.bounds.maxX - 2)
+        let y = annotation.bounds.midY - caretHeight * 0.5
+        let p1 = convert(NSPoint(x: x, y: y), from: page)
+        let p2 = convert(NSPoint(x: x, y: y + caretHeight), from: page)
+        let path = CGMutablePath()
+        path.move(to: p1)
+        path.addLine(to: p2)
+        textEditCaretLayer.path = path
+        textEditCaretLayer.strokeColor = (annotation.fontColor ?? textForegroundColor).cgColor
+        textEditCaretLayer.isHidden = false
+    }
+
+    @objc private func toggleTextEditCaretVisibility() {
+        textEditCaretLayer.isHidden.toggle()
+    }
+
+    private func inlineEditorFrame(for annotation: PDFAnnotation, on page: PDFPage) -> NSRect {
+        let p1 = convert(annotation.bounds.origin, from: page)
+        let p2 = convert(NSPoint(x: annotation.bounds.maxX, y: annotation.bounds.maxY), from: page)
+        var rect = NSRect(
+            x: min(p1.x, p2.x),
+            y: min(p1.y, p2.y),
+            width: abs(p2.x - p1.x),
+            height: abs(p2.y - p1.y)
+        ).insetBy(dx: 2, dy: 2)
+        rect.size.width = max(rect.size.width, 24)
+        rect.size.height = max(rect.size.height, 18)
+        return rect
     }
 
     private func handleCalloutClick(at locationInView: NSPoint) {
@@ -2168,6 +2263,16 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             }
         }
         return best
+    }
+
+    func selectAllInlineTextIfEditing() -> Bool {
+        guard let field = inlineTextField else { return false }
+        if let editor = window?.fieldEditor(true, for: field) as? NSTextView {
+            editor.selectAll(nil)
+            return true
+        }
+        field.selectText(nil)
+        return true
     }
 
     override func keyDown(with event: NSEvent) {
