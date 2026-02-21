@@ -206,6 +206,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
         let redoItem = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
         redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Find…", action: #selector(MainViewController.commandFocusSearch(_:)), keyEquivalent: "f").target = controller
         editMenu.addItem(withTitle: "Select All Markups On Page", action: #selector(MainViewController.commandSelectAll(_:)), keyEquivalent: "a").target = controller
         editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: "Edit Selected Markup", action: #selector(MainViewController.commandEditMarkup(_:)), keyEquivalent: "e").target = controller
@@ -224,6 +226,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         markupsMenu.addItem(withTitle: "Edit Selected Markup", action: #selector(MainViewController.commandEditMarkup(_:)), keyEquivalent: "e").target = controller
         let deleteItem = markupsMenu.addItem(withTitle: "Delete Selected Markup", action: #selector(MainViewController.commandDeleteMarkup(_:)), keyEquivalent: "\u{8}")
         deleteItem.keyEquivalentModifierMask = []
+        markupsMenu.addItem(NSMenuItem.separator())
+        markupsMenu.addItem(withTitle: "Bring to Front", action: #selector(MainViewController.commandBringMarkupToFront(_:)), keyEquivalent: "]").target = controller
+        markupsMenu.item(at: markupsMenu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command, .shift]
+        markupsMenu.addItem(withTitle: "Send to Back", action: #selector(MainViewController.commandSendMarkupToBack(_:)), keyEquivalent: "[").target = controller
+        markupsMenu.item(at: markupsMenu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command, .shift]
+        markupsMenu.addItem(withTitle: "Bring Forward", action: #selector(MainViewController.commandBringMarkupForward(_:)), keyEquivalent: "]").target = controller
+        markupsMenu.item(at: markupsMenu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command, .option]
+        markupsMenu.addItem(withTitle: "Send Backward", action: #selector(MainViewController.commandSendMarkupBackward(_:)), keyEquivalent: "[").target = controller
+        markupsMenu.item(at: markupsMenu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command, .option]
         for item in markupsMenu.items { item.target = controller }
         markupsItem.submenu = markupsMenu
 
