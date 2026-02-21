@@ -25,6 +25,9 @@ jobs:
       - name: Build app bundle
         run: ./Scripts/package-app.sh
 
+      - name: Install DMG tooling
+        run: brew install create-dmg
+
       - name: Prepare release artifacts
         run: |
           VERSION_TAG="${GITHUB_REF_NAME:-manual}"
