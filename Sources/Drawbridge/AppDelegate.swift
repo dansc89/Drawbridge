@@ -201,6 +201,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let markupsMenu = NSMenu(title: "Markups")
         let highlightItem = markupsMenu.addItem(withTitle: "Highlight Selection", action: #selector(MainViewController.commandHighlight(_:)), keyEquivalent: "h")
         highlightItem.keyEquivalentModifierMask = [.command, .shift]
+        markupsMenu.addItem(withTitle: "Auto-Generate Sheet Names/Bookmarks…", action: #selector(MainViewController.commandAutoGenerateSheetNames(_:)), keyEquivalent: "").target = controller
+        markupsMenu.addItem(NSMenuItem.separator())
         markupsMenu.addItem(withTitle: "Refresh Markups", action: #selector(MainViewController.commandRefreshMarkups(_:)), keyEquivalent: "r").target = controller
         markupsMenu.addItem(withTitle: "Edit Selected Markup", action: #selector(MainViewController.commandEditMarkup(_:)), keyEquivalent: "e").target = controller
         let deleteItem = markupsMenu.addItem(withTitle: "Delete Selected Markup", action: #selector(MainViewController.commandDeleteMarkup(_:)), keyEquivalent: "\u{8}")

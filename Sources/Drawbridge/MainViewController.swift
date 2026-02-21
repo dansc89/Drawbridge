@@ -2,11 +2,27 @@ import AppKit
 @preconcurrency
 import PDFKit
 import UniformTypeIdentifiers
+import Vision
 
 @MainActor
 final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemValidation, NSSplitViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate {
     private struct PDFDocumentBox: @unchecked Sendable {
         let document: PDFDocument
+    }
+    private struct NormalizedPageRect {
+        let x: CGFloat
+        let y: CGFloat
+        let width: CGFloat
+        let height: CGFloat
+    }
+    private struct AutoNamedSheet {
+        let pageIndex: Int
+        let sheetNumber: String
+        let sheetTitle: String
+    }
+    private enum AutoNameCapturePhase {
+        case sheetNumber
+        case sheetTitle
     }
 
     private let lineWeightLevels = Array(1...10)
@@ -160,9 +176,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var grabClipboardPageRect: NSRect?
     private var sidebarCurrentPageIndex: Int = -1
     private var bookmarkLabelOverrides: [String: String] = [:]
+    private var pageLabelOverrides: [Int: String] = [:]
     private var hasPromptedForInitialMarkupSaveCopy = false
     private var isPresentingInitialMarkupSaveCopyPrompt = false
     private var isGridVisible = false
+    private var autoNameCapturePhase: AutoNameCapturePhase?
+    private var autoNameReferencePageIndex: Int?
+    private var pendingSheetNumberZone: NormalizedPageRect?
+    private var pendingSheetTitleZone: NormalizedPageRect?
+    private var autoNamePreviousToolMode: ToolMode?
     var onDocumentOpened: ((URL) -> Void)?
     private var sidebarContainerView: NSView?
     private var lastSidebarExpandedWidth: CGFloat = 240
@@ -394,6 +416,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             self?.grabClipboardImage = image
             self?.grabClipboardPageRect = pageRect
             self?.showCaptureToast("Captured - Shift+Command+V to paste")
+        }
+        pdfView.onRegionCaptured = { [weak self] page, rectInPage in
+            self?.handleAutoNameRegionCaptured(on: page, rectInPage: rectInPage)
         }
         pdfView.layer?.addSublayer(selectedMarkupOverlayLayer)
 
@@ -3235,6 +3260,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     @objc func commandSave(_ sender: Any?) { saveDocument() }
     @objc func commandSaveCopy(_ sender: Any?) { saveCopy() }
     @objc func commandExportCSV(_ sender: Any?) { exportMarkupsCSV() }
+    @objc func commandAutoGenerateSheetNames(_ sender: Any?) { startAutoGenerateSheetNamesFlow() }
     @objc func commandSetScale(_ sender: Any?) { commandSetDrawingScale(sender) }
     @objc func commandPerformanceSettings(_ sender: Any?) {
         let defaults = UserDefaults.standard
@@ -3446,6 +3472,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if action == #selector(commandSave(_:)) || action == #selector(commandSaveCopy(_:)) || action == #selector(commandExportCSV(_:)) {
             return hasDocument
         }
+        if action == #selector(commandAutoGenerateSheetNames(_:)) {
+            return hasDocument
+        }
         if action == #selector(commandSetScale(_:)) {
             return hasDocument
         }
@@ -3649,6 +3678,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
 
     private func openDocument(at url: URL) {
+        cancelAutoNameCapture()
         beginBusyIndicator("Loading PDF…")
         defer { endBusyIndicator() }
         guard let document = PDFDocument(url: url) else {
@@ -3662,6 +3692,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         pdfView.document = document
         clearMarkupCache()
+        pageLabelOverrides.removeAll()
         hasPromptedForInitialMarkupSaveCopy = false
         isPresentingInitialMarkupSaveCopyPrompt = false
         rehydrateImageAnnotationsIfNeeded(in: document)
@@ -3861,8 +3892,10 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
     }
 
     private func clearToStartState() {
+        cancelAutoNameCapture()
         pdfView.document = nil
         clearMarkupCache()
+        pageLabelOverrides.removeAll()
         openDocumentURL = nil
         hasPromptedForInitialMarkupSaveCopy = true
         isPresentingInitialMarkupSaveCopyPrompt = false
@@ -4643,6 +4676,10 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
     }
 
     func displayPageLabel(forPageIndex pageIndex: Int) -> String {
+        if let override = pageLabelOverrides[pageIndex],
+           !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return override
+        }
         guard let doc = pdfView.document else { return "\(pageIndex + 1)" }
         guard let page = doc.page(at: pageIndex) else { return "\(pageIndex + 1)" }
         let label = page.label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -4723,6 +4760,284 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
     private func bookmarkContainsCurrentPage(_ outline: PDFOutline) -> Bool {
         guard sidebarCurrentPageIndex >= 0 else { return false }
         return destinationPageIndex(for: outline) == sidebarCurrentPageIndex
+    }
+
+    private func startAutoGenerateSheetNamesFlow() {
+        guard let document = pdfView.document,
+              let currentPage = pdfView.currentPage else {
+            NSSound.beep()
+            return
+        }
+        autoNameReferencePageIndex = document.index(for: currentPage)
+        guard autoNameReferencePageIndex ?? -1 >= 0 else {
+            NSSound.beep()
+            return
+        }
+        pendingSheetNumberZone = nil
+        pendingSheetTitleZone = nil
+        autoNameCapturePhase = .sheetNumber
+        autoNamePreviousToolMode = pdfView.toolMode
+        setTool(.select)
+        let alert = NSAlert()
+        alert.messageText = "Capture Sheet Number Zone"
+        alert.informativeText = "Drag a rectangle over the sheet number area on the current page, then release."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Start Capture")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            cancelAutoNameCapture()
+            return
+        }
+        beginRegionCaptureForAutoName()
+    }
+
+    private func beginRegionCaptureForAutoName() {
+        pdfView.beginRegionCaptureMode()
+    }
+
+    private func cancelAutoNameCapture() {
+        pdfView.cancelRegionCaptureMode()
+        autoNameCapturePhase = nil
+        autoNameReferencePageIndex = nil
+        pendingSheetNumberZone = nil
+        pendingSheetTitleZone = nil
+        if let previous = autoNamePreviousToolMode {
+            setTool(previous)
+        }
+        autoNamePreviousToolMode = nil
+    }
+
+    private func handleAutoNameRegionCaptured(on page: PDFPage, rectInPage: NSRect) {
+        guard let document = pdfView.document else { return }
+        guard let phase = autoNameCapturePhase,
+              let referenceIndex = autoNameReferencePageIndex,
+              let referencePage = document.page(at: referenceIndex) else {
+            cancelAutoNameCapture()
+            return
+        }
+        let currentIndex = document.index(for: page)
+        guard currentIndex == referenceIndex else {
+            let alert = NSAlert()
+            alert.messageText = "Capture On Reference Page"
+            alert.informativeText = "Please capture zones on the same page where you started."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            beginRegionCaptureForAutoName()
+            return
+        }
+
+        let normalized = normalize(rectInPage: rectInPage, for: referencePage)
+        switch phase {
+        case .sheetNumber:
+            pendingSheetNumberZone = normalized
+            autoNameCapturePhase = .sheetTitle
+            let alert = NSAlert()
+            alert.messageText = "Capture Sheet Title Zone"
+            alert.informativeText = "Now drag a rectangle over the sheet title/name area, then release."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Start Capture")
+            alert.addButton(withTitle: "Cancel")
+            if alert.runModal() == .alertFirstButtonReturn {
+                beginRegionCaptureForAutoName()
+            } else {
+                cancelAutoNameCapture()
+            }
+        case .sheetTitle:
+            pendingSheetTitleZone = normalized
+            autoNameCapturePhase = nil
+            runAutoNameExtraction()
+        }
+    }
+
+    private func runAutoNameExtraction() {
+        guard let document = pdfView.document,
+              let numberZone = pendingSheetNumberZone,
+              let titleZone = pendingSheetTitleZone else {
+            cancelAutoNameCapture()
+            return
+        }
+        beginBusyIndicator("Reading Sheet Names…")
+        defer {
+            endBusyIndicator()
+            if let previous = autoNamePreviousToolMode {
+                setTool(previous)
+            }
+            autoNamePreviousToolMode = nil
+            autoNameReferencePageIndex = nil
+            autoNameCapturePhase = nil
+            pendingSheetNumberZone = nil
+            pendingSheetTitleZone = nil
+        }
+
+        var generated: [AutoNamedSheet] = []
+        generated.reserveCapacity(document.pageCount)
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            let numberRect = denormalize(rect: numberZone, for: page)
+            let titleRect = denormalize(rect: titleZone, for: page)
+            let detectedNumber = extractText(from: page, rectInPage: numberRect)
+            let number = detectedNumber.isEmpty ? "Page \(pageIndex + 1)" : detectedNumber
+            let title = extractText(from: page, rectInPage: titleRect)
+            generated.append(
+                AutoNamedSheet(
+                    pageIndex: pageIndex,
+                    sheetNumber: number,
+                    sheetTitle: title
+                )
+            )
+        }
+
+        guard !generated.isEmpty else {
+            let alert = NSAlert()
+            alert.messageText = "No Pages Found"
+            alert.informativeText = "Could not generate names for this document."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+
+        let previewLines = generated.prefix(20).map { sheet in
+            let title = sheet.sheetTitle.isEmpty ? "(untitled)" : sheet.sheetTitle
+            return "\(sheet.pageIndex + 1). \(sheet.sheetNumber) - \(title)"
+        }
+        let overflowNote = generated.count > 20 ? "\n…and \(generated.count - 20) more pages." : ""
+        let confirmation = NSAlert()
+        confirmation.messageText = "Apply Auto-Generated Sheet Names?"
+        confirmation.informativeText = previewLines.joined(separator: "\n") + overflowNote
+        confirmation.alertStyle = .informational
+        confirmation.addButton(withTitle: "Apply")
+        confirmation.addButton(withTitle: "Cancel")
+        guard confirmation.runModal() == .alertFirstButtonReturn else { return }
+
+        applyAutoNamedSheets(generated, to: document)
+    }
+
+    private func applyAutoNamedSheets(_ sheets: [AutoNamedSheet], to document: PDFDocument) {
+        pageLabelOverrides.removeAll()
+        for sheet in sheets {
+            pageLabelOverrides[sheet.pageIndex] = sheet.sheetNumber
+        }
+
+        let root = PDFOutline()
+        for sheet in sheets {
+            guard let page = document.page(at: sheet.pageIndex) else { continue }
+            let item = PDFOutline()
+            let cleanedTitle = sheet.sheetTitle.isEmpty ? "Untitled" : sheet.sheetTitle
+            item.label = "\(sheet.sheetNumber) - \(cleanedTitle)"
+            let target = NSPoint(x: 0, y: page.bounds(for: .mediaBox).maxY)
+            item.destination = PDFDestination(page: page, at: target)
+            root.insertChild(item, at: root.numberOfChildren)
+        }
+        document.outlineRoot = root
+
+        markMarkupChanged()
+        scheduleAutosave()
+        reloadBookmarks()
+        updateStatusBar()
+
+        let alert = NSAlert()
+        alert.messageText = "Sheet Names Updated"
+        alert.informativeText = "Applied page labels and bookmarks for \(sheets.count) pages."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func normalize(rectInPage: NSRect, for page: PDFPage) -> NormalizedPageRect {
+        let bounds = page.bounds(for: .mediaBox)
+        let safeWidth = max(bounds.width, 1)
+        let safeHeight = max(bounds.height, 1)
+        return NormalizedPageRect(
+            x: (rectInPage.minX - bounds.minX) / safeWidth,
+            y: (rectInPage.minY - bounds.minY) / safeHeight,
+            width: rectInPage.width / safeWidth,
+            height: rectInPage.height / safeHeight
+        )
+    }
+
+    private func denormalize(rect: NormalizedPageRect, for page: PDFPage) -> NSRect {
+        let bounds = page.bounds(for: .mediaBox)
+        return NSRect(
+            x: bounds.minX + rect.x * bounds.width,
+            y: bounds.minY + rect.y * bounds.height,
+            width: rect.width * bounds.width,
+            height: rect.height * bounds.height
+        )
+    }
+
+    private func extractText(from page: PDFPage, rectInPage: NSRect) -> String {
+        let bounded = rectInPage.intersection(page.bounds(for: .mediaBox))
+        guard !bounded.isEmpty else { return "" }
+
+        if let selected = page.selection(for: bounded)?.string {
+            let cleaned = cleanDetectedSheetText(selected)
+            if !cleaned.isEmpty {
+                return cleaned
+            }
+        }
+
+        guard let image = renderCroppedImage(from: page, rectInPage: bounded) else {
+            return ""
+        }
+        return cleanDetectedSheetText(recognizeText(in: image))
+    }
+
+    private func renderCroppedImage(from page: PDFPage, rectInPage: NSRect) -> CGImage? {
+        let crop = rectInPage.intersection(page.bounds(for: .mediaBox))
+        guard crop.width > 1, crop.height > 1 else { return nil }
+
+        let scale: CGFloat = 2.0
+        let width = Int((crop.width * scale).rounded(.up))
+        let height = Int((crop.height * scale).rounded(.up))
+        guard width > 0, height > 0 else { return nil }
+
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return nil
+        }
+
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.scaleBy(x: scale, y: scale)
+        context.translateBy(x: -crop.minX, y: -crop.minY)
+        page.draw(with: .mediaBox, to: context)
+        return context.makeImage()
+    }
+
+    private func recognizeText(in image: CGImage) -> String {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = true
+
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        do {
+            try handler.perform([request])
+            guard let observations = request.results else { return "" }
+            return observations
+                .compactMap { $0.topCandidates(1).first?.string }
+                .joined(separator: " ")
+        } catch {
+            return ""
+        }
+    }
+
+    private func cleanDetectedSheetText(_ raw: String) -> String {
+        var text = raw
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+        while text.contains("  ") {
+            text = text.replacingOccurrences(of: "  ", with: " ")
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
 
