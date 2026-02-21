@@ -4738,11 +4738,78 @@ Drawbridge is tuned for this, but very large files may refresh slower during hea
 
         let alert = NSAlert()
         alert.messageText = "You have unsaved changes."
-        alert.informativeText = "Discard current markups and continue?"
+        alert.informativeText = "Save changes before continuing?"
         alert.alertStyle = .warning
+        alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Discard Changes")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
-        return alert.runModal() == .alertFirstButtonReturn
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            return saveCurrentDocumentForClosePrompt()
+        }
+        if response == .alertSecondButtonReturn {
+            return true
+        }
+        return false
+    }
+
+    private func saveCurrentDocumentForClosePrompt() -> Bool {
+        guard let document = pdfView.document else { return true }
+        if let sourceURL = openDocumentURL {
+            return persistProjectSnapshotSynchronously(document: document, for: sourceURL, busyMessage: "Saving Changes…")
+        }
+        // Unsaved new document path still requires Save As flow.
+        saveDocumentAsProject(document: document)
+        return false
+    }
+
+    private func persistProjectSnapshotSynchronously(document: PDFDocument, for sourcePDFURL: URL, busyMessage: String) -> Bool {
+        pendingAutosaveWorkItem?.cancel()
+        pendingAutosaveWorkItem = nil
+        autosaveQueued = false
+        manualSaveInFlight = true
+        beginBusyIndicator(busyMessage, detail: "Saving…", lockInteraction: true)
+        defer {
+            endBusyIndicator()
+            manualSaveInFlight = false
+            if autosaveQueued {
+                autosaveQueued = false
+                scheduleAutosave()
+            }
+        }
+
+        let sidecar = sidecarURL(for: sourcePDFURL)
+        let snapshot = buildSidecarSnapshot(document: document, sourcePDFURL: sourcePDFURL)
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+
+        guard let data = try? encoder.encode(snapshot) else {
+            let alert = NSAlert()
+            alert.messageText = "Failed to save changes"
+            alert.informativeText = "Could not encode project snapshot."
+            alert.alertStyle = .warning
+            alert.runModal()
+            return false
+        }
+
+        do {
+            try data.write(to: sidecar, options: .atomic)
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Failed to save changes"
+            alert.informativeText = "Could not write changes to disk.\n\n\(error.localizedDescription)"
+            alert.alertStyle = .warning
+            alert.runModal()
+            return false
+        }
+
+        markupChangeVersion = 0
+        lastAutosavedChangeVersion = 0
+        lastMarkupEditAt = .distantPast
+        lastUserInteractionAt = .distantPast
+        view.window?.isDocumentEdited = false
+        updateStatusBar()
+        return true
     }
 }
