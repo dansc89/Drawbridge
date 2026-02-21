@@ -65,7 +65,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let showNavigationPane = true
     private let pdfView = MarkupPDFView(frame: .zero)
     private let pdfCanvasContainer = StartupDropView(frame: .zero)
-    private let bookmarksContainer = NSVisualEffectView(frame: .zero)
+    private let bookmarksContainer = NSView(frame: .zero)
     private let navigationResizeHandle = NavigationResizeHandleView(frame: .zero)
     private let navigationTitleLabel = NSTextField(labelWithString: "Navigation")
     private let navigationModeControl = NSSegmentedControl(labels: ["Pages", "Bookmarks"], trackingMode: .selectOne, target: nil, action: nil)
@@ -83,6 +83,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let emptyStateView = StartupDropView(frame: .zero)
     private let emptyStateTitle = NSTextField(labelWithString: "Open or create a PDF to start marking up")
     private let emptyStateOpenButton = NSButton(title: "Open PDF", target: nil, action: nil)
+    private let emptyStateRecentButton = NSButton(title: "Open Recent", target: nil, action: nil)
     private let emptyStateSampleButton = NSButton(title: "Create New", target: nil, action: nil)
     private let markupsTable = NSTableView(frame: .zero)
     private let markupsCountLabel = NSTextField(labelWithString: "0 items")
@@ -104,11 +105,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let measureLabel = NSTextField(labelWithString: "Measure:")
     private let toolbarControlsStack = NSStackView(frame: .zero)
     private let secondaryToolbarControlsStack = NSStackView(frame: .zero)
-    private let documentTabsBar = NSVisualEffectView(frame: .zero)
+    private let documentTabsBar = NSView(frame: .zero)
     private let documentTabsStack = NSStackView(frame: .zero)
-    private let statusBar = NSVisualEffectView(frame: .zero)
-    private let busyOverlayView = NSVisualEffectView(frame: .zero)
-    private let captureToastView = NSVisualEffectView(frame: .zero)
+    private let statusBar = NSView(frame: .zero)
+    private let busyOverlayView = NSView(frame: .zero)
+    private let captureToastView = NSView(frame: .zero)
     private let captureToastLabel = NSTextField(labelWithString: "Captured")
     private lazy var captureSound: NSSound? = {
         let grabPath = "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/Grab.aif"
@@ -325,6 +326,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         emptyStateOpenButton.title = "Open Existing PDF"
         emptyStateOpenButton.target = self
         emptyStateOpenButton.action = #selector(openPDF)
+        emptyStateRecentButton.target = self
+        emptyStateRecentButton.action = #selector(showOpenRecentMenuFromEmptyState(_:))
         emptyStateSampleButton.target = self
         emptyStateSampleButton.action = #selector(createNewPDFAction)
         highlightButton.target = self
@@ -555,7 +558,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             navigationResizeHandle.topAnchor.constraint(equalTo: pdfCanvasContainer.topAnchor),
             navigationResizeHandle.bottomAnchor.constraint(equalTo: pdfCanvasContainer.bottomAnchor),
             navigationResizeHandle.centerXAnchor.constraint(equalTo: bookmarksContainer.trailingAnchor),
-            navigationResizeHandle.widthAnchor.constraint(equalToConstant: 10),
+            navigationResizeHandle.widthAnchor.constraint(equalToConstant: 26),
 
             pdfView.topAnchor.constraint(equalTo: pdfCanvasContainer.topAnchor),
             pdfView.leadingAnchor.constraint(equalTo: bookmarksContainer.trailingAnchor),
@@ -565,7 +568,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         bookmarksWidthConstraint = bookmarksWidth
 
         navigationResizeHandle.wantsLayer = true
-        navigationResizeHandle.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
+        navigationResizeHandle.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.4).cgColor
         navigationResizeHandle.layer?.cornerRadius = 1
         let resizePan = NSPanGestureRecognizer(target: self, action: #selector(handleNavigationResizePan(_:)))
         navigationResizeHandle.addGestureRecognizer(resizePan)
@@ -594,9 +597,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
 
-        bookmarksContainer.material = .windowBackground
-        bookmarksContainer.blendingMode = .withinWindow
-        bookmarksContainer.state = .active
         bookmarksContainer.wantsLayer = true
         bookmarksContainer.layer?.borderWidth = 1
         bookmarksContainer.layer?.borderColor = NSColor.separatorColor.cgColor
@@ -933,9 +933,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func configureStatusBar() {
-        statusBar.material = .windowBackground
-        statusBar.blendingMode = .withinWindow
-        statusBar.state = .active
         statusBar.wantsLayer = true
         statusBar.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
@@ -961,9 +958,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func configureBusyOverlay() {
-        busyOverlayView.material = .windowBackground
-        busyOverlayView.blendingMode = .withinWindow
-        busyOverlayView.state = .active
         busyOverlayView.wantsLayer = true
         busyOverlayView.layer?.cornerRadius = 10
         busyOverlayView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
@@ -1002,9 +996,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func configureCaptureToast() {
-        captureToastView.material = .windowBackground
-        captureToastView.blendingMode = .withinWindow
-        captureToastView.state = .active
         captureToastView.wantsLayer = true
         captureToastView.layer?.cornerRadius = 8
         captureToastView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
@@ -1293,9 +1284,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func configureEmptyStateView() {
-        emptyStateView.material = .windowBackground
-        emptyStateView.blendingMode = .withinWindow
-        emptyStateView.state = .active
         emptyStateView.wantsLayer = true
         emptyStateView.layer?.cornerRadius = 12
         emptyStateView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
@@ -1303,9 +1291,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         emptyStateTitle.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
         emptyStateOpenButton.bezelStyle = .texturedRounded
+        emptyStateRecentButton.bezelStyle = .texturedRounded
         emptyStateSampleButton.bezelStyle = .texturedRounded
 
-        let actions = NSStackView(views: [emptyStateOpenButton, emptyStateSampleButton])
+        let actions = NSStackView(views: [emptyStateOpenButton, emptyStateRecentButton, emptyStateSampleButton])
         actions.orientation = .horizontal
         actions.spacing = 8
         actions.alignment = .centerY
@@ -1330,6 +1319,26 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             stack.trailingAnchor.constraint(equalTo: emptyStateView.trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: emptyStateView.bottomAnchor)
         ])
+    }
+
+    @objc private func showOpenRecentMenuFromEmptyState(_ sender: NSButton) {
+        guard let menu = openRecentMenuFromMainMenu() else {
+            NSSound.beep()
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
+    private func openRecentMenuFromMainMenu() -> NSMenu? {
+        guard let mainMenu = NSApp.mainMenu else { return nil }
+        for topLevelItem in mainMenu.items where topLevelItem.title == "File" {
+            guard let fileMenu = topLevelItem.submenu else { continue }
+            guard let openRecentRoot = fileMenu.items.first(where: { $0.title == "Open Recent" }) else { continue }
+            guard let recentMenu = openRecentRoot.submenu else { continue }
+            return recentMenu.copy() as? NSMenu
+        }
+        return nil
     }
 
     private func setupToolbarControlStack() {
@@ -1449,9 +1458,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func configureDocumentTabsBar() {
-        documentTabsBar.material = .windowBackground
-        documentTabsBar.blendingMode = .withinWindow
-        documentTabsBar.state = .active
         documentTabsBar.wantsLayer = true
         documentTabsBar.layer?.borderWidth = 1
         documentTabsBar.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
@@ -2992,8 +2998,26 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func promptForInitialMarkupWorkingCopy(from sourceURL: URL) -> Bool {
+        let explanation = NSAlert()
+        explanation.messageText = "Create a marked-up copy before continuing?"
+        explanation.informativeText = """
+        To protect your original PDF, Drawbridge saves markups to a separate copy.
+
+        Your source file will remain unchanged. Choose where to save the marked-up copy next.
+        """
+        explanation.alertStyle = .informational
+        explanation.addButton(withTitle: "Choose Save Location")
+        explanation.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        guard explanation.runModal() == .alertFirstButtonReturn else {
+            return false
+        }
+
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
+        panel.title = "Save Marked-Up Copy"
+        panel.message = "Choose where to save your marked-up PDF. The original file will not be modified."
+        panel.prompt = "Save Markup Copy"
         panel.nameFieldStringValue = suggestedMarkupCopyFilename(for: sourceURL)
 
         guard panel.runModal() == .OK, let destinationURL = panel.url else {
