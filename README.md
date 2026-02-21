@@ -22,8 +22,6 @@ Download the `.dmg`, open it, then drag **Drawbridge.app** into **Applications**
 1. Open Drawbridge.
 2. Open an existing PDF or create a new one.
 3. Add markups.
-4. Press `Cmd+S` to save changes quickly.
-5. Use **Save As PDF** when you want a fully exported PDF file.
 
 ## Support
 
