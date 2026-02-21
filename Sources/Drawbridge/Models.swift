@@ -27,6 +27,7 @@ struct MarkupIndexSnapshot: Codable {
 struct SidecarAnnotationRecord: Codable {
     let pageIndex: Int
     let archivedAnnotation: Data
+    let lineWidth: CGFloat?
 }
 
 struct SidecarSnapshot: Codable {
