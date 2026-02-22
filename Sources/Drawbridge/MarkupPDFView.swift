@@ -290,7 +290,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var snapStatusHideWorkItem: DispatchWorkItem?
     private var textEditCaretTimer: Timer?
     private var isGridVisible = false
-    private var isGridSnapEnabled = false
     private var isOrthoSnapEnabled = false
     private var isEndpointSnapEnabled = false
     private var isMidpointSnapEnabled = false
@@ -378,10 +377,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         updateGridOverlayIfNeeded()
     }
 
-    func setGridSnapEnabled(_ enabled: Bool) {
-        isGridSnapEnabled = enabled
-    }
-
     func setOrthoSnapEnabled(_ enabled: Bool) {
         isOrthoSnapEnabled = enabled
     }
@@ -459,7 +454,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func snapPointInPageIfNeeded(_ point: NSPoint, on page: PDFPage) -> NSPoint {
-        guard isGridSnapEnabled || isEndpointSnapEnabled || isMidpointSnapEnabled || isIntersectionSnapEnabled else { return point }
+        guard isEndpointSnapEnabled || isMidpointSnapEnabled || isIntersectionSnapEnabled else { return point }
         let pointInView = convert(point, from: page)
         let snappedInView = snapPointInViewIfNeeded(pointInView, on: page)
         return convert(snappedInView, to: page)
@@ -488,18 +483,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 return snapPoint
             }
         }
-        guard isGridVisible, isGridSnapEnabled else { return point }
-        let pageBounds = page.bounds(for: displayBox)
-        let spacing = gridSpacingInPoints
-        guard spacing.isFinite, spacing > 0 else { return point }
-        let pointInPage = convert(point, to: page)
-        guard pointInPage.x.isFinite,
-              pointInPage.y.isFinite else {
-            return point
-        }
-        let snappedPageX = pageBounds.minX + round((pointInPage.x - pageBounds.minX) / spacing) * spacing
-        let snappedPageY = pageBounds.minY + round((pointInPage.y - pageBounds.minY) / spacing) * spacing
-        return convert(NSPoint(x: snappedPageX, y: snappedPageY), from: page)
+        return point
     }
 
     private func nearestPoint(to target: NSPoint, within maxDistance: CGFloat, from points: [NSPoint]) -> NSPoint? {
