@@ -2528,7 +2528,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             NSApp.activate(ignoringOtherApps: true)
             let response = alert.runModal()
             if response == .alertFirstButtonReturn {
-                commandSetDrawingScale(nil)
                 focusAndHighlightScalePresetControl()
             } else if response == .alertThirdButtonReturn {
                 suppressScaleReminderForSession = true
