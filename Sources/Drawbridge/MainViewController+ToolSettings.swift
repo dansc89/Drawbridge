@@ -18,6 +18,47 @@ extension MainViewController {
         applyToolSettingsToPDFView()
     }
 
+    private func applyTextMarkupStyle(
+        foreground: NSColor,
+        background: NSColor,
+        outlineColor: NSColor,
+        outlineWidth: CGFloat,
+        font: NSFont
+    ) {
+        pdfView.textForegroundColor = foreground
+        pdfView.textBackgroundColor = background
+        pdfView.textOutlineColor = outlineColor.withAlphaComponent(1.0)
+        pdfView.textOutlineWidth = max(0, outlineWidth)
+        pdfView.textFontName = font.fontName
+        pdfView.textFontSize = font.pointSize
+    }
+
+    private func makeToolSettingsState(
+        strokeColor: NSColor,
+        fillColor: NSColor,
+        opacity: CGFloat,
+        lineWeightLevel: Int,
+        fontName: String,
+        fontSize: CGFloat,
+        calloutArrowStyleRawValue: Int,
+        arrowHeadSize: CGFloat,
+        outlineColor: NSColor = .clear,
+        outlineWidth: CGFloat = 0
+    ) -> ToolSettingsState {
+        ToolSettingsState(
+            strokeColor: strokeColor,
+            fillColor: fillColor,
+            outlineColor: outlineColor,
+            opacity: opacity,
+            lineWeightLevel: lineWeightLevel,
+            outlineWidth: outlineWidth,
+            fontName: fontName,
+            fontSize: fontSize,
+            calloutArrowStyleRawValue: calloutArrowStyleRawValue,
+            arrowHeadSize: arrowHeadSize
+        )
+    }
+
     @objc func colorizeSnapshotsBlackToRed() {
         let snapshots = currentSelectedMarkupItems().compactMap { $0.annotation as? PDFSnapshotAnnotation }
         guard !snapshots.isEmpty else {
@@ -38,7 +79,8 @@ extension MainViewController {
     }
 
     func applyToolSettingsToPDFView() {
-        let selectedCount = currentSelectedMarkupItems().count
+        let selectedItems = currentSelectedMarkupItems()
+        let selectedCount = selectedItems.count
         let settingsSpan = PerformanceMetrics.begin(
             "apply_tool_settings",
             thresholdMs: 20,
@@ -60,7 +102,6 @@ extension MainViewController {
         let textFont = resolvedToolSettingsFont()
         let calloutArrowStyle = resolvedCalloutArrowStyleFromUI()
         let arrowHeadSize = selectedArrowHeadSize()
-        let selectedItems = currentSelectedMarkupItems()
 
         if pdfView.toolMode == .select, !selectedItems.isEmpty {
             var editedAny = false
@@ -155,23 +196,25 @@ extension MainViewController {
             pdfView.rectangleFillColor = fill
             pdfView.rectangleLineWidth = currentWidth
         case .text:
-            pdfView.textForegroundColor = fill
-            pdfView.textBackgroundColor = stroke.withAlphaComponent(opacity * 0.5)
-            pdfView.textOutlineColor = outlineColor
-            pdfView.textOutlineWidth = outlineWidth
-            pdfView.textFontName = textFont.fontName
-            pdfView.textFontSize = textFont.pointSize
+            applyTextMarkupStyle(
+                foreground: fill,
+                background: stroke.withAlphaComponent(opacity * 0.5),
+                outlineColor: outlineColor,
+                outlineWidth: outlineWidth,
+                font: textFont
+            )
         case .callout:
             pdfView.calloutStrokeColor = stroke
             pdfView.calloutLineWidth = currentWidth
             pdfView.calloutArrowStyle = calloutArrowStyle
             pdfView.calloutArrowHeadSize = arrowHeadSize
-            pdfView.textForegroundColor = fill
-            pdfView.textBackgroundColor = stroke.withAlphaComponent(opacity * 0.5)
-            pdfView.textOutlineColor = outlineColor
-            pdfView.textOutlineWidth = outlineWidth
-            pdfView.textFontName = textFont.fontName
-            pdfView.textFontSize = textFont.pointSize
+            applyTextMarkupStyle(
+                foreground: fill,
+                background: stroke.withAlphaComponent(opacity * 0.5),
+                outlineColor: outlineColor,
+                outlineWidth: outlineWidth,
+                font: textFont
+            )
         case .measure, .calibrate:
             pdfView.measurementStrokeColor = stroke
             pdfView.calibrationStrokeColor = stroke
@@ -649,31 +692,31 @@ extension MainViewController {
         let defaultTextOutlineWidth: CGFloat = 3.0
         switch tool {
         case .pen:
-            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .arrow:
-            return ToolSettingsState(strokeColor: pdfView.arrowStrokeColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.arrowStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: pdfView.calloutArrowStyle.rawValue, arrowHeadSize: max(1.0, pdfView.arrowHeadSize))
+            return makeToolSettingsState(strokeColor: pdfView.arrowStrokeColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.arrowStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: pdfView.calloutArrowStyle.rawValue, arrowHeadSize: max(1.0, pdfView.arrowHeadSize))
         case .line:
-            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .polyline:
-            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .highlighter:
-            return ToolSettingsState(strokeColor: pdfView.highlighterColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.highlighterColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: pdfView.highlighterColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.highlighterColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .cloud:
-            return ToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .rectangle:
-            return ToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .text:
-            return ToolSettingsState(strokeColor: pdfView.textBackgroundColor.withAlphaComponent(1.0), fillColor: pdfView.textForegroundColor.withAlphaComponent(1.0), outlineColor: defaultTextOutlineColor, opacity: 1.0, lineWeightLevel: 5, outlineWidth: defaultTextOutlineWidth, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: pdfView.textBackgroundColor.withAlphaComponent(1.0), fillColor: pdfView.textForegroundColor.withAlphaComponent(1.0), opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize, outlineColor: defaultTextOutlineColor, outlineWidth: defaultTextOutlineWidth)
         case .callout:
-            return ToolSettingsState(strokeColor: pdfView.calloutStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.textForegroundColor.withAlphaComponent(1.0), outlineColor: defaultTextOutlineColor, opacity: 1.0, lineWeightLevel: 5, outlineWidth: defaultTextOutlineWidth, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: pdfView.calloutArrowStyle.rawValue, arrowHeadSize: max(1.0, pdfView.calloutArrowHeadSize))
+            return makeToolSettingsState(strokeColor: pdfView.calloutStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.textForegroundColor.withAlphaComponent(1.0), opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: pdfView.calloutArrowStyle.rawValue, arrowHeadSize: max(1.0, pdfView.calloutArrowHeadSize), outlineColor: defaultTextOutlineColor, outlineWidth: defaultTextOutlineWidth)
         case .area:
-            return ToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 1, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 1, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .measure:
-            return ToolSettingsState(strokeColor: pdfView.measurementStrokeColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.measurementStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: pdfView.measurementStrokeColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.measurementStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .calibrate:
-            return ToolSettingsState(strokeColor: pdfView.calibrationStrokeColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.calibrationStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: pdfView.calibrationStrokeColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.calibrationStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .select, .grab:
-            return ToolSettingsState(strokeColor: .systemRed, fillColor: .systemYellow, opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: .systemRed, fillColor: .systemYellow, opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         }
     }
 
@@ -734,23 +777,25 @@ extension MainViewController {
             pdfView.rectangleFillColor = fill
             pdfView.rectangleLineWidth = widthValue(for: state.lineWeightLevel, tool: .rectangle)
         case .text:
-            pdfView.textForegroundColor = state.fillColor.withAlphaComponent(1.0)
-            pdfView.textBackgroundColor = state.strokeColor.withAlphaComponent(1.0)
-            pdfView.textOutlineColor = state.outlineColor.withAlphaComponent(1.0)
-            pdfView.textOutlineWidth = max(0, state.outlineWidth)
-            pdfView.textFontName = state.fontName
-            pdfView.textFontSize = state.fontSize
+            applyTextMarkupStyle(
+                foreground: state.fillColor.withAlphaComponent(1.0),
+                background: state.strokeColor.withAlphaComponent(1.0),
+                outlineColor: state.outlineColor.withAlphaComponent(1.0),
+                outlineWidth: state.outlineWidth,
+                font: resolveFont(family: state.fontName, size: state.fontSize)
+            )
         case .callout:
             pdfView.calloutStrokeColor = state.strokeColor.withAlphaComponent(1.0)
             pdfView.calloutLineWidth = widthValue(for: state.lineWeightLevel, tool: .callout)
             pdfView.calloutArrowStyle = MarkupPDFView.ArrowEndStyle(rawValue: state.calloutArrowStyleRawValue) ?? .solidArrow
             pdfView.calloutArrowHeadSize = max(1.0, state.arrowHeadSize)
-            pdfView.textForegroundColor = state.fillColor.withAlphaComponent(1.0)
-            pdfView.textBackgroundColor = state.strokeColor.withAlphaComponent(1.0)
-            pdfView.textOutlineColor = state.outlineColor.withAlphaComponent(1.0)
-            pdfView.textOutlineWidth = max(0, state.outlineWidth)
-            pdfView.textFontName = state.fontName
-            pdfView.textFontSize = state.fontSize
+            applyTextMarkupStyle(
+                foreground: state.fillColor.withAlphaComponent(1.0),
+                background: state.strokeColor.withAlphaComponent(1.0),
+                outlineColor: state.outlineColor.withAlphaComponent(1.0),
+                outlineWidth: state.outlineWidth,
+                font: resolveFont(family: state.fontName, size: state.fontSize)
+            )
         case .area:
             pdfView.penColor = stroke
             pdfView.areaLineWidth = widthValue(for: state.lineWeightLevel, tool: .area)
