@@ -688,8 +688,8 @@ extension MainViewController {
         let defaultFontSize = max(6.0, pdfView.textFontSize)
         let defaultArrowRaw = MarkupPDFView.ArrowEndStyle.solidArrow.rawValue
         let defaultArrowHeadSize: CGFloat = 8.0
-        let defaultTextOutlineColor = NSColor.black
-        let defaultTextOutlineWidth: CGFloat = 3.0
+        let defaultTextOutlineColor = MarkupStyleDefaults.textOutlineColor
+        let defaultTextOutlineWidth: CGFloat = MarkupStyleDefaults.textOutlineWidth
         switch tool {
         case .pen:
             return makeToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)

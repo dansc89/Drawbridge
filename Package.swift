@@ -9,6 +9,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "Drawbridge"
+        ),
+        .testTarget(
+            name: "DrawbridgeTests",
+            dependencies: ["Drawbridge"]
         )
     ]
 )
