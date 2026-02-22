@@ -189,7 +189,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let busyDetailLabel = NSTextField(labelWithString: "")
     private let busyProgressIndicator = NSProgressIndicator(frame: .zero)
     private let statusToolLabel = NSTextField(labelWithString: "Tool: Pen")
-    private let statusToolsHintLabel = NSTextField(labelWithString: "Tools: V D A L P H C R T Q M K | Shift+A Area | Esc Esc: Select")
+    let statusToolsHintLabel = NSTextField(labelWithString: "Shortcuts customizable in Drawbridge > Keyboard Shortcuts…")
     private let statusPageSizeLabel = NSTextField(labelWithString: "Size: -")
     private let statusPageLabel = NSTextField(labelWithString: "Page: -")
     private let statusZoomLabel = NSTextField(labelWithString: "Zoom: 100%")
@@ -315,12 +315,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var pageLabelOverrides: [Int: String] = [:]
     var hasPromptedForInitialMarkupSaveCopy = false
     var isPresentingInitialMarkupSaveCopyPrompt = false
-    private var isGridVisible = false
+    var isGridVisible = false
+    var isShiftKeyDown = false
     var isGridSnapEnabled = false
     var isOrthoSnapEnabled = false
     private var isEndpointSnapEnabled = false
     private var isMidpointSnapEnabled = false
     private var isIntersectionSnapEnabled = false
+    private var suppressScaleReminderForSession = false
     private var autoNameCapturePhase: AutoNameCapturePhase?
     private var autoNameReferencePageIndex: Int?
     private var pendingSheetNumberZone: NormalizedPageRect?
@@ -329,6 +331,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var pageScaleLocks: [Int: PageScaleLock] = [:]
     var lastScaleLockAppliedPageIndex: Int = -1
     var toolSettingsByTool: [ToolMode: ToolSettingsState] = [:]
+    var shortcutBindings: [ShortcutAction: ShortcutBinding] = [:]
     private var layerVisibilityByName: [String: Bool] = [:]
     private var layerToggleSwitches: [String: NSSwitch] = [:]
     var onDocumentOpened: ((URL) -> Void)?
@@ -366,7 +369,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         "Select", "Grab", "Pen", "Arrow", "Line", "Polyline", "Highlighter", "Cloud", "Rectangle", "Text", "Callout"
     ]
     private let takeoffSymbolCandidates: [[String]] = [
-        ["polygon"],
+        ["polygon", "square.dashed", "square.on.square"],
         ["ruler"]
     ]
     private let takeoffSymbolDescriptions: [String] = [
@@ -390,13 +393,35 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     ]
     let drawingScalePresets: [(label: String, drawingInches: Double, realFeet: Double)] = [
         ("Scale: Not Set", 0.0, 0.0),
+        ("3\" = 1'-0\"", 3.0, 1.0),
+        ("1 1/2\" = 1'-0\"", 1.5, 1.0),
         ("1\" = 1'-0\"", 1.0, 1.0),
+        ("3/4\" = 1'-0\"", 0.75, 1.0),
         ("1/2\" = 1'-0\"", 0.5, 1.0),
         ("3/8\" = 1'-0\"", 0.375, 1.0),
         ("1/4\" = 1'-0\"", 0.25, 1.0),
         ("3/16\" = 1'-0\"", 0.1875, 1.0),
         ("1/8\" = 1'-0\"", 0.125, 1.0),
+        ("3/32\" = 1'-0\"", 0.09375, 1.0),
         ("1/16\" = 1'-0\"", 0.0625, 1.0),
+        ("3/64\" = 1'-0\"", 0.046875, 1.0),
+        ("1/32\" = 1'-0\"", 0.03125, 1.0),
+        ("1\" = 2'-0\"", 1.0, 2.0),
+        ("1\" = 4'-0\"", 1.0, 4.0),
+        ("1\" = 8'-0\"", 1.0, 8.0),
+        ("1\" = 10'-0\"", 1.0, 10.0),
+        ("1\" = 20'-0\"", 1.0, 20.0),
+        ("1\" = 30'-0\"", 1.0, 30.0),
+        ("1\" = 40'-0\"", 1.0, 40.0),
+        ("1\" = 50'-0\"", 1.0, 50.0),
+        ("1\" = 60'-0\"", 1.0, 60.0),
+        ("1\" = 80'-0\"", 1.0, 80.0),
+        ("1\" = 100'-0\"", 1.0, 100.0),
+        ("1\" = 200'-0\"", 1.0, 200.0),
+        ("1\" = 300'-0\"", 1.0, 300.0),
+        ("1\" = 400'-0\"", 1.0, 400.0),
+        ("1\" = 500'-0\"", 1.0, 500.0),
+        ("1\" = 1000'-0\"", 1.0, 1000.0),
         ("Custom…", -1.0, -1.0)
     ]
     private weak var newDocumentPanel: NSPanel?
@@ -432,7 +457,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     override func viewDidLoad() {
         super.viewDidLoad()
         registerDefaultPerformanceSettingsIfNeeded()
+        loadShortcutBindings()
         setupUI()
+        updateShortcutHintLabel()
         configureWatchdogFromDefaults()
         startMarkupsRefreshTimer()
         updateEmptyStateVisibility()
@@ -1708,9 +1735,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         gridToggleButton.setButtonType(.toggle)
         gridToggleButton.image = NSImage(systemSymbolName: "grid", accessibilityDescription: "Toggle Grid")
-        gridToggleButton.imagePosition = .imageOnly
+        gridToggleButton.imagePosition = .imageLeading
+        gridToggleButton.title = "X"
         gridToggleButton.bezelStyle = .texturedRounded
-        gridToggleButton.toolTip = "Show/Hide Grid"
+        gridToggleButton.toolTip = "Show/Hide Grid (X)"
         gridToggleButton.target = self
         gridToggleButton.action = #selector(toggleGridOverlay)
         gridToggleButton.state = isGridVisible ? .on : .off
@@ -1804,10 +1832,19 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
     }
 
+    private func setGridVisibleState(_ visible: Bool) {
+        isGridVisible = visible
+        gridToggleButton.state = visible ? .on : .off
+        pdfView.setGridVisible(visible)
+        applyToggleIconAppearance(gridToggleButton, enabled: visible)
+    }
+
+    func toggleGridVisibilityShortcut() {
+        setGridVisibleState(!isGridVisible)
+    }
+
     @objc private func toggleGridOverlay() {
-        isGridVisible = (gridToggleButton.state == .on)
-        pdfView.setGridVisible(isGridVisible)
-        applyToggleIconAppearance(gridToggleButton, enabled: isGridVisible)
+        setGridVisibleState(gridToggleButton.state == .on)
     }
 
     func setGridSnapEnabled(_ enabled: Bool, showToast: Bool = true) {
@@ -1877,7 +1914,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             view.removeFromSuperview()
         }
 
-        snapRowsStack.addArrangedSubview(makeSnapRow(title: "Snap to Ortho", isOn: isOrthoSnapEnabled, action: #selector(snapOrthoSwitchChanged(_:))))
+        snapRowsStack.addArrangedSubview(makeSnapRow(title: "Snap to Ortho - Tap Shift", isOn: isOrthoSnapEnabled, action: #selector(snapOrthoSwitchChanged(_:))))
         snapRowsStack.addArrangedSubview(makeSnapRow(title: "Snap to Endpoint", isOn: isEndpointSnapEnabled, action: #selector(snapEndpointSwitchChanged(_:))))
         snapRowsStack.addArrangedSubview(makeSnapRow(title: "Snap to Midpoint", isOn: isMidpointSnapEnabled, action: #selector(snapMidpointSwitchChanged(_:))))
         snapRowsStack.addArrangedSubview(makeSnapRow(title: "Snap to Intersection", isOn: isIntersectionSnapEnabled, action: #selector(snapIntersectionSwitchChanged(_:))))
@@ -2091,7 +2128,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         scalePresetPopup.target = self
         scalePresetPopup.action = #selector(changeScalePreset)
         scalePresetPopup.translatesAutoresizingMaskIntoConstraints = false
-        scalePresetPopup.widthAnchor.constraint(equalToConstant: 112).isActive = true
+        scalePresetPopup.widthAnchor.constraint(equalToConstant: 170).isActive = true
         scalePresetPopup.toolTip = "Drawing Scale"
     }
 
@@ -2476,6 +2513,27 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func setTool(_ mode: ToolMode) {
+        if (mode == .line || mode == .polyline),
+           pdfView.document != nil,
+           !suppressScaleReminderForSession {
+            let alert = NSAlert()
+            alert.messageText = "Set Scale Before Drafting"
+            let scaleText = measurementScaleField.stringValue.isEmpty ? "1.000000" : measurementScaleField.stringValue
+            let unit = measurementUnitPopup.titleOfSelectedItem ?? "ft"
+            alert.informativeText = "Current scale is \(scaleText) \(unit). Confirm your drawing scale before using Line or Polyline."
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "Set Scale")
+            alert.addButton(withTitle: "Ignore Now")
+            alert.addButton(withTitle: "Ignore for Session")
+            NSApp.activate(ignoringOtherApps: true)
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                commandSetDrawingScale(nil)
+                focusAndHighlightScalePresetControl()
+            } else if response == .alertThirdButtonReturn {
+                suppressScaleReminderForSession = true
+            }
+        }
         switch mode {
         case .select:
             toolSelector.selectedSegment = 0
@@ -2545,6 +2603,36 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         bounce.duration = 0.18
         bounce.timingFunction = CAMediaTimingFunction(name: .easeOut)
         layer.add(bounce, forKey: "drawbridge.tool.bounce")
+    }
+
+    private func focusAndHighlightScalePresetControl() {
+        guard let window = view.window else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeFirstResponder(scalePresetPopup)
+        scalePresetPopup.wantsLayer = true
+        guard let layer = scalePresetPopup.layer else { return }
+        let accent = NSColor.systemBlue
+        layer.cornerRadius = 6
+        layer.borderColor = accent.cgColor
+        layer.borderWidth = 2
+        layer.shadowColor = accent.cgColor
+        layer.shadowOpacity = 0.9
+        layer.shadowRadius = 10
+        layer.shadowOffset = .zero
+
+        let pulse = CAKeyframeAnimation(keyPath: "transform.scale")
+        pulse.values = [1.0, 1.08, 1.0, 1.08, 1.0]
+        pulse.keyTimes = [0.0, 0.2, 0.45, 0.7, 1.0]
+        pulse.duration = 1.0
+        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(pulse, forKey: "drawbridge.scalePreset.spotlight")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self else { return }
+            self.scalePresetPopup.layer?.borderWidth = 0
+            self.scalePresetPopup.layer?.shadowOpacity = 0
+            self.scalePresetPopup.layer?.shadowRadius = 0
+        }
     }
 
     @objc func toggleSidebar() {
