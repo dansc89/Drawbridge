@@ -38,6 +38,19 @@ extension MainViewController {
         }
     }
 
+    func installFlagsMonitorIfNeeded() {
+        guard flagsEventMonitor == nil else { return }
+        flagsEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            guard let self else { return event }
+            return self.routeFlagsChangedEvent(event)
+        }
+    }
+
+    func routeFlagsChangedEvent(_ event: NSEvent) -> NSEvent? {
+        guard view.window?.isKeyWindow == true else { return event }
+        return event
+    }
+
     func routeKeyDownEvent(_ event: NSEvent) -> NSEvent? {
         guard view.window?.isKeyWindow == true else { return event }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -77,6 +90,12 @@ extension MainViewController {
         }
 
         if modifiers.isDisjoint(with: [.command, .option, .control]) {
+            if (view.window?.firstResponder is NSTextView) == false,
+               (view.window?.firstResponder is NSTextField) == false,
+               pdfView.handleTypedDistanceKey(event) {
+                lastUserInteractionAt = Date()
+                return nil
+            }
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField {
                 return event
             }
@@ -187,6 +206,7 @@ extension MainViewController {
             pdfView.cancelPendingCallout()
             pdfView.cancelPendingPolyline()
             pdfView.cancelPendingArrow()
+            pdfView.cancelPendingLine()
             pdfView.cancelPendingArea()
             if pdfView.toolMode != .select {
                 setTool(.select)

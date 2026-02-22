@@ -654,8 +654,10 @@ extension MainViewController {
             return interpolateLevel(level, lowAt1: 1, midAt5: 2, highAt10: 4)
         case .arrow:
             return interpolateLevel(level, lowAt1: 1, midAt5: 2, highAt10: 4)
-        case .pen, .line, .polyline:
+        case .pen:
             return interpolateLevel(level, lowAt1: 6, midAt5: 15, highAt10: 25)
+        case .line, .polyline:
+            return interpolateLevel(level, lowAt1: 1, midAt5: 2, highAt10: 4)
         case .highlighter:
             return interpolateLevel(level, lowAt1: 12, midAt5: 25, highAt10: 40)
         case .cloud, .rectangle:
@@ -696,9 +698,9 @@ extension MainViewController {
         case .arrow:
             return makeToolSettingsState(strokeColor: pdfView.arrowStrokeColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.arrowStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: pdfView.calloutArrowStyle.rawValue, arrowHeadSize: max(1.0, pdfView.arrowHeadSize))
         case .line:
-            return makeToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: .black, fillColor: .clear, opacity: 1.0, lineWeightLevel: 1, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .polyline:
-            return makeToolSettingsState(strokeColor: pdfView.penColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.penColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: .black, fillColor: .clear, opacity: 1.0, lineWeightLevel: 1, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .highlighter:
             return makeToolSettingsState(strokeColor: pdfView.highlighterColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.highlighterColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .cloud:

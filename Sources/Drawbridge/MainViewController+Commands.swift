@@ -11,6 +11,18 @@ extension MainViewController {
     @objc func commandExportCSV(_ sender: Any?) { exportMarkupsCSV() }
     @objc func commandAutoGenerateSheetNames(_ sender: Any?) { startAutoGenerateSheetNamesFlow() }
     @objc func commandSetScale(_ sender: Any?) { commandSetDrawingScale(sender) }
+    @objc func commandLockScalePages(_ sender: Any?) { commandLockScaleToPages(sender) }
+    @objc func commandClearScalePages(_ sender: Any?) { commandClearScaleLocks(sender) }
+    @objc func commandToggleGridSnap(_ sender: Any?) {
+        let enabled = !isGridSnapEnabled
+        setGridSnapEnabled(enabled)
+        (sender as? NSMenuItem)?.state = enabled ? .on : .off
+    }
+    @objc func commandToggleOrthoSnap(_ sender: Any?) {
+        let enabled = !isOrthoSnapEnabled
+        setOrthoSnapEnabled(enabled)
+        (sender as? NSMenuItem)?.state = enabled ? .on : .off
+    }
     @objc func commandPerformanceSettings(_ sender: Any?) {
         let defaults = UserDefaults.standard
         let adaptiveDefault = defaults.bool(forKey: Self.defaultsAdaptiveIndexCapEnabledKey)
@@ -310,6 +322,9 @@ extension MainViewController {
              #selector(commandExportCSV(_:)),
              #selector(commandAutoGenerateSheetNames(_:)),
              #selector(commandSetScale(_:)),
+             #selector(commandLockScalePages(_:)),
+             #selector(commandClearScalePages(_:)),
+             #selector(commandToggleOrthoSnap(_:)),
              #selector(commandRefreshMarkups(_:)),
              #selector(commandSelectAll(_:)),
              #selector(commandFocusSearch(_:)),
@@ -329,6 +344,9 @@ extension MainViewController {
              #selector(selectCalloutTool(_:)),
              #selector(selectMeasureTool(_:)),
              #selector(selectCalibrateTool(_:)):
+            if action == #selector(commandToggleOrthoSnap(_:)) {
+                menuItem.state = isOrthoSnapEnabled ? .on : .off
+            }
             return hasDocument
         case #selector(commandHighlight(_:)):
             return hasTextSelection

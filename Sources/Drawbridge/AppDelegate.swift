@@ -268,6 +268,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let setScaleItem = viewMenu.addItem(withTitle: "Set Drawing Scale...", action: #selector(MainViewController.commandSetScale(_:)), keyEquivalent: "k")
         setScaleItem.keyEquivalentModifierMask = [.command, .shift]
         setScaleItem.target = controller
+        let lockScaleItem = viewMenu.addItem(withTitle: "Lock Scale to Pages...", action: #selector(MainViewController.commandLockScalePages(_:)), keyEquivalent: "k")
+        lockScaleItem.keyEquivalentModifierMask = [.command, .option, .shift]
+        lockScaleItem.target = controller
+        let clearScaleLocksItem = viewMenu.addItem(withTitle: "Clear Scale Locks...", action: #selector(MainViewController.commandClearScalePages(_:)), keyEquivalent: "")
+        clearScaleLocksItem.target = controller
+        let snapOrthoItem = viewMenu.addItem(withTitle: "Snap to Ortho", action: #selector(MainViewController.commandToggleOrthoSnap(_:)), keyEquivalent: "g")
+        snapOrthoItem.keyEquivalentModifierMask = [.command, .option]
+        snapOrthoItem.target = controller
+        snapOrthoItem.state = controller.isOrthoSnapEnabled ? .on : .off
         viewMenu.addItem(NSMenuItem.separator())
         let toggleSidebarItem = viewMenu.addItem(withTitle: "Toggle Sidebar", action: #selector(MainViewController.commandToggleSidebar(_:)), keyEquivalent: "s")
         toggleSidebarItem.keyEquivalentModifierMask = [.command, .option]

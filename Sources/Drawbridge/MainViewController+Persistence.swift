@@ -16,6 +16,7 @@ extension MainViewController {
             document: document,
             sourcePDFURL: sourcePDFURL,
             initialCapacity: totalCachedAnnotationCount(),
+            pageScaleLocks: pageScaleLocks,
             resolvedLineWidth: { annotation in
                 self.resolvedLineWidth(for: annotation)
             }
@@ -23,9 +24,17 @@ extension MainViewController {
     }
 
     func loadSidecarSnapshotIfAvailable(for sourcePDFURL: URL, document: PDFDocument) {
-        snapshotStore.loadSnapshotIfAvailable(for: sourcePDFURL, document: document) { lineWidth, annotation in
-            self.assignLineWidth(lineWidth, to: annotation)
-        }
+        snapshotStore.loadSnapshotIfAvailable(
+            for: sourcePDFURL,
+            document: document,
+            applyPageScaleLocks: { locks in
+                self.pageScaleLocks = locks
+                self.lastScaleLockAppliedPageIndex = -1
+            },
+            assignLineWidth: { lineWidth, annotation in
+                self.assignLineWidth(lineWidth, to: annotation)
+            }
+        )
     }
 
     func persistProjectSnapshot(document: PDFDocument, for sourcePDFURL: URL, busyMessage: String) {

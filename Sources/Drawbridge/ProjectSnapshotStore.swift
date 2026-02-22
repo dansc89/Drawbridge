@@ -41,6 +41,7 @@ final class ProjectSnapshotStore: @unchecked Sendable {
         document: PDFDocument,
         sourcePDFURL: URL,
         initialCapacity: Int,
+        pageScaleLocks: [Int: PageScaleLock],
         resolvedLineWidth: (PDFAnnotation) -> CGFloat
     ) -> SidecarSnapshot {
         var records: [SidecarAnnotationRecord] = []
@@ -64,6 +65,7 @@ final class ProjectSnapshotStore: @unchecked Sendable {
             sourcePDFPath: sourcePDFURL.standardizedFileURL.path,
             pageCount: document.pageCount,
             annotations: records,
+            pageScaleLocks: pageScaleLocks,
             savedAt: Date()
         )
     }
@@ -92,6 +94,7 @@ final class ProjectSnapshotStore: @unchecked Sendable {
     func loadSnapshotIfAvailable(
         for sourcePDFURL: URL,
         document: PDFDocument,
+        applyPageScaleLocks: ([Int: PageScaleLock]) -> Void,
         assignLineWidth: (CGFloat, PDFAnnotation) -> Void
     ) {
         let url = sidecarURL(for: sourcePDFURL)
@@ -112,6 +115,7 @@ final class ProjectSnapshotStore: @unchecked Sendable {
             ?? (try? jsonDecoder.decode(SidecarSnapshot.self, from: data)) else { return }
         guard snapshot.sourcePDFPath == sourcePDFURL.standardizedFileURL.path else { return }
 
+        applyPageScaleLocks(snapshot.pageScaleLocks ?? [:])
         applySnapshot(snapshot, to: document, assignLineWidth: assignLineWidth)
     }
 

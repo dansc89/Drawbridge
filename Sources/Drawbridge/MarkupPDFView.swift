@@ -146,10 +146,14 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var pendingPolylinePointsInPage: [NSPoint] = []
     private var pendingArrowPage: PDFPage?
     private var pendingArrowStartInPage: NSPoint?
+    private var pendingLinePage: PDFPage?
+    private var pendingLineStartInPage: NSPoint?
     private var pendingAreaPage: PDFPage?
     private var pendingAreaPointsInPage: [NSPoint] = []
     private var pendingMeasurePage: PDFPage?
     private var pendingMeasureStartInPage: NSPoint?
+    private var lastPointerInView: NSPoint?
+    private var typedDistanceBuffer: String = ""
     private var mouseTrackingArea: NSTrackingArea?
     private let dragPreviewLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
@@ -220,8 +224,77 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         ]
         return layer
     }()
+    private let typedDistanceHUDBackgroundLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.strokeColor = NSColor.systemBlue.withAlphaComponent(0.6).cgColor
+        layer.fillColor = NSColor.black.withAlphaComponent(0.82).cgColor
+        layer.lineWidth = 1.0
+        layer.zPosition = 40
+        layer.isHidden = true
+        layer.actions = [
+            "path": NSNull(),
+            "hidden": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull()
+        ]
+        return layer
+    }()
+    private let typedDistanceHUDTextLayer: CATextLayer = {
+        let layer = CATextLayer()
+        layer.alignmentMode = .left
+        layer.truncationMode = .none
+        layer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
+        layer.zPosition = 41
+        layer.isWrapped = false
+        layer.isHidden = true
+        layer.actions = [
+            "hidden": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "string": NSNull()
+        ]
+        return layer
+    }()
+    private let snapStatusBackgroundLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.strokeColor = NSColor.systemBlue.withAlphaComponent(0.7).cgColor
+        layer.fillColor = NSColor.systemBlue.withAlphaComponent(0.9).cgColor
+        layer.lineWidth = 1.0
+        layer.zPosition = 45
+        layer.isHidden = true
+        layer.actions = [
+            "path": NSNull(),
+            "hidden": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull()
+        ]
+        return layer
+    }()
+    private let snapStatusTextLayer: CATextLayer = {
+        let layer = CATextLayer()
+        layer.alignmentMode = .left
+        layer.truncationMode = .none
+        layer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
+        layer.zPosition = 46
+        layer.isWrapped = false
+        layer.isHidden = true
+        layer.actions = [
+            "hidden": NSNull(),
+            "position": NSNull(),
+            "bounds": NSNull(),
+            "string": NSNull(),
+            "opacity": NSNull()
+        ]
+        return layer
+    }()
+    private var snapStatusHideWorkItem: DispatchWorkItem?
     private var textEditCaretTimer: Timer?
     private var isGridVisible = false
+    private var isGridSnapEnabled = false
+    private var isOrthoSnapEnabled = false
+    private var isEndpointSnapEnabled = false
+    private var isMidpointSnapEnabled = false
+    private var isIntersectionSnapEnabled = false
     private let gridSpacingInPoints: CGFloat = 24.0
     private let maxGridLinesPerAxis = 400
 
@@ -268,6 +341,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         layer?.addSublayer(dragPreviewLayer)
         layer?.addSublayer(dropHighlightLayer)
         layer?.addSublayer(textEditCaretLayer)
+        layer?.addSublayer(typedDistanceHUDBackgroundLayer)
+        layer?.addSublayer(typedDistanceHUDTextLayer)
+        layer?.addSublayer(snapStatusBackgroundLayer)
+        layer?.addSublayer(snapStatusTextLayer)
         autoScales = true
         displayMode = .singlePage
         displayDirection = .vertical
@@ -299,6 +376,234 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     func setGridVisible(_ visible: Bool) {
         isGridVisible = visible
         updateGridOverlayIfNeeded()
+    }
+
+    func setGridSnapEnabled(_ enabled: Bool) {
+        isGridSnapEnabled = enabled
+    }
+
+    func setOrthoSnapEnabled(_ enabled: Bool) {
+        isOrthoSnapEnabled = enabled
+    }
+
+    func setEndpointSnapEnabled(_ enabled: Bool) {
+        isEndpointSnapEnabled = enabled
+    }
+
+    func setMidpointSnapEnabled(_ enabled: Bool) {
+        isMidpointSnapEnabled = enabled
+    }
+
+    func setIntersectionSnapEnabled(_ enabled: Bool) {
+        isIntersectionSnapEnabled = enabled
+    }
+
+    private func isOrthoConstraintActive(for event: NSEvent) -> Bool {
+        event.modifierFlags.contains(.shift) || (isOrthoSnapEnabled && (toolMode == .line || toolMode == .polyline))
+    }
+
+    func showSnapStatusToast(enabled: Bool) {
+        snapStatusHideWorkItem?.cancel()
+        snapStatusHideWorkItem = nil
+
+        let text = enabled ? "SNAP ON" : "SNAP OFF"
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.white
+        ]
+        let textSize = (text as NSString).size(withAttributes: attrs)
+        let paddingX: CGFloat = 10
+        let paddingY: CGFloat = 6
+        let toastWidth = max(90, ceil(textSize.width) + paddingX * 2)
+        let toastHeight = max(26, ceil(textSize.height) + paddingY * 2)
+
+        let anchorPoint: NSPoint
+        if let pointer = lastPointerInView {
+            anchorPoint = pointer
+        } else {
+            anchorPoint = NSPoint(x: bounds.midX, y: bounds.midY)
+        }
+        var origin = NSPoint(x: anchorPoint.x + 12, y: anchorPoint.y + 28)
+        origin.x = min(max(8, origin.x), max(8, bounds.maxX - toastWidth - 8))
+        origin.y = min(max(8, origin.y), max(8, bounds.maxY - toastHeight - 8))
+        let rect = NSRect(x: origin.x, y: origin.y, width: toastWidth, height: toastHeight)
+
+        snapStatusBackgroundLayer.path = CGPath(roundedRect: rect, cornerWidth: 7, cornerHeight: 7, transform: nil)
+        snapStatusBackgroundLayer.fillColor = (enabled ? NSColor.systemBlue : NSColor.systemGray).withAlphaComponent(0.90).cgColor
+        snapStatusBackgroundLayer.isHidden = false
+
+        snapStatusTextLayer.contentsScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        snapStatusTextLayer.string = NSAttributedString(string: text, attributes: attrs)
+        snapStatusTextLayer.frame = NSRect(
+            x: rect.minX + paddingX,
+            y: rect.minY + paddingY - 1,
+            width: rect.width - paddingX * 2,
+            height: rect.height - paddingY * 2
+        )
+        snapStatusTextLayer.opacity = 1.0
+        snapStatusTextLayer.isHidden = false
+
+        let hideWork = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            self.snapStatusBackgroundLayer.isHidden = true
+            self.snapStatusBackgroundLayer.path = nil
+            self.snapStatusTextLayer.isHidden = true
+            self.snapStatusTextLayer.string = nil
+            CATransaction.commit()
+        }
+        snapStatusHideWorkItem = hideWork
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: hideWork)
+    }
+
+    private func snapPointInPageIfNeeded(_ point: NSPoint, on page: PDFPage) -> NSPoint {
+        guard isGridSnapEnabled || isEndpointSnapEnabled || isMidpointSnapEnabled || isIntersectionSnapEnabled else { return point }
+        let pointInView = convert(point, from: page)
+        let snappedInView = snapPointInViewIfNeeded(pointInView, on: page)
+        return convert(snappedInView, to: page)
+    }
+
+    private func snapPointInViewIfNeeded(_ point: NSPoint, on page: PDFPage) -> NSPoint {
+        if isEndpointSnapEnabled || isMidpointSnapEnabled || isIntersectionSnapEnabled {
+            let segments = snapSegmentsInView(on: page)
+            var candidates: [NSPoint] = []
+            candidates.reserveCapacity(segments.count * 2)
+            if isEndpointSnapEnabled {
+                for segment in segments {
+                    candidates.append(segment.start)
+                    candidates.append(segment.end)
+                }
+            }
+            if isMidpointSnapEnabled {
+                for segment in segments {
+                    candidates.append(NSPoint(x: (segment.start.x + segment.end.x) * 0.5, y: (segment.start.y + segment.end.y) * 0.5))
+                }
+            }
+            if isIntersectionSnapEnabled {
+                candidates.append(contentsOf: segmentIntersectionsInView(from: segments))
+            }
+            if let snapPoint = nearestPoint(to: point, within: 14.0, from: candidates) {
+                return snapPoint
+            }
+        }
+        guard isGridVisible, isGridSnapEnabled else { return point }
+        let pageBounds = page.bounds(for: displayBox)
+        let spacing = gridSpacingInPoints
+        guard spacing.isFinite, spacing > 0 else { return point }
+        let pointInPage = convert(point, to: page)
+        guard pointInPage.x.isFinite,
+              pointInPage.y.isFinite else {
+            return point
+        }
+        let snappedPageX = pageBounds.minX + round((pointInPage.x - pageBounds.minX) / spacing) * spacing
+        let snappedPageY = pageBounds.minY + round((pointInPage.y - pageBounds.minY) / spacing) * spacing
+        return convert(NSPoint(x: snappedPageX, y: snappedPageY), from: page)
+    }
+
+    private func nearestPoint(to target: NSPoint, within maxDistance: CGFloat, from points: [NSPoint]) -> NSPoint? {
+        var bestPoint: NSPoint?
+        var bestDistance = maxDistance
+        for point in points {
+            let distance = hypot(point.x - target.x, point.y - target.y)
+            if distance <= bestDistance {
+                bestDistance = distance
+                bestPoint = point
+            }
+        }
+        return bestPoint
+    }
+
+    private func endpointSnapEligible(_ annotation: PDFAnnotation) -> Bool {
+        guard annotation.shouldDisplay else { return false }
+        guard let type = annotation.type?.lowercased(), type.contains("ink") else { return false }
+        let contents = (annotation.contents ?? "").lowercased()
+        return contents.contains("line") || contents.contains("polyline")
+    }
+
+    private func annotationSegmentsInPage(for annotation: PDFAnnotation) -> [(NSPoint, NSPoint)] {
+        guard let path = annotation.paths?.first, path.elementCount > 0 else { return [] }
+        let origin = annotation.bounds.origin
+        var segments: [(NSPoint, NSPoint)] = []
+        segments.reserveCapacity(max(1, path.elementCount - 1))
+        var previousPoint: NSPoint?
+
+        for idx in 0..<path.elementCount {
+            var points = [NSPoint](repeating: .zero, count: 3)
+            let element = path.element(at: idx, associatedPoints: &points)
+            switch element {
+            case .moveTo:
+                previousPoint = NSPoint(x: points[0].x + origin.x, y: points[0].y + origin.y)
+            case .lineTo:
+                let point = NSPoint(x: points[0].x + origin.x, y: points[0].y + origin.y)
+                if let previousPoint, hypot(point.x - previousPoint.x, point.y - previousPoint.y) > 0.01 {
+                    segments.append((previousPoint, point))
+                }
+                previousPoint = point
+            default:
+                break
+            }
+        }
+        return segments
+    }
+
+    private struct SnapSegmentInView {
+        let start: NSPoint
+        let end: NSPoint
+    }
+
+    private func snapSegmentsInView(on page: PDFPage) -> [SnapSegmentInView] {
+        var segments: [SnapSegmentInView] = []
+        segments.reserveCapacity(120)
+        for annotation in page.annotations {
+            guard endpointSnapEligible(annotation) else { continue }
+            let annotationSegments = annotationSegmentsInPage(for: annotation)
+            guard !annotationSegments.isEmpty else { continue }
+            for segment in annotationSegments {
+                segments.append(SnapSegmentInView(start: convert(segment.0, from: page), end: convert(segment.1, from: page)))
+            }
+        }
+        return segments
+    }
+
+    private func segmentIntersectionsInView(from segments: [SnapSegmentInView]) -> [NSPoint] {
+        guard segments.count >= 2 else { return [] }
+        let capped = min(segments.count, 220)
+        var intersections: [NSPoint] = []
+        intersections.reserveCapacity(min(400, capped * 2))
+        for i in 0..<(capped - 1) {
+            for j in (i + 1)..<capped {
+                if let p = segmentIntersectionPoint(segments[i].start, segments[i].end, segments[j].start, segments[j].end) {
+                    intersections.append(p)
+                }
+            }
+        }
+        return intersections
+    }
+
+    private func segmentIntersectionPoint(_ p1: NSPoint, _ p2: NSPoint, _ p3: NSPoint, _ p4: NSPoint) -> NSPoint? {
+        let x1 = p1.x, y1 = p1.y
+        let x2 = p2.x, y2 = p2.y
+        let x3 = p3.x, y3 = p3.y
+        let x4 = p4.x, y4 = p4.y
+        let denominator = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+        if abs(denominator) < 0.00001 { return nil }
+
+        let det1 = x1 * y2 - y1 * x2
+        let det2 = x3 * y4 - y3 * x4
+        let px = (det1 * (x3 - x4) - (x1 - x2) * det2) / denominator
+        let py = (det1 * (y3 - y4) - (y1 - y2) * det2) / denominator
+
+        func within(_ v: CGFloat, _ a: CGFloat, _ b: CGFloat) -> Bool {
+            let minV = min(a, b) - 0.5
+            let maxV = max(a, b) + 0.5
+            return v >= minV && v <= maxV
+        }
+        guard within(px, x1, x2), within(py, y1, y2), within(px, x3, x4), within(py, y3, y4) else {
+            return nil
+        }
+        return NSPoint(x: px, y: py)
     }
 
     func beginRegionCaptureMode() {
@@ -360,16 +665,16 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         let majorEvery = 5
         let path = CGMutablePath()
-        let spacing = max(8.0, gridSpacingInPoints * scaleFactor)
+        let spacing = gridSpacingInPoints
         guard spacing.isFinite, spacing > 0 else {
             gridOverlayLayer.isHidden = true
             gridOverlayLayer.path = nil
             return
         }
-        let xStart = floor(pageRectInView.minX / spacing) * spacing
-        let yStart = floor(pageRectInView.minY / spacing) * spacing
-        let xLineEstimate = Int(ceil(pageRectInView.width / spacing)) + 2
-        let yLineEstimate = Int(ceil(pageRectInView.height / spacing)) + 2
+        let pageWidth = pageBounds.width
+        let pageHeight = pageBounds.height
+        let xLineEstimate = Int(ceil(pageWidth / spacing)) + 1
+        let yLineEstimate = Int(ceil(pageHeight / spacing)) + 1
         guard xLineEstimate <= maxGridLinesPerAxis, yLineEstimate <= maxGridLinesPerAxis else {
             // Avoid extreme path sizes on atypical documents/zoom levels.
             gridOverlayLayer.isHidden = true
@@ -378,28 +683,32 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
 
         var i = 0
-        var x = xStart
-        while x <= pageRectInView.maxX, i <= maxGridLinesPerAxis {
-            path.move(to: CGPoint(x: x, y: pageRectInView.minY))
-            path.addLine(to: CGPoint(x: x, y: pageRectInView.maxY))
+        var xPage = pageBounds.minX
+        while xPage <= pageBounds.maxX + 0.001, i <= maxGridLinesPerAxis {
+            let from = convert(NSPoint(x: xPage, y: pageBounds.minY), from: page)
+            let to = convert(NSPoint(x: xPage, y: pageBounds.maxY), from: page)
+            path.move(to: CGPoint(x: from.x, y: from.y))
+            path.addLine(to: CGPoint(x: to.x, y: to.y))
             if i % majorEvery == 0 {
-                path.move(to: CGPoint(x: x + 0.25, y: pageRectInView.minY))
-                path.addLine(to: CGPoint(x: x + 0.25, y: pageRectInView.maxY))
+                path.move(to: CGPoint(x: from.x + 0.25, y: from.y))
+                path.addLine(to: CGPoint(x: to.x + 0.25, y: to.y))
             }
-            x += spacing
+            xPage += spacing
             i += 1
         }
 
         i = 0
-        var y = yStart
-        while y <= pageRectInView.maxY, i <= maxGridLinesPerAxis {
-            path.move(to: CGPoint(x: pageRectInView.minX, y: y))
-            path.addLine(to: CGPoint(x: pageRectInView.maxX, y: y))
+        var yPage = pageBounds.minY
+        while yPage <= pageBounds.maxY + 0.001, i <= maxGridLinesPerAxis {
+            let from = convert(NSPoint(x: pageBounds.minX, y: yPage), from: page)
+            let to = convert(NSPoint(x: pageBounds.maxX, y: yPage), from: page)
+            path.move(to: CGPoint(x: from.x, y: from.y))
+            path.addLine(to: CGPoint(x: to.x, y: to.y))
             if i % majorEvery == 0 {
-                path.move(to: CGPoint(x: pageRectInView.minX, y: y + 0.25))
-                path.addLine(to: CGPoint(x: pageRectInView.maxX, y: y + 0.25))
+                path.move(to: CGPoint(x: from.x, y: from.y + 0.25))
+                path.addLine(to: CGPoint(x: to.x, y: to.y + 0.25))
             }
-            y += spacing
+            yPage += spacing
             i += 1
         }
 
@@ -423,13 +732,29 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseMoved(with event: NSEvent) {
+        lastPointerInView = convert(event.locationInWindow, from: nil)
+        updateTypedDistanceHUD()
+        if toolMode == .line {
+            let ortho = isOrthoConstraintActive(for: event)
+            if let page = pendingLinePage, let pointer = lastPointerInView {
+                updateLinePreview(at: snapPointInViewIfNeeded(pointer, on: page), orthogonal: ortho)
+            } else {
+                updateLinePreview(at: lastPointerInView, orthogonal: ortho)
+            }
+            return
+        }
         if toolMode == .measure {
             updateMeasurePreview(with: event)
             return
         }
         if toolMode == .polyline {
             let locationInView = convert(event.locationInWindow, from: nil)
-            updatePolylinePreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
+            let ortho = isOrthoConstraintActive(for: event)
+            if let page = pendingPolylinePage {
+                updatePolylinePreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: ortho)
+            } else {
+                updatePolylinePreview(at: locationInView, orthogonal: ortho)
+            }
             return
         }
         if toolMode == .arrow {
@@ -444,7 +769,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         if toolMode == .text {
             let locationInView = convert(event.locationInWindow, from: nil)
-            updateTextPreview(at: locationInView)
+            if let page = page(for: locationInView, nearest: true) {
+                updateTextPreview(at: snapPointInViewIfNeeded(locationInView, on: page))
+            } else {
+                updateTextPreview(at: locationInView)
+            }
             return
         }
         guard toolMode == .callout else {
@@ -452,11 +781,16 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return
         }
         let locationInView = convert(event.locationInWindow, from: nil)
-        updateCalloutPreview(at: locationInView)
+        if let page = pendingCalloutPage ?? page(for: locationInView, nearest: true) {
+            updateCalloutPreview(at: snapPointInViewIfNeeded(locationInView, on: page))
+        } else {
+            updateCalloutPreview(at: locationInView)
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
         let locationInView = convert(event.locationInWindow, from: nil)
+        lastPointerInView = locationInView
         if isRegionCaptureModeEnabled {
             guard let page = page(for: locationInView, nearest: true) else { return }
             regionCaptureStartInView = locationInView
@@ -586,17 +920,17 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 super.mouseDown(with: event)
                 return
             }
-            let pointInPage = convert(locationInView, to: page)
+            let pointInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
             if pendingArrowPage == nil || pendingArrowPage !== page || pendingArrowStartInPage == nil {
                 pendingArrowPage = page
                 pendingArrowStartInPage = pointInPage
-                updateArrowPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
+                updateArrowPreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: event.modifierFlags.contains(.shift))
             } else if let start = pendingArrowStartInPage {
                 let endInPage: NSPoint
                 if event.modifierFlags.contains(.shift) {
                     let startInView = convert(start, from: page)
                     let snapped = orthogonalSnapPoint(anchor: startInView, current: locationInView)
-                    endInPage = convert(snapped, to: page)
+                    endInPage = snapPointInPageIfNeeded(convert(snapped, to: page), on: page)
                 } else {
                     endInPage = pointInPage
                 }
@@ -612,16 +946,27 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 super.mouseDown(with: event)
                 return
             }
-            dragStartInView = locationInView
-            dragPage = page
-            let path = CGMutablePath()
-            path.move(to: locationInView)
-            path.addLine(to: locationInView)
-            dragPreviewLayer.strokeColor = penColor.cgColor
-            dragPreviewLayer.fillColor = NSColor.clear.cgColor
-            dragPreviewLayer.lineWidth = penLineWidth
-            dragPreviewLayer.path = path
-            dragPreviewLayer.isHidden = false
+            typedDistanceBuffer = ""
+            let pointInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
+            let ortho = isOrthoConstraintActive(for: event)
+            if pendingLinePage == nil || pendingLinePage !== page || pendingLineStartInPage == nil {
+                pendingLinePage = page
+                pendingLineStartInPage = pointInPage
+            } else if let start = pendingLineStartInPage {
+                let endInPage: NSPoint
+                if ortho {
+                    let startInView = convert(start, from: page)
+                    let snapped = orthogonalSnapPoint(anchor: startInView, current: locationInView)
+                    endInPage = snapPointInPageIfNeeded(convert(snapped, to: page), on: page)
+                } else {
+                    endInPage = pointInPage
+                }
+                addLineAnnotation(from: start, to: endInPage, on: page, actionName: "Add Line", contents: "Line")
+                clearPendingLine()
+            }
+            let previewPoint = snapPointInViewIfNeeded(locationInView, on: page)
+            updateLinePreview(at: previewPoint, orthogonal: ortho)
+            return
         case .polyline:
             if inlineTextField != nil {
                 _ = commitInlineTextEditor(cancel: false)
@@ -630,14 +975,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 super.mouseDown(with: event)
                 return
             }
-            let pointInPage = convert(locationInView, to: page)
+            let ortho = isOrthoConstraintActive(for: event)
+            let pointInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
             let constrainedPointInPage: NSPoint
-            if event.modifierFlags.contains(.shift),
+            if ortho,
                pendingPolylinePage === page,
                let last = pendingPolylinePointsInPage.last {
                 let lastInView = convert(last, from: page)
                 let currentInView = convert(pointInPage, from: page)
-                constrainedPointInPage = convert(orthogonalSnapPoint(anchor: lastInView, current: currentInView), to: page)
+                constrainedPointInPage = snapPointInPageIfNeeded(convert(orthogonalSnapPoint(anchor: lastInView, current: currentInView), to: page), on: page)
             } else {
                 constrainedPointInPage = pointInPage
             }
@@ -650,7 +996,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             } else {
                 pendingPolylinePointsInPage.append(constrainedPointInPage)
             }
-            updatePolylinePreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
+            typedDistanceBuffer = ""
+            let previewPoint = snapPointInViewIfNeeded(locationInView, on: page)
+            updatePolylinePreview(at: previewPoint, orthogonal: ortho)
         case .area:
             if inlineTextField != nil {
                 _ = commitInlineTextEditor(cancel: false)
@@ -659,14 +1007,14 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 super.mouseDown(with: event)
                 return
             }
-            let pointInPage = convert(locationInView, to: page)
+            let pointInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
             let constrainedPointInPage: NSPoint
             if event.modifierFlags.contains(.shift),
                pendingAreaPage === page,
                let last = pendingAreaPointsInPage.last {
                 let lastInView = convert(last, from: page)
                 let currentInView = convert(pointInPage, from: page)
-                constrainedPointInPage = convert(orthogonalSnapPoint(anchor: lastInView, current: currentInView), to: page)
+                constrainedPointInPage = snapPointInPageIfNeeded(convert(orthogonalSnapPoint(anchor: lastInView, current: currentInView), to: page), on: page)
             } else {
                 constrainedPointInPage = pointInPage
             }
@@ -679,7 +1027,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             } else {
                 pendingAreaPointsInPage.append(constrainedPointInPage)
             }
-            updateAreaPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
+            let previewPoint = snapPointInViewIfNeeded(locationInView, on: page)
+            updateAreaPreview(at: previewPoint, orthogonal: event.modifierFlags.contains(.shift))
         case .cloud, .rectangle:
             if inlineTextField != nil {
                 _ = commitInlineTextEditor(cancel: false)
@@ -688,13 +1037,18 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 super.mouseDown(with: event)
                 return
             }
-            dragStartInView = locationInView
+            let snappedLocationInView = snapPointInViewIfNeeded(locationInView, on: page)
+            dragStartInView = snappedLocationInView
             dragPage = page
             dragPreviewLayer.isHidden = false
-            dragPreviewLayer.path = CGPath(rect: NSRect(origin: locationInView, size: .zero), transform: nil)
+            dragPreviewLayer.path = CGPath(rect: NSRect(origin: snappedLocationInView, size: .zero), transform: nil)
         case .text:
             hideTextPreview()
-            beginInlineTextEditing(at: locationInView)
+            if let page = page(for: locationInView, nearest: true) {
+                beginInlineTextEditing(at: snapPointInViewIfNeeded(locationInView, on: page))
+            } else {
+                beginInlineTextEditing(at: locationInView)
+            }
         case .callout:
             return
         case .measure, .calibrate:
@@ -706,7 +1060,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 return
             }
             if toolMode == .measure {
-                let pointInPage = convert(locationInView, to: page)
+                let pointInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
                 if let startPage = pendingMeasurePage,
                    let start = pendingMeasureStartInPage,
                    startPage == page {
@@ -729,18 +1083,21 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                     dragPreviewLayer.isHidden = false
                 }
             } else {
-                dragStartInView = locationInView
+                let snappedLocationInView = snapPointInViewIfNeeded(locationInView, on: page)
+                dragStartInView = snappedLocationInView
                 dragPage = page
                 dragPreviewLayer.strokeColor = calibrationStrokeColor.cgColor
                 dragPreviewLayer.fillColor = NSColor.clear.cgColor
                 dragPreviewLayer.lineWidth = measurementLineWidth
-                dragPreviewLayer.path = CGPath(rect: NSRect(origin: locationInView, size: .zero), transform: nil)
+                dragPreviewLayer.path = CGPath(rect: NSRect(origin: snappedLocationInView, size: .zero), transform: nil)
                 dragPreviewLayer.isHidden = false
             }
         }
     }
 
     override func mouseDragged(with event: NSEvent) {
+        lastPointerInView = convert(event.locationInWindow, from: nil)
+        updateTypedDistanceHUD()
         if isRegionCaptureModeEnabled {
             guard let start = regionCaptureStartInView else { return }
             let current = convert(event.locationInWindow, from: nil)
@@ -868,21 +1225,44 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         if toolMode == .polyline {
             let locationInView = convert(event.locationInWindow, from: nil)
-            updatePolylinePreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
+            let ortho = isOrthoConstraintActive(for: event)
+            if let page = pendingPolylinePage {
+                updatePolylinePreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: ortho)
+            } else {
+                updatePolylinePreview(at: locationInView, orthogonal: ortho)
+            }
             return
         }
         if toolMode == .arrow {
             let locationInView = convert(event.locationInWindow, from: nil)
-            updateArrowPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
+            if let page = pendingArrowPage {
+                updateArrowPreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: event.modifierFlags.contains(.shift))
+            } else {
+                updateArrowPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
+            }
+            return
+        }
+        if toolMode == .line {
+            let locationInView = convert(event.locationInWindow, from: nil)
+            let ortho = isOrthoConstraintActive(for: event)
+            if let page = pendingLinePage {
+                updateLinePreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: ortho)
+            } else {
+                updateLinePreview(at: locationInView, orthogonal: ortho)
+            }
             return
         }
         if toolMode == .area {
             let locationInView = convert(event.locationInWindow, from: nil)
-            updateAreaPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
+            if let page = pendingAreaPage {
+                updateAreaPreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: event.modifierFlags.contains(.shift))
+            } else {
+                updateAreaPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
+            }
             return
         }
 
-        guard (toolMode == .pen || toolMode == .highlighter || toolMode == .line || toolMode == .cloud || toolMode == .rectangle || toolMode == .calibrate || toolMode == .grab) else {
+        guard (toolMode == .pen || toolMode == .highlighter || toolMode == .cloud || toolMode == .rectangle || toolMode == .calibrate || toolMode == .grab) else {
             super.mouseDragged(with: event)
             return
         }
@@ -926,20 +1306,16 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             dragPreviewLayer.path = penPreviewPath
             CATransaction.commit()
             return
-        } else if toolMode == .line {
-            let current = convert(event.locationInWindow, from: nil)
-            guard let start = dragStartInView else { return }
-            let target = event.modifierFlags.contains(.shift) ? orthogonalSnapPoint(anchor: start, current: current) : current
-            let path = CGMutablePath()
-            path.move(to: start)
-            path.addLine(to: target)
-            dragPreviewLayer.strokeColor = penColor.cgColor
-            dragPreviewLayer.fillColor = NSColor.clear.cgColor
-            dragPreviewLayer.lineWidth = penLineWidth
-            dragPreviewLayer.path = path
         } else if toolMode == .cloud || toolMode == .rectangle || toolMode == .grab {
-            let current = convert(event.locationInWindow, from: nil)
+            let rawCurrent = convert(event.locationInWindow, from: nil)
             guard let start = dragStartInView else { return }
+            let current: NSPoint
+            if (toolMode == .cloud || toolMode == .rectangle),
+               let page = dragPage {
+                current = snapPointInViewIfNeeded(rawCurrent, on: page)
+            } else {
+                current = rawCurrent
+            }
             let rect = normalizedRect(from: start, to: current)
             if toolMode == .grab {
                 dragPreviewLayer.strokeColor = NSColor.controlAccentColor.cgColor
@@ -952,8 +1328,14 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             }
             dragPreviewLayer.path = CGPath(rect: rect, transform: nil)
         } else {
-            let current = convert(event.locationInWindow, from: nil)
+            let rawCurrent = convert(event.locationInWindow, from: nil)
             guard let start = dragStartInView else { return }
+            let current: NSPoint
+            if let page = dragPage {
+                current = snapPointInViewIfNeeded(rawCurrent, on: page)
+            } else {
+                current = rawCurrent
+            }
             let path = CGMutablePath()
             path.move(to: start)
             path.addLine(to: current)
@@ -1007,6 +1389,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             fencePage = nil
             if (toolMode != .measure || pendingMeasureStartInPage == nil) &&
                 !(toolMode == .arrow && pendingArrowStartInPage != nil) &&
+                !(toolMode == .line && pendingLineStartInPage != nil) &&
                 !(toolMode == .polyline && !pendingPolylinePointsInPage.isEmpty) &&
                 !(toolMode == .area && !pendingAreaPointsInPage.isEmpty) {
                 dragPreviewLayer.isHidden = true
@@ -1082,17 +1465,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return
         }
 
-        if toolMode == .line,
-           let start = dragStartInView,
-           let page = dragPage {
-            let endRaw = convert(event.locationInWindow, from: nil)
-            let end = event.modifierFlags.contains(.shift) ? orthogonalSnapPoint(anchor: start, current: endRaw) : endRaw
-            let startInPage = convert(start, to: page)
-            let endInPage = convert(end, to: page)
-            addLineAnnotation(from: startInPage, to: endInPage, on: page, actionName: "Add Line", contents: "Line")
-            return
-        }
-
         if toolMode == .grab,
            let start = dragStartInView,
            let page = dragPage {
@@ -1115,7 +1487,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return
         }
 
-        let end = convert(event.locationInWindow, from: nil)
+        let rawEnd = convert(event.locationInWindow, from: nil)
+        let end = snapPointInViewIfNeeded(rawEnd, on: page)
         if toolMode == .calibrate {
             let p1 = convert(start, to: page)
             let p2 = convert(end, to: page)
@@ -1299,6 +1672,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private func clearPendingPolyline() {
         pendingPolylinePage = nil
         pendingPolylinePointsInPage = []
+        typedDistanceBuffer = ""
+        hideTypedDistanceHUD()
         dragPreviewLayer.path = nil
         dragPreviewLayer.isHidden = true
     }
@@ -1325,6 +1700,252 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         clearPendingPolyline()
     }
 
+    private func updateLinePreview(at locationInView: NSPoint?, orthogonal: Bool) {
+        guard toolMode == .line,
+              let page = pendingLinePage,
+              let start = pendingLineStartInPage else {
+            return
+        }
+        let startInView = convert(start, from: page)
+        let targetInView: NSPoint
+        if let typedTarget = typedLengthPreviewTargetInView(
+            on: page,
+            from: start,
+            fallbackLocationInView: locationInView,
+            orthogonal: orthogonal
+        ) {
+            targetInView = typedTarget
+        } else if let locationInView,
+           self.page(for: locationInView, nearest: true) == page {
+            targetInView = orthogonal ? orthogonalSnapPoint(anchor: startInView, current: locationInView) : locationInView
+        } else {
+            targetInView = startInView
+        }
+
+        let path = CGMutablePath()
+        path.move(to: startInView)
+        path.addLine(to: targetInView)
+        dragPreviewLayer.strokeColor = penColor.cgColor
+        dragPreviewLayer.fillColor = NSColor.clear.cgColor
+        dragPreviewLayer.lineWidth = penLineWidth
+        dragPreviewLayer.lineDashPattern = [6, 4]
+        dragPreviewLayer.path = path
+        dragPreviewLayer.isHidden = false
+    }
+
+    private func clearPendingLine() {
+        pendingLinePage = nil
+        pendingLineStartInPage = nil
+        typedDistanceBuffer = ""
+        hideTypedDistanceHUD()
+        dragPreviewLayer.path = nil
+        dragPreviewLayer.isHidden = true
+    }
+
+    func cancelPendingLine() {
+        clearPendingLine()
+    }
+
+    private func parseFractionOrDecimal(_ raw: String) -> Double? {
+        let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if token.isEmpty { return nil }
+        if let value = Double(token) {
+            return value
+        }
+        let pieces = token.split(separator: "/")
+        guard pieces.count == 2,
+              let numerator = Double(pieces[0]),
+              let denominator = Double(pieces[1]),
+              denominator != 0 else {
+            return nil
+        }
+        return numerator / denominator
+    }
+
+    private func parseLengthInCurrentUnit(_ raw: String) -> Double? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+
+        let normalized = text.replacingOccurrences(of: " ", with: "")
+        if normalized.contains("'") || normalized.contains("\"") {
+            let feetPart = normalized.split(separator: "'", maxSplits: 1, omittingEmptySubsequences: false)
+            let feetValue = parseFractionOrDecimal(String(feetPart.first ?? "")) ?? 0
+            var inchesValue = 0.0
+            if feetPart.count > 1 {
+                let afterFeet = String(feetPart[1]).replacingOccurrences(of: "\"", with: "")
+                if !afterFeet.isEmpty {
+                    if afterFeet.contains("-") {
+                        let components = afterFeet.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+                        let whole = parseFractionOrDecimal(String(components.first ?? "")) ?? 0
+                        let frac = parseFractionOrDecimal(String(components.count > 1 ? components[1] : "")) ?? 0
+                        inchesValue = whole + frac
+                    } else {
+                        inchesValue = parseFractionOrDecimal(afterFeet) ?? 0
+                    }
+                }
+            }
+            let feetTotal = feetValue + (inchesValue / 12.0)
+            switch measurementUnitLabel {
+            case "ft":
+                return feetTotal
+            case "in":
+                return feetTotal * 12.0
+            case "m":
+                return feetTotal * 0.3048
+            default:
+                return feetTotal * 864.0
+            }
+        }
+
+        if normalized.contains("-") {
+            let components = normalized.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+            if components.count == 2,
+               let feet = parseFractionOrDecimal(String(components[0])),
+               let inches = parseFractionOrDecimal(String(components[1])) {
+                let feetTotal = feet + (inches / 12.0)
+                switch measurementUnitLabel {
+                case "ft":
+                    return feetTotal
+                case "in":
+                    return feetTotal * 12.0
+                case "m":
+                    return feetTotal * 0.3048
+                default:
+                    return feetTotal * 864.0
+                }
+            }
+        }
+
+        return parseFractionOrDecimal(normalized)
+    }
+
+    private func directionPointForTypedDistance(on page: PDFPage, from anchor: NSPoint, orthogonal: Bool) -> NSPoint {
+        guard let pointerInView = lastPointerInView else {
+            return NSPoint(x: anchor.x + 1.0, y: anchor.y)
+        }
+        let pointerPage = snapPointInPageIfNeeded(convert(pointerInView, to: page), on: page)
+        if !orthogonal {
+            return pointerPage
+        }
+        let dx = pointerPage.x - anchor.x
+        let dy = pointerPage.y - anchor.y
+        if abs(dx) >= abs(dy) {
+            return NSPoint(x: pointerPage.x, y: anchor.y)
+        }
+        return NSPoint(x: anchor.x, y: pointerPage.y)
+    }
+
+    private func typedLengthPreviewTargetInView(
+        on page: PDFPage,
+        from anchor: NSPoint,
+        fallbackLocationInView: NSPoint?,
+        orthogonal: Bool
+    ) -> NSPoint? {
+        guard let lengthInUnits = parseLengthInCurrentUnit(typedDistanceBuffer),
+              lengthInUnits > 0 else {
+            return nil
+        }
+        let lengthInPoints = CGFloat(lengthInUnits) / max(0.0001, measurementUnitsPerPoint)
+        let pointerInView = fallbackLocationInView ?? lastPointerInView ?? convert(anchor, from: page)
+        let pointerPage = snapPointInPageIfNeeded(convert(pointerInView, to: page), on: page)
+        let toward: NSPoint
+        if orthogonal {
+            let dx = pointerPage.x - anchor.x
+            let dy = pointerPage.y - anchor.y
+            if abs(dx) >= abs(dy) {
+                toward = NSPoint(x: pointerPage.x, y: anchor.y)
+            } else {
+                toward = NSPoint(x: anchor.x, y: pointerPage.y)
+            }
+        } else {
+            toward = pointerPage
+        }
+
+        var dx = toward.x - anchor.x
+        var dy = toward.y - anchor.y
+        let magnitude = hypot(dx, dy)
+        if magnitude < 0.001 {
+            dx = 1
+            dy = 0
+        } else {
+            dx /= magnitude
+            dy /= magnitude
+        }
+        let targetInPage = NSPoint(x: anchor.x + dx * lengthInPoints, y: anchor.y + dy * lengthInPoints)
+        return convert(targetInPage, from: page)
+    }
+
+    private func refreshTypedDistancePreview(orthogonal: Bool) {
+        updateTypedDistanceHUD()
+        switch toolMode {
+        case .line:
+            if let page = pendingLinePage {
+                let pointer = lastPointerInView.map { snapPointInViewIfNeeded($0, on: page) }
+                updateLinePreview(at: pointer, orthogonal: orthogonal)
+            }
+        case .polyline:
+            if let page = pendingPolylinePage, !pendingPolylinePointsInPage.isEmpty {
+                let pointer = lastPointerInView.map { snapPointInViewIfNeeded($0, on: page) }
+                updatePolylinePreview(at: pointer, orthogonal: orthogonal)
+            }
+        default:
+            break
+        }
+    }
+
+    private func commitTypedDistanceIfPossible(orthogonal: Bool) -> Bool {
+        guard !typedDistanceBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        guard let lengthInUnits = parseLengthInCurrentUnit(typedDistanceBuffer),
+              lengthInUnits > 0 else {
+            NSSound.beep()
+            return false
+        }
+        let lengthInPoints = CGFloat(lengthInUnits) / max(0.0001, measurementUnitsPerPoint)
+
+        if toolMode == .line,
+           let page = pendingLinePage,
+           let start = pendingLineStartInPage {
+            let toward = directionPointForTypedDistance(on: page, from: start, orthogonal: orthogonal)
+            var dx = toward.x - start.x
+            var dy = toward.y - start.y
+            let magnitude = hypot(dx, dy)
+            if magnitude < 0.001 {
+                dx = 1
+                dy = 0
+            } else {
+                dx /= magnitude
+                dy /= magnitude
+            }
+            let end = NSPoint(x: start.x + dx * lengthInPoints, y: start.y + dy * lengthInPoints)
+            addLineAnnotation(from: start, to: end, on: page, actionName: "Add Line", contents: "Line")
+            clearPendingLine()
+            return true
+        }
+
+        if toolMode == .polyline,
+           let page = pendingPolylinePage,
+           let anchor = pendingPolylinePointsInPage.last {
+            let toward = directionPointForTypedDistance(on: page, from: anchor, orthogonal: orthogonal)
+            var dx = toward.x - anchor.x
+            var dy = toward.y - anchor.y
+            let magnitude = hypot(dx, dy)
+            if magnitude < 0.001 {
+                dx = 1
+                dy = 0
+            } else {
+                dx /= magnitude
+                dy /= magnitude
+            }
+            let next = NSPoint(x: anchor.x + dx * lengthInPoints, y: anchor.y + dy * lengthInPoints)
+            pendingPolylinePointsInPage.append(next)
+            typedDistanceBuffer = ""
+            updatePolylinePreview(at: lastPointerInView, orthogonal: orthogonal)
+            return true
+        }
+
+        return false
+    }
+
     private func updateArrowPreview(at locationInView: NSPoint?, orthogonal: Bool) {
         guard toolMode == .arrow,
               let page = pendingArrowPage,
@@ -1335,7 +1956,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let targetInView: NSPoint
         if let locationInView,
            self.page(for: locationInView, nearest: true) == page {
-            targetInView = orthogonal ? orthogonalSnapPoint(anchor: startInView, current: locationInView) : locationInView
+            let snappedCurrent = snapPointInViewIfNeeded(locationInView, on: page)
+            if orthogonal {
+                let orthogonalPoint = orthogonalSnapPoint(anchor: startInView, current: snappedCurrent)
+                targetInView = snapPointInViewIfNeeded(orthogonalPoint, on: page)
+            } else {
+                targetInView = snappedCurrent
+            }
         } else {
             targetInView = startInView
         }
@@ -1363,6 +1990,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private func clearPendingArrow() {
         pendingArrowPage = nil
         pendingArrowStartInPage = nil
+        typedDistanceBuffer = ""
+        hideTypedDistanceHUD()
         dragPreviewLayer.path = nil
         dragPreviewLayer.isHidden = true
     }
@@ -1405,6 +2034,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private func clearPendingArea() {
         pendingAreaPage = nil
         pendingAreaPointsInPage = []
+        typedDistanceBuffer = ""
+        hideTypedDistanceHUD()
         dragPreviewLayer.path = nil
         dragPreviewLayer.isHidden = true
     }
@@ -1995,7 +2626,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             NSSound.beep()
             return
         }
-        let pointInPage = convert(locationInView, to: page)
+        let snappedLocationInView = snapPointInViewIfNeeded(locationInView, on: page)
+        let pointInPage = snapPointInPageIfNeeded(convert(snappedLocationInView, to: page), on: page)
 
         if inlineTextField != nil {
             let committed = commitInlineTextEditor(cancel: false)
@@ -2016,23 +2648,23 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             pendingCalloutPage = page
             pendingCalloutTipInPage = pointInPage
             pendingCalloutGroupID = UUID().uuidString
-            updateCalloutPreview(at: locationInView)
+            updateCalloutPreview(at: snappedLocationInView)
             return
         }
 
         if pendingCalloutTipInPage == nil {
             pendingCalloutTipInPage = pointInPage
-            updateCalloutPreview(at: locationInView)
+            updateCalloutPreview(at: snappedLocationInView)
             return
         }
         if pendingCalloutElbowInPage == nil {
             pendingCalloutElbowInPage = pointInPage
-            updateCalloutPreview(at: locationInView)
+            updateCalloutPreview(at: snappedLocationInView)
             return
         }
 
         hideCalloutPreview()
-        beginInlineTextEditing(at: locationInView)
+        beginInlineTextEditing(at: snappedLocationInView)
     }
 
     private func clearPendingCallout() {
@@ -2040,6 +2672,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         pendingCalloutTipInPage = nil
         pendingCalloutElbowInPage = nil
         pendingCalloutGroupID = nil
+        hideTypedDistanceHUD()
         hideCalloutPreview()
     }
 
@@ -2050,10 +2683,67 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     func cancelPendingMeasurement() {
         pendingMeasurePage = nil
         pendingMeasureStartInPage = nil
+        hideTypedDistanceHUD()
         if toolMode == .measure {
             dragPreviewLayer.isHidden = true
             dragPreviewLayer.path = nil
         }
+    }
+
+    private func hideTypedDistanceHUD() {
+        typedDistanceHUDBackgroundLayer.isHidden = true
+        typedDistanceHUDBackgroundLayer.path = nil
+        typedDistanceHUDTextLayer.isHidden = true
+        typedDistanceHUDTextLayer.string = nil
+    }
+
+    private func updateTypedDistanceHUD() {
+        let isLineReady = (toolMode == .line && pendingLinePage != nil && pendingLineStartInPage != nil)
+        let isPolylineReady = (toolMode == .polyline && pendingPolylinePage != nil && !pendingPolylinePointsInPage.isEmpty)
+        guard isLineReady || isPolylineReady else {
+            hideTypedDistanceHUD()
+            return
+        }
+
+        let hasTypedLength = !typedDistanceBuffer.isEmpty
+        let text = hasTypedLength ? typedDistanceBuffer : "Type length..."
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: hasTypedLength ? NSColor.white : NSColor.systemBlue.withAlphaComponent(0.95)
+        ]
+        let textSize = (text as NSString).size(withAttributes: attrs)
+        let paddingX: CGFloat = 8
+        let paddingY: CGFloat = 5
+        let hudWidth = max(56, ceil(textSize.width) + paddingX * 2)
+        let hudHeight = max(24, ceil(textSize.height) + paddingY * 2)
+
+        let anchorPoint: NSPoint
+        if let pointer = lastPointerInView {
+            anchorPoint = pointer
+        } else if toolMode == .line, let page = pendingLinePage, let start = pendingLineStartInPage {
+            anchorPoint = convert(start, from: page)
+        } else if toolMode == .polyline, let page = pendingPolylinePage, let last = pendingPolylinePointsInPage.last {
+            anchorPoint = convert(last, from: page)
+        } else {
+            hideTypedDistanceHUD()
+            return
+        }
+
+        let origin = NSPoint(x: anchorPoint.x + 14, y: anchorPoint.y + 14)
+        let rect = NSRect(x: origin.x, y: origin.y, width: hudWidth, height: hudHeight)
+        typedDistanceHUDBackgroundLayer.path = CGPath(roundedRect: rect, cornerWidth: 6, cornerHeight: 6, transform: nil)
+        typedDistanceHUDBackgroundLayer.isHidden = false
+
+        typedDistanceHUDTextLayer.contentsScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
+        typedDistanceHUDTextLayer.string = NSAttributedString(string: text, attributes: attrs)
+        typedDistanceHUDTextLayer.frame = NSRect(
+            x: rect.minX + paddingX,
+            y: rect.minY + paddingY - 1,
+            width: rect.width - paddingX * 2,
+            height: rect.height - paddingY * 2
+        )
+        typedDistanceHUDTextLayer.isHidden = false
     }
 
     private func updateMeasurePreview(with event: NSEvent) {
@@ -2064,7 +2754,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         let locationInView = convert(event.locationInWindow, from: nil)
         guard self.page(for: locationInView, nearest: true) == page else { return }
-        let endInPage = convert(locationInView, to: page)
+        let endInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
         let geometry = measurementGeometry(from: start, to: endInPage)
         let path = CGMutablePath()
         for segment in geometry.segments {
@@ -2240,13 +2930,23 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         for point in pendingPolylinePointsInPage.dropFirst() {
             path.addLine(to: convert(point, from: page))
         }
-        if let locationInView,
+        if let anchor = pendingPolylinePointsInPage.last,
+           let typedTarget = typedLengthPreviewTargetInView(
+                on: page,
+                from: anchor,
+                fallbackLocationInView: locationInView,
+                orthogonal: orthogonal
+           ) {
+            path.addLine(to: typedTarget)
+        } else if let locationInView,
            self.page(for: locationInView, nearest: true) == page {
+            let snappedCurrent = snapPointInViewIfNeeded(locationInView, on: page)
             if orthogonal, let last = pendingPolylinePointsInPage.last {
                 let lastInView = convert(last, from: page)
-                path.addLine(to: orthogonalSnapPoint(anchor: lastInView, current: locationInView))
+                let orthogonalPoint = orthogonalSnapPoint(anchor: lastInView, current: snappedCurrent)
+                path.addLine(to: snapPointInViewIfNeeded(orthogonalPoint, on: page))
             } else {
-                path.addLine(to: locationInView)
+                path.addLine(to: snappedCurrent)
             }
         }
 
@@ -2267,7 +2967,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return
         }
 
-        let hoverInPage = convert(locationInView, to: page)
+        let hoverInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
         let tipInView = convert(tipInPage, from: page)
         let hoverInView = convert(hoverInPage, from: page)
 
@@ -2327,7 +3027,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             hideTextPreview()
             return
         }
-        let anchorInPage = convert(locationInView, to: page)
+        let anchorInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
         let pageRect = calloutTextAnnotationBounds(forAnchorInPage: anchorInPage, on: page)
         let textRect = rectInView(fromPageRect: pageRect, on: page)
         let path = CGMutablePath()
@@ -3055,8 +3755,44 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return true
     }
 
+    @discardableResult
+    func handleTypedDistanceKey(_ event: NSEvent) -> Bool {
+        let noCommandModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).isDisjoint(with: [.command, .option, .control])
+        guard noCommandModifiers,
+              toolMode == .line || (toolMode == .polyline && pendingPolylinePage != nil && !pendingPolylinePointsInPage.isEmpty) else {
+            return false
+        }
+        let ortho = isOrthoConstraintActive(for: event)
+        if event.keyCode == 36 || event.keyCode == 76 {
+            return commitTypedDistanceIfPossible(orthogonal: ortho)
+        }
+        if event.keyCode == 51 || event.keyCode == 117 {
+            if !typedDistanceBuffer.isEmpty {
+                typedDistanceBuffer.removeLast()
+                refreshTypedDistancePreview(orthogonal: ortho)
+                return true
+            }
+            return false
+        }
+        if let chars = event.charactersIgnoringModifiers,
+           !chars.isEmpty {
+            let allowed = CharacterSet(charactersIn: "0123456789./'\"- ")
+            let filtered = String(chars.unicodeScalars.filter { allowed.contains($0) })
+            if !filtered.isEmpty {
+                typedDistanceBuffer.append(filtered)
+                refreshTypedDistancePreview(orthogonal: ortho)
+                return true
+            }
+        }
+        return false
+    }
+
     override func keyDown(with event: NSEvent) {
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask).isDisjoint(with: [.command, .option, .control]) {
+        if handleTypedDistanceKey(event) {
+            return
+        }
+        let noCommandModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).isDisjoint(with: [.command, .option, .control])
+        if noCommandModifiers {
             switch event.keyCode {
             case 123, 126: // Left / Up
                 onPageNavigationShortcut?(-1)
@@ -3068,7 +3804,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 break
             }
         }
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask).isDisjoint(with: [.command, .option, .control]),
+        if noCommandModifiers,
            (event.keyCode == 51 || event.keyCode == 117) {
             onDeleteKeyPressed?()
             return

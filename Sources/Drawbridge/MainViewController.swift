@@ -200,6 +200,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let toolSettingsSidebarToggleButton = NSButton(title: "", target: nil, action: nil)
     private let collapsedSidebarRevealButton = NSButton(title: "", target: nil, action: nil)
     private let toolSettingsSectionContent = NSStackView(frame: .zero)
+    private let snapSectionButton = NSButton(title: "", target: nil, action: nil)
+    private let snapSectionContent = NSStackView(frame: .zero)
+    private let snapRowsStack = NSStackView(frame: .zero)
     private let layersSectionButton = NSButton(title: "", target: nil, action: nil)
     private let layersSectionContent = NSStackView(frame: .zero)
     private let layersRowsStack = NSStackView(frame: .zero)
@@ -259,6 +262,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var markupsTimer: Timer?
     var scrollEventMonitor: Any?
     var keyEventMonitor: Any?
+    var flagsEventMonitor: Any?
     private var markupFilterText = ""
     var pendingCalibrationDistanceInPoints: CGFloat?
     private var busyOperationDepth = 0
@@ -312,11 +316,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var hasPromptedForInitialMarkupSaveCopy = false
     var isPresentingInitialMarkupSaveCopyPrompt = false
     private var isGridVisible = false
+    var isGridSnapEnabled = false
+    var isOrthoSnapEnabled = false
+    private var isEndpointSnapEnabled = false
+    private var isMidpointSnapEnabled = false
+    private var isIntersectionSnapEnabled = false
     private var autoNameCapturePhase: AutoNameCapturePhase?
     private var autoNameReferencePageIndex: Int?
     private var pendingSheetNumberZone: NormalizedPageRect?
     private var pendingSheetTitleZone: NormalizedPageRect?
     private var autoNamePreviousToolMode: ToolMode?
+    var pageScaleLocks: [Int: PageScaleLock] = [:]
+    var lastScaleLockAppliedPageIndex: Int = -1
     var toolSettingsByTool: [ToolMode: ToolSettingsState] = [:]
     private var layerVisibilityByName: [String: Bool] = [:]
     private var layerToggleSwitches: [String: NSSwitch] = [:]
@@ -338,6 +349,29 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         control.selectedSegment = -1
         return control
     }()
+    private let toolSymbolCandidates: [[String]] = [
+        ["cursorarrow"],
+        ["camera.viewfinder", "camera"],
+        ["pencil.tip", "pencil"],
+        ["arrow.up.right"],
+        ["line.diagonal"],
+        ["point.3.filled.connected.trianglepath.dotted"],
+        ["highlighter", "pencil.and.scribble", "scribble"],
+        ["cloud"],
+        ["square"],
+        ["textformat"],
+        ["text.bubble", "text.bubble.fill"]
+    ]
+    private let toolSymbolDescriptions: [String] = [
+        "Select", "Grab", "Pen", "Arrow", "Line", "Polyline", "Highlighter", "Cloud", "Rectangle", "Text", "Callout"
+    ]
+    private let takeoffSymbolCandidates: [[String]] = [
+        ["polygon"],
+        ["ruler"]
+    ]
+    private let takeoffSymbolDescriptions: [String] = [
+        "Area", "Measure"
+    ]
     private let newDocumentSizes: [(name: String, widthInches: CGFloat, heightInches: CGFloat)] = [
         ("ARCH E 36\" x 48\"", 36.0, 48.0),
         ("ARCH E1 30\" x 42\"", 30.0, 42.0),
@@ -412,6 +446,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         applySplitLayoutIfPossible(force: true)
         installScrollMonitorIfNeeded()
         installKeyMonitorIfNeeded()
+        installFlagsMonitorIfNeeded()
     }
 
     override func viewDidLayout() {
@@ -432,6 +467,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if let monitor = keyEventMonitor {
             NSEvent.removeMonitor(monitor)
             keyEventMonitor = nil
+        }
+        if let monitor = flagsEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            flagsEventMonitor = nil
         }
     }
 
@@ -1234,60 +1273,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         measurementCountLabel.textColor = .secondaryLabelColor
         measurementTotalLabel.textColor = .secondaryLabelColor
+        configureSnapSectionUI()
         configureLayersSectionUI()
         configureSectionButtons()
         updateToolSettingsUIForCurrentTool()
         applyToolSettingsToPDFView()
-    }
-
-    private func configureSectionButtons() {
-        markupsSectionButton.target = self
-        markupsSectionButton.action = #selector(toggleMarkupsSection)
-        summarySectionButton.target = self
-        summarySectionButton.action = #selector(toggleSummarySection)
-        layersSectionButton.target = self
-        layersSectionButton.action = #selector(toggleLayersSection)
-
-        toolSettingsSectionButton.isBordered = false
-        toolSettingsSectionButton.isEnabled = false
-        toolSettingsSectionButton.alignment = .left
-        toolSettingsSectionButton.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        toolSettingsSectionButton.contentTintColor = .secondaryLabelColor
-
-        [markupsSectionButton, summarySectionButton, layersSectionButton].forEach {
-            $0.setButtonType(.momentaryPushIn)
-            $0.bezelStyle = .recessed
-            $0.alignment = .left
-            $0.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        }
-        updateSectionHeaders()
-    }
-
-    @objc private func toggleToolSettingsSection() {
-        toolSettingsSectionContent.isHidden.toggle()
-        updateSectionHeaders()
-    }
-
-    @objc private func toggleMarkupsSection() {
-        markupsSectionContent.isHidden.toggle()
-        updateSectionHeaders()
-    }
-
-    @objc private func toggleSummarySection() {
-        summarySectionContent.isHidden.toggle()
-        updateSectionHeaders()
-    }
-
-    @objc private func toggleLayersSection() {
-        layersSectionContent.isHidden.toggle()
-        updateSectionHeaders()
-    }
-
-    private func updateSectionHeaders() {
-        toolSettingsSectionButton.title = "Tool Settings"
-        markupsSectionButton.title = "\(markupsSectionContent.isHidden ? "▸" : "▾") Markups"
-        summarySectionButton.title = "\(summarySectionContent.isHidden ? "▸" : "▾") Takeoff Summary"
-        layersSectionButton.title = "\(layersSectionContent.isHidden ? "▸" : "▾") Layers"
     }
 
     private func ensureLayerVisibilityDefaults() {
@@ -1724,6 +1714,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         gridToggleButton.target = self
         gridToggleButton.action = #selector(toggleGridOverlay)
         gridToggleButton.state = isGridVisible ? .on : .off
+        gridToggleButton.wantsLayer = true
+
+        applyToggleIconAppearance(gridToggleButton, enabled: isGridVisible)
 
         pageJumpField.isHidden = true
         configureScalePresetPopup()
@@ -1814,6 +1807,175 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     @objc private func toggleGridOverlay() {
         isGridVisible = (gridToggleButton.state == .on)
         pdfView.setGridVisible(isGridVisible)
+        applyToggleIconAppearance(gridToggleButton, enabled: isGridVisible)
+    }
+
+    func setGridSnapEnabled(_ enabled: Bool, showToast: Bool = true) {
+        isGridSnapEnabled = enabled
+        pdfView.setGridSnapEnabled(enabled)
+        if showToast {
+            pdfView.showSnapStatusToast(enabled: enabled)
+        }
+        if let item = NSApp.mainMenu?.item(withTitle: "View")?.submenu?.items.first(where: { $0.action == #selector(commandToggleGridSnap(_:)) }) {
+            item.state = enabled ? .on : .off
+        }
+        configureSnapSectionUI()
+    }
+
+    private func setEndpointSnapEnabled(_ enabled: Bool) {
+        isEndpointSnapEnabled = enabled
+        pdfView.setEndpointSnapEnabled(enabled)
+        configureSnapSectionUI()
+    }
+
+    func setOrthoSnapEnabled(_ enabled: Bool) {
+        isOrthoSnapEnabled = enabled
+        pdfView.setOrthoSnapEnabled(enabled)
+        if let item = NSApp.mainMenu?.item(withTitle: "View")?.submenu?.items.first(where: { $0.action == #selector(commandToggleOrthoSnap(_:)) }) {
+            item.state = enabled ? .on : .off
+        }
+        configureSnapSectionUI()
+    }
+
+    private func setMidpointSnapEnabled(_ enabled: Bool) {
+        isMidpointSnapEnabled = enabled
+        pdfView.setMidpointSnapEnabled(enabled)
+        configureSnapSectionUI()
+    }
+
+    private func setIntersectionSnapEnabled(_ enabled: Bool) {
+        isIntersectionSnapEnabled = enabled
+        pdfView.setIntersectionSnapEnabled(enabled)
+        configureSnapSectionUI()
+    }
+
+    private func makeSnapRow(title: String, isOn: Bool, action: Selector) -> NSStackView {
+        let label = NSTextField(labelWithString: title)
+        label.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        label.lineBreakMode = .byTruncatingTail
+
+        let toggle = NSSwitch(frame: .zero)
+        toggle.state = isOn ? .on : .off
+        toggle.target = self
+        toggle.action = action
+
+        let row = NSStackView(views: [label, NSView(), toggle])
+        row.orientation = .horizontal
+        row.spacing = 8
+        row.alignment = .centerY
+        return row
+    }
+
+    private func configureSnapSectionUI() {
+        snapSectionContent.orientation = .vertical
+        snapSectionContent.spacing = 6
+        snapRowsStack.orientation = .vertical
+        snapRowsStack.spacing = 4
+
+        for view in snapRowsStack.arrangedSubviews {
+            snapRowsStack.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+
+        snapRowsStack.addArrangedSubview(makeSnapRow(title: "Snap to Ortho", isOn: isOrthoSnapEnabled, action: #selector(snapOrthoSwitchChanged(_:))))
+        snapRowsStack.addArrangedSubview(makeSnapRow(title: "Snap to Endpoint", isOn: isEndpointSnapEnabled, action: #selector(snapEndpointSwitchChanged(_:))))
+        snapRowsStack.addArrangedSubview(makeSnapRow(title: "Snap to Midpoint", isOn: isMidpointSnapEnabled, action: #selector(snapMidpointSwitchChanged(_:))))
+        snapRowsStack.addArrangedSubview(makeSnapRow(title: "Snap to Intersection", isOn: isIntersectionSnapEnabled, action: #selector(snapIntersectionSwitchChanged(_:))))
+
+        for view in snapSectionContent.arrangedSubviews {
+            snapSectionContent.removeArrangedSubview(view)
+            view.removeFromSuperview()
+        }
+        snapSectionContent.addArrangedSubview(snapRowsStack)
+    }
+
+    @objc private func snapOrthoSwitchChanged(_ sender: NSSwitch) {
+        setOrthoSnapEnabled(sender.state == .on)
+    }
+
+    @objc private func snapEndpointSwitchChanged(_ sender: NSSwitch) {
+        setEndpointSnapEnabled(sender.state == .on)
+    }
+
+    @objc private func snapMidpointSwitchChanged(_ sender: NSSwitch) {
+        setMidpointSnapEnabled(sender.state == .on)
+    }
+
+    @objc private func snapIntersectionSwitchChanged(_ sender: NSSwitch) {
+        setIntersectionSnapEnabled(sender.state == .on)
+    }
+
+    @objc private func toggleSnapSection() {
+        snapSectionContent.isHidden.toggle()
+        updateSectionHeaders()
+    }
+
+    private func updateSectionHeaders() {
+        toolSettingsSectionButton.title = "Tool Settings"
+        markupsSectionButton.title = "\(markupsSectionContent.isHidden ? "▸" : "▾") Markups"
+        summarySectionButton.title = "\(summarySectionContent.isHidden ? "▸" : "▾") Takeoff Summary"
+        snapSectionButton.title = "\(snapSectionContent.isHidden ? "▸" : "▾") Snap"
+        layersSectionButton.title = "\(layersSectionContent.isHidden ? "▸" : "▾") Layers"
+    }
+
+    private func configureSectionButtons() {
+        markupsSectionButton.target = self
+        markupsSectionButton.action = #selector(toggleMarkupsSection)
+        summarySectionButton.target = self
+        summarySectionButton.action = #selector(toggleSummarySection)
+        snapSectionButton.target = self
+        snapSectionButton.action = #selector(toggleSnapSection)
+        layersSectionButton.target = self
+        layersSectionButton.action = #selector(toggleLayersSection)
+
+        toolSettingsSectionButton.isBordered = false
+        toolSettingsSectionButton.isEnabled = false
+        toolSettingsSectionButton.alignment = .left
+        toolSettingsSectionButton.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        toolSettingsSectionButton.contentTintColor = .secondaryLabelColor
+
+        [markupsSectionButton, summarySectionButton, snapSectionButton, layersSectionButton].forEach {
+            $0.setButtonType(.momentaryPushIn)
+            $0.bezelStyle = .recessed
+            $0.alignment = .left
+            $0.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        }
+        updateSectionHeaders()
+    }
+
+    @objc private func toggleMarkupsSection() {
+        markupsSectionContent.isHidden.toggle()
+        updateSectionHeaders()
+    }
+
+    @objc private func toggleSummarySection() {
+        summarySectionContent.isHidden.toggle()
+        updateSectionHeaders()
+    }
+
+    @objc private func toggleLayersSection() {
+        layersSectionContent.isHidden.toggle()
+        updateSectionHeaders()
+    }
+
+    @objc private func toggleToolSettingsSection() {
+        toolSettingsSectionContent.isHidden.toggle()
+        updateSectionHeaders()
+    }
+
+    private func applyToggleIconAppearance(_ button: NSButton, enabled: Bool) {
+        let active = NSColor.systemBlue
+        let inactive = NSColor.tertiaryLabelColor
+        button.contentTintColor = enabled ? active : inactive
+        button.bezelColor = enabled ? active.withAlphaComponent(0.30) : NSColor.clear
+        button.layer?.cornerRadius = 6
+        button.layer?.borderWidth = enabled ? 1.0 : 0.0
+        button.layer?.borderColor = enabled ? active.withAlphaComponent(0.85).cgColor : NSColor.clear.cgColor
+        button.layer?.backgroundColor = enabled ? active.withAlphaComponent(0.20).cgColor : NSColor.clear.cgColor
+        button.layer?.shadowColor = active.cgColor
+        button.layer?.shadowOpacity = enabled ? 0.95 : 0.0
+        button.layer?.shadowRadius = enabled ? 10.0 : 0.0
+        button.layer?.shadowOffset = .zero
     }
 
     private func configureCollapsedSidebarRevealButton() {
@@ -1942,29 +2104,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func configureToolSelectorAppearance() {
-        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
-        func symbol(_ names: [String], _ description: String) -> NSImage? {
-            for name in names {
-                if let image = NSImage(systemSymbolName: name, accessibilityDescription: description) {
-                    return image.withSymbolConfiguration(symbolConfig)
-                }
-            }
-            return nil
-        }
-        let symbols = [
-            symbol(["cursorarrow"], "Select"),
-            symbol(["camera.viewfinder", "camera"], "Grab"),
-            symbol(["pencil.tip", "pencil"], "Pen"),
-            symbol(["arrow.up.right"], "Arrow"),
-            symbol(["line.diagonal"], "Line"),
-            symbol(["point.3.filled.connected.trianglepath.dotted"], "Polyline"),
-            symbol(["highlighter", "pencil.and.scribble", "scribble"], "Highlighter"),
-            symbol(["cloud"], "Cloud"),
-            symbol(["square"], "Rectangle"),
-            symbol(["textformat"], "Text"),
-            symbol(["text.bubble", "text.bubble.fill"], "Callout")
-        ]
-
         toolSelector.trackingMode = .selectOne
         toolSelector.setLabel("V", forSegment: 0)
         toolSelector.setLabel("G", forSegment: 1)
@@ -1978,12 +2117,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSelector.setLabel("T", forSegment: 9)
         toolSelector.setLabel("Q", forSegment: 10)
         for idx in 0..<11 {
-            if let icon = symbols[idx] {
-                toolSelector.setImage(icon, forSegment: idx)
-            }
             toolSelector.setWidth(42, forSegment: idx)
         }
-        toolSelector.selectedSegmentBezelColor = NSColor.systemBlue.withAlphaComponent(0.35)
+        toolSelector.selectedSegmentBezelColor = NSColor.systemBlue.withAlphaComponent(0.9)
         toolSelector.wantsLayer = true
 
         toolSelector.setToolTip("Select (V)", forSegment: 0)
@@ -1997,27 +2133,57 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSelector.setToolTip("Rectangle (R)", forSegment: 8)
         toolSelector.setToolTip("Text (T)", forSegment: 9)
         toolSelector.setToolTip("Callout (Q)", forSegment: 10)
+        refreshToolSegmentIcons()
     }
 
     private func configureTakeoffSelectorAppearance() {
-        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
-        let areaIcon = NSImage(systemSymbolName: "polygon", accessibilityDescription: "Area")?.withSymbolConfiguration(symbolConfig)
-        let measureIcon = NSImage(systemSymbolName: "ruler", accessibilityDescription: "Measure")?.withSymbolConfiguration(symbolConfig)
         takeoffSelector.trackingMode = .selectOne
         takeoffSelector.setLabel("A", forSegment: 0)
         takeoffSelector.setLabel("M", forSegment: 1)
-        if let areaIcon {
-            takeoffSelector.setImage(areaIcon, forSegment: 0)
-        }
-        if let measureIcon {
-            takeoffSelector.setImage(measureIcon, forSegment: 1)
-        }
         takeoffSelector.setWidth(44, forSegment: 0)
         takeoffSelector.setWidth(44, forSegment: 1)
-        takeoffSelector.selectedSegmentBezelColor = NSColor.systemBlue.withAlphaComponent(0.35)
+        takeoffSelector.selectedSegmentBezelColor = NSColor.systemBlue.withAlphaComponent(0.9)
         takeoffSelector.wantsLayer = true
         takeoffSelector.setToolTip("Area (Shift+A)", forSegment: 0)
         takeoffSelector.setToolTip("Measure (M)", forSegment: 1)
+        refreshTakeoffSegmentIcons()
+    }
+
+    private func symbolImage(
+        candidates: [String],
+        description: String,
+        color: NSColor
+    ) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+        for name in candidates {
+            if let image = NSImage(systemSymbolName: name, accessibilityDescription: description) {
+                return image.withSymbolConfiguration(config)
+            }
+        }
+        return nil
+    }
+
+    private func refreshToolSegmentIcons() {
+        let activeColor = NSColor.systemBlue
+        let inactiveColor = NSColor.secondaryLabelColor
+        for idx in 0..<min(toolSelector.segmentCount, toolSymbolCandidates.count) {
+            let color = (toolSelector.selectedSegment == idx) ? activeColor : inactiveColor
+            if let icon = symbolImage(candidates: toolSymbolCandidates[idx], description: toolSymbolDescriptions[idx], color: color) {
+                toolSelector.setImage(icon, forSegment: idx)
+            }
+        }
+    }
+
+    private func refreshTakeoffSegmentIcons() {
+        let activeColor = NSColor.systemBlue
+        let inactiveColor = NSColor.secondaryLabelColor
+        for idx in 0..<min(takeoffSelector.segmentCount, takeoffSymbolCandidates.count) {
+            let color = (takeoffSelector.selectedSegment == idx) ? activeColor : inactiveColor
+            if let icon = symbolImage(candidates: takeoffSymbolCandidates[idx], description: takeoffSymbolDescriptions[idx], color: color) {
+                takeoffSelector.setImage(icon, forSegment: idx)
+            }
+        }
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -2153,6 +2319,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             toolSettingsHeaderRow,
             toolSettingsSectionContent,
             sidebarSpacer,
+            snapSectionButton,
+            snapSectionContent,
             layersSectionButton,
             layersSectionContent
         ])
@@ -2215,6 +2383,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             showAreaScaleRequiredWarning()
             toolSelector.selectedSegment = segmentIndex(for: pdfView.toolMode)
             takeoffSelector.selectedSegment = takeoffSegmentIndex(for: pdfView.toolMode)
+            refreshToolSegmentIcons()
+            refreshTakeoffSegmentIcons()
             return
         }
 
@@ -2230,12 +2400,17 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if requestedMode != .arrow {
             pdfView.cancelPendingArrow()
         }
+        if requestedMode != .line {
+            pdfView.cancelPendingLine()
+        }
         if requestedMode != .area {
             pdfView.cancelPendingArea()
         }
 
         pdfView.toolMode = requestedMode
         applyStoredToolSettings(to: requestedMode)
+        refreshToolSegmentIcons()
+        refreshTakeoffSegmentIcons()
         if toolSelector.selectedSegment >= 0 || takeoffSelector.selectedSegment >= 0 {
             animateToolSelectionFeedback()
         }
@@ -2346,9 +2521,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         case .calibrate:
             toolSelector.selectedSegment = -1
             takeoffSelector.selectedSegment = -1
+            refreshToolSegmentIcons()
+            refreshTakeoffSegmentIcons()
             pdfView.cancelPendingCallout()
             pdfView.cancelPendingPolyline()
             pdfView.cancelPendingArrow()
+            pdfView.cancelPendingLine()
             pdfView.cancelPendingArea()
             pdfView.toolMode = .calibrate
             updateToolSettingsUIForCurrentTool()
@@ -2707,6 +2885,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         document.insert(page, at: 0)
         pdfView.document = document
         clearMarkupCache()
+        pageScaleLocks.removeAll(keepingCapacity: false)
+        lastScaleLockAppliedPageIndex = -1
         openDocumentURL = nil
         hasPromptedForInitialMarkupSaveCopy = true
         isPresentingInitialMarkupSaveCopyPrompt = false
@@ -3437,7 +3617,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: workItem)
     }
 
-    private func markMarkupChanged() {
+    func markMarkupChanged() {
         promptInitialMarkupSaveCopyIfNeeded()
         markupChangeVersion += 1
         lastMarkupEditAt = Date()
@@ -3446,7 +3626,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         refreshSearchIfNeeded()
     }
 
-    private func markMarkupChangedAndScheduleAutosave() {
+    func markMarkupChangedAndScheduleAutosave() {
         markMarkupChanged()
         scheduleAutosave()
     }
@@ -3656,6 +3836,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         pdfView.document = document
         clearMarkupCache()
+        pageScaleLocks.removeAll(keepingCapacity: false)
+        lastScaleLockAppliedPageIndex = -1
         pageLabelOverrides.removeAll()
         hasPromptedForInitialMarkupSaveCopy = false
         isPresentingInitialMarkupSaveCopyPrompt = false
@@ -3869,6 +4051,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         cancelAutoNameCapture()
         pdfView.document = nil
         clearMarkupCache()
+        pageScaleLocks.removeAll(keepingCapacity: false)
+        lastScaleLockAppliedPageIndex = -1
         pageLabelOverrides.removeAll()
         openDocumentURL = nil
         hasPromptedForInitialMarkupSaveCopy = true
@@ -4169,6 +4353,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     func updateStatusBar() {
         statusToolLabel.stringValue = "Tool: \(currentToolName())"
+        applyScaleLockForCurrentPageIfNeeded()
 
         if let document = pdfView.document,
            let page = pdfView.currentPage {
@@ -4205,7 +4390,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         statusZoomLabel.stringValue = "Zoom: \(zoomPercent)%"
         let scaleText = measurementScaleField.stringValue.isEmpty ? "1.0" : measurementScaleField.stringValue
         let unit = measurementUnitPopup.titleOfSelectedItem ?? pdfView.measurementUnitLabel
-        statusScaleLabel.stringValue = "Scale: \(scaleText) \(unit)"
+        let lockedSuffix: String
+        if let document = pdfView.document,
+           let page = pdfView.currentPage,
+           pageScaleLocks[document.index(for: page)] != nil {
+            lockedSuffix = " [Locked]"
+        } else {
+            lockedSuffix = ""
+        }
+        statusScaleLabel.stringValue = "Scale: \(scaleText) \(unit)\(lockedSuffix)"
     }
 
     func currentToolName() -> String {

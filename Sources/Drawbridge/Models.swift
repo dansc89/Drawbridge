@@ -38,9 +38,15 @@ struct SidecarAnnotationRecord: Codable {
     let lineWidth: CGFloat?
 }
 
+struct PageScaleLock: Codable, Equatable {
+    let unit: String
+    let scale: Double
+}
+
 struct SidecarSnapshot: Codable {
     let sourcePDFPath: String
     let pageCount: Int
     let annotations: [SidecarAnnotationRecord]
+    let pageScaleLocks: [Int: PageScaleLock]?
     let savedAt: Date
 }
