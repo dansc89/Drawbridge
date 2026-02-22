@@ -117,6 +117,14 @@ Args:
 - first: page count
 - second: markups per page
 - third: output PDF path (optional)
+- fourth: benchmark iterations (optional, default `1`; values `>1` print avg/p50/p95/max)
+
+Example with benchmark summary:
+
+```bash
+cd /Users/danielnguyen/Drawbridge
+./Scripts/run-stress.sh 300 100 /Users/danielnguyen/Drawbridge/dist/stress/Drawbridge-Stress.pdf 5
+```
 
 Index snapshot path:
 
@@ -136,6 +144,17 @@ Controls:
 Watchdog log path:
 
 `~/Library/Application Support/Drawbridge/Logs/watchdog.log`
+
+Optional performance event log:
+
+```bash
+cd /Users/danielnguyen/Drawbridge
+DRAWBRIDGE_PERF=1 swift run
+```
+
+Log path:
+
+`~/Library/Application Support/Drawbridge/Logs/performance.log`
 
 ## Nightly Stress Suite
 

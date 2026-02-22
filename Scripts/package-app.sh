@@ -79,6 +79,8 @@ cat > "$PLIST_PATH" <<EOF
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSRequiresAquaSystemAppearance</key>
+  <false/>
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>

@@ -37,7 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.appearance = NSAppearance(named: .darkAqua)
         window.isOpaque = true
         window.alphaValue = 1.0
-        window.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 1.0)
+        window.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1.0)
         window.isMovableByWindowBackground = false
         let mainViewController = MainViewController()
         loadRecentFiles()
@@ -52,11 +52,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.toolbar = mainViewController.makeToolbar()
         window.toolbar?.showsBaselineSeparator = true
         window.contentView?.wantsLayer = true
-        window.contentView?.layer?.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 1.0).cgColor
-        window.contentView?.layer?.isOpaque = true
+        window.contentView?.layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1.0).cgColor
         window.contentView?.superview?.wantsLayer = true
-        window.contentView?.superview?.layer?.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 1.0).cgColor
-        window.contentView?.superview?.layer?.isOpaque = true
+        window.contentView?.superview?.layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1.0).cgColor
         window.delegate = self
         window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
         window.minSize = NSSize(width: 1360, height: 700)
@@ -206,6 +204,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
         let redoItem = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
         redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(withTitle: "Copy", action: #selector(MainViewController.commandCopy(_:)), keyEquivalent: "c").target = controller
+        editMenu.addItem(withTitle: "Paste", action: #selector(MainViewController.commandPaste(_:)), keyEquivalent: "v").target = controller
         editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: "Find…", action: #selector(MainViewController.commandFocusSearch(_:)), keyEquivalent: "f").target = controller
         editMenu.addItem(withTitle: "Select All Markups On Page", action: #selector(MainViewController.commandSelectAll(_:)), keyEquivalent: "a").target = controller

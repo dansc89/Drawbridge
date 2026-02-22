@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 final class StartupDropView: NSView {
     var onOpenDroppedPDF: ((URL) -> Void)?
+    var onAppearanceChanged: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -12,6 +13,11 @@ final class StartupDropView: NSView {
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         registerForDraggedTypes([.fileURL, .URL])
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        onAppearanceChanged?()
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
