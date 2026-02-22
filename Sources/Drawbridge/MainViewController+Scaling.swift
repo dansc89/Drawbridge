@@ -162,7 +162,7 @@ extension MainViewController {
         }
 
         applyDrawingScale(drawingInches: drawingInches, realFeet: realFeet)
-        scalePresetPopup.selectItem(withTitle: "Custom…")
+        synchronizeScalePresetSelection()
     }
 
     private func synchronizeScalePresetSelection() {
