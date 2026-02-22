@@ -1596,10 +1596,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         markupsTable.deselectAll(nil)
         lastDirectlySelectedAnnotation = nil
         clearGroupedPasteDragSelection()
-        selectedMarkupOverlayLayer.isHidden = true
-        selectedMarkupOverlayLayer.path = nil
-        selectedTextOverlayLayer.isHidden = true
-        selectedTextOverlayLayer.path = nil
+        clearSelectionOverlayLayers()
         updateToolSettingsUIForCurrentTool()
         updateStatusBar()
     }
@@ -3888,7 +3885,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         lastMarkupEditAt = .distantPast
         lastUserInteractionAt = .distantPast
         markupsTable.deselectAll(nil)
-        selectedMarkupOverlayLayer.isHidden = true
+        clearSelectionOverlayLayers()
         refreshMarkups()
         resetSearchState(clearQuery: true)
         view.window?.title = "Drawbridge"
@@ -3981,26 +3978,48 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     private func restoreSelection(for annotation: PDFAnnotation?) {
         guard let annotation else {
-            markupsTable.deselectAll(nil)
-            selectedMarkupOverlayLayer.isHidden = true
-            updateToolSettingsUIForCurrentTool()
+            clearMarkupTableSelectionUI(updateStatusBarValue: false)
             return
         }
         guard let row = markupItems.firstIndex(where: { $0.annotation === annotation }) else {
-            markupsTable.deselectAll(nil)
-            selectedMarkupOverlayLayer.isHidden = true
-            updateToolSettingsUIForCurrentTool()
+            clearMarkupTableSelectionUI(updateStatusBarValue: false)
             return
         }
-        markupsTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        applyMarkupTableSelectionRows(IndexSet(integer: row), updateStatusBarValue: false)
+    }
+
+    private func clearSelectionOverlayLayers() {
+        selectedMarkupOverlayLayer.isHidden = true
+        selectedMarkupOverlayLayer.path = nil
+        selectedTextOverlayLayer.isHidden = true
+        selectedTextOverlayLayer.path = nil
+    }
+
+    private func clearMarkupTableSelectionUI(updateStatusBarValue: Bool = true) {
+        markupsTable.deselectAll(nil)
+        clearSelectionOverlayLayers()
         updateToolSettingsUIForCurrentTool()
+        if updateStatusBarValue {
+            updateStatusBar()
+        }
+    }
+
+    private func applyMarkupTableSelectionRows(_ rows: IndexSet, updateStatusBarValue: Bool = true) {
+        markupsTable.selectRowIndexes(rows, byExtendingSelection: false)
+        if let first = rows.first {
+            markupsTable.scrollRowToVisible(first)
+        }
+        updateSelectionOverlay()
+        updateToolSettingsUIForCurrentTool()
+        if updateStatusBarValue {
+            updateStatusBar()
+        }
     }
 
     func updateSelectionOverlay() {
         let selectedItems = currentSelectedMarkupItems()
         guard !selectedItems.isEmpty else {
-            selectedMarkupOverlayLayer.isHidden = true
-            selectedTextOverlayLayer.isHidden = true
+            clearSelectionOverlayLayers()
             return
         }
 
@@ -4071,25 +4090,17 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return selected.contains(ObjectIdentifier(item.annotation)) ? idx : nil
         })
         if rows.isEmpty {
-            markupsTable.deselectAll(nil)
             clearGroupedPasteDragSelection()
-            updateSelectionOverlay()
-            updateToolSettingsUIForCurrentTool()
+            clearMarkupTableSelectionUI(updateStatusBarValue: false)
             return
         }
-        markupsTable.selectRowIndexes(rows, byExtendingSelection: false)
         if enablesGroupedDrag {
             groupedPasteDragPageID = ObjectIdentifier(page)
             groupedPasteDragAnnotationIDs = selected
         } else {
             clearGroupedPasteDragSelection()
         }
-        if let first = rows.first {
-            markupsTable.scrollRowToVisible(first)
-        }
-        updateSelectionOverlay()
-        updateToolSettingsUIForCurrentTool()
-        updateStatusBar()
+        applyMarkupTableSelectionRows(rows)
     }
 
     private func clearGroupedPasteDragSelection() {
