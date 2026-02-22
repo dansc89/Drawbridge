@@ -255,39 +255,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         ]
         return layer
     }()
-    private let snapStatusBackgroundLayer: CAShapeLayer = {
-        let layer = CAShapeLayer()
-        layer.strokeColor = NSColor.systemBlue.withAlphaComponent(0.7).cgColor
-        layer.fillColor = NSColor.systemBlue.withAlphaComponent(0.9).cgColor
-        layer.lineWidth = 1.0
-        layer.zPosition = 45
-        layer.isHidden = true
-        layer.actions = [
-            "path": NSNull(),
-            "hidden": NSNull(),
-            "position": NSNull(),
-            "bounds": NSNull()
-        ]
-        return layer
-    }()
-    private let snapStatusTextLayer: CATextLayer = {
-        let layer = CATextLayer()
-        layer.alignmentMode = .left
-        layer.truncationMode = .none
-        layer.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
-        layer.zPosition = 46
-        layer.isWrapped = false
-        layer.isHidden = true
-        layer.actions = [
-            "hidden": NSNull(),
-            "position": NSNull(),
-            "bounds": NSNull(),
-            "string": NSNull(),
-            "opacity": NSNull()
-        ]
-        return layer
-    }()
-    private var snapStatusHideWorkItem: DispatchWorkItem?
     private var textEditCaretTimer: Timer?
     private var isGridVisible = false
     private var isOrthoSnapEnabled = false
@@ -342,8 +309,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         layer?.addSublayer(textEditCaretLayer)
         layer?.addSublayer(typedDistanceHUDBackgroundLayer)
         layer?.addSublayer(typedDistanceHUDTextLayer)
-        layer?.addSublayer(snapStatusBackgroundLayer)
-        layer?.addSublayer(snapStatusTextLayer)
         autoScales = true
         displayMode = .singlePage
         displayDirection = .vertical
@@ -397,62 +362,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         isOrthoSnapEnabled && (toolMode == .line || toolMode == .polyline)
     }
 
-    func showSnapStatusToast(enabled: Bool) {
-        snapStatusHideWorkItem?.cancel()
-        snapStatusHideWorkItem = nil
-
-        let text = enabled ? "SNAP ON" : "SNAP OFF"
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .bold)
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: NSColor.white
-        ]
-        let textSize = (text as NSString).size(withAttributes: attrs)
-        let paddingX: CGFloat = 10
-        let paddingY: CGFloat = 6
-        let toastWidth = max(90, ceil(textSize.width) + paddingX * 2)
-        let toastHeight = max(26, ceil(textSize.height) + paddingY * 2)
-
-        let anchorPoint: NSPoint
-        if let pointer = lastPointerInView {
-            anchorPoint = pointer
-        } else {
-            anchorPoint = NSPoint(x: bounds.midX, y: bounds.midY)
-        }
-        var origin = NSPoint(x: anchorPoint.x + 12, y: anchorPoint.y + 28)
-        origin.x = min(max(8, origin.x), max(8, bounds.maxX - toastWidth - 8))
-        origin.y = min(max(8, origin.y), max(8, bounds.maxY - toastHeight - 8))
-        let rect = NSRect(x: origin.x, y: origin.y, width: toastWidth, height: toastHeight)
-
-        snapStatusBackgroundLayer.path = CGPath(roundedRect: rect, cornerWidth: 7, cornerHeight: 7, transform: nil)
-        snapStatusBackgroundLayer.fillColor = (enabled ? NSColor.systemBlue : NSColor.systemGray).withAlphaComponent(0.90).cgColor
-        snapStatusBackgroundLayer.isHidden = false
-
-        snapStatusTextLayer.contentsScale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2.0
-        snapStatusTextLayer.string = NSAttributedString(string: text, attributes: attrs)
-        snapStatusTextLayer.frame = NSRect(
-            x: rect.minX + paddingX,
-            y: rect.minY + paddingY - 1,
-            width: rect.width - paddingX * 2,
-            height: rect.height - paddingY * 2
-        )
-        snapStatusTextLayer.opacity = 1.0
-        snapStatusTextLayer.isHidden = false
-
-        let hideWork = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            self.snapStatusBackgroundLayer.isHidden = true
-            self.snapStatusBackgroundLayer.path = nil
-            self.snapStatusTextLayer.isHidden = true
-            self.snapStatusTextLayer.string = nil
-            CATransaction.commit()
-        }
-        snapStatusHideWorkItem = hideWork
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: hideWork)
-    }
-
     private func snapPointInPageIfNeeded(_ point: NSPoint, on page: PDFPage) -> NSPoint {
         guard isEndpointSnapEnabled || isMidpointSnapEnabled || isIntersectionSnapEnabled else { return point }
         let pointInView = convert(point, from: page)
@@ -461,27 +370,25 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func snapPointInViewIfNeeded(_ point: NSPoint, on page: PDFPage) -> NSPoint {
-        if isEndpointSnapEnabled || isMidpointSnapEnabled || isIntersectionSnapEnabled {
-            let segments = snapSegmentsInView(on: page)
-            var candidates: [NSPoint] = []
-            candidates.reserveCapacity(segments.count * 2)
-            if isEndpointSnapEnabled {
-                for segment in segments {
-                    candidates.append(segment.start)
-                    candidates.append(segment.end)
-                }
+        let segments = snapSegmentsInView(on: page)
+        var candidates: [NSPoint] = []
+        candidates.reserveCapacity(segments.count * 2)
+        if isEndpointSnapEnabled {
+            for segment in segments {
+                candidates.append(segment.start)
+                candidates.append(segment.end)
             }
-            if isMidpointSnapEnabled {
-                for segment in segments {
-                    candidates.append(NSPoint(x: (segment.start.x + segment.end.x) * 0.5, y: (segment.start.y + segment.end.y) * 0.5))
-                }
+        }
+        if isMidpointSnapEnabled {
+            for segment in segments {
+                candidates.append(NSPoint(x: (segment.start.x + segment.end.x) * 0.5, y: (segment.start.y + segment.end.y) * 0.5))
             }
-            if isIntersectionSnapEnabled {
-                candidates.append(contentsOf: segmentIntersectionsInView(from: segments))
-            }
-            if let snapPoint = nearestPoint(to: point, within: 14.0, from: candidates) {
-                return snapPoint
-            }
+        }
+        if isIntersectionSnapEnabled {
+            candidates.append(contentsOf: segmentIntersectionsInView(from: segments))
+        }
+        if let snapPoint = nearestPoint(to: point, within: 14.0, from: candidates) {
+            return snapPoint
         }
         return point
     }
