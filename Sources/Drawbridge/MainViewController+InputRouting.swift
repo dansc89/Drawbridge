@@ -48,6 +48,16 @@ extension MainViewController {
 
     func routeFlagsChangedEvent(_ event: NSEvent) -> NSEvent? {
         guard view.window?.isKeyWindow == true else { return event }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let shiftNowDown = modifiers.contains(.shift)
+        defer { isShiftKeyDown = shiftNowDown }
+        guard pdfView.toolMode == .line || pdfView.toolMode == .polyline else {
+            return event
+        }
+        if shiftNowDown && !isShiftKeyDown && modifiers.isDisjoint(with: [.command, .option, .control]) {
+            setOrthoSnapEnabled(!isOrthoSnapEnabled)
+            lastUserInteractionAt = Date()
+        }
         return event
     }
 
@@ -137,67 +147,11 @@ extension MainViewController {
             return nil
         }
 
-        guard let key = event.charactersIgnoringModifiers?.lowercased() else { return event }
-        switch key {
-        case "v":
+        if let action = shortcutAction(for: event), performShortcutAction(action) {
             lastUserInteractionAt = Date()
-            setTool(.select)
             return nil
-        case "g":
-            lastUserInteractionAt = Date()
-            setTool(.grab)
-            return nil
-        case "d":
-            lastUserInteractionAt = Date()
-            setTool(.pen)
-            return nil
-        case "a":
-            lastUserInteractionAt = Date()
-            if event.modifierFlags.contains(.shift) {
-                setTool(.area)
-            } else {
-                setTool(.arrow)
-            }
-            return nil
-        case "l":
-            lastUserInteractionAt = Date()
-            setTool(.line)
-            return nil
-        case "p":
-            lastUserInteractionAt = Date()
-            setTool(.polyline)
-            return nil
-        case "h":
-            lastUserInteractionAt = Date()
-            setTool(.highlighter)
-            return nil
-        case "c":
-            lastUserInteractionAt = Date()
-            setTool(.cloud)
-            return nil
-        case "r":
-            lastUserInteractionAt = Date()
-            setTool(.rectangle)
-            return nil
-        case "t":
-            lastUserInteractionAt = Date()
-            setTool(.text)
-            return nil
-        case "q":
-            lastUserInteractionAt = Date()
-            setTool(.callout)
-            return nil
-        case "m":
-            lastUserInteractionAt = Date()
-            setTool(.measure)
-            return nil
-        case "k":
-            lastUserInteractionAt = Date()
-            setTool(.calibrate)
-            return nil
-        default:
-            return event
         }
+        return event
     }
 
     func handleEscapePress() {

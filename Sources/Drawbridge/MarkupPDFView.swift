@@ -399,7 +399,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func isOrthoConstraintActive(for event: NSEvent) -> Bool {
-        event.modifierFlags.contains(.shift) || (isOrthoSnapEnabled && (toolMode == .line || toolMode == .polyline))
+        isOrthoSnapEnabled && (toolMode == .line || toolMode == .polyline)
     }
 
     func showSnapStatusToast(enabled: Bool) {

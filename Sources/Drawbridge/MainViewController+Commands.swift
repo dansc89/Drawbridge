@@ -23,6 +23,105 @@ extension MainViewController {
         setOrthoSnapEnabled(enabled)
         (sender as? NSMenuItem)?.state = enabled ? .on : .off
     }
+    @objc func commandKeyboardShortcuts(_ sender: Any?) {
+        let actions = ShortcutAction.allCases
+        var keyFields: [ShortcutAction: NSTextField] = [:]
+        var modifierPopups: [ShortcutAction: NSPopUpButton] = [:]
+
+        let rows = NSStackView()
+        rows.orientation = .vertical
+        rows.spacing = 6
+        rows.translatesAutoresizingMaskIntoConstraints = false
+
+        for action in actions {
+            let binding = shortcutBindings[action] ?? defaultShortcutBindings()[action]!
+            let label = NSTextField(labelWithString: action.displayName)
+            label.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+
+            let modifierPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+            modifierPopup.addItems(withTitles: ["None", "Shift"])
+            modifierPopup.selectItem(at: binding.requiresShift ? 1 : 0)
+            modifierPopup.translatesAutoresizingMaskIntoConstraints = false
+            modifierPopup.widthAnchor.constraint(equalToConstant: 78).isActive = true
+
+            let keyField = NSTextField(string: binding.key.uppercased())
+            keyField.alignment = .center
+            keyField.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)
+            keyField.translatesAutoresizingMaskIntoConstraints = false
+            keyField.widthAnchor.constraint(equalToConstant: 46).isActive = true
+
+            modifierPopups[action] = modifierPopup
+            keyFields[action] = keyField
+
+            let row = NSStackView(views: [label, NSView(), modifierPopup, keyField])
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 8
+            rows.addArrangedSubview(row)
+        }
+
+        let hint = NSTextField(labelWithString: "Use single-character keys. Duplicate combinations are blocked.")
+        hint.textColor = .secondaryLabelColor
+        hint.font = NSFont.systemFont(ofSize: 11)
+
+        let container = NSStackView(views: [rows, hint])
+        container.orientation = .vertical
+        container.spacing = 8
+        container.edgeInsets = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 540, height: 420))
+        scroll.borderType = .noBorder
+        scroll.hasVerticalScroller = true
+        scroll.documentView = container
+        NSLayoutConstraint.activate([
+            container.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            container.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            container.bottomAnchor.constraint(equalTo: scroll.contentView.bottomAnchor),
+            container.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
+        ])
+
+        let alert = NSAlert()
+        alert.messageText = "Keyboard Shortcuts"
+        alert.informativeText = "Customize tool and drafting shortcuts."
+        alert.alertStyle = .informational
+        alert.accessoryView = scroll
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Restore Defaults")
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        if response == .alertThirdButtonReturn {
+            resetShortcutBindingsToDefaults()
+            return
+        }
+        guard response == .alertFirstButtonReturn else { return }
+
+        var updated: [ShortcutAction: ShortcutBinding] = [:]
+        var seenCombos = Set<String>()
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "[]\\;',./`-="))
+        for action in actions {
+            guard let keyField = keyFields[action],
+                  let modifierPopup = modifierPopups[action] else { continue }
+            let rawKey = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard rawKey.count == 1, rawKey.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
+                NSSound.beep()
+                return
+            }
+            let requiresShift = modifierPopup.indexOfSelectedItem == 1
+            let combo = "\(requiresShift ? "s" : "n"):\(rawKey)"
+            guard !seenCombos.contains(combo) else {
+                NSSound.beep()
+                return
+            }
+            seenCombos.insert(combo)
+            updated[action] = ShortcutBinding(key: rawKey, requiresShift: requiresShift)
+        }
+        shortcutBindings = updated
+        saveShortcutBindings()
+        updateShortcutHintLabel()
+    }
     @objc func commandPerformanceSettings(_ sender: Any?) {
         let defaults = UserDefaults.standard
         let adaptiveDefault = defaults.bool(forKey: Self.defaultsAdaptiveIndexCapEnabledKey)
@@ -310,6 +409,7 @@ extension MainViewController {
         switch action {
         case #selector(commandOpen(_:)),
              #selector(commandNew(_:)),
+             #selector(commandKeyboardShortcuts(_:)),
              #selector(commandPerformanceSettings(_:)):
             return true
         case #selector(commandCycleNextDocument(_:)),

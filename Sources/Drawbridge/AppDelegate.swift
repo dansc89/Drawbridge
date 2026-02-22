@@ -156,7 +156,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let aboutItem = appMenu.addItem(withTitle: "About Drawbridge", action: #selector(showAboutPanel(_:)), keyEquivalent: "")
         aboutItem.target = self
         appMenu.addItem(NSMenuItem.separator())
-        let prefsItem = appMenu.addItem(withTitle: "Performance Settings…", action: #selector(MainViewController.commandPerformanceSettings(_:)), keyEquivalent: ",")
+        let shortcutItem = appMenu.addItem(withTitle: "Keyboard Shortcuts…", action: #selector(MainViewController.commandKeyboardShortcuts(_:)), keyEquivalent: ",")
+        shortcutItem.target = controller
+        let prefsItem = appMenu.addItem(withTitle: "Performance Settings…", action: #selector(MainViewController.commandPerformanceSettings(_:)), keyEquivalent: "")
         prefsItem.target = controller
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit Drawbridge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
