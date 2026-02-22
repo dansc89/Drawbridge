@@ -182,8 +182,7 @@ extension MainViewController {
     }
 
     func handleEscapePress() {
-        let now = Date()
-        if now.timeIntervalSince(lastEscapePressAt) <= 0.65 {
+        if escapePressTracker.registerPress() {
             pdfView.cancelPendingMeasurement()
             pdfView.cancelPendingCallout()
             pdfView.cancelPendingPolyline()
@@ -193,9 +192,6 @@ extension MainViewController {
                 setTool(.select)
             }
             clearMarkupSelection()
-            lastEscapePressAt = .distantPast
-        } else {
-            lastEscapePressAt = now
         }
     }
 }

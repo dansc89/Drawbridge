@@ -292,7 +292,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var lastAutosaveAt: Date = .distantPast
     var lastMarkupEditAt: Date = .distantPast
     var lastUserInteractionAt: Date = .distantPast
-    var lastEscapePressAt: Date = .distantPast
+    var escapePressTracker = EscapePressTracker()
     private var saveProgressTimer: Timer?
     private var saveOperationStartedAt: CFAbsoluteTime?
     private var savePhase: String?
@@ -4109,11 +4109,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func shouldDragAsGroupedPasteSelection(on page: PDFPage, selectedSet: Set<ObjectIdentifier>, anchor: PDFAnnotation) -> Bool {
-        guard selectedSet.count > 1 else { return false }
-        guard groupedPasteDragPageID == ObjectIdentifier(page) else { return false }
         let anchorID = ObjectIdentifier(anchor)
-        guard groupedPasteDragAnnotationIDs.contains(anchorID) else { return false }
-        return selectedSet.isSubset(of: groupedPasteDragAnnotationIDs)
+        return MarkupInteractionPolicy.shouldDragGroupedPasteSelection(
+            selectedAnnotationIDs: selectedSet,
+            anchorAnnotationID: anchorID,
+            currentPageID: ObjectIdentifier(page),
+            groupedPastePageID: groupedPasteDragPageID,
+            groupedPasteAnnotationIDs: groupedPasteDragAnnotationIDs
+        )
     }
 
 

@@ -78,8 +78,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var rectangleLineWidth: CGFloat = 50.0
     var textForegroundColor: NSColor = .labelColor
     var textBackgroundColor: NSColor = NSColor.systemOrange.withAlphaComponent(0.25)
-    var textOutlineColor: NSColor = .black
-    var textOutlineWidth: CGFloat = 3.0
+    var textOutlineColor: NSColor = MarkupStyleDefaults.textOutlineColor
+    var textOutlineWidth: CGFloat = MarkupStyleDefaults.textOutlineWidth
     var textFontName: String = ".SFNS-Regular"
     var textFontSize: CGFloat = 15.0
     var calloutStrokeColor: NSColor = .systemRed
