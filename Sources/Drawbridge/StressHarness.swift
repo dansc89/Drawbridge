@@ -1,14 +1,16 @@
 import AppKit
+import Foundation
 import PDFKit
 
 enum StressHarness {
     static func run(arguments: [String]) -> Int {
         let pages = max(1, intValue(after: "--pages", in: arguments) ?? 250)
         let markupsPerPage = max(1, intValue(after: "--markups-per-page", in: arguments) ?? 80)
+        let iterations = max(1, intValue(after: "--iterations", in: arguments) ?? 1)
         let output = outputURL(from: arguments) ?? URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("Drawbridge-Stress.pdf")
 
         print("Drawbridge stress harness starting")
-        print("pages=\(pages) markupsPerPage=\(markupsPerPage)")
+        print("pages=\(pages) markupsPerPage=\(markupsPerPage) iterations=\(iterations)")
         print("output=\(output.path)")
 
         let started = CFAbsoluteTimeGetCurrent()
@@ -21,11 +23,11 @@ enum StressHarness {
             return 2
         }
 
-        let loadStart = CFAbsoluteTimeGetCurrent()
         guard let loaded = PDFDocument(url: output) else {
             fputs("failed_to_load_written_pdf\n", stderr)
             return 3
         }
+        let loadStart = CFAbsoluteTimeGetCurrent()
         var totalMarkups = 0
         for pageIndex in 0..<loaded.pageCount {
             totalMarkups += loaded.page(at: pageIndex)?.annotations.count ?? 0
@@ -33,8 +35,130 @@ enum StressHarness {
         let loadMs = Int(((CFAbsoluteTimeGetCurrent() - loadStart) * 1000.0).rounded())
         print("load_scan_ms=\(loadMs)")
         print("total_markups=\(totalMarkups)")
+
+        if iterations > 1 {
+            runBenchmarkIterations(iterations: iterations, fileURL: output)
+        }
         print("done")
         return 0
+    }
+
+    private static func runBenchmarkIterations(iterations: Int, fileURL: URL) {
+        var loadDurationsMs: [Double] = []
+        var markupScanDurationsMs: [Double] = []
+        var textSearchDurationsMs: [Double] = []
+        var refreshModelDurationsMs: [Double] = []
+        var filteredModelDurationsMs: [Double] = []
+        loadDurationsMs.reserveCapacity(iterations)
+        markupScanDurationsMs.reserveCapacity(iterations)
+        textSearchDurationsMs.reserveCapacity(iterations)
+        refreshModelDurationsMs.reserveCapacity(iterations)
+        filteredModelDurationsMs.reserveCapacity(iterations)
+
+        for index in 1...iterations {
+            let loadStart = CFAbsoluteTimeGetCurrent()
+            guard let document = PDFDocument(url: fileURL) else {
+                fputs("benchmark_failed_load_iteration=\(index)\n", stderr)
+                break
+            }
+            loadDurationsMs.append((CFAbsoluteTimeGetCurrent() - loadStart) * 1000.0)
+
+            let scanStart = CFAbsoluteTimeGetCurrent()
+            var markups = 0
+            for pageIndex in 0..<document.pageCount {
+                markups += document.page(at: pageIndex)?.annotations.count ?? 0
+            }
+            markupScanDurationsMs.append((CFAbsoluteTimeGetCurrent() - scanStart) * 1000.0)
+
+            let searchStart = CFAbsoluteTimeGetCurrent()
+            let options: NSString.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+            var cursor: PDFSelection?
+            var textHits = 0
+            while textHits < 600,
+                  let match = document.findString("Stress", fromSelection: cursor, withOptions: options) {
+                cursor = match
+                textHits += 1
+            }
+            textSearchDurationsMs.append((CFAbsoluteTimeGetCurrent() - searchStart) * 1000.0)
+
+            let refreshModelStart = CFAbsoluteTimeGetCurrent()
+            let refreshModelResult = benchmarkRefreshModel(document: document, filter: nil, cap: 25_000)
+            refreshModelDurationsMs.append((CFAbsoluteTimeGetCurrent() - refreshModelStart) * 1000.0)
+
+            let filteredModelStart = CFAbsoluteTimeGetCurrent()
+            let filteredModelResult = benchmarkRefreshModel(document: document, filter: "ink", cap: 25_000)
+            filteredModelDurationsMs.append((CFAbsoluteTimeGetCurrent() - filteredModelStart) * 1000.0)
+            print(
+                "benchmark_iter=\(index) load_ms=\(format(loadDurationsMs.last)) annotation_scan_ms=\(format(markupScanDurationsMs.last)) text_search_ms=\(format(textSearchDurationsMs.last)) refresh_model_ms=\(format(refreshModelDurationsMs.last)) filtered_model_ms=\(format(filteredModelDurationsMs.last)) listed=\(refreshModelResult.listed) filtered_listed=\(filteredModelResult.listed) markups=\(markups) text_hits=\(textHits)"
+            )
+        }
+
+        print("benchmark_summary iterations=\(iterations)")
+        print(statsLine(label: "load_ms", values: loadDurationsMs))
+        print(statsLine(label: "annotation_scan_ms", values: markupScanDurationsMs))
+        print(statsLine(label: "text_search_ms", values: textSearchDurationsMs))
+        print(statsLine(label: "refresh_model_ms", values: refreshModelDurationsMs))
+        print(statsLine(label: "filtered_model_ms", values: filteredModelDurationsMs))
+    }
+
+    private static func benchmarkRefreshModel(document: PDFDocument, filter: String?, cap: Int) -> (listed: Int, totalMatching: Int) {
+        var cache: [Int: [PDFAnnotation]] = [:]
+        cache.reserveCapacity(document.pageCount)
+        for pageIndex in 0..<document.pageCount {
+            cache[pageIndex] = document.page(at: pageIndex)?.annotations ?? []
+        }
+
+        let loweredFilter = filter?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        var listed = 0
+        var totalMatching = 0
+
+        for pageIndex in 0..<document.pageCount {
+            guard let annotations = cache[pageIndex] else { continue }
+            if loweredFilter.isEmpty {
+                totalMatching += annotations.count
+                if listed < cap {
+                    listed += min(cap - listed, annotations.count)
+                }
+                continue
+            }
+
+            for annotation in annotations {
+                let type = annotation.type ?? ""
+                let contents = annotation.contents ?? ""
+                let text = "\(type)\n\(contents)".lowercased()
+                if text.contains(loweredFilter) {
+                    totalMatching += 1
+                    if listed < cap {
+                        listed += 1
+                    }
+                }
+            }
+        }
+
+        return (listed, totalMatching)
+    }
+
+    private static func statsLine(label: String, values: [Double]) -> String {
+        guard !values.isEmpty else { return "\(label) no_data=1" }
+        return "\(label) avg=\(format(values.reduce(0, +) / Double(values.count))) p50=\(format(percentile(values, 50))) p95=\(format(percentile(values, 95))) max=\(format(values.max()))"
+    }
+
+    private static func percentile(_ values: [Double], _ pct: Double) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let position = (pct / 100.0) * Double(max(sorted.count - 1, 0))
+        let lower = Int(floor(position))
+        let upper = Int(ceil(position))
+        if lower == upper {
+            return sorted[lower]
+        }
+        let weight = position - Double(lower)
+        return sorted[lower] * (1.0 - weight) + sorted[upper] * weight
+    }
+
+    private static func format(_ value: Double?) -> String {
+        guard let value else { return "0.00" }
+        return String(format: "%.2f", value)
     }
 
     private static func generateSyntheticPDF(pageCount: Int, markupsPerPage: Int) -> PDFDocument {
@@ -107,4 +231,3 @@ enum StressHarness {
         return URL(fileURLWithPath: path)
     }
 }
-

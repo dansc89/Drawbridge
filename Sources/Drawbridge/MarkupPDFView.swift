@@ -4,6 +4,29 @@ import UniformTypeIdentifiers
 
 final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private typealias Segment = (start: NSPoint, end: NSPoint)
+    private enum ResizeCorner {
+        case lowerLeft
+        case lowerRight
+        case upperLeft
+        case upperRight
+    }
+    private enum CalloutDragHandle {
+        case moveAll
+        case tip
+        case elbow
+        case textCorner(ResizeCorner)
+    }
+    private struct CalloutDragState {
+        var page: PDFPage
+        var textAnnotation: PDFAnnotation
+        var leaderAnnotation: PDFAnnotation
+        var dotAnnotation: PDFAnnotation?
+        var startTextBounds: NSRect
+        var startElbow: NSPoint
+        var startTip: NSPoint
+        var startPointerInPage: NSPoint
+        var handle: CalloutDragHandle
+    }
     private struct DimensionGeometry {
         let segments: [Segment]
         let labelAnchor: NSPoint
@@ -16,11 +39,30 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let labelOffset: CGFloat
     }
     private static let calloutGroupPrefix = "DrawbridgeCallout:"
-    enum ArrowEndStyle: Int {
+    private static let textGroupPrefix = "DrawbridgeText:"
+    private static let textOutlineMarker = "Drawbridge Text Outline"
+    enum ArrowEndStyle: Int, CaseIterable {
         case solidArrow = 0
         case openArrow = 1
         case filledDot = 2
         case openDot = 3
+        case filledSquare = 4
+        case openSquare = 5
+        case filledTriangle = 6
+        case openTriangle = 7
+
+        var displayName: String {
+            switch self {
+            case .solidArrow: return "Solid Arrow"
+            case .openArrow: return "Open Arrow"
+            case .filledDot: return "Filled Dot"
+            case .openDot: return "Open Dot"
+            case .filledSquare: return "Filled Square"
+            case .openSquare: return "Open Square"
+            case .filledTriangle: return "Filled Triangle"
+            case .openTriangle: return "Open Triangle"
+            }
+        }
     }
 
     var toolMode: ToolMode = .pen
@@ -36,11 +78,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var rectangleLineWidth: CGFloat = 50.0
     var textForegroundColor: NSColor = .labelColor
     var textBackgroundColor: NSColor = NSColor.systemOrange.withAlphaComponent(0.25)
+    var textOutlineColor: NSColor = .black
+    var textOutlineWidth: CGFloat = 3.0
     var textFontName: String = ".SFNS-Regular"
     var textFontSize: CGFloat = 15.0
     var calloutStrokeColor: NSColor = .systemRed
     var calloutLineWidth: CGFloat = 2.0
     var calloutArrowStyle: ArrowEndStyle = .solidArrow
+    var arrowHeadSize: CGFloat = 8.0
+    var calloutArrowHeadSize: CGFloat = 8.0
     var measurementStrokeColor: NSColor = .systemBlue
     var calibrationStrokeColor: NSColor = .systemGreen
     var measurementLineWidth: CGFloat = 2.0
@@ -52,6 +98,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var onAnnotationClicked: ((PDFPage, PDFAnnotation) -> Void)?
     var onAnnotationsBoxSelected: ((PDFPage, [PDFAnnotation]) -> Void)?
     var onAnnotationMoved: ((PDFPage, PDFAnnotation, NSRect) -> Void)?
+    var onResolveDragSelection: ((PDFPage, PDFAnnotation) -> [PDFAnnotation])?
     var onDeleteKeyPressed: (() -> Void)?
     var onSnapshotCaptured: ((Data, NSRect) -> Void)?
     var onOpenDroppedPDF: ((URL) -> Void)?
@@ -84,6 +131,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var movingAnnotationPage: PDFPage?
     private var movingAnnotationStartBounds: NSRect?
     private var movingStartPointInPage: NSPoint?
+    private var movingResizeCorner: ResizeCorner?
+    private var movingCalloutState: CalloutDragState?
+    private var movingAnnotations: [PDFAnnotation] = []
+    private var movingAnnotationStartBoundsByID: [ObjectIdentifier: NSRect] = [:]
     private var didMoveAnnotation = false
     private var fenceStartInView: NSPoint?
     private var fencePage: PDFPage?
@@ -113,6 +164,23 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             "strokeColor": NSNull(),
             "fillColor": NSNull(),
             "lineWidth": NSNull()
+        ]
+        layer.isHidden = true
+        return layer
+    }()
+    private let calloutTextBoxPreviewLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.strokeColor = NSColor.systemRed.cgColor
+        layer.fillColor = NSColor.clear.cgColor
+        layer.lineWidth = 1.0
+        layer.lineJoin = .round
+        layer.zPosition = 9
+        layer.actions = [
+            "path": NSNull(),
+            "strokeColor": NSNull(),
+            "fillColor": NSNull(),
+            "lineWidth": NSNull(),
+            "hidden": NSNull()
         ]
         layer.isHidden = true
         return layer
@@ -157,10 +225,46 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private let gridSpacingInPoints: CGFloat = 24.0
     private let maxGridLinesPerAxis = 400
 
+    private func forceUprightTextAnnotationIfSupported(_ annotation: PDFAnnotation, on page: PDFPage) {
+        let selector = NSSelectorFromString("setRotation:")
+        guard annotation.responds(to: selector) else { return }
+        let pageRotation = ((page.rotation % 360) + 360) % 360
+        let desired = (360 - pageRotation) % 360
+        annotation.setValue(desired, forKey: "rotation")
+    }
+
+    private func configureInlineEditorField(_ field: NSTextField) {
+        field.alignment = .left
+        field.lineBreakMode = .byWordWrapping
+        field.maximumNumberOfLines = 0
+        if let cell = field.cell as? NSTextFieldCell {
+            cell.wraps = true
+            cell.usesSingleLineMode = false
+            cell.isScrollable = false
+            cell.lineBreakMode = .byWordWrapping
+        }
+    }
+
+    private func resolvedTextBackgroundColor(for annotation: PDFAnnotation) -> NSColor {
+        annotation.color
+    }
+
+    private func applyTextBoxStyle(to annotation: PDFAnnotation) {
+        annotation.color = textBackgroundColor
+        annotation.interiorColor = nil
+        assignLineWidth(0.0, to: annotation)
+    }
+
+    private func inlineEditorDisplayFont(from baseFont: NSFont) -> NSFont {
+        let zoom = max(0.05, scaleFactor)
+        return baseFont.withSize(max(4.0, baseFont.pointSize * zoom))
+    }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.addSublayer(gridOverlayLayer)
+        layer?.addSublayer(calloutTextBoxPreviewLayer)
         layer?.addSublayer(dragPreviewLayer)
         layer?.addSublayer(dropHighlightLayer)
         layer?.addSublayer(textEditCaretLayer)
@@ -168,12 +272,21 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         displayMode = .singlePage
         displayDirection = .vertical
         displaysPageBreaks = true
-        backgroundColor = NSColor.windowBackgroundColor
+        refreshAppearanceColors()
         registerForDraggedTypes([.fileURL])
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshAppearanceColors()
+    }
+
+    func refreshAppearanceColors() {
+        backgroundColor = NSColor(calibratedWhite: 0.07, alpha: 1.0)
     }
 
     override func layout() {
@@ -329,6 +442,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             updateAreaPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
             return
         }
+        if toolMode == .text {
+            let locationInView = convert(event.locationInWindow, from: nil)
+            updateTextPreview(at: locationInView)
+            return
+        }
         guard toolMode == .callout else {
             super.mouseMoved(with: event)
             return
@@ -368,16 +486,46 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         if toolMode == .select, let page = page(for: locationInView, nearest: true) {
             let pointInPage = convert(locationInView, to: page)
-            if let hit = nearestAnnotation(to: pointInPage, on: page, maxDistance: 10) {
-                onAnnotationClicked?(page, hit)
+            if let hit = nearestAnnotation(
+                to: pointInPage,
+                on: page,
+                maxDistance: selectionHitDistanceInPage()
+            ) {
+                let dragCandidates = onResolveDragSelection?(page, hit) ?? [hit]
+                let shouldPreserveSelectionForDrag = dragCandidates.count > 1
+                if !shouldPreserveSelectionForDrag {
+                    onAnnotationClicked?(page, hit)
+                }
                 if event.clickCount >= 2, isEditableTextAnnotation(hit) {
                     beginInlineTextEditing(for: hit, on: page)
+                    return
+                }
+                if let calloutState = initialCalloutDragState(from: hit, on: page, pointerInView: locationInView, pointerInPage: pointInPage) {
+                    movingCalloutState = calloutState
+                    didMoveAnnotation = false
                     return
                 }
                 movingAnnotation = hit
                 movingAnnotationPage = page
                 movingAnnotationStartBounds = hit.bounds
                 movingStartPointInPage = pointInPage
+                movingResizeCorner = resizeCornerHit(for: hit, on: page, at: locationInView)
+                let requested = dragCandidates
+                if movingResizeCorner != nil {
+                    movingAnnotations = [hit]
+                } else {
+                    var seen = Set<ObjectIdentifier>()
+                    movingAnnotations = requested.filter { candidate in
+                        let key = ObjectIdentifier(candidate)
+                        if seen.contains(key) { return false }
+                        seen.insert(key)
+                        return candidate.page === page
+                    }
+                    if movingAnnotations.isEmpty {
+                        movingAnnotations = [hit]
+                    }
+                }
+                movingAnnotationStartBoundsByID = Dictionary(uniqueKeysWithValues: movingAnnotations.map { (ObjectIdentifier($0), $0.bounds) })
                 didMoveAnnotation = false
                 return
             }
@@ -545,6 +693,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             dragPreviewLayer.isHidden = false
             dragPreviewLayer.path = CGPath(rect: NSRect(origin: locationInView, size: .zero), transform: nil)
         case .text:
+            hideTextPreview()
             beginInlineTextEditing(at: locationInView)
         case .callout:
             return
@@ -606,6 +755,59 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 dragPreviewLayer.path = CGPath(rect: rect, transform: nil)
                 return
             }
+            if var calloutState = movingCalloutState {
+                let locationInView = convert(event.locationInWindow, from: nil)
+                let currentPoint = convert(locationInView, to: calloutState.page)
+                let minSize = minimumResizeSize(for: calloutState.textAnnotation)
+                var nextTextBounds = calloutState.startTextBounds
+                var nextElbow = calloutState.startElbow
+                var nextTip = calloutState.startTip
+                switch calloutState.handle {
+                case .moveAll:
+                    let dx = currentPoint.x - calloutState.startPointerInPage.x
+                    let dy = currentPoint.y - calloutState.startPointerInPage.y
+                    if abs(dx) < 0.01, abs(dy) < 0.01 { return }
+                    nextTextBounds = calloutState.startTextBounds.offsetBy(dx: dx, dy: dy)
+                    nextElbow = NSPoint(x: calloutState.startElbow.x + dx, y: calloutState.startElbow.y + dy)
+                    nextTip = NSPoint(x: calloutState.startTip.x + dx, y: calloutState.startTip.y + dy)
+                case .tip:
+                    nextTip = currentPoint
+                case .elbow:
+                    nextElbow = currentPoint
+                case let .textCorner(corner):
+                    var minX = calloutState.startTextBounds.minX
+                    var minY = calloutState.startTextBounds.minY
+                    var maxX = calloutState.startTextBounds.maxX
+                    var maxY = calloutState.startTextBounds.maxY
+                    switch corner {
+                    case .lowerLeft:
+                        minX = min(currentPoint.x, maxX - minSize.width)
+                        minY = min(currentPoint.y, maxY - minSize.height)
+                    case .lowerRight:
+                        maxX = max(currentPoint.x, minX + minSize.width)
+                        minY = min(currentPoint.y, maxY - minSize.height)
+                    case .upperLeft:
+                        minX = min(currentPoint.x, maxX - minSize.width)
+                        maxY = max(currentPoint.y, minY + minSize.height)
+                    case .upperRight:
+                        maxX = max(currentPoint.x, minX + minSize.width)
+                        maxY = max(currentPoint.y, minY + minSize.height)
+                    }
+                    nextTextBounds = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+                }
+
+                calloutState.textAnnotation.bounds = nextTextBounds
+                replaceCalloutLeader(
+                    state: &calloutState,
+                    elbow: nextElbow,
+                    tip: nextTip
+                )
+                movingCalloutState = calloutState
+                didMoveAnnotation = true
+                needsDisplay = true
+                onViewportChanged?()
+                return
+            }
             guard let annotation = movingAnnotation,
                   let page = movingAnnotationPage,
                   let startBounds = movingAnnotationStartBounds,
@@ -615,13 +817,50 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
             let locationInView = convert(event.locationInWindow, from: nil)
             let currentPoint = convert(locationInView, to: page)
+            if let resizeCorner = movingResizeCorner {
+                let minSize = minimumResizeSize(for: annotation)
+                var minX = startBounds.minX
+                var minY = startBounds.minY
+                var maxX = startBounds.maxX
+                var maxY = startBounds.maxY
+                switch resizeCorner {
+                case .lowerLeft:
+                    minX = min(currentPoint.x, maxX - minSize.width)
+                    minY = min(currentPoint.y, maxY - minSize.height)
+                case .lowerRight:
+                    maxX = max(currentPoint.x, minX + minSize.width)
+                    minY = min(currentPoint.y, maxY - minSize.height)
+                case .upperLeft:
+                    minX = min(currentPoint.x, maxX - minSize.width)
+                    maxY = max(currentPoint.y, minY + minSize.height)
+                case .upperRight:
+                    maxX = max(currentPoint.x, minX + minSize.width)
+                    maxY = max(currentPoint.y, minY + minSize.height)
+                }
+                let resized = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+                if abs(resized.width - annotation.bounds.width) > 0.01 || abs(resized.height - annotation.bounds.height) > 0.01 || abs(resized.origin.x - annotation.bounds.origin.x) > 0.01 || abs(resized.origin.y - annotation.bounds.origin.y) > 0.01 {
+                    didMoveAnnotation = true
+                    annotation.bounds = resized
+                    needsDisplay = true
+                    onViewportChanged?()
+                }
+                return
+            }
             let dx = currentPoint.x - startPoint.x
             let dy = currentPoint.y - startPoint.y
             if abs(dx) < 0.01, abs(dy) < 0.01 {
                 return
             }
             didMoveAnnotation = true
-            annotation.bounds = startBounds.offsetBy(dx: dx, dy: dy)
+            if movingAnnotations.count > 1 {
+                for candidate in movingAnnotations {
+                    let key = ObjectIdentifier(candidate)
+                    guard let base = movingAnnotationStartBoundsByID[key] else { continue }
+                    candidate.bounds = base.offsetBy(dx: dx, dy: dy)
+                }
+            } else {
+                annotation.bounds = startBounds.offsetBy(dx: dx, dy: dy)
+            }
             needsDisplay = true
             onViewportChanged?()
             return
@@ -759,6 +998,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             movingAnnotationPage = nil
             movingAnnotationStartBounds = nil
             movingStartPointInPage = nil
+            movingResizeCorner = nil
+            movingCalloutState = nil
+            movingAnnotations = []
+            movingAnnotationStartBoundsByID.removeAll(keepingCapacity: false)
             didMoveAnnotation = false
             fenceStartInView = nil
             fencePage = nil
@@ -776,7 +1019,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             if let start = fenceStartInView, let page = fencePage {
                 let end = convert(event.locationInWindow, from: nil)
                 let rectInView = normalizedRect(from: start, to: end)
-                guard rectInView.width > 4, rectInView.height > 4 else { return }
+                guard rectInView.width > 4, rectInView.height > 4 else {
+                    onAnnotationsBoxSelected?(page, [])
+                    return
+                }
                 let p1 = convert(rectInView.origin, to: page)
                 let p2 = convert(NSPoint(x: rectInView.maxX, y: rectInView.maxY), to: page)
                 let box = normalizedRect(from: p1, to: p2)
@@ -784,9 +1030,20 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 onAnnotationsBoxSelected?(page, hits)
                 return
             }
-            guard didMoveAnnotation,
-                  let page = movingAnnotationPage,
-                  let annotation = movingAnnotation,
+            if didMoveAnnotation, let calloutState = movingCalloutState {
+                onAnnotationMoved?(calloutState.page, calloutState.textAnnotation, calloutState.startTextBounds)
+                return
+            }
+            guard didMoveAnnotation, let page = movingAnnotationPage else { return }
+            if !movingAnnotations.isEmpty {
+                for annotation in movingAnnotations {
+                    let key = ObjectIdentifier(annotation)
+                    guard let startBounds = movingAnnotationStartBoundsByID[key] else { continue }
+                    onAnnotationMoved?(page, annotation, startBounds)
+                }
+                return
+            }
+            guard let annotation = movingAnnotation,
                   let startBounds = movingAnnotationStartBounds else { return }
             onAnnotationMoved?(page, annotation, startBounds)
             return
@@ -931,60 +1188,39 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let localEnd = NSPoint(x: end.x - bounds.origin.x, y: end.y - bounds.origin.y)
         path.move(to: localStart)
         path.line(to: localEnd)
-
-        let dx = localEnd.x - localStart.x
-        let dy = localEnd.y - localStart.y
-        let len = hypot(dx, dy)
-        if len > 0.001 {
-            let ux = dx / len
-            let uy = dy / len
-            let arrowLength = max(10.0, arrowLineWidth * 3.0)
-            let halfAngle = CGFloat.pi / 7.0
-            let left = NSPoint(
-                x: localEnd.x - arrowLength * (ux * cos(halfAngle) - uy * sin(halfAngle)),
-                y: localEnd.y - arrowLength * (uy * cos(halfAngle) + ux * sin(halfAngle))
-            )
-            let right = NSPoint(
-                x: localEnd.x - arrowLength * (ux * cos(-halfAngle) - uy * sin(-halfAngle)),
-                y: localEnd.y - arrowLength * (uy * cos(-halfAngle) + ux * sin(-halfAngle))
-            )
-            switch calloutArrowStyle {
-            case .solidArrow, .openArrow:
-                path.move(to: left)
-                path.line(to: localEnd)
-                path.line(to: right)
-                if calloutArrowStyle == .solidArrow {
-                    path.line(to: left)
-                }
-            case .filledDot, .openDot:
-                break
-            }
-        }
+        addArrowDecoration(
+            to: path,
+            tip: localEnd,
+            from: localStart,
+            style: calloutArrowStyle,
+            lineWidth: arrowLineWidth,
+            headSize: arrowHeadSize
+        )
 
         let annotation = PDFAnnotation(bounds: bounds, forType: .ink, withProperties: nil)
         annotation.color = arrowStrokeColor
         path.lineWidth = arrowLineWidth
         assignLineWidth(arrowLineWidth, to: annotation)
-        annotation.contents = "Arrow|Style:\(calloutArrowStyle.rawValue)"
+        annotation.contents = "Arrow|Style:\(calloutArrowStyle.rawValue)|Head:\(encodedHeadSize(arrowHeadSize))"
         annotation.add(path)
         page.addAnnotation(annotation)
         onAnnotationAdded?(page, annotation, "Add Arrow")
-
-        if calloutArrowStyle == .filledDot || calloutArrowStyle == .openDot {
-            let radius = max(3.0, arrowLineWidth * 1.8)
-            let dotBounds = NSRect(x: end.x - radius, y: end.y - radius, width: radius * 2.0, height: radius * 2.0)
-            let dot = PDFAnnotation(bounds: dotBounds, forType: .circle, withProperties: nil)
-            dot.color = arrowStrokeColor
-            dot.interiorColor = (calloutArrowStyle == .filledDot) ? arrowStrokeColor : .clear
-            assignLineWidth(max(1.0, arrowLineWidth), to: dot)
-            dot.contents = "Arrow Dot|Style:\(calloutArrowStyle.rawValue)"
-            page.addAnnotation(dot)
-            onAnnotationAdded?(page, dot, "Add Arrow")
+        if let endpoint = makeArrowEndpointAnnotation(
+            tip: end,
+            style: calloutArrowStyle,
+            lineWidth: arrowLineWidth,
+            strokeColor: arrowStrokeColor,
+            headSize: arrowHeadSize,
+            groupID: nil,
+            isCallout: false
+        ) {
+            page.addAnnotation(endpoint)
+            onAnnotationAdded?(page, endpoint, "Add Arrow")
         }
     }
 
     private func assignLineWidth(_ lineWidth: CGFloat, to annotation: PDFAnnotation) {
-        let normalized = max(0.1, lineWidth)
+        let normalized = max(0.0, lineWidth)
         let border = annotation.border ?? PDFBorder()
         border.lineWidth = normalized
         annotation.border = border
@@ -1104,16 +1340,23 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             targetInView = startInView
         }
 
-        let path = CGMutablePath()
+        let path = NSBezierPath()
         path.move(to: startInView)
-        path.addLine(to: targetInView)
-        addArrowDecoration(to: path, tip: targetInView, from: startInView, style: calloutArrowStyle, lineWidth: arrowLineWidth)
+        path.line(to: targetInView)
+        addArrowDecoration(
+            to: path,
+            tip: targetInView,
+            from: startInView,
+            style: calloutArrowStyle,
+            lineWidth: arrowLineWidth,
+            headSize: arrowHeadSize
+        )
 
         dragPreviewLayer.strokeColor = arrowStrokeColor.cgColor
         dragPreviewLayer.fillColor = NSColor.clear.cgColor
         dragPreviewLayer.lineWidth = arrowLineWidth
         dragPreviewLayer.lineDashPattern = [6, 4]
-        dragPreviewLayer.path = path
+        dragPreviewLayer.path = cgPath(from: path)
         dragPreviewLayer.isHidden = false
     }
 
@@ -1207,6 +1450,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         label.fontColor = penColor
         label.color = NSColor.white.withAlphaComponent(0.88)
+        forceUprightTextAnnotationIfSupported(label, on: page)
         page.addAnnotation(label)
         onAnnotationAdded?(page, label, "Add Area Label")
         return true
@@ -1281,14 +1525,16 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let field = NSTextField(frame: .zero)
         let resolvedFont = NSFont(name: textFontName, size: max(6.0, textFontSize))
             ?? NSFont.systemFont(ofSize: max(6.0, textFontSize), weight: .regular)
-        field.font = resolvedFont
+        field.font = inlineEditorDisplayFont(from: resolvedFont)
         field.textColor = textForegroundColor
-        field.drawsBackground = false
+        field.drawsBackground = true
+        field.backgroundColor = textBackgroundColor
         field.isBordered = false
         field.isBezeled = false
         field.focusRingType = .none
         field.delegate = self
         field.placeholderString = nil
+        configureInlineEditorField(field)
 
         addSubview(field)
         inlineTextField = field
@@ -1298,15 +1544,18 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         inlineOriginalTextContents = nil
 
         let anchor = inlineTextAnchorInPage!
-        let bounds = calloutTextAnnotationBounds(forAnchorInPage: anchor)
+        let bounds = calloutTextAnnotationBounds(forAnchorInPage: anchor, on: page)
         let annotation = PDFAnnotation(bounds: bounds, forType: .freeText, withProperties: nil)
         annotation.contents = " "
         annotation.font = resolvedFont
         annotation.fontColor = textForegroundColor
-        annotation.color = textBackgroundColor
+        applyTextBoxStyle(to: annotation)
         annotation.alignment = .left
+        forceUprightTextAnnotationIfSupported(annotation, on: page)
         if toolMode == .callout, let calloutGroupID = pendingCalloutGroupID {
             annotation.userName = Self.calloutGroupPrefix + calloutGroupID
+        } else {
+            annotation.userName = Self.textGroupPrefix + UUID().uuidString
         }
         page.addAnnotation(annotation)
         inlineLiveTextAnnotation = annotation
@@ -1329,14 +1578,16 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let size = max(6.0, annotation.font?.pointSize ?? textFontSize)
         let resolvedFont = NSFont(name: textFontName, size: size)
             ?? NSFont.systemFont(ofSize: size, weight: .regular)
-        field.font = resolvedFont
+        field.font = inlineEditorDisplayFont(from: resolvedFont)
         field.textColor = annotation.fontColor ?? textForegroundColor
-        field.drawsBackground = false
+        field.drawsBackground = true
+        field.backgroundColor = resolvedTextBackgroundColor(for: annotation)
         field.isBordered = false
         field.isBezeled = false
         field.focusRingType = .none
         field.delegate = self
         field.stringValue = annotation.contents ?? ""
+        configureInlineEditorField(field)
 
         addSubview(field)
         inlineTextField = field
@@ -1357,7 +1608,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
     }
 
-    private func commitInlineTextEditor(cancel: Bool) -> PDFAnnotation? {
+    private func commitInlineTextEditor(cancel: Bool, selectCommittedAnnotation: Bool = false) -> PDFAnnotation? {
         guard let field = inlineTextField else { return nil }
         let wasEditingExisting = inlineEditingExistingAnnotation
         let originalText = inlineOriginalTextContents
@@ -1400,6 +1651,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         annotation.contents = text
         annotation.shouldDisplay = inlineAnnotationWasDisplayed
+        syncTextOutlineAppearance(for: annotation, outlineColor: textOutlineColor, outlineWidth: textOutlineWidth)
         if wasEditingExisting {
             let previousText = originalText ?? ""
             if previousText != text {
@@ -1413,7 +1665,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 onToolShortcut?(.select)
             }
         }
-        onAnnotationClicked?(page, annotation)
+        if selectCommittedAnnotation {
+            onAnnotationClicked?(page, annotation)
+        } else {
+            onAnnotationsBoxSelected?(page, [])
+        }
         return annotation
     }
 
@@ -1463,7 +1719,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     private func isEditableTextAnnotation(_ annotation: PDFAnnotation) -> Bool {
         let type = (annotation.type ?? "").lowercased()
-        return type.contains("freetext")
+        return type.contains("freetext") || (type.contains("free") && type.contains("text"))
     }
 
     private func startTextEditCaretBlink(for annotation: PDFAnnotation, page: PDFPage) {
@@ -1510,15 +1766,228 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private func inlineEditorFrame(for annotation: PDFAnnotation, on page: PDFPage) -> NSRect {
         let p1 = convert(annotation.bounds.origin, from: page)
         let p2 = convert(NSPoint(x: annotation.bounds.maxX, y: annotation.bounds.maxY), from: page)
-        var rect = NSRect(
+        let rect = NSRect(
             x: min(p1.x, p2.x),
             y: min(p1.y, p2.y),
             width: abs(p2.x - p1.x),
             height: abs(p2.y - p1.y)
-        ).insetBy(dx: 2, dy: 2)
-        rect.size.width = max(rect.size.width, 24)
-        rect.size.height = max(rect.size.height, 18)
-        return rect
+        )
+        return NSRect(
+            x: rect.origin.x,
+            y: rect.origin.y,
+            width: max(rect.size.width, 24),
+            height: max(rect.size.height, 18)
+        )
+    }
+
+    private func minimumResizeSize(for annotation: PDFAnnotation) -> NSSize {
+        let fontSize = max(6.0, annotation.font?.pointSize ?? textFontSize)
+        return NSSize(width: max(120.0, fontSize * 8.0), height: max(34.0, fontSize * 2.4))
+    }
+
+    private func resizeCornerHit(for annotation: PDFAnnotation, on page: PDFPage, at locationInView: NSPoint) -> ResizeCorner? {
+        guard isEditableTextAnnotation(annotation) else { return nil }
+        // Match handle geometry shown by MainViewController selection overlay for FreeText.
+        let visualRect = rectInView(fromPageRect: annotation.bounds, on: page).insetBy(dx: -4, dy: -4)
+        guard visualRect.width > 0.1, visualRect.height > 0.1 else { return nil }
+        let handles: [(ResizeCorner, NSPoint)] = [
+            (.lowerLeft, NSPoint(x: visualRect.minX, y: visualRect.minY)),
+            (.lowerRight, NSPoint(x: visualRect.maxX, y: visualRect.minY)),
+            (.upperLeft, NSPoint(x: visualRect.minX, y: visualRect.maxY)),
+            (.upperRight, NSPoint(x: visualRect.maxX, y: visualRect.maxY))
+        ]
+        let threshold: CGFloat = 16.0
+        for (corner, point) in handles {
+            if hypot(locationInView.x - point.x, locationInView.y - point.y) <= threshold {
+                return corner
+            }
+        }
+        return nil
+    }
+
+    private func initialCalloutDragState(
+        from hit: PDFAnnotation,
+        on page: PDFPage,
+        pointerInView: NSPoint,
+        pointerInPage: NSPoint
+    ) -> CalloutDragState? {
+        guard let groupID = calloutGroupID(for: hit) else { return nil }
+        let grouped = page.annotations.filter { calloutGroupID(for: $0) == groupID }
+        guard let text = grouped.first(where: { isEditableTextAnnotation($0) }),
+              let leader = grouped.first(where: { ($0.contents ?? "").lowercased().contains("callout leader") }),
+              let geometry = calloutLeaderGeometry(for: leader) else {
+            return nil
+        }
+        let handle: CalloutDragHandle
+        if let corner = resizeCornerHit(for: text, on: page, at: pointerInView) {
+            handle = .textCorner(corner)
+        } else {
+            let elbowInView = convert(geometry.elbow, from: page)
+            let tipInView = convert(geometry.tip, from: page)
+            if hypot(pointerInView.x - tipInView.x, pointerInView.y - tipInView.y) <= 12 {
+                handle = .tip
+            } else if hypot(pointerInView.x - elbowInView.x, pointerInView.y - elbowInView.y) <= 12 {
+                handle = .elbow
+            } else {
+                handle = .moveAll
+            }
+        }
+        return CalloutDragState(
+            page: page,
+            textAnnotation: text,
+            leaderAnnotation: leader,
+            dotAnnotation: grouped.first(where: { isCalloutEndpointAnnotation($0) }),
+            startTextBounds: text.bounds,
+            startElbow: geometry.elbow,
+            startTip: geometry.tip,
+            startPointerInPage: pointerInPage,
+            handle: handle
+        )
+    }
+
+    private func replaceCalloutLeader(state: inout CalloutDragState, elbow: NSPoint, tip: NSPoint) {
+        let style = calloutArrowStyle(for: state.leaderAnnotation) ?? calloutArrowStyle
+        let headSize = calloutArrowHeadSize(for: state.leaderAnnotation) ?? calloutArrowHeadSize
+        let lineWidth = max(0.1, state.leaderAnnotation.border?.lineWidth ?? calloutLineWidth)
+        let stroke = state.leaderAnnotation.color
+        let groupID = calloutGroupID(for: state.textAnnotation)
+        state.page.removeAnnotation(state.leaderAnnotation)
+        if let dot = state.dotAnnotation {
+            state.page.removeAnnotation(dot)
+        }
+        let rebuilt = makeCalloutLeaderAnnotations(
+            on: state.page,
+            textAnnotation: state.textAnnotation,
+            elbow: elbow,
+            tip: tip,
+            style: style,
+            lineWidth: lineWidth,
+            headSize: headSize,
+            strokeColor: stroke,
+            groupID: groupID
+        )
+        state.page.addAnnotation(rebuilt.leader)
+        if let endpoint = rebuilt.endpoint {
+            state.page.addAnnotation(endpoint)
+        }
+        state.leaderAnnotation = rebuilt.leader
+        state.dotAnnotation = rebuilt.endpoint
+    }
+
+    private func calloutLeaderGeometry(for leader: PDFAnnotation) -> (elbow: NSPoint, tip: NSPoint)? {
+        if let contents = leader.contents {
+            var elbow: NSPoint?
+            var tip: NSPoint?
+            for part in contents.split(separator: "|") {
+                let token = String(part)
+                if token.hasPrefix("Elbow:") {
+                    elbow = parseCalloutPoint(String(token.dropFirst("Elbow:".count)))
+                } else if token.hasPrefix("Tip:") {
+                    tip = parseCalloutPoint(String(token.dropFirst("Tip:".count)))
+                }
+            }
+            if let elbow, let tip {
+                return (elbow, tip)
+            }
+        }
+        guard let path = leader.paths?.first, path.elementCount >= 3 else { return nil }
+        var polylinePoints: [NSPoint] = []
+        polylinePoints.reserveCapacity(3)
+        for idx in 0..<path.elementCount {
+            var associated = [NSPoint](repeating: .zero, count: 3)
+            let element = path.element(at: idx, associatedPoints: &associated)
+            switch element {
+            case .moveTo, .lineTo:
+                polylinePoints.append(associated[0])
+            default:
+                break
+            }
+            if polylinePoints.count >= 3 {
+                break
+            }
+        }
+        guard polylinePoints.count >= 3 else { return nil }
+        let offset = leader.bounds.origin
+        return (
+            translated(polylinePoints[1], by: offset),
+            translated(polylinePoints[2], by: offset)
+        )
+    }
+
+    private func parseCalloutPoint(_ token: String) -> NSPoint? {
+        let values = token.split(separator: ",", maxSplits: 1).map(String.init)
+        guard values.count == 2,
+              let x = Double(values[0]),
+              let y = Double(values[1]) else {
+            return nil
+        }
+        return NSPoint(x: x, y: y)
+    }
+
+    private func encodedCalloutPoint(_ point: NSPoint) -> String {
+        String(format: "%.4f,%.4f", point.x, point.y)
+    }
+
+    private func encodedHeadSize(_ headSize: CGFloat) -> String {
+        String(format: "%.2f", max(1.0, headSize))
+    }
+
+    private func makeCalloutLeaderAnnotations(
+        on page: PDFPage,
+        textAnnotation: PDFAnnotation,
+        elbow: NSPoint,
+        tip: NSPoint,
+        style: ArrowEndStyle,
+        lineWidth: CGFloat,
+        headSize: CGFloat,
+        strokeColor: NSColor,
+        groupID: String?
+    ) -> (leader: PDFAnnotation, endpoint: PDFAnnotation?) {
+        let anchor = nearestPointOnRectBoundary(textAnnotation.bounds, toward: elbow)
+        let points = [anchor, elbow, tip]
+        let minX = points.map(\.x).min() ?? 0
+        let minY = points.map(\.y).min() ?? 0
+        let maxX = points.map(\.x).max() ?? 0
+        let maxY = points.map(\.y).max() ?? 0
+        let pad = max(6.0, lineWidth * 2.0)
+        let bounds = NSRect(x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2.0, height: (maxY - minY) + pad * 2.0)
+
+        let path = NSBezierPath()
+        path.lineJoinStyle = .round
+        path.lineCapStyle = .round
+        path.move(to: NSPoint(x: anchor.x - bounds.origin.x, y: anchor.y - bounds.origin.y))
+        path.line(to: NSPoint(x: elbow.x - bounds.origin.x, y: elbow.y - bounds.origin.y))
+        path.line(to: NSPoint(x: tip.x - bounds.origin.x, y: tip.y - bounds.origin.y))
+
+        addArrowDecoration(
+            to: path,
+            tip: NSPoint(x: tip.x - bounds.origin.x, y: tip.y - bounds.origin.y),
+            from: NSPoint(x: elbow.x - bounds.origin.x, y: elbow.y - bounds.origin.y),
+            style: style,
+            lineWidth: lineWidth,
+            headSize: headSize
+        )
+
+        let leader = PDFAnnotation(bounds: bounds, forType: .ink, withProperties: nil)
+        leader.color = strokeColor
+        path.lineWidth = lineWidth
+        assignLineWidth(lineWidth, to: leader)
+        leader.contents = "Callout Leader|Arrow:\(style.rawValue)|Head:\(encodedHeadSize(headSize))|Elbow:\(encodedCalloutPoint(elbow))|Tip:\(encodedCalloutPoint(tip))"
+        if let groupID {
+            leader.userName = Self.calloutGroupPrefix + groupID
+        }
+        leader.add(path)
+
+        let endpoint = makeArrowEndpointAnnotation(
+            tip: tip,
+            style: style,
+            lineWidth: lineWidth,
+            strokeColor: strokeColor,
+            headSize: headSize,
+            groupID: groupID,
+            isCallout: true
+        )
+        return (leader, endpoint)
     }
 
     private func handleCalloutClick(at locationInView: NSPoint) {
@@ -1645,6 +2114,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         label.fontColor = measurementStrokeColor
         label.color = NSColor.white.withAlphaComponent(0.88)
+        forceUprightTextAnnotationIfSupported(label, on: page)
         page.addAnnotation(label)
         onAnnotationAdded?(page, label, "Add Measurement Label")
     }
@@ -1750,6 +2220,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func hideCalloutPreview() {
+        calloutTextBoxPreviewLayer.isHidden = true
+        calloutTextBoxPreviewLayer.path = nil
         dragPreviewLayer.isHidden = true
         dragPreviewLayer.path = nil
         dragPreviewLayer.lineDashPattern = nil
@@ -1799,36 +2271,97 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let tipInView = convert(tipInPage, from: page)
         let hoverInView = convert(hoverInPage, from: page)
 
-        let path = CGMutablePath()
+        let path = NSBezierPath()
         if let elbowInPage = pendingCalloutElbowInPage {
             let elbowInView = convert(elbowInPage, from: page)
-            let textRectInPage = calloutTextAnnotationBounds(forAnchorInPage: hoverInPage)
+            let textRectInPage = calloutTextAnnotationBounds(forAnchorInPage: hoverInPage, on: page)
             let textRect = rectInView(fromPageRect: textRectInPage, on: page)
             let anchor = nearestPointOnRectBoundary(textRect, toward: elbowInView)
-            path.addRect(textRect.integral)
+            let textPath = CGMutablePath()
+            textPath.addRect(textRect)
+            calloutTextBoxPreviewLayer.strokeColor = calloutStrokeColor.cgColor
+            calloutTextBoxPreviewLayer.fillColor = textBackgroundColor.cgColor
+            calloutTextBoxPreviewLayer.lineWidth = max(0.0, textOutlineWidth)
+            calloutTextBoxPreviewLayer.strokeColor = textOutlineColor.cgColor
+            calloutTextBoxPreviewLayer.path = textPath
+            calloutTextBoxPreviewLayer.isHidden = false
             path.move(to: anchor)
-            path.addLine(to: elbowInView)
-            path.addLine(to: tipInView)
-            addArrowDecoration(to: path, tip: tipInView, from: elbowInView, style: calloutArrowStyle, lineWidth: calloutLineWidth)
+            path.line(to: elbowInView)
+            path.line(to: tipInView)
+            addArrowDecoration(
+                to: path,
+                tip: tipInView,
+                from: elbowInView,
+                style: calloutArrowStyle,
+                lineWidth: calloutLineWidth,
+                headSize: calloutArrowHeadSize
+            )
         } else {
+            calloutTextBoxPreviewLayer.isHidden = true
+            calloutTextBoxPreviewLayer.path = nil
             path.move(to: hoverInView)
-            path.addLine(to: tipInView)
-            addArrowDecoration(to: path, tip: tipInView, from: hoverInView, style: calloutArrowStyle, lineWidth: calloutLineWidth)
+            path.line(to: tipInView)
+            addArrowDecoration(
+                to: path,
+                tip: tipInView,
+                from: hoverInView,
+                style: calloutArrowStyle,
+                lineWidth: calloutLineWidth,
+                headSize: calloutArrowHeadSize
+            )
         }
 
         dragPreviewLayer.strokeColor = calloutStrokeColor.cgColor
         dragPreviewLayer.fillColor = NSColor.clear.cgColor
-        dragPreviewLayer.lineWidth = calloutLineWidth
         dragPreviewLayer.lineDashPattern = [6, 4]
+        dragPreviewLayer.lineWidth = calloutLineWidth
+        dragPreviewLayer.path = cgPath(from: path)
+        dragPreviewLayer.isHidden = false
+    }
+
+    private func updateTextPreview(at locationInView: NSPoint) {
+        calloutTextBoxPreviewLayer.isHidden = true
+        calloutTextBoxPreviewLayer.path = nil
+        guard inlineTextField == nil,
+              let page = page(for: locationInView, nearest: true) else {
+            hideTextPreview()
+            return
+        }
+        let anchorInPage = convert(locationInView, to: page)
+        let pageRect = calloutTextAnnotationBounds(forAnchorInPage: anchorInPage, on: page)
+        let textRect = rectInView(fromPageRect: pageRect, on: page)
+        let path = CGMutablePath()
+        path.addRect(textRect)
+        dragPreviewLayer.strokeColor = textBackgroundColor.cgColor
+        dragPreviewLayer.fillColor = textBackgroundColor.cgColor
+        dragPreviewLayer.strokeColor = textOutlineColor.cgColor
+        dragPreviewLayer.lineWidth = max(0.0, textOutlineWidth)
+        dragPreviewLayer.lineDashPattern = nil
         dragPreviewLayer.path = path
         dragPreviewLayer.isHidden = false
     }
 
-    private func calloutTextAnnotationBounds(forAnchorInPage anchor: NSPoint) -> NSRect {
+    private func hideTextPreview() {
+        guard inlineTextField == nil else { return }
+        dragPreviewLayer.isHidden = true
+        dragPreviewLayer.path = nil
+        dragPreviewLayer.lineDashPattern = nil
+    }
+
+    private func calloutTextAnnotationBounds(forAnchorInPage anchor: NSPoint, on page: PDFPage) -> NSRect {
         let size = max(6.0, textFontSize)
-        let width = max(240.0, size * 12.0)
-        let height = max(42.0, size * 2.2)
-        return NSRect(x: anchor.x, y: anchor.y - (height * 0.75), width: width, height: height)
+        let visualWidth = max(260.0, size * 16.0)
+        let visualHeight = max(56.0, size * 3.6)
+        let pageRotation = ((page.rotation % 360) + 360) % 360
+        let shouldSwap = (pageRotation == 90 || pageRotation == 270)
+        let width = shouldSwap ? visualHeight : visualWidth
+        let height = shouldSwap ? visualWidth : visualHeight
+        return NSRect(
+            x: anchor.x,
+            y: anchor.y - (height * 0.35),
+            width: width,
+            height: height
+        )
     }
 
     private func rectInView(fromPageRect pageRect: NSRect, on page: PDFPage) -> NSRect {
@@ -1837,14 +2370,14 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return normalizedRect(from: v1, to: v2)
     }
 
-    private func addArrowDecoration(to path: CGMutablePath, tip: NSPoint, from base: NSPoint, style: ArrowEndStyle, lineWidth: CGFloat) {
+    private func addArrowDecoration(to path: NSBezierPath, tip: NSPoint, from base: NSPoint, style: ArrowEndStyle, lineWidth: CGFloat, headSize: CGFloat) {
         let dx = tip.x - base.x
         let dy = tip.y - base.y
         let dist = hypot(dx, dy)
         guard dist > 0.001 else { return }
         let ux = dx / dist
         let uy = dy / dist
-        let length = max(10.0, lineWidth * 3.0)
+        let length = max(4.0, headSize * 2.0, lineWidth * 2.0)
         let halfAngle = CGFloat.pi / 7.0
         let left = NSPoint(
             x: tip.x - length * (ux * cos(halfAngle) - uy * sin(halfAngle)),
@@ -1855,17 +2388,33 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             y: tip.y - length * (uy * cos(-halfAngle) + ux * sin(-halfAngle))
         )
         switch style {
-        case .solidArrow, .openArrow:
+        case .solidArrow:
             path.move(to: left)
-            path.addLine(to: tip)
-            path.addLine(to: right)
-            if style == .solidArrow {
-                path.addLine(to: left)
-            }
+            path.line(to: tip)
+            path.line(to: right)
+            path.line(to: left)
+        case .openArrow:
+            path.move(to: left)
+            path.line(to: tip)
+            path.line(to: right)
+        case .filledTriangle:
+            path.move(to: left)
+            path.line(to: tip)
+            path.line(to: right)
+            path.line(to: left)
+        case .openTriangle:
+            path.move(to: left)
+            path.line(to: tip)
+            path.line(to: right)
+            path.line(to: left)
         case .filledDot, .openDot:
-            let radius = max(3.0, lineWidth * 1.8)
+            let radius = max(1.0, headSize * 0.5, lineWidth * 0.75)
             let dotRect = NSRect(x: tip.x - radius, y: tip.y - radius, width: radius * 2.0, height: radius * 2.0)
-            path.addEllipse(in: dotRect)
+            path.appendOval(in: dotRect)
+        case .filledSquare, .openSquare:
+            let side = max(2.0, headSize)
+            let squareRect = NSRect(x: tip.x - side * 0.5, y: tip.y - side * 0.5, width: side, height: side)
+            path.appendRect(squareRect)
         }
     }
 
@@ -1886,8 +2435,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         var best: PDFAnnotation?
         var bestDistance = maxDistance
-        for annotation in page.annotations {
+        for annotation in page.annotations.reversed() {
             guard annotation.shouldDisplay else { continue }
+            if isTextOutlineAnnotation(annotation) { continue }
             let annotationType = (annotation.type ?? "").lowercased()
             let isInkLike = annotationType.contains("ink")
             let d: CGFloat
@@ -1903,7 +2453,36 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 best = annotation
             }
         }
+        if let best {
+            return best
+        }
+
+        // Fallback: for thin/complex paths where stroke extraction can miss, accept
+        // an expanded-bounds hit and prefer the closest perimeter in topmost order.
+        var fallback: PDFAnnotation?
+        var fallbackDistance = maxDistance
+        for annotation in page.annotations.reversed() {
+            guard annotation.shouldDisplay else { continue }
+            if isTextOutlineAnnotation(annotation) { continue }
+            let expanded = annotation.bounds.insetBy(dx: -maxDistance, dy: -maxDistance)
+            guard expanded.contains(point) else { continue }
+            let d = distanceToRectPerimeter(point, rect: annotation.bounds)
+            if d <= fallbackDistance {
+                fallbackDistance = d
+                fallback = annotation
+            }
+        }
+        if let fallback {
+            return fallback
+        }
         return best
+    }
+
+    private func selectionHitDistanceInPage() -> CGFloat {
+        // Keep click hit-target roughly constant on-screen across zoom levels.
+        let zoom = max(0.05, scaleFactor)
+        let viewPixels: CGFloat = 16.0
+        return min(72.0, max(8.0, viewPixels / zoom))
     }
 
     private func distanceToRect(_ point: NSPoint, rect: NSRect) -> CGFloat {
@@ -2058,6 +2637,30 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         NSPoint(x: point.x + offset.x, y: point.y + offset.y)
     }
 
+    private func cgPath(from bezierPath: NSBezierPath) -> CGPath {
+        let path = CGMutablePath()
+        let pointCount = 3
+        var points = [NSPoint](repeating: .zero, count: pointCount)
+        for index in 0..<bezierPath.elementCount {
+            let element = bezierPath.element(at: index, associatedPoints: &points)
+            switch element {
+            case .moveTo:
+                path.move(to: points[0])
+            case .lineTo:
+                path.addLine(to: points[0])
+            case .curveTo, .cubicCurveTo:
+                path.addCurve(to: points[2], control1: points[0], control2: points[1])
+            case .quadraticCurveTo:
+                path.addQuadCurve(to: points[1], control: points[0])
+            case .closePath:
+                path.closeSubpath()
+            @unknown default:
+                break
+            }
+        }
+        return path
+    }
+
     private func orthogonalSnapPoint(anchor: NSPoint, current: NSPoint) -> NSPoint {
         let dx = current.x - anchor.x
         let dy = current.y - anchor.y
@@ -2149,77 +2752,22 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func addCalloutLeader(on page: PDFPage, textAnnotation: PDFAnnotation, elbow: NSPoint, tip: NSPoint) {
-        let anchor = nearestPointOnRectBoundary(textAnnotation.bounds, toward: elbow)
-        let points = [anchor, elbow, tip]
-
-        let minX = points.map(\.x).min() ?? 0
-        let minY = points.map(\.y).min() ?? 0
-        let maxX = points.map(\.x).max() ?? 0
-        let maxY = points.map(\.y).max() ?? 0
-        let pad = max(6.0, calloutLineWidth * 2.0)
-        let bounds = NSRect(x: minX - pad, y: minY - pad, width: (maxX - minX) + pad * 2.0, height: (maxY - minY) + pad * 2.0)
-
-        let path = NSBezierPath()
-        path.lineJoinStyle = .round
-        path.lineCapStyle = .round
-        path.move(to: NSPoint(x: anchor.x - bounds.origin.x, y: anchor.y - bounds.origin.y))
-        path.line(to: NSPoint(x: elbow.x - bounds.origin.x, y: elbow.y - bounds.origin.y))
-        path.line(to: NSPoint(x: tip.x - bounds.origin.x, y: tip.y - bounds.origin.y))
-
-        let dx = tip.x - elbow.x
-        let dy = tip.y - elbow.y
-        let length = hypot(dx, dy)
-        if length > 0.001 {
-            let ux = dx / length
-            let uy = dy / length
-            let arrowLength = max(10.0, calloutLineWidth * 3.0)
-            let halfAngle = CGFloat.pi / 7.0
-            let left = NSPoint(
-                x: tip.x - arrowLength * (ux * cos(halfAngle) - uy * sin(halfAngle)),
-                y: tip.y - arrowLength * (uy * cos(halfAngle) + ux * sin(halfAngle))
-            )
-            let right = NSPoint(
-                x: tip.x - arrowLength * (ux * cos(-halfAngle) - uy * sin(-halfAngle)),
-                y: tip.y - arrowLength * (uy * cos(-halfAngle) + ux * sin(-halfAngle))
-            )
-            switch calloutArrowStyle {
-            case .solidArrow, .openArrow:
-                path.move(to: NSPoint(x: left.x - bounds.origin.x, y: left.y - bounds.origin.y))
-                path.line(to: NSPoint(x: tip.x - bounds.origin.x, y: tip.y - bounds.origin.y))
-                path.line(to: NSPoint(x: right.x - bounds.origin.x, y: right.y - bounds.origin.y))
-                if calloutArrowStyle == .solidArrow {
-                    path.line(to: NSPoint(x: left.x - bounds.origin.x, y: left.y - bounds.origin.y))
-                }
-            case .filledDot, .openDot:
-                break
-            }
-        }
-
-        let annotation = PDFAnnotation(bounds: bounds, forType: .ink, withProperties: nil)
-        annotation.color = calloutStrokeColor
-        path.lineWidth = calloutLineWidth
-        assignLineWidth(calloutLineWidth, to: annotation)
-        annotation.contents = "Callout Leader|Arrow:\(calloutArrowStyle.rawValue)"
-        if let calloutGroupID = calloutGroupID(for: textAnnotation) {
-            annotation.userName = Self.calloutGroupPrefix + calloutGroupID
-        }
-        annotation.add(path)
-        page.addAnnotation(annotation)
-        onAnnotationAdded?(page, annotation, "Add Callout")
-
-        if calloutArrowStyle == .filledDot || calloutArrowStyle == .openDot {
-            let radius = max(3.0, calloutLineWidth * 1.8)
-            let dotBounds = NSRect(x: tip.x - radius, y: tip.y - radius, width: radius * 2.0, height: radius * 2.0)
-            let dot = PDFAnnotation(bounds: dotBounds, forType: .circle, withProperties: nil)
-            dot.color = calloutStrokeColor
-            dot.interiorColor = (calloutArrowStyle == .filledDot) ? calloutStrokeColor : .clear
-            assignLineWidth(max(1.0, calloutLineWidth), to: dot)
-            dot.contents = "Callout Arrow Dot|Arrow:\(calloutArrowStyle.rawValue)"
-            if let calloutGroupID = calloutGroupID(for: textAnnotation) {
-                dot.userName = Self.calloutGroupPrefix + calloutGroupID
-            }
-            page.addAnnotation(dot)
-            onAnnotationAdded?(page, dot, "Add Callout")
+        let rebuilt = makeCalloutLeaderAnnotations(
+            on: page,
+            textAnnotation: textAnnotation,
+            elbow: elbow,
+            tip: tip,
+            style: calloutArrowStyle,
+            lineWidth: calloutLineWidth,
+            headSize: calloutArrowHeadSize,
+            strokeColor: calloutStrokeColor,
+            groupID: calloutGroupID(for: textAnnotation)
+        )
+        page.addAnnotation(rebuilt.leader)
+        onAnnotationAdded?(page, rebuilt.leader, "Add Callout")
+        if let endpoint = rebuilt.endpoint {
+            page.addAnnotation(endpoint)
+            onAnnotationAdded?(page, endpoint, "Add Callout")
         }
     }
 
@@ -2232,11 +2780,75 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return value.isEmpty ? nil : value
     }
 
+    private func isTextOutlineAnnotation(_ annotation: PDFAnnotation) -> Bool {
+        (annotation.contents ?? "") == Self.textOutlineMarker
+    }
+
+    func syncTextOutlineGeometry(for textAnnotation: PDFAnnotation) {
+        guard isEditableTextAnnotation(textAnnotation),
+              let page = textAnnotation.page,
+              let userName = textAnnotation.userName else { return }
+        let outlines = page.annotations.filter { $0.userName == userName && isTextOutlineAnnotation($0) }
+        for outline in outlines {
+            outline.bounds = textAnnotation.bounds
+        }
+    }
+
+    func textOutlineStyle(for textAnnotation: PDFAnnotation) -> (color: NSColor, width: CGFloat)? {
+        guard isEditableTextAnnotation(textAnnotation),
+              let page = textAnnotation.page,
+              let userName = textAnnotation.userName else { return nil }
+        guard let outline = page.annotations.first(where: { $0.userName == userName && isTextOutlineAnnotation($0) }) else {
+            return nil
+        }
+        return (outline.color, max(0.0, outline.border?.lineWidth ?? 0.0))
+    }
+
+    func syncTextOutlineAppearance(for textAnnotation: PDFAnnotation, outlineColor: NSColor, outlineWidth: CGFloat) {
+        guard isEditableTextAnnotation(textAnnotation),
+              let page = textAnnotation.page else { return }
+
+        if textAnnotation.userName == nil {
+            textAnnotation.userName = Self.textGroupPrefix + UUID().uuidString
+        }
+        guard let userName = textAnnotation.userName else { return }
+
+        let outlines = page.annotations.filter { $0.userName == userName && isTextOutlineAnnotation($0) }
+        let normalizedWidth = max(0.0, outlineWidth)
+        if normalizedWidth <= 0.01 {
+            for outline in outlines {
+                page.removeAnnotation(outline)
+            }
+            return
+        }
+
+        let outline: PDFAnnotation
+        if let first = outlines.first {
+            outline = first
+            for extra in outlines.dropFirst() {
+                page.removeAnnotation(extra)
+            }
+        } else {
+            outline = PDFAnnotation(bounds: textAnnotation.bounds, forType: .square, withProperties: nil)
+            outline.userName = userName
+            outline.contents = Self.textOutlineMarker
+            outline.shouldPrint = textAnnotation.shouldPrint
+            outline.shouldDisplay = textAnnotation.shouldDisplay
+            page.addAnnotation(outline)
+        }
+
+        outline.bounds = textAnnotation.bounds
+        outline.color = outlineColor
+        outline.interiorColor = .clear
+        assignLineWidth(normalizedWidth, to: outline)
+    }
+
     func calloutArrowStyle(for annotation: PDFAnnotation) -> ArrowEndStyle? {
         guard let contents = annotation.contents else { return nil }
         if let range = contents.range(of: "Arrow:") {
             let raw = contents[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
-            if let value = Int(raw), let style = ArrowEndStyle(rawValue: value) {
+            let token = raw.split(separator: "|", maxSplits: 1).first.map(String.init) ?? String(raw)
+            if let value = Int(token), let style = ArrowEndStyle(rawValue: value) {
                 return style
             }
         }
@@ -2244,6 +2856,174 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return .solidArrow
         }
         return nil
+    }
+
+    private func isCalloutEndpointAnnotation(_ annotation: PDFAnnotation) -> Bool {
+        let contents = (annotation.contents ?? "").lowercased()
+        return contents.contains("callout arrow dot") || contents.contains("callout arrow square")
+    }
+
+    func calloutArrowHeadSize(for annotation: PDFAnnotation) -> CGFloat? {
+        guard let contents = annotation.contents else { return nil }
+        if let range = contents.range(of: "Head:") {
+            let raw = contents[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+            let token = raw.split(separator: "|", maxSplits: 1).first.map(String.init) ?? String(raw)
+            if let value = Double(token) {
+                return max(1.0, CGFloat(value))
+            }
+        }
+        return nil
+    }
+
+    func linkedCalloutLeader(for annotation: PDFAnnotation) -> PDFAnnotation? {
+        guard let page = annotation.page else { return nil }
+        if let groupID = calloutGroupID(for: annotation) {
+            return page.annotations.first(where: {
+                calloutGroupID(for: $0) == groupID && looksLikeCalloutLeaderAnnotation($0)
+            })
+        }
+        if looksLikeCalloutLeaderAnnotation(annotation) {
+            return annotation
+        }
+        guard isEditableTextAnnotation(annotation) else { return nil }
+        return nearestCalloutLeader(to: annotation, on: page)
+    }
+
+    @discardableResult
+    func updateCalloutLeaderAppearance(
+        for annotation: PDFAnnotation,
+        style: ArrowEndStyle,
+        headSize: CGFloat,
+        lineWidth: CGFloat,
+        strokeColor: NSColor
+    ) -> Bool {
+        guard let page = annotation.page else { return false }
+        guard let leader = linkedCalloutLeader(for: annotation),
+              let geometry = calloutLeaderGeometry(for: leader) else {
+            return false
+        }
+        let textAnnotation: PDFAnnotation
+        if isEditableTextAnnotation(annotation) {
+            textAnnotation = annotation
+        } else if let groupID = calloutGroupID(for: leader),
+                  let groupedText = page.annotations.first(where: {
+                      calloutGroupID(for: $0) == groupID && isEditableTextAnnotation($0)
+                  }) {
+            textAnnotation = groupedText
+        } else if let nearby = nearestCalloutText(to: leader, on: page) {
+            textAnnotation = nearby
+        } else {
+            return false
+        }
+
+        let groupID = calloutGroupID(for: textAnnotation) ?? calloutGroupID(for: leader)
+        let endpoint = page.annotations.first(where: {
+            calloutGroupID(for: $0) == groupID && isCalloutEndpointAnnotation($0)
+        })
+        page.removeAnnotation(leader)
+        if let endpoint {
+            page.removeAnnotation(endpoint)
+        }
+        let rebuilt = makeCalloutLeaderAnnotations(
+            on: page,
+            textAnnotation: textAnnotation,
+            elbow: geometry.elbow,
+            tip: geometry.tip,
+            style: style,
+            lineWidth: max(0.1, lineWidth),
+            headSize: max(1.0, headSize),
+            strokeColor: strokeColor,
+            groupID: groupID
+        )
+        page.addAnnotation(rebuilt.leader)
+        if let newEndpoint = rebuilt.endpoint {
+            page.addAnnotation(newEndpoint)
+        }
+        return true
+    }
+
+    private func isCalloutLeaderAnnotation(_ annotation: PDFAnnotation) -> Bool {
+        (annotation.contents ?? "").lowercased().contains("callout leader")
+    }
+
+    private func looksLikeCalloutLeaderAnnotation(_ annotation: PDFAnnotation) -> Bool {
+        if isCalloutLeaderAnnotation(annotation) {
+            return true
+        }
+        let type = (annotation.type ?? "").lowercased()
+        guard type.contains("ink") else { return false }
+        return calloutLeaderGeometry(for: annotation) != nil
+    }
+
+    private func nearestCalloutLeader(to textAnnotation: PDFAnnotation, on page: PDFPage) -> PDFAnnotation? {
+        let searchRect = textAnnotation.bounds.insetBy(dx: -30, dy: -30)
+        return page.annotations
+            .filter { candidate in
+                guard looksLikeCalloutLeaderAnnotation(candidate) else { return false }
+                let center = NSPoint(x: candidate.bounds.midX, y: candidate.bounds.midY)
+                return candidate.bounds.intersects(searchRect) || searchRect.contains(center)
+            }
+            .min(by: { centerDistance($0.bounds, textAnnotation.bounds) < centerDistance($1.bounds, textAnnotation.bounds) })
+    }
+
+    private func nearestCalloutText(to leaderAnnotation: PDFAnnotation, on page: PDFPage) -> PDFAnnotation? {
+        let searchRect = leaderAnnotation.bounds.insetBy(dx: -30, dy: -30)
+        return page.annotations
+            .filter { candidate in
+                guard isEditableTextAnnotation(candidate) else { return false }
+                let center = NSPoint(x: candidate.bounds.midX, y: candidate.bounds.midY)
+                return candidate.bounds.intersects(searchRect) || searchRect.contains(center)
+            }
+            .min(by: { centerDistance($0.bounds, leaderAnnotation.bounds) < centerDistance($1.bounds, leaderAnnotation.bounds) })
+    }
+
+    private func centerDistance(_ a: NSRect, _ b: NSRect) -> CGFloat {
+        let ac = NSPoint(x: a.midX, y: a.midY)
+        let bc = NSPoint(x: b.midX, y: b.midY)
+        return hypot(ac.x - bc.x, ac.y - bc.y)
+    }
+
+    private func makeArrowEndpointAnnotation(
+        tip: NSPoint,
+        style: ArrowEndStyle,
+        lineWidth: CGFloat,
+        strokeColor: NSColor,
+        headSize: CGFloat,
+        groupID: String?,
+        isCallout: Bool
+    ) -> PDFAnnotation? {
+        let normalizedHead = max(1.0, headSize)
+        let normalizedLine = max(1.0, lineWidth)
+        let prefix = isCallout ? "Callout Arrow" : "Arrow"
+
+        switch style {
+        case .filledDot, .openDot:
+            let radius = max(1.0, normalizedHead * 0.5)
+            let bounds = NSRect(x: tip.x - radius, y: tip.y - radius, width: radius * 2.0, height: radius * 2.0)
+            let dot = PDFAnnotation(bounds: bounds, forType: .circle, withProperties: nil)
+            dot.color = strokeColor
+            dot.interiorColor = (style == .filledDot) ? strokeColor : .clear
+            assignLineWidth(normalizedLine, to: dot)
+            dot.contents = "\(prefix) Dot|Arrow:\(style.rawValue)|Head:\(encodedHeadSize(normalizedHead))"
+            if let groupID {
+                dot.userName = Self.calloutGroupPrefix + groupID
+            }
+            return dot
+        case .filledSquare, .openSquare:
+            let side = max(2.0, normalizedHead)
+            let bounds = NSRect(x: tip.x - side * 0.5, y: tip.y - side * 0.5, width: side, height: side)
+            let square = PDFAnnotation(bounds: bounds, forType: .square, withProperties: nil)
+            square.color = strokeColor
+            square.interiorColor = (style == .filledSquare) ? strokeColor : .clear
+            assignLineWidth(normalizedLine, to: square)
+            square.contents = "\(prefix) Square|Arrow:\(style.rawValue)|Head:\(encodedHeadSize(normalizedHead))"
+            if let groupID {
+                square.userName = Self.calloutGroupPrefix + groupID
+            }
+            return square
+        case .solidArrow, .openArrow, .filledTriangle, .openTriangle:
+            return nil
+        }
     }
 
     private func nearestPointOnRectBoundary(_ rect: NSRect, toward point: NSPoint) -> NSPoint {
