@@ -3995,7 +3995,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         selectedTextOverlayLayer.path = nil
     }
 
-    private func clearMarkupTableSelectionUI(updateStatusBarValue: Bool = true) {
+    func clearMarkupTableSelectionUI(updateStatusBarValue: Bool = true) {
         markupsTable.deselectAll(nil)
         clearSelectionOverlayLayers()
         updateToolSettingsUIForCurrentTool()
@@ -4004,7 +4004,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
     }
 
-    private func applyMarkupTableSelectionRows(_ rows: IndexSet, updateStatusBarValue: Bool = true) {
+    func applyMarkupTableSelectionRows(_ rows: IndexSet, updateStatusBarValue: Bool = true) {
         markupsTable.selectRowIndexes(rows, byExtendingSelection: false)
         if let first = rows.first {
             markupsTable.scrollRowToVisible(first)

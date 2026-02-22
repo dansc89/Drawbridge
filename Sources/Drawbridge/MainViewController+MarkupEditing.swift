@@ -296,29 +296,18 @@ extension MainViewController {
             return related.contains(ObjectIdentifier(item.annotation)) ? idx : nil
         })
         if !relatedRows.isEmpty {
-            markupsTable.selectRowIndexes(relatedRows, byExtendingSelection: false)
-            if let first = relatedRows.first {
-                markupsTable.scrollRowToVisible(first)
-            }
-            updateToolSettingsUIForCurrentTool()
-            updateStatusBar()
+            applyMarkupTableSelectionRows(relatedRows)
             return
         }
 
         let targetRow = markupItems.firstIndex(where: { $0.pageIndex == pageIndex && $0.annotation === annotation })
             ?? nearestMarkupRow(to: annotation.bounds, onPageIndex: pageIndex)
         if let row = targetRow {
-            markupsTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-            markupsTable.scrollRowToVisible(row)
-            updateToolSettingsUIForCurrentTool()
-            updateStatusBar()
+            applyMarkupTableSelectionRows(IndexSet(integer: row))
             return
         }
         // Keep the clicked annotation selected even when the table is filtered/capped and has no matching row.
-        markupsTable.deselectAll(nil)
-        updateSelectionOverlay()
-        updateToolSettingsUIForCurrentTool()
-        updateStatusBar()
+        clearMarkupTableSelectionUI()
     }
 
     private func nearestMarkupRow(to bounds: NSRect, onPageIndex pageIndex: Int) -> Int? {
