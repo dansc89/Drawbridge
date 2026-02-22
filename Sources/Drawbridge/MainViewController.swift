@@ -317,7 +317,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var isPresentingInitialMarkupSaveCopyPrompt = false
     var isGridVisible = false
     var isShiftKeyDown = false
-    var isGridSnapEnabled = false
     var isOrthoSnapEnabled = false
     private var isEndpointSnapEnabled = false
     private var isMidpointSnapEnabled = false
@@ -1845,18 +1844,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     @objc private func toggleGridOverlay() {
         setGridVisibleState(gridToggleButton.state == .on)
-    }
-
-    func setGridSnapEnabled(_ enabled: Bool, showToast: Bool = true) {
-        isGridSnapEnabled = enabled
-        pdfView.setGridSnapEnabled(enabled)
-        if showToast {
-            pdfView.showSnapStatusToast(enabled: enabled)
-        }
-        if let item = NSApp.mainMenu?.item(withTitle: "View")?.submenu?.items.first(where: { $0.action == #selector(commandToggleGridSnap(_:)) }) {
-            item.state = enabled ? .on : .off
-        }
-        configureSnapSectionUI()
     }
 
     private func setEndpointSnapEnabled(_ enabled: Bool) {

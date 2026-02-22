@@ -13,11 +13,6 @@ extension MainViewController {
     @objc func commandSetScale(_ sender: Any?) { commandSetDrawingScale(sender) }
     @objc func commandLockScalePages(_ sender: Any?) { commandLockScaleToPages(sender) }
     @objc func commandClearScalePages(_ sender: Any?) { commandClearScaleLocks(sender) }
-    @objc func commandToggleGridSnap(_ sender: Any?) {
-        let enabled = !isGridSnapEnabled
-        setGridSnapEnabled(enabled)
-        (sender as? NSMenuItem)?.state = enabled ? .on : .off
-    }
     @objc func commandToggleOrthoSnap(_ sender: Any?) {
         let enabled = !isOrthoSnapEnabled
         setOrthoSnapEnabled(enabled)
