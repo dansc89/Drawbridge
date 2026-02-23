@@ -383,7 +383,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let markupsSectionContent = NSStackView(frame: .zero)
     private let summarySectionContent = NSStackView(frame: .zero)
     private let toolSelector: NSSegmentedControl = {
-        let control = NSSegmentedControl(labels: ["Select", "Grab", "Draw", "Arrow", "Line", "Polyline", "Highlighter", "Cloud", "Rect", "Ellipse", "Text", "Callout"], trackingMode: .selectOne, target: nil, action: nil)
+        let control = NSSegmentedControl(labels: ["Select", "Grab", "Draw", "Arrow", "Line", "Polyline", "Polygon", "Highlighter", "Cloud", "Rect", "Ellipse", "Text", "Callout"], trackingMode: .selectOne, target: nil, action: nil)
         control.selectedSegment = 0
         return control
     }()
@@ -399,6 +399,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         ["arrow.up.right"],
         ["line.diagonal"],
         ["point.3.filled.connected.trianglepath.dotted"],
+        ["polygon", "triangle"],
         ["highlighter", "pencil.and.scribble", "scribble"],
         ["cloud"],
         ["square"],
@@ -407,7 +408,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         ["text.bubble", "text.bubble.fill"]
     ]
     private let toolSymbolDescriptions: [String] = [
-        "Select", "Grab", "Pen", "Arrow", "Line", "Polyline", "Highlighter", "Cloud", "Rectangle", "Ellipse", "Text", "Callout"
+        "Select", "Grab", "Pen", "Arrow", "Line", "Polyline", "Polygon", "Highlighter", "Cloud", "Rectangle", "Ellipse", "Text", "Callout"
     ]
     private let takeoffSymbolCandidates: [[String]] = [
         ["polygon", "square.dashed", "square.on.square"],
@@ -2219,13 +2220,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSelector.setLabel("A", forSegment: 3)
         toolSelector.setLabel("L", forSegment: 4)
         toolSelector.setLabel("P", forSegment: 5)
-        toolSelector.setLabel("H", forSegment: 6)
-        toolSelector.setLabel("C", forSegment: 7)
-        toolSelector.setLabel("R", forSegment: 8)
-        toolSelector.setLabel("E", forSegment: 9)
-        toolSelector.setLabel("T", forSegment: 10)
-        toolSelector.setLabel("Q", forSegment: 11)
-        for idx in 0..<12 {
+        toolSelector.setLabel("P", forSegment: 6)
+        toolSelector.setLabel("H", forSegment: 7)
+        toolSelector.setLabel("C", forSegment: 8)
+        toolSelector.setLabel("R", forSegment: 9)
+        toolSelector.setLabel("E", forSegment: 10)
+        toolSelector.setLabel("T", forSegment: 11)
+        toolSelector.setLabel("Q", forSegment: 12)
+        for idx in 0..<13 {
             toolSelector.setWidth(42, forSegment: idx)
         }
         toolSelector.selectedSegmentBezelColor = NSColor.systemBlue.withAlphaComponent(0.9)
@@ -2237,12 +2239,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolSelector.setToolTip("Arrow (A)", forSegment: 3)
         toolSelector.setToolTip("Line (L)", forSegment: 4)
         toolSelector.setToolTip("Polyline (P)", forSegment: 5)
-        toolSelector.setToolTip("Highlighter (H)", forSegment: 6)
-        toolSelector.setToolTip("Cloud (C)", forSegment: 7)
-        toolSelector.setToolTip("Rectangle (R)", forSegment: 8)
-        toolSelector.setToolTip("Ellipse (E)", forSegment: 9)
-        toolSelector.setToolTip("Text (T)", forSegment: 10)
-        toolSelector.setToolTip("Callout (Q)", forSegment: 11)
+        toolSelector.setToolTip("Polygon (Shift+P)", forSegment: 6)
+        toolSelector.setToolTip("Highlighter (H)", forSegment: 7)
+        toolSelector.setToolTip("Cloud (C)", forSegment: 8)
+        toolSelector.setToolTip("Rectangle (R)", forSegment: 9)
+        toolSelector.setToolTip("Ellipse (E)", forSegment: 10)
+        toolSelector.setToolTip("Text (T)", forSegment: 11)
+        toolSelector.setToolTip("Callout (Q)", forSegment: 12)
         refreshToolSegmentIcons()
     }
 
@@ -2481,12 +2484,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         case 3: requestedMode = .arrow
         case 4: requestedMode = .line
         case 5: requestedMode = .polyline
-        case 6: requestedMode = .highlighter
-        case 7: requestedMode = .cloud
-        case 8: requestedMode = .rectangle
-        case 9: requestedMode = .circle
-        case 10: requestedMode = .text
-        case 11: requestedMode = .callout
+        case 6: requestedMode = .polygon
+        case 7: requestedMode = .highlighter
+        case 8: requestedMode = .cloud
+        case 9: requestedMode = .rectangle
+        case 10: requestedMode = .circle
+        case 11: requestedMode = .text
+        case 12: requestedMode = .callout
         default: requestedMode = .pen
         }
         activateTool(requestedMode)
@@ -2521,6 +2525,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         if requestedMode != .polyline {
             pdfView.cancelPendingPolyline()
+        }
+        if requestedMode != .polygon {
+            pdfView.cancelPendingPolygon()
         }
         if requestedMode != .arrow {
             pdfView.cancelPendingArrow()
@@ -2565,6 +2572,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     @objc func selectPolylineTool(_ sender: Any?) {
         setTool(.polyline)
+    }
+
+    @objc func selectPolygonTool(_ sender: Any?) {
+        setTool(.polygon)
     }
 
     @objc func selectSelectionTool(_ sender: Any?) {
@@ -2648,23 +2659,26 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         case .polyline:
             toolSelector.selectedSegment = 5
             takeoffSelector.selectedSegment = -1
-        case .highlighter:
+        case .polygon:
             toolSelector.selectedSegment = 6
             takeoffSelector.selectedSegment = -1
-        case .cloud:
+        case .highlighter:
             toolSelector.selectedSegment = 7
             takeoffSelector.selectedSegment = -1
-        case .rectangle:
+        case .cloud:
             toolSelector.selectedSegment = 8
             takeoffSelector.selectedSegment = -1
-        case .circle:
+        case .rectangle:
             toolSelector.selectedSegment = 9
             takeoffSelector.selectedSegment = -1
-        case .text:
+        case .circle:
             toolSelector.selectedSegment = 10
             takeoffSelector.selectedSegment = -1
-        case .callout:
+        case .text:
             toolSelector.selectedSegment = 11
+            takeoffSelector.selectedSegment = -1
+        case .callout:
+            toolSelector.selectedSegment = 12
             takeoffSelector.selectedSegment = -1
         case .area:
             toolSelector.selectedSegment = -1
@@ -2681,6 +2695,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             refreshTakeoffSegmentIcons()
             pdfView.cancelPendingCallout()
             pdfView.cancelPendingPolyline()
+            pdfView.cancelPendingPolygon()
             pdfView.cancelPendingArrow()
             pdfView.cancelPendingLine()
             pdfView.cancelPendingArea()
@@ -3233,7 +3248,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             NSSound.beep()
             return
         }
-        pdfView.restorePolylineHatchOverlays(on: destinationPage, for: pasted)
+        pdfView.restorePolygonHatchOverlays(on: destinationPage, for: pasted)
         commitMarkupMutation(selecting: pasted.first, forceImmediateRefresh: true)
         selectMarkupsFromFence(page: destinationPage, annotations: pasted, enablesGroupedDrag: true)
     }
@@ -4666,6 +4681,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return "Line"
         case .polyline:
             return "Polyline"
+        case .polygon:
+            return "Polygon"
         case .area:
             return "Area"
         case .highlighter:
@@ -4695,12 +4712,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         case .arrow: return 3
         case .line: return 4
         case .polyline: return 5
-        case .highlighter: return 6
-        case .cloud: return 7
-        case .rectangle: return 8
-        case .circle: return 9
-        case .text: return 10
-        case .callout: return 11
+        case .polygon: return 6
+        case .highlighter: return 7
+        case .cloud: return 8
+        case .rectangle: return 9
+        case .circle: return 10
+        case .text: return 11
+        case .callout: return 12
         case .area, .measure: return -1
         case .calibrate: return -1
         }

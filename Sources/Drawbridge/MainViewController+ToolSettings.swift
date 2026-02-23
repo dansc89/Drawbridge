@@ -202,6 +202,9 @@ extension MainViewController {
         case .polyline:
             pdfView.penColor = stroke
             pdfView.penLineWidth = currentWidth
+        case .polygon:
+            pdfView.penColor = stroke
+            pdfView.penLineWidth = currentWidth
             pdfView.rectangleFillColor = fill
             pdfView.rectangleHatchBackgroundColor = hatchBackground
             pdfView.rectangleHatchStyle = rectangleHatchStyle
@@ -571,11 +574,28 @@ extension MainViewController {
             toolSettingsOutlineRow.isHidden = true
         case .polyline:
             toolSettingsStrokeColorWell.color = pdfView.penColor.withAlphaComponent(1.0)
+            toolSettingsOpacitySlider.doubleValue = Double(pdfView.penColor.alphaComponent)
+            toolSettingsOpacityValueLabel.stringValue = "\(Int(round(toolSettingsOpacitySlider.doubleValue * 100)))%"
+            selectLineWeightLevel(for: pdfView.penLineWidth, tool: .polyline)
+            toolSettingsStrokeTitleLabel.stringValue = "Color:"
+            toolSettingsFillTitleLabel.stringValue = "Fill:"
+            toolSettingsFillRow.isHidden = true
+            toolSettingsFontRow.isHidden = true
+            toolSettingsWidthRow.isHidden = false
+            toolSettingsOpacitySlider.isEnabled = true
+            toolSettingsStrokeColorWell.isEnabled = true
+            toolSettingsFillColorWell.isEnabled = false
+            toolSettingsFontPopup.isEnabled = false
+            toolSettingsFontSizePopup.isEnabled = false
+            toolSettingsLineWidthPopup.isEnabled = true
+            toolSettingsOutlineRow.isHidden = true
+        case .polygon:
+            toolSettingsStrokeColorWell.color = pdfView.penColor.withAlphaComponent(1.0)
             toolSettingsFillColorWell.color = pdfView.rectangleFillColor.withAlphaComponent(1.0)
             toolSettingsHatchBackgroundColorWell.color = pdfView.rectangleHatchBackgroundColor.withAlphaComponent(1.0)
             toolSettingsOpacitySlider.doubleValue = Double(pdfView.penColor.alphaComponent)
             toolSettingsOpacityValueLabel.stringValue = "\(Int(round(toolSettingsOpacitySlider.doubleValue * 100)))%"
-            selectLineWeightLevel(for: pdfView.penLineWidth, tool: .polyline)
+            selectLineWeightLevel(for: pdfView.penLineWidth, tool: .polygon)
             toolSettingsStrokeTitleLabel.stringValue = "Stroke:"
             toolSettingsFillTitleLabel.stringValue = "Hatch Color:"
             toolSettingsFillRow.isHidden = false
@@ -751,7 +771,7 @@ extension MainViewController {
             return interpolateLevel(level, lowAt1: 1, midAt5: 2, highAt10: 4)
         case .pen:
             return interpolateLevel(level, lowAt1: 6, midAt5: 15, highAt10: 25)
-        case .line, .polyline:
+        case .line, .polyline, .polygon:
             return interpolateLevel(level, lowAt1: 1, midAt5: 2, highAt10: 4)
         case .highlighter:
             return interpolateLevel(level, lowAt1: 12, midAt5: 25, highAt10: 40)
@@ -796,6 +816,8 @@ extension MainViewController {
         case .line:
             return makeToolSettingsState(strokeColor: .black, fillColor: .clear, opacity: 1.0, lineWeightLevel: 1, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .polyline:
+            return makeToolSettingsState(strokeColor: .black, fillColor: .clear, opacity: 1.0, lineWeightLevel: 1, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+        case .polygon:
             return makeToolSettingsState(strokeColor: .black, fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), hatchBackgroundColor: pdfView.rectangleHatchBackgroundColor.withAlphaComponent(1.0), opacity: 1.0, lineWeightLevel: 1, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize, rectangleHatchStyleRawValue: pdfView.rectangleHatchStyle.rawValue)
         case .highlighter:
             return makeToolSettingsState(strokeColor: pdfView.highlighterColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.highlighterColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
@@ -821,7 +843,7 @@ extension MainViewController {
     }
 
     func initializePerToolSettings() {
-        let tools: [ToolMode] = [.pen, .arrow, .line, .polyline, .highlighter, .cloud, .rectangle, .circle, .text, .callout, .area, .measure, .calibrate]
+        let tools: [ToolMode] = [.pen, .arrow, .line, .polyline, .polygon, .highlighter, .cloud, .rectangle, .circle, .text, .callout, .area, .measure, .calibrate]
         for tool in tools {
             toolSettingsByTool[tool] = defaultToolSettings(for: tool)
         }
@@ -868,6 +890,9 @@ extension MainViewController {
         case .polyline:
             pdfView.penColor = stroke
             pdfView.penLineWidth = widthValue(for: state.lineWeightLevel, tool: .polyline)
+        case .polygon:
+            pdfView.penColor = stroke
+            pdfView.penLineWidth = widthValue(for: state.lineWeightLevel, tool: .polygon)
             pdfView.rectangleFillColor = fill
             pdfView.rectangleHatchBackgroundColor = hatchBackground
             pdfView.rectangleHatchStyle = MarkupPDFView.RectangleHatchStyle(rawValue: state.rectangleHatchStyleRawValue) ?? .solid
@@ -954,6 +979,9 @@ extension MainViewController {
             }
             if contents.contains("polyline") {
                 return .polyline
+            }
+            if contents.contains("polygon") {
+                return .polygon
             }
             if contents == "line" {
                 return .line

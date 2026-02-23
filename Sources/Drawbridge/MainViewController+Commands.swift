@@ -481,7 +481,7 @@ extension MainViewController {
         guide.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         guide.string = """
 1) Open PDF: ⌘O
-2) Tools (keyboard shortcuts): V Select, D Draw, A Arrow, L Line, P Polyline, Shift+A Area, H Highlighter, C Cloud, R Rect, E Ellipse, T Text, Q Callout, M Measure, K Calibrate
+2) Tools (keyboard shortcuts): V Select, D Draw, A Arrow, L Line, P Polyline, Shift+P Polygon, Shift+A Area, H Highlighter, C Cloud, R Rect, E Ellipse, T Text, Q Callout, M Measure, K Calibrate
    Mac menu keys: ⌘1 Pen, ⌘2 Highlighter, ⌘3 Cloud, ⌘4 Rect, ⌘5 Text, ⌘6 Callout
 3) Navigation:
    • Mouse wheel = zoom in/out
