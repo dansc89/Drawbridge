@@ -25,9 +25,21 @@ extension MainViewController {
                         annotationsToDelete.append((page: page, annotation: sibling))
                     }
                 }
+                for sibling in pdfView.relatedHatchOverlayAnnotations(for: item.annotation, on: page) where sibling !== item.annotation {
+                    let siblingID = ObjectIdentifier(sibling)
+                    if seen.insert(siblingID).inserted {
+                        annotationsToDelete.append((page: page, annotation: sibling))
+                    }
+                }
             }
         } else if let direct = lastDirectlySelectedAnnotation, let page = direct.page {
             annotationsToDelete.append((page: page, annotation: direct))
+            for sibling in pdfView.relatedHatchOverlayAnnotations(for: direct, on: page) where sibling !== direct {
+                let siblingID = ObjectIdentifier(sibling)
+                if seen.insert(siblingID).inserted {
+                    annotationsToDelete.append((page: page, annotation: sibling))
+                }
+            }
         } else {
             NSSound.beep()
             return
@@ -199,6 +211,9 @@ extension MainViewController {
             for sibling in relatedCalloutAnnotations(for: item.annotation, on: page) {
                 groupedByPage[pageID]?.ids.insert(ObjectIdentifier(sibling))
             }
+            for sibling in pdfView.relatedHatchOverlayAnnotations(for: item.annotation, on: page) {
+                groupedByPage[pageID]?.ids.insert(ObjectIdentifier(sibling))
+            }
         }
 
         var changedAny = false
@@ -351,7 +366,8 @@ extension MainViewController {
     }
 
     func relatedCalloutAnnotations(for annotation: PDFAnnotation, on page: PDFPage) -> [PDFAnnotation] {
-        if let userName = annotation.userName {
+        if let userName = annotation.userName,
+           userName.hasPrefix("DrawbridgeCallout:") || userName.hasPrefix("DrawbridgeText:") {
             let sameUser = page.annotations.filter { $0.userName == userName }
             if sameUser.count > 1 {
                 return sameUser

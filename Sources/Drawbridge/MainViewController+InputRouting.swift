@@ -49,12 +49,12 @@ extension MainViewController {
     func routeFlagsChangedEvent(_ event: NSEvent) -> NSEvent? {
         guard view.window?.isKeyWindow == true else { return event }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let shiftNowDown = modifiers.contains(.shift)
-        defer { isShiftKeyDown = shiftNowDown }
+        let optionNowDown = modifiers.contains(.option)
+        defer { isOrthoModifierKeyDown = optionNowDown }
         guard pdfView.toolMode == .line || pdfView.toolMode == .polyline else {
             return event
         }
-        if shiftNowDown && !isShiftKeyDown && modifiers.isDisjoint(with: [.command, .option, .control]) {
+        if optionNowDown && !isOrthoModifierKeyDown && modifiers.isDisjoint(with: [.command, .shift, .control]) {
             setOrthoSnapEnabled(!isOrthoSnapEnabled)
             lastUserInteractionAt = Date()
         }
