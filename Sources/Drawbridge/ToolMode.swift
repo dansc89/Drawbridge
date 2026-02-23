@@ -11,6 +11,7 @@ enum ToolMode {
     case highlighter
     case cloud
     case rectangle
+    case circle
     case text
     case callout
     case measure

@@ -11,6 +11,7 @@ enum ShortcutAction: String, CaseIterable {
     case highlighterTool
     case cloudTool
     case rectangleTool
+    case ellipseTool
     case textTool
     case calloutTool
     case measureTool
@@ -30,6 +31,7 @@ enum ShortcutAction: String, CaseIterable {
         case .highlighterTool: return "Highlighter Tool"
         case .cloudTool: return "Cloud Tool"
         case .rectangleTool: return "Rectangle Tool"
+        case .ellipseTool: return "Ellipse Tool"
         case .textTool: return "Text Tool"
         case .calloutTool: return "Callout Tool"
         case .measureTool: return "Measure Tool"
@@ -81,6 +83,7 @@ extension MainViewController {
             .highlighterTool: ShortcutBinding(key: "h", requiresShift: false),
             .cloudTool: ShortcutBinding(key: "c", requiresShift: false),
             .rectangleTool: ShortcutBinding(key: "r", requiresShift: false),
+            .ellipseTool: ShortcutBinding(key: "e", requiresShift: false),
             .textTool: ShortcutBinding(key: "t", requiresShift: false),
             .calloutTool: ShortcutBinding(key: "q", requiresShift: false),
             .measureTool: ShortcutBinding(key: "m", requiresShift: false),
@@ -164,6 +167,8 @@ extension MainViewController {
             setTool(.cloud)
         case .rectangleTool:
             setTool(.rectangle)
+        case .ellipseTool:
+            setTool(.circle)
         case .textTool:
             setTool(.text)
         case .calloutTool:

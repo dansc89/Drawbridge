@@ -36,12 +36,14 @@ extension MainViewController {
     private func makeToolSettingsState(
         strokeColor: NSColor,
         fillColor: NSColor,
+        hatchBackgroundColor: NSColor = .white,
         opacity: CGFloat,
         lineWeightLevel: Int,
         fontName: String,
         fontSize: CGFloat,
         calloutArrowStyleRawValue: Int,
         arrowHeadSize: CGFloat,
+        rectangleHatchStyleRawValue: Int = MarkupPDFView.RectangleHatchStyle.solid.rawValue,
         outlineColor: NSColor = .clear,
         outlineWidth: CGFloat = 0
     ) -> ToolSettingsState {
@@ -55,7 +57,9 @@ extension MainViewController {
             fontName: fontName,
             fontSize: fontSize,
             calloutArrowStyleRawValue: calloutArrowStyleRawValue,
-            arrowHeadSize: arrowHeadSize
+            arrowHeadSize: arrowHeadSize,
+            rectangleHatchStyleRawValue: rectangleHatchStyleRawValue,
+            hatchBackgroundColor: hatchBackgroundColor
         )
     }
 
@@ -97,11 +101,13 @@ extension MainViewController {
         let currentWidth = widthValue(for: selectedLineWeightLevel(), tool: pdfView.toolMode)
         let stroke = toolSettingsStrokeColorWell.color.withAlphaComponent(opacity)
         let fill = toolSettingsFillColorWell.color.withAlphaComponent(opacity)
+        let hatchBackground = toolSettingsHatchBackgroundColorWell.color.withAlphaComponent(opacity)
         let outlineColor = toolSettingsOutlineColorWell.color.withAlphaComponent(1.0)
         let outlineWidth = selectedTextOutlineWidth()
         let textFont = resolvedToolSettingsFont()
         let calloutArrowStyle = resolvedCalloutArrowStyleFromUI()
         let arrowHeadSize = selectedArrowHeadSize()
+        let rectangleHatchStyle = resolvedRectangleHatchStyleFromUI()
 
         if pdfView.toolMode == .select, !selectedItems.isEmpty {
             var editedAny = false
@@ -142,7 +148,20 @@ extension MainViewController {
                 } else {
                     annotation.color = stroke
                     if annotationType.contains("square") || annotationType.contains("circle") {
-                        annotation.interiorColor = fill
+                        let inferred = inferredToolMode(for: annotation)
+                        if inferred == .rectangle || inferred == .circle {
+                            let updatedWidth = widthValue(for: selectedLineWeightLevel(), tool: inferred)
+                            assignLineWidth(updatedWidth, to: annotation)
+                            pdfView.applyRectangleHatchStyle(
+                                rectangleHatchStyle,
+                                to: annotation,
+                                fillColor: fill,
+                                backgroundColor: hatchBackground,
+                                lineWidth: updatedWidth
+                            )
+                        } else {
+                            annotation.interiorColor = fill
+                        }
                     }
                     if !annotationType.contains("highlight") {
                         let inferredTool = inferredToolMode(for: annotation)
@@ -177,9 +196,15 @@ extension MainViewController {
         switch pdfView.toolMode {
         case .grab:
             break
-        case .pen, .line, .polyline:
+        case .pen, .line:
             pdfView.penColor = stroke
             pdfView.penLineWidth = currentWidth
+        case .polyline:
+            pdfView.penColor = stroke
+            pdfView.penLineWidth = currentWidth
+            pdfView.rectangleFillColor = fill
+            pdfView.rectangleHatchBackgroundColor = hatchBackground
+            pdfView.rectangleHatchStyle = rectangleHatchStyle
         case .arrow:
             pdfView.arrowStrokeColor = stroke
             pdfView.arrowLineWidth = currentWidth
@@ -191,10 +216,12 @@ extension MainViewController {
         case .highlighter:
             pdfView.highlighterColor = stroke
             pdfView.highlighterLineWidth = currentWidth
-        case .cloud, .rectangle:
+        case .cloud, .rectangle, .circle:
             pdfView.rectangleStrokeColor = stroke
             pdfView.rectangleFillColor = fill
+            pdfView.rectangleHatchBackgroundColor = hatchBackground
             pdfView.rectangleLineWidth = currentWidth
+            pdfView.rectangleHatchStyle = (pdfView.toolMode == .rectangle || pdfView.toolMode == .circle) ? rectangleHatchStyle : .solid
         case .text:
             applyTextMarkupStyle(
                 foreground: fill,
@@ -279,6 +306,15 @@ extension MainViewController {
         toolSettingsArrowSizePopup.selectItem(withTitle: "\(Int(nearest)) pt")
     }
 
+    private func resolvedRectangleHatchStyleFromUI() -> MarkupPDFView.RectangleHatchStyle {
+        let selectedTitle = toolSettingsHatchPopup.titleOfSelectedItem ?? MarkupPDFView.RectangleHatchStyle.solid.displayName
+        return MarkupPDFView.RectangleHatchStyle.allCases.first(where: { $0.displayName == selectedTitle }) ?? .solid
+    }
+
+    private func selectRectangleHatchStyle(_ style: MarkupPDFView.RectangleHatchStyle) {
+        toolSettingsHatchPopup.selectItem(withTitle: style.displayName)
+    }
+
     private func selectedTextOutlineWidth() -> CGFloat {
         guard let title = toolSettingsOutlineWidthPopup.titleOfSelectedItem else {
             selectTextOutlineWidth(0)
@@ -322,6 +358,10 @@ extension MainViewController {
             toolSettingsArrowPopup.isEnabled = false
             toolSettingsArrowSizeRow.isHidden = true
             toolSettingsArrowSizePopup.isEnabled = false
+            toolSettingsHatchRow.isHidden = true
+            toolSettingsHatchPopup.isEnabled = false
+            toolSettingsHatchBackgroundRow.isHidden = true
+            toolSettingsHatchBackgroundColorWell.isEnabled = false
             toolSettingsOutlineRow.isHidden = true
             toolSettingsOutlineColorWell.isEnabled = false
             toolSettingsOutlineWidthPopup.isEnabled = false
@@ -376,14 +416,19 @@ extension MainViewController {
                 snapshotColorizeButton.isEnabled = true
             } else {
                 toolSettingsStrokeTitleLabel.stringValue = "Color:"
-                toolSettingsFillTitleLabel.stringValue = "Fill:"
                 let contents = (primary.contents ?? "").lowercased()
+                let isRectangleMarkup = (inferredTool == .rectangle || inferredTool == .circle) && (annotationType.contains("square") || annotationType.contains("circle"))
+                toolSettingsFillTitleLabel.stringValue = isRectangleMarkup ? "Hatch Color:" : "Fill:"
                 let isArrowMarkup =
                     contents.contains("arrow|style:") ||
                     contents.contains("arrow dot|") ||
                     contents.contains("arrow square|") ||
                     contents.contains("callout leader|arrow:")
                 toolSettingsFillRow.isHidden = !(annotationType.contains("square") || annotationType.contains("circle"))
+                toolSettingsHatchRow.isHidden = !isRectangleMarkup
+                toolSettingsHatchPopup.isEnabled = isRectangleMarkup
+                toolSettingsHatchBackgroundRow.isHidden = !isRectangleMarkup
+                toolSettingsHatchBackgroundColorWell.isEnabled = isRectangleMarkup
                 toolSettingsFontRow.isHidden = true
                 toolSettingsArrowRow.isHidden = !isArrowMarkup
                 toolSettingsArrowPopup.isEnabled = isArrowMarkup
@@ -405,7 +450,16 @@ extension MainViewController {
                 toolSettingsLineWidthPopup.isEnabled = true
                 toolSettingsStrokeColorWell.color = primary.color.withAlphaComponent(1.0)
                 toolSettingsOpacitySlider.doubleValue = Double(primary.color.alphaComponent)
-                toolSettingsFillColorWell.color = (primary.interiorColor ?? NSColor.systemYellow).withAlphaComponent(1.0)
+                if isRectangleMarkup {
+                    let hatch = pdfView.rectangleHatchStyle(for: primary) ?? .solid
+                    selectRectangleHatchStyle(hatch)
+                    let baseFill = pdfView.rectangleFillColor(for: primary) ?? NSColor.systemYellow
+                    toolSettingsFillColorWell.color = baseFill.withAlphaComponent(1.0)
+                    let baseBackground = pdfView.rectangleHatchBackgroundColor(for: primary) ?? NSColor.white
+                    toolSettingsHatchBackgroundColorWell.color = baseBackground.withAlphaComponent(1.0)
+                } else {
+                    toolSettingsFillColorWell.color = (primary.interiorColor ?? NSColor.systemYellow).withAlphaComponent(1.0)
+                }
                 let currentLineWidth = resolvedLineWidth(for: primary)
                 selectLineWeightLevel(
                     for: currentLineWidth > 0 ? currentLineWidth : widthValue(for: 5, tool: inferredTool),
@@ -417,6 +471,7 @@ extension MainViewController {
             toolSettingsOpacitySlider.isEnabled = !isFreeTextType(annotationType)
             toolSettingsStrokeColorWell.isEnabled = true
             toolSettingsFillColorWell.isEnabled = !toolSettingsFillRow.isHidden
+            toolSettingsHatchBackgroundColorWell.isEnabled = !toolSettingsHatchBackgroundRow.isHidden
             toolSettingsOutlineColorWell.isEnabled = !toolSettingsOutlineRow.isHidden
             toolSettingsOutlineWidthPopup.isEnabled = !toolSettingsOutlineRow.isHidden
             toolSettingsFontPopup.isEnabled = false
@@ -436,6 +491,10 @@ extension MainViewController {
         toolSettingsArrowPopup.isEnabled = false
         toolSettingsArrowSizeRow.isHidden = true
         toolSettingsArrowSizePopup.isEnabled = false
+        toolSettingsHatchRow.isHidden = true
+        toolSettingsHatchPopup.isEnabled = false
+        toolSettingsHatchBackgroundRow.isHidden = true
+        toolSettingsHatchBackgroundColorWell.isEnabled = false
         toolSettingsOutlineRow.isHidden = true
         toolSettingsOutlineColorWell.isEnabled = false
         toolSettingsOutlineWidthPopup.isEnabled = false
@@ -493,7 +552,7 @@ extension MainViewController {
             toolSettingsFontSizePopup.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = false
             toolSettingsOutlineRow.isHidden = true
-        case .pen, .line, .polyline:
+        case .pen, .line:
             toolSettingsStrokeColorWell.color = pdfView.penColor.withAlphaComponent(1.0)
             toolSettingsOpacitySlider.doubleValue = Double(pdfView.penColor.alphaComponent)
             toolSettingsOpacityValueLabel.stringValue = "\(Int(round(toolSettingsOpacitySlider.doubleValue * 100)))%"
@@ -501,6 +560,30 @@ extension MainViewController {
             toolSettingsStrokeTitleLabel.stringValue = "Color:"
             toolSettingsFillTitleLabel.stringValue = "Fill:"
             toolSettingsFillRow.isHidden = true
+            toolSettingsFontRow.isHidden = true
+            toolSettingsWidthRow.isHidden = false
+            toolSettingsOpacitySlider.isEnabled = true
+            toolSettingsStrokeColorWell.isEnabled = true
+            toolSettingsFillColorWell.isEnabled = true
+            toolSettingsFontPopup.isEnabled = false
+            toolSettingsFontSizePopup.isEnabled = false
+            toolSettingsLineWidthPopup.isEnabled = true
+            toolSettingsOutlineRow.isHidden = true
+        case .polyline:
+            toolSettingsStrokeColorWell.color = pdfView.penColor.withAlphaComponent(1.0)
+            toolSettingsFillColorWell.color = pdfView.rectangleFillColor.withAlphaComponent(1.0)
+            toolSettingsHatchBackgroundColorWell.color = pdfView.rectangleHatchBackgroundColor.withAlphaComponent(1.0)
+            toolSettingsOpacitySlider.doubleValue = Double(pdfView.penColor.alphaComponent)
+            toolSettingsOpacityValueLabel.stringValue = "\(Int(round(toolSettingsOpacitySlider.doubleValue * 100)))%"
+            selectLineWeightLevel(for: pdfView.penLineWidth, tool: .polyline)
+            toolSettingsStrokeTitleLabel.stringValue = "Stroke:"
+            toolSettingsFillTitleLabel.stringValue = "Hatch Color:"
+            toolSettingsFillRow.isHidden = false
+            toolSettingsHatchRow.isHidden = false
+            toolSettingsHatchPopup.isEnabled = true
+            toolSettingsHatchBackgroundRow.isHidden = false
+            toolSettingsHatchBackgroundColorWell.isEnabled = true
+            selectRectangleHatchStyle(pdfView.rectangleHatchStyle)
             toolSettingsFontRow.isHidden = true
             toolSettingsWidthRow.isHidden = false
             toolSettingsOpacitySlider.isEnabled = true
@@ -544,11 +627,23 @@ extension MainViewController {
             toolSettingsFontSizePopup.isEnabled = false
             toolSettingsLineWidthPopup.isEnabled = true
             toolSettingsOutlineRow.isHidden = true
-        case .cloud, .rectangle:
+        case .cloud, .rectangle, .circle:
+            toolSettingsStrokeColorWell.color = pdfView.rectangleStrokeColor.withAlphaComponent(1.0)
+            toolSettingsFillColorWell.color = pdfView.rectangleFillColor.withAlphaComponent(1.0)
+            toolSettingsOpacitySlider.doubleValue = Double(pdfView.rectangleStrokeColor.alphaComponent)
+            toolSettingsOpacityValueLabel.stringValue = "\(Int(round(toolSettingsOpacitySlider.doubleValue * 100)))%"
             selectLineWeightLevel(for: pdfView.rectangleLineWidth, tool: .rectangle)
             toolSettingsStrokeTitleLabel.stringValue = "Stroke:"
-            toolSettingsFillTitleLabel.stringValue = "Fill:"
+            toolSettingsFillTitleLabel.stringValue = (pdfView.toolMode == .cloud) ? "Fill:" : "Hatch Color:"
             toolSettingsFillRow.isHidden = false
+            toolSettingsHatchRow.isHidden = (pdfView.toolMode == .cloud)
+            toolSettingsHatchBackgroundRow.isHidden = (pdfView.toolMode == .cloud)
+            toolSettingsHatchPopup.isEnabled = (pdfView.toolMode == .rectangle || pdfView.toolMode == .circle)
+            toolSettingsHatchBackgroundColorWell.isEnabled = (pdfView.toolMode == .rectangle || pdfView.toolMode == .circle)
+            if pdfView.toolMode == .rectangle || pdfView.toolMode == .circle {
+                selectRectangleHatchStyle(pdfView.rectangleHatchStyle)
+                toolSettingsHatchBackgroundColorWell.color = pdfView.rectangleHatchBackgroundColor.withAlphaComponent(1.0)
+            }
             toolSettingsFontRow.isHidden = true
             toolSettingsWidthRow.isHidden = false
             toolSettingsOpacitySlider.isEnabled = true
@@ -660,8 +755,9 @@ extension MainViewController {
             return interpolateLevel(level, lowAt1: 1, midAt5: 2, highAt10: 4)
         case .highlighter:
             return interpolateLevel(level, lowAt1: 12, midAt5: 25, highAt10: 40)
-        case .cloud, .rectangle:
-            return interpolateLevel(level, lowAt1: 12, midAt5: 25, highAt10: 50)
+        case .cloud, .rectangle, .circle:
+            // Keep line-weight levels consistent with line/polyline tools.
+            return interpolateLevel(level, lowAt1: 1, midAt5: 2, highAt10: 4)
         case .callout, .measure, .calibrate:
             return interpolateLevel(level, lowAt1: 1, midAt5: 2, highAt10: 4)
         case .select, .text:
@@ -700,13 +796,15 @@ extension MainViewController {
         case .line:
             return makeToolSettingsState(strokeColor: .black, fillColor: .clear, opacity: 1.0, lineWeightLevel: 1, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .polyline:
-            return makeToolSettingsState(strokeColor: .black, fillColor: .clear, opacity: 1.0, lineWeightLevel: 1, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: .black, fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), hatchBackgroundColor: pdfView.rectangleHatchBackgroundColor.withAlphaComponent(1.0), opacity: 1.0, lineWeightLevel: 1, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize, rectangleHatchStyleRawValue: pdfView.rectangleHatchStyle.rawValue)
         case .highlighter:
             return makeToolSettingsState(strokeColor: pdfView.highlighterColor.withAlphaComponent(1.0), fillColor: .clear, opacity: pdfView.highlighterColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .cloud:
-            return makeToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), hatchBackgroundColor: pdfView.rectangleHatchBackgroundColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize, rectangleHatchStyleRawValue: MarkupPDFView.RectangleHatchStyle.solid.rawValue)
         case .rectangle:
-            return makeToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
+            return makeToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), hatchBackgroundColor: pdfView.rectangleHatchBackgroundColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize, rectangleHatchStyleRawValue: pdfView.rectangleHatchStyle.rawValue)
+        case .circle:
+            return makeToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), hatchBackgroundColor: pdfView.rectangleHatchBackgroundColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize, rectangleHatchStyleRawValue: pdfView.rectangleHatchStyle.rawValue)
         case .text:
             return makeToolSettingsState(strokeColor: pdfView.textBackgroundColor.withAlphaComponent(1.0), fillColor: pdfView.textForegroundColor.withAlphaComponent(1.0), opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize, outlineColor: defaultTextOutlineColor, outlineWidth: defaultTextOutlineWidth)
         case .callout:
@@ -723,7 +821,7 @@ extension MainViewController {
     }
 
     func initializePerToolSettings() {
-        let tools: [ToolMode] = [.pen, .arrow, .line, .polyline, .highlighter, .cloud, .rectangle, .text, .callout, .area, .measure, .calibrate]
+        let tools: [ToolMode] = [.pen, .arrow, .line, .polyline, .highlighter, .cloud, .rectangle, .circle, .text, .callout, .area, .measure, .calibrate]
         for tool in tools {
             toolSettingsByTool[tool] = defaultToolSettings(for: tool)
         }
@@ -734,6 +832,7 @@ extension MainViewController {
         var state = toolSettingsByTool[tool] ?? defaultToolSettings(for: tool)
         state.strokeColor = toolSettingsStrokeColorWell.color.withAlphaComponent(1.0)
         state.fillColor = toolSettingsFillColorWell.color.withAlphaComponent(1.0)
+        state.hatchBackgroundColor = toolSettingsHatchBackgroundColorWell.color.withAlphaComponent(1.0)
         state.outlineColor = toolSettingsOutlineColorWell.color.withAlphaComponent(1.0)
         state.opacity = normalizedOpacity(CGFloat(toolSettingsOpacitySlider.doubleValue), for: tool)
         state.lineWeightLevel = selectedLineWeightLevel()
@@ -743,6 +842,7 @@ extension MainViewController {
         state.fontSize = font.pointSize
         state.calloutArrowStyleRawValue = resolvedCalloutArrowStyleFromUI().rawValue
         state.arrowHeadSize = selectedArrowHeadSize()
+        state.rectangleHatchStyleRawValue = resolvedRectangleHatchStyleFromUI().rawValue
         toolSettingsByTool[tool] = state
     }
 
@@ -752,6 +852,7 @@ extension MainViewController {
         let opacity = normalizedOpacity(state.opacity, for: tool)
         let stroke = state.strokeColor.withAlphaComponent(opacity)
         let fill = state.fillColor.withAlphaComponent(opacity)
+        let hatchBackground = state.hatchBackgroundColor.withAlphaComponent(opacity)
         switch tool {
         case .pen:
             pdfView.penColor = stroke
@@ -767,17 +868,30 @@ extension MainViewController {
         case .polyline:
             pdfView.penColor = stroke
             pdfView.penLineWidth = widthValue(for: state.lineWeightLevel, tool: .polyline)
+            pdfView.rectangleFillColor = fill
+            pdfView.rectangleHatchBackgroundColor = hatchBackground
+            pdfView.rectangleHatchStyle = MarkupPDFView.RectangleHatchStyle(rawValue: state.rectangleHatchStyleRawValue) ?? .solid
         case .highlighter:
             pdfView.highlighterColor = stroke
             pdfView.highlighterLineWidth = widthValue(for: state.lineWeightLevel, tool: .highlighter)
         case .cloud:
             pdfView.rectangleStrokeColor = stroke
             pdfView.rectangleFillColor = fill
+            pdfView.rectangleHatchBackgroundColor = hatchBackground
             pdfView.rectangleLineWidth = widthValue(for: state.lineWeightLevel, tool: .cloud)
+            pdfView.rectangleHatchStyle = .solid
         case .rectangle:
             pdfView.rectangleStrokeColor = stroke
             pdfView.rectangleFillColor = fill
+            pdfView.rectangleHatchBackgroundColor = hatchBackground
             pdfView.rectangleLineWidth = widthValue(for: state.lineWeightLevel, tool: .rectangle)
+            pdfView.rectangleHatchStyle = MarkupPDFView.RectangleHatchStyle(rawValue: state.rectangleHatchStyleRawValue) ?? .solid
+        case .circle:
+            pdfView.rectangleStrokeColor = stroke
+            pdfView.rectangleFillColor = fill
+            pdfView.rectangleHatchBackgroundColor = hatchBackground
+            pdfView.rectangleLineWidth = widthValue(for: state.lineWeightLevel, tool: .circle)
+            pdfView.rectangleHatchStyle = MarkupPDFView.RectangleHatchStyle(rawValue: state.rectangleHatchStyleRawValue) ?? .solid
         case .text:
             applyTextMarkupStyle(
                 foreground: state.fillColor.withAlphaComponent(1.0),
@@ -822,7 +936,10 @@ extension MainViewController {
             (contents.contains("arrow dot|") || contents.contains("arrow square|")) {
             return contents.contains("callout") ? .callout : .arrow
         }
-        if type.contains("square") || type.contains("circle") {
+        if type.contains("circle") {
+            return .circle
+        }
+        if type.contains("square") {
             return .rectangle
         }
         if type.contains("highlight") {

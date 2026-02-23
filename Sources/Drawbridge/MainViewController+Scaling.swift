@@ -3,6 +3,34 @@ import PDFKit
 
 @MainActor
 extension MainViewController {
+    private var unsetScalePresetLabel: String { "Scale: Not Set" }
+    private var defaultPageScaleState: PageScaleLock { PageScaleLock(unit: "ft", scale: 1.0) }
+
+    private func armPendingScaleReminderSuppressionForCurrentPage() {
+        pendingScaleReminderSuppressionOneShot = true
+        guard let document = pdfView.document,
+              let pageIndex = currentPageIndexForScaleContext(in: document) else {
+            pendingScaleReminderSuppressionDocumentID = nil
+            pendingScaleReminderSuppressionPageIndex = -1
+            return
+        }
+        pendingScaleReminderSuppressionDocumentID = ObjectIdentifier(document)
+        pendingScaleReminderSuppressionPageIndex = pageIndex
+    }
+
+    private func recordExplicitScaleSetForCurrentPage() {
+        guard let document = pdfView.document,
+              let pageIndex = currentPageIndexForScaleContext(in: document) else {
+            return
+        }
+        let docID = ObjectIdentifier(document)
+        if explicitScaleSetDocumentID != docID {
+            explicitScaleSetDocumentID = docID
+            explicitScaleSetPageIndexes.removeAll(keepingCapacity: false)
+        }
+        explicitScaleSetPageIndexes.insert(pageIndex)
+    }
+
     func currentMeasurementScaleState() -> PageScaleLock {
         let scale = max(0.0001, measurementScaleField.doubleValue > 0 ? measurementScaleField.doubleValue : 1.0)
         let unit = measurementUnitPopup.titleOfSelectedItem ?? pdfView.measurementUnitLabel
@@ -27,12 +55,20 @@ extension MainViewController {
     }
 
     @objc func applyMeasurementScale() {
-        applyMeasurementScaleState(currentMeasurementScaleState(), updateControls: true, updateStatus: true)
+        recordExplicitScaleSetForCurrentPage()
+        let state = currentMeasurementScaleState()
+        applyMeasurementScaleState(state, updateControls: true, updateStatus: true)
+        lockScaleToCurrentPage(state)
     }
 
     @objc func changeScalePreset() {
         let idx = max(0, scalePresetPopup.indexOfSelectedItem)
         let preset = drawingScalePresets[min(idx, drawingScalePresets.count - 1)]
+        if preset.drawingInches == -2 {
+            commandLockScaleToPages(nil)
+            synchronizeScalePresetSelection()
+            return
+        }
         if preset.drawingInches < 0 {
             commandSetDrawingScale(nil)
             return
@@ -50,16 +86,19 @@ extension MainViewController {
     }
 
     private func applyDrawingScale(drawingInches: Double, realFeet: Double) {
+        recordExplicitScaleSetForCurrentPage()
         let points = CGFloat(drawingInches * 72.0)
         guard points > 0, realFeet > 0 else { return }
         let unitsPerPoint = CGFloat(realFeet) / points
         let base = baseUnitsPerPoint(for: "ft")
         let scale = unitsPerPoint / base
+        let state = PageScaleLock(unit: "ft", scale: Double(scale))
         applyMeasurementScaleState(
-            PageScaleLock(unit: "ft", scale: Double(scale)),
+            state,
             updateControls: true,
             updateStatus: true
         )
+        lockScaleToCurrentPage(state)
     }
 
     @objc func commandSetDrawingScale(_ sender: Any?) {
@@ -162,7 +201,7 @@ extension MainViewController {
         }
 
         applyDrawingScale(drawingInches: drawingInches, realFeet: realFeet)
-        synchronizeScalePresetSelection()
+        selectPresetForArchitecturalScale(drawingInches: drawingInches, realFeet: realFeet)
     }
 
     private func synchronizeScalePresetSelection() {
@@ -173,15 +212,40 @@ extension MainViewController {
         }
 
         let scale = max(0.0001, measurementScaleField.doubleValue > 0 ? measurementScaleField.doubleValue : 1.0)
-        let tolerance = 0.000001
-        for preset in drawingScalePresets where preset.drawingInches > 0 && preset.realFeet > 0 {
-            let expectedScale = preset.realFeet / (preset.drawingInches * 72.0) / Double(baseUnitsPerPoint(for: "ft"))
-            if abs(expectedScale - scale) <= tolerance {
-                scalePresetPopup.selectItem(withTitle: preset.label)
-                return
-            }
+        if let label = bestMatchingPresetLabel(forScale: scale) {
+            scalePresetPopup.selectItem(withTitle: label)
+            return
         }
         scalePresetPopup.selectItem(withTitle: "Custom…")
+    }
+
+    private func selectPresetForArchitecturalScale(drawingInches: Double, realFeet: Double) {
+        let points = drawingInches * 72.0
+        guard points > 0 else {
+            synchronizeScalePresetSelection()
+            return
+        }
+        let scale = realFeet / points / Double(baseUnitsPerPoint(for: "ft"))
+        if let label = bestMatchingPresetLabel(forScale: scale) {
+            scalePresetPopup.selectItem(withTitle: label)
+            return
+        }
+        synchronizeScalePresetSelection()
+    }
+
+    private func bestMatchingPresetLabel(forScale scale: Double) -> String? {
+        let tolerance = 0.0001
+        var bestLabel: String?
+        var bestDelta = Double.greatestFiniteMagnitude
+        for preset in drawingScalePresets where preset.drawingInches > 0 && preset.realFeet > 0 {
+            let expectedScale = preset.realFeet / (preset.drawingInches * 72.0) / Double(baseUnitsPerPoint(for: "ft"))
+            let delta = abs(expectedScale - scale)
+            if delta <= tolerance && delta < bestDelta {
+                bestDelta = delta
+                bestLabel = preset.label
+            }
+        }
+        return bestLabel
     }
 
     private func parseArchitecturalInches(_ raw: String) -> Double? {
@@ -266,13 +330,33 @@ extension MainViewController {
         let base = baseUnitsPerPoint(for: selectedUnit)
         let scale = unitsPerPoint / base
 
+        recordExplicitScaleSetForCurrentPage()
         applyMeasurementScaleState(
             PageScaleLock(unit: selectedUnit, scale: Double(scale)),
             updateControls: true,
             updateStatus: true
         )
+        lockScaleToCurrentPage(PageScaleLock(unit: selectedUnit, scale: Double(scale)))
         pendingCalibrationDistanceInPoints = nil
         setTool(.measure)
+    }
+
+    private func lockScaleToCurrentPage(_ state: PageScaleLock) {
+        armPendingScaleReminderSuppressionForCurrentPage()
+        guard let document = pdfView.document,
+              let pageIndex = currentPageIndexForScaleContext(in: document) else {
+            return
+        }
+        lastExplicitScaleSetDocumentID = ObjectIdentifier(document)
+        lastExplicitScaleSetPageIndex = pageIndex
+        if pageScaleLocks[pageIndex] == state {
+            lastScaleLockAppliedPageIndex = pageIndex
+            return
+        }
+        pageScaleLocks[pageIndex] = state
+        lastScaleLockAppliedPageIndex = pageIndex
+        markMarkupChanged()
+        scheduleAutosave()
     }
 
     func applyScaleLockForCurrentPageIfNeeded() {
@@ -285,12 +369,27 @@ extension MainViewController {
         guard pageIndex >= 0 else { return }
         guard pageIndex != lastScaleLockAppliedPageIndex else { return }
         lastScaleLockAppliedPageIndex = pageIndex
-        guard let lock = pageScaleLocks[pageIndex] else { return }
+        guard let lock = pageScaleLocks[pageIndex] else {
+            let current = currentMeasurementScaleState()
+            if current != defaultPageScaleState {
+                applyMeasurementScaleState(defaultPageScaleState, updateControls: true, updateStatus: false)
+            }
+            clearScalePresetDisplay()
+            return
+        }
         let current = currentMeasurementScaleState()
         let sameUnit = current.unit == lock.unit
         let sameScale = abs(current.scale - lock.scale) <= 0.000001
-        guard !(sameUnit && sameScale) else { return }
+        guard !(sameUnit && sameScale) else {
+            synchronizeScalePresetSelection()
+            return
+        }
         applyMeasurementScaleState(lock, updateControls: true, updateStatus: false)
+    }
+
+    private func clearScalePresetDisplay() {
+        scalePresetPopup.selectItem(at: -1)
+        scalePresetPopup.title = ""
     }
 
     @objc func commandLockScaleToPages(_ sender: Any?) {
@@ -304,8 +403,18 @@ extension MainViewController {
 
         let alert = NSAlert()
         alert.messageText = "Lock Scale to Pages"
-        alert.informativeText = "Apply current scale \(String(format: "%.6f", currentScale.scale)) \(currentScale.unit) to a page range."
+        alert.informativeText = "Choose pages and scale to apply."
         alert.alertStyle = .informational
+
+        let scaleField = NSTextField(string: String(format: "%.6f", currentScale.scale))
+        scaleField.alignment = .right
+        scaleField.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        scaleField.translatesAutoresizingMaskIntoConstraints = false
+        scaleField.widthAnchor.constraint(equalToConstant: 110).isActive = true
+
+        let unitPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 100, height: 24), pullsDown: false)
+        unitPopup.addItems(withTitles: ["pt", "in", "ft", "m"])
+        unitPopup.selectItem(withTitle: currentScale.unit)
 
         let startField = NSTextField(string: "\(currentPageNumber)")
         let endField = NSTextField(string: "\(currentPageNumber)")
@@ -318,22 +427,39 @@ extension MainViewController {
         startField.widthAnchor.constraint(equalToConstant: 72).isActive = true
         endField.widthAnchor.constraint(equalToConstant: 72).isActive = true
 
-        let row = NSStackView(views: [
+        let scaleRow = NSStackView(views: [
+            NSTextField(labelWithString: "Scale"),
+            scaleField,
+            unitPopup
+        ])
+        scaleRow.orientation = .horizontal
+        scaleRow.spacing = 8
+        scaleRow.alignment = .centerY
+
+        let pagesRow = NSStackView(views: [
             NSTextField(labelWithString: "Pages"),
             startField,
             NSTextField(labelWithString: "to"),
             endField,
             NSTextField(labelWithString: "(\(document.pageCount) total)")
         ])
-        row.orientation = .horizontal
-        row.spacing = 8
-        row.alignment = .centerY
+        pagesRow.orientation = .horizontal
+        pagesRow.spacing = 8
+        pagesRow.alignment = .centerY
 
-        alert.accessoryView = row
+        let stack = NSStackView(views: [scaleRow, pagesRow])
+        stack.orientation = .vertical
+        stack.spacing = 8
+
+        alert.accessoryView = stack
         alert.addButton(withTitle: "Lock Scale")
         alert.addButton(withTitle: "Cancel")
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let chosenScale = max(0.0001, scaleField.doubleValue > 0 ? scaleField.doubleValue : 1.0)
+        let chosenUnit = unitPopup.titleOfSelectedItem ?? currentScale.unit
+        let lockState = PageScaleLock(unit: chosenUnit, scale: chosenScale)
 
         let start = max(1, min(document.pageCount, startField.integerValue))
         let end = max(1, min(document.pageCount, endField.integerValue))
@@ -345,7 +471,15 @@ extension MainViewController {
         }
 
         for pageIndex in lower...upper {
-            pageScaleLocks[pageIndex] = currentScale
+            pageScaleLocks[pageIndex] = lockState
+        }
+        let docID = ObjectIdentifier(document)
+        if explicitScaleSetDocumentID != docID {
+            explicitScaleSetDocumentID = docID
+            explicitScaleSetPageIndexes.removeAll(keepingCapacity: false)
+        }
+        for pageIndex in lower...upper {
+            explicitScaleSetPageIndexes.insert(pageIndex)
         }
         lastScaleLockAppliedPageIndex = -1
         applyScaleLockForCurrentPageIfNeeded()
@@ -396,6 +530,7 @@ extension MainViewController {
 
         if modePopup.indexOfSelectedItem == 0 {
             pageScaleLocks.removeAll(keepingCapacity: false)
+            explicitScaleSetPageIndexes.removeAll(keepingCapacity: false)
         } else {
             let start = max(1, min(document.pageCount, startField.integerValue))
             let end = max(1, min(document.pageCount, endField.integerValue))
@@ -403,8 +538,14 @@ extension MainViewController {
             let upper = max(start, end) - 1
             for pageIndex in lower...upper {
                 pageScaleLocks.removeValue(forKey: pageIndex)
+                explicitScaleSetPageIndexes.remove(pageIndex)
             }
         }
+        if explicitScaleSetPageIndexes.isEmpty {
+            explicitScaleSetDocumentID = nil
+        }
+        lastExplicitScaleSetDocumentID = nil
+        lastExplicitScaleSetPageIndex = -1
         lastScaleLockAppliedPageIndex = -1
         applyScaleLockForCurrentPageIfNeeded()
         markMarkupChanged()

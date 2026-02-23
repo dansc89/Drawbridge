@@ -3,6 +3,13 @@ import PDFKit
 import UniformTypeIdentifiers
 
 final class MarkupPDFView: PDFView, NSTextFieldDelegate {
+    enum ReorderAction {
+        case sendToBack
+        case bringForward
+        case sendBackward
+        case bringToFront
+    }
+
     private typealias Segment = (start: NSPoint, end: NSPoint)
     private enum ResizeCorner {
         case lowerLeft
@@ -15,6 +22,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         case tip
         case elbow
         case textCorner(ResizeCorner)
+    }
+    private enum LineEndpointHandle {
+        case start
+        case end
     }
     private struct CalloutDragState {
         var page: PDFPage
@@ -65,6 +76,69 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
     }
 
+    enum RectangleHatchStyle: Int, CaseIterable {
+        case none = 0
+        case solid = 1
+        case concrete = 2
+        case earth = 3
+        case metal = 4
+        case woodVeneer = 5
+        case diagonal = 6
+        case crosshatch = 7
+        case brick = 8
+        case insulation = 9
+        case stone = 10
+
+        var displayName: String {
+            switch self {
+            case .none: return "None"
+            case .solid: return "Solid"
+            case .concrete: return "Concrete"
+            case .earth: return "Earth"
+            case .metal: return "Metal"
+            case .woodVeneer: return "Wood Veneer"
+            case .diagonal: return "Diagonal"
+            case .crosshatch: return "Crosshatch"
+            case .brick: return "Brick"
+            case .insulation: return "Insulation"
+            case .stone: return "Stone"
+            }
+        }
+
+        var metadataToken: String {
+            switch self {
+            case .none: return "clear"
+            case .solid: return "solid"
+            case .concrete: return "concrete"
+            case .earth: return "earth"
+            case .metal: return "metal"
+            case .woodVeneer: return "wood_veneer"
+            case .diagonal: return "diagonal"
+            case .crosshatch: return "crosshatch"
+            case .brick: return "brick"
+            case .insulation: return "insulation"
+            case .stone: return "stone"
+            }
+        }
+
+        static func from(metadataToken: String) -> RectangleHatchStyle {
+            switch metadataToken.lowercased() {
+            case "clear": return .none
+            case "none", "solid": return .solid
+            case "concrete": return .concrete
+            case "earth": return .earth
+            case "metal": return .metal
+            case "wood_veneer": return .woodVeneer
+            case "diagonal": return .diagonal
+            case "crosshatch": return .crosshatch
+            case "brick": return .brick
+            case "insulation": return .insulation
+            case "stone": return .stone
+            default: return .solid
+            }
+        }
+    }
+
     var toolMode: ToolMode = .pen
     var penColor: NSColor = .systemRed
     var penLineWidth: CGFloat = 15.0
@@ -75,7 +149,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var highlighterLineWidth: CGFloat = 31.0
     var rectangleStrokeColor: NSColor = .systemRed
     var rectangleFillColor: NSColor = .systemYellow
+    var rectangleHatchBackgroundColor: NSColor = .white
     var rectangleLineWidth: CGFloat = 50.0
+    var rectangleHatchStyle: RectangleHatchStyle = .solid
     var textForegroundColor: NSColor = .labelColor
     var textBackgroundColor: NSColor = NSColor.systemOrange.withAlphaComponent(0.25)
     var textOutlineColor: NSColor = MarkupStyleDefaults.textOutlineColor
@@ -99,6 +175,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var onAnnotationsBoxSelected: ((PDFPage, [PDFAnnotation]) -> Void)?
     var onAnnotationMoved: ((PDFPage, PDFAnnotation, NSRect) -> Void)?
     var onResolveDragSelection: ((PDFPage, PDFAnnotation) -> [PDFAnnotation])?
+    var selectedAnnotationsProvider: ((PDFPage) -> [PDFAnnotation])?
     var onDeleteKeyPressed: (() -> Void)?
     var onSnapshotCaptured: ((Data, NSRect) -> Void)?
     var onOpenDroppedPDF: ((URL) -> Void)?
@@ -107,6 +184,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var onPageNavigationShortcut: ((Int) -> Void)?
     var onViewportChanged: (() -> Void)?
     var onRegionCaptured: ((PDFPage, NSRect) -> Void)?
+    var onReorderActionRequested: ((ReorderAction) -> Void)?
     var shouldBeginMarkupInteraction: (() -> Bool)?
 
     private var dragStartInView: NSPoint?
@@ -132,6 +210,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var movingAnnotationStartBounds: NSRect?
     private var movingStartPointInPage: NSPoint?
     private var movingResizeCorner: ResizeCorner?
+    private var movingLineEndpointHandle: LineEndpointHandle?
+    private var movingLineSegmentAtDragStart: Segment?
     private var movingCalloutState: CalloutDragState?
     private var movingAnnotations: [PDFAnnotation] = []
     private var movingAnnotationStartBoundsByID: [ObjectIdentifier: NSRect] = [:]
@@ -148,6 +228,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var pendingArrowStartInPage: NSPoint?
     private var pendingLinePage: PDFPage?
     private var pendingLineStartInPage: NSPoint?
+    private var pendingCirclePage: PDFPage?
+    private var pendingCircleCenterInPage: NSPoint?
     private var pendingAreaPage: PDFPage?
     private var pendingAreaPointsInPage: [NSPoint] = []
     private var pendingMeasurePage: PDFPage?
@@ -255,12 +337,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         ]
         return layer
     }()
+    private var pendingContextMenuHitAnnotation: PDFAnnotation?
     private var textEditCaretTimer: Timer?
     private var isGridVisible = false
-    private var isOrthoSnapEnabled = false
-    private var isEndpointSnapEnabled = false
-    private var isMidpointSnapEnabled = false
-    private var isIntersectionSnapEnabled = false
+    private var isOrthoSnapEnabled = true
+    private var isEndpointSnapEnabled = true
+    private var isMidpointSnapEnabled = true
+    private var isIntersectionSnapEnabled = true
     private let gridSpacingInPoints: CGFloat = 24.0
     private let maxGridLinesPerAxis = 400
 
@@ -414,26 +497,30 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func annotationSegmentsInPage(for annotation: PDFAnnotation) -> [(NSPoint, NSPoint)] {
-        guard let path = annotation.paths?.first, path.elementCount > 0 else { return [] }
+        let allPaths = annotation.paths ?? []
+        guard !allPaths.isEmpty else { return [] }
         let origin = annotation.bounds.origin
         var segments: [(NSPoint, NSPoint)] = []
-        segments.reserveCapacity(max(1, path.elementCount - 1))
-        var previousPoint: NSPoint?
+        segments.reserveCapacity(max(1, allPaths.reduce(0) { $0 + max(0, $1.elementCount - 1) }))
 
-        for idx in 0..<path.elementCount {
-            var points = [NSPoint](repeating: .zero, count: 3)
-            let element = path.element(at: idx, associatedPoints: &points)
-            switch element {
-            case .moveTo:
-                previousPoint = NSPoint(x: points[0].x + origin.x, y: points[0].y + origin.y)
-            case .lineTo:
-                let point = NSPoint(x: points[0].x + origin.x, y: points[0].y + origin.y)
-                if let previousPoint, hypot(point.x - previousPoint.x, point.y - previousPoint.y) > 0.01 {
-                    segments.append((previousPoint, point))
+        for path in allPaths {
+            guard path.elementCount > 0 else { continue }
+            var previousPoint: NSPoint?
+            for idx in 0..<path.elementCount {
+                var points = [NSPoint](repeating: .zero, count: 3)
+                let element = path.element(at: idx, associatedPoints: &points)
+                switch element {
+                case .moveTo:
+                    previousPoint = NSPoint(x: points[0].x + origin.x, y: points[0].y + origin.y)
+                case .lineTo:
+                    let point = NSPoint(x: points[0].x + origin.x, y: points[0].y + origin.y)
+                    if let previousPoint, hypot(point.x - previousPoint.x, point.y - previousPoint.y) > 0.01 {
+                        segments.append((previousPoint, point))
+                    }
+                    previousPoint = point
+                default:
+                    break
                 }
-                previousPoint = point
-            default:
-                break
             }
         }
         return segments
@@ -634,6 +721,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             }
             return
         }
+        if toolMode == .circle {
+            let locationInView = convert(event.locationInWindow, from: nil)
+            if let page = pendingCirclePage {
+                updateCirclePreview(at: snapPointInViewIfNeeded(locationInView, on: page))
+            } else {
+                updateCirclePreview(at: locationInView)
+            }
+            return
+        }
         if toolMode == .measure {
             updateMeasurePreview(with: event)
             return
@@ -679,6 +775,63 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
     }
 
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let locationInView = convert(event.locationInWindow, from: nil)
+        guard let page = page(for: locationInView, nearest: true) else {
+            return super.menu(for: event)
+        }
+        let pointInPage = convert(locationInView, to: page)
+        guard let hit = nearestAnnotation(to: pointInPage, on: page, maxDistance: selectionHitDistanceInPage()) else {
+            return super.menu(for: event)
+        }
+        pendingContextMenuHitAnnotation = hit
+        onAnnotationClicked?(page, hit)
+
+        let menu = NSMenu(title: "Markup")
+        let sendToBack = NSMenuItem(title: "Move To Back", action: #selector(contextMenuSendToBack(_:)), keyEquivalent: "")
+        sendToBack.target = self
+        let bringForward = NSMenuItem(title: "Move Forward", action: #selector(contextMenuBringForward(_:)), keyEquivalent: "")
+        bringForward.target = self
+        let sendBackward = NSMenuItem(title: "Move Backward", action: #selector(contextMenuSendBackward(_:)), keyEquivalent: "")
+        sendBackward.target = self
+        let bringToFront = NSMenuItem(title: "Bring To Front", action: #selector(contextMenuBringToFront(_:)), keyEquivalent: "")
+        bringToFront.target = self
+
+        menu.addItem(sendToBack)
+        menu.addItem(bringForward)
+        menu.addItem(sendBackward)
+        menu.addItem(bringToFront)
+        return menu
+    }
+
+    @objc private func contextMenuSendToBack(_ sender: Any?) {
+        _ = sender
+        guard pendingContextMenuHitAnnotation != nil else { return }
+        pendingContextMenuHitAnnotation = nil
+        onReorderActionRequested?(.sendToBack)
+    }
+
+    @objc private func contextMenuBringForward(_ sender: Any?) {
+        _ = sender
+        guard pendingContextMenuHitAnnotation != nil else { return }
+        pendingContextMenuHitAnnotation = nil
+        onReorderActionRequested?(.bringForward)
+    }
+
+    @objc private func contextMenuSendBackward(_ sender: Any?) {
+        _ = sender
+        guard pendingContextMenuHitAnnotation != nil else { return }
+        pendingContextMenuHitAnnotation = nil
+        onReorderActionRequested?(.sendBackward)
+    }
+
+    @objc private func contextMenuBringToFront(_ sender: Any?) {
+        _ = sender
+        guard pendingContextMenuHitAnnotation != nil else { return }
+        pendingContextMenuHitAnnotation = nil
+        onReorderActionRequested?(.bringToFront)
+    }
+
     override func mouseDown(with event: NSEvent) {
         let locationInView = convert(event.locationInWindow, from: nil)
         lastPointerInView = locationInView
@@ -696,7 +849,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         let createsMarkupTool: Bool
         switch toolMode {
-        case .pen, .arrow, .highlighter, .line, .polyline, .area, .cloud, .rectangle, .text, .callout, .measure, .calibrate:
+        case .pen, .arrow, .highlighter, .line, .polyline, .area, .cloud, .rectangle, .circle, .text, .callout, .measure, .calibrate:
             createsMarkupTool = true
         default:
             createsMarkupTool = false
@@ -711,6 +864,19 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         if toolMode == .select, let page = page(for: locationInView, nearest: true) {
             let pointInPage = convert(locationInView, to: page)
+            if let handleTarget = selectedHandleDragTarget(on: page, at: locationInView, pointInPage: pointInPage) {
+                movingAnnotation = handleTarget.annotation
+                movingAnnotationPage = page
+                movingAnnotationStartBounds = handleTarget.annotation.bounds
+                movingStartPointInPage = pointInPage
+                movingLineEndpointHandle = handleTarget.lineEndpointHandle
+                movingLineSegmentAtDragStart = lineSegmentInPage(for: handleTarget.annotation)
+                movingResizeCorner = handleTarget.resizeCorner
+                movingAnnotations = [handleTarget.annotation]
+                movingAnnotationStartBoundsByID = [ObjectIdentifier(handleTarget.annotation): handleTarget.annotation.bounds]
+                didMoveAnnotation = false
+                return
+            }
             if let hit = nearestAnnotation(
                 to: pointInPage,
                 on: page,
@@ -734,9 +900,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 movingAnnotationPage = page
                 movingAnnotationStartBounds = hit.bounds
                 movingStartPointInPage = pointInPage
+                movingLineEndpointHandle = lineEndpointHit(for: hit, on: page, at: locationInView)
+                movingLineSegmentAtDragStart = lineSegmentInPage(for: hit)
                 movingResizeCorner = resizeCornerHit(for: hit, on: page, at: locationInView)
                 let requested = dragCandidates
-                if movingResizeCorner != nil {
+                if movingResizeCorner != nil || movingLineEndpointHandle != nil {
                     movingAnnotations = [hit]
                 } else {
                     var seen = Set<ObjectIdentifier>()
@@ -857,6 +1025,29 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             }
             let previewPoint = snapPointInViewIfNeeded(locationInView, on: page)
             updateLinePreview(at: previewPoint, orthogonal: ortho)
+            return
+        case .circle:
+            if inlineTextField != nil {
+                _ = commitInlineTextEditor(cancel: false)
+            }
+            guard let page = page(for: locationInView, nearest: true) else {
+                super.mouseDown(with: event)
+                return
+            }
+            typedDistanceBuffer = ""
+            let pointInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
+            if pendingCirclePage == nil || pendingCirclePage !== page || pendingCircleCenterInPage == nil {
+                pendingCirclePage = page
+                pendingCircleCenterInPage = pointInPage
+            } else if let center = pendingCircleCenterInPage {
+                let radius = hypot(pointInPage.x - center.x, pointInPage.y - center.y)
+                if radius > 0.5 {
+                    addCircleAnnotation(center: center, radius: radius, on: page)
+                }
+                clearPendingCircle()
+            }
+            let previewPoint = snapPointInViewIfNeeded(locationInView, on: page)
+            updateCirclePreview(at: previewPoint)
             return
         case .polyline:
             if inlineTextField != nil {
@@ -1065,6 +1256,23 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
             let locationInView = convert(event.locationInWindow, from: nil)
             let currentPoint = convert(locationInView, to: page)
+            if let endpointHandle = movingLineEndpointHandle,
+               var segment = movingLineSegmentAtDragStart,
+               isLineEndpointEditable(annotation) {
+                switch endpointHandle {
+                case .start:
+                    segment.start = currentPoint
+                case .end:
+                    segment.end = currentPoint
+                }
+                if hypot(segment.end.x - segment.start.x, segment.end.y - segment.start.y) > 0.5 {
+                    updateLineAnnotationGeometry(annotation, start: segment.start, end: segment.end)
+                    didMoveAnnotation = true
+                    needsDisplay = true
+                    onViewportChanged?()
+                }
+                return
+            }
             if let resizeCorner = movingResizeCorner {
                 let minSize = minimumResizeSize(for: annotation)
                 var minX = startBounds.minX
@@ -1085,10 +1293,49 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                     maxX = max(currentPoint.x, minX + minSize.width)
                     maxY = max(currentPoint.y, minY + minSize.height)
                 }
+                let annotationType = (annotation.type ?? "").lowercased()
+                let shouldLockAspect = event.modifierFlags.contains(.shift) &&
+                    (annotationType.contains("circle") || annotationType.contains("square"))
+                if shouldLockAspect,
+                   startBounds.width > 0.001,
+                   startBounds.height > 0.001 {
+                    let startW = startBounds.width
+                    let startH = startBounds.height
+                    let tentativeW = max(minSize.width, maxX - minX)
+                    let tentativeH = max(minSize.height, maxY - minY)
+                    let sx = tentativeW / startW
+                    let sy = tentativeH / startH
+                    let scale = (sx >= 1 || sy >= 1) ? max(sx, sy) : min(sx, sy)
+                    let lockedW = max(minSize.width, startW * scale)
+                    let lockedH = max(minSize.height, startH * scale)
+                    switch resizeCorner {
+                    case .lowerLeft:
+                        maxX = startBounds.maxX
+                        maxY = startBounds.maxY
+                        minX = maxX - lockedW
+                        minY = maxY - lockedH
+                    case .lowerRight:
+                        minX = startBounds.minX
+                        maxY = startBounds.maxY
+                        maxX = minX + lockedW
+                        minY = maxY - lockedH
+                    case .upperLeft:
+                        maxX = startBounds.maxX
+                        minY = startBounds.minY
+                        minX = maxX - lockedW
+                        maxY = minY + lockedH
+                    case .upperRight:
+                        minX = startBounds.minX
+                        minY = startBounds.minY
+                        maxX = minX + lockedW
+                        maxY = minY + lockedH
+                    }
+                }
                 let resized = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
                 if abs(resized.width - annotation.bounds.width) > 0.01 || abs(resized.height - annotation.bounds.height) > 0.01 || abs(resized.origin.x - annotation.bounds.origin.x) > 0.01 || abs(resized.origin.y - annotation.bounds.origin.y) > 0.01 {
                     didMoveAnnotation = true
                     annotation.bounds = resized
+                    syncRectangleHatchOverlayIfNeeded(for: annotation)
                     needsDisplay = true
                     onViewportChanged?()
                 }
@@ -1105,9 +1352,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                     let key = ObjectIdentifier(candidate)
                     guard let base = movingAnnotationStartBoundsByID[key] else { continue }
                     candidate.bounds = base.offsetBy(dx: dx, dy: dy)
+                    syncRectangleHatchOverlayIfNeeded(for: candidate)
                 }
             } else {
                 annotation.bounds = startBounds.offsetBy(dx: dx, dy: dy)
+                syncRectangleHatchOverlayIfNeeded(for: annotation)
             }
             needsDisplay = true
             onViewportChanged?()
@@ -1140,6 +1389,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 updateLinePreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: ortho)
             } else {
                 updateLinePreview(at: locationInView, orthogonal: ortho)
+            }
+            return
+        }
+        if toolMode == .circle {
+            let locationInView = convert(event.locationInWindow, from: nil)
+            if let page = pendingCirclePage {
+                updateCirclePreview(at: snapPointInViewIfNeeded(locationInView, on: page))
+            } else {
+                updateCirclePreview(at: locationInView)
             }
             return
         }
@@ -1215,7 +1473,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 dragPreviewLayer.lineDashPattern = [6, 4]
             } else {
                 dragPreviewLayer.strokeColor = (toolMode == .cloud ? NSColor.systemCyan : rectangleStrokeColor).cgColor
-                dragPreviewLayer.fillColor = (toolMode == .cloud ? NSColor.clear.cgColor : rectangleFillColor.cgColor)
+                let previewFill: NSColor
+                if toolMode == .cloud {
+                    previewFill = .clear
+                } else if rectangleHatchStyle == .solid {
+                    previewFill = rectangleFillColor
+                } else {
+                    previewFill = rectangleHatchBackgroundColor
+                }
+                dragPreviewLayer.fillColor = previewFill.cgColor
             }
             dragPreviewLayer.path = CGPath(rect: rect, transform: nil)
         } else {
@@ -1272,6 +1538,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             movingAnnotationStartBounds = nil
             movingStartPointInPage = nil
             movingResizeCorner = nil
+            movingLineEndpointHandle = nil
+            movingLineSegmentAtDragStart = nil
             movingCalloutState = nil
             movingAnnotations = []
             movingAnnotationStartBoundsByID.removeAll(keepingCapacity: false)
@@ -1300,7 +1568,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 let p1 = convert(rectInView.origin, to: page)
                 let p2 = convert(NSPoint(x: rectInView.maxX, y: rectInView.maxY), to: page)
                 let box = normalizedRect(from: p1, to: p2)
-                let hits = page.annotations.filter { $0.bounds.intersects(box) }
+                let hits = page.annotations.filter { candidate in
+                    !isHatchOverlayAnnotation(candidate) && candidate.bounds.intersects(box)
+                }
                 onAnnotationsBoxSelected?(page, hits)
                 return
             }
@@ -1403,15 +1673,22 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         let annotation = PDFAnnotation(bounds: annotationRect, forType: .square, withProperties: nil)
         annotation.color = rectangleStrokeColor
-        annotation.interiorColor = rectangleFillColor
         assignLineWidth(rectangleLineWidth, to: annotation)
         page.addAnnotation(annotation)
+        applyRectangleHatchStyle(
+            rectangleHatchStyle,
+            to: annotation,
+            fillColor: rectangleFillColor,
+            backgroundColor: rectangleHatchBackgroundColor,
+            lineWidth: rectangleLineWidth
+        )
         onAnnotationAdded?(page, annotation, "Add Rectangle")
     }
 
-    private func addLineAnnotation(from start: NSPoint, to end: NSPoint, on page: PDFPage, actionName: String, contents: String) {
+    @discardableResult
+    private func addLineAnnotation(from start: NSPoint, to end: NSPoint, on page: PDFPage, actionName: String, contents: String) -> PDFAnnotation? {
         let distance = hypot(end.x - start.x, end.y - start.y)
-        guard distance > 1.0 else { return }
+        guard distance > 1.0 else { return nil }
 
         let minX = min(start.x, end.x)
         let minY = min(start.y, end.y)
@@ -1432,6 +1709,29 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         annotation.add(localPath)
         page.addAnnotation(annotation)
         onAnnotationAdded?(page, annotation, actionName)
+        return annotation
+    }
+
+    private func addCircleAnnotation(center: NSPoint, radius: CGFloat, on page: PDFPage) {
+        guard radius > 0.5 else { return }
+        let bounds = NSRect(
+            x: center.x - radius,
+            y: center.y - radius,
+            width: radius * 2.0,
+            height: radius * 2.0
+        )
+        let annotation = PDFAnnotation(bounds: bounds, forType: .circle, withProperties: nil)
+        annotation.color = rectangleStrokeColor
+        assignLineWidth(rectangleLineWidth, to: annotation)
+        page.addAnnotation(annotation)
+        applyRectangleHatchStyle(
+            rectangleHatchStyle,
+            to: annotation,
+            fillColor: rectangleFillColor,
+            backgroundColor: rectangleHatchBackgroundColor,
+            lineWidth: rectangleLineWidth
+        )
+        onAnnotationAdded?(page, annotation, "Add Circle")
     }
 
     private func addArrowAnnotation(from start: NSPoint, to end: NSPoint, on page: PDFPage) {
@@ -1575,13 +1875,72 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         guard let page = pendingPolylinePage, pendingPolylinePointsInPage.count >= 2 else {
             return hadPending
         }
-        for idx in 1..<pendingPolylinePointsInPage.count {
-            addLineAnnotation(
-                from: pendingPolylinePointsInPage[idx - 1],
-                to: pendingPolylinePointsInPage[idx],
+        let points = pendingPolylinePointsInPage
+        var closedPolygonPoints = points
+        if let first = points.first, let last = points.last,
+           hypot(last.x - first.x, last.y - first.y) > 0.5 {
+            closedPolygonPoints.append(first)
+        }
+        let hatchStyle = rectangleHatchStyle
+        let shouldDrawHatch = points.count >= 3 && hatchStyle != .none && hatchStyle != .solid
+        let polylineGroupID = shouldDrawHatch ? UUID().uuidString : nil
+        var createdSegments: [PDFAnnotation] = []
+        createdSegments.reserveCapacity(points.count + 1)
+        for idx in 1..<points.count {
+            if let segment = addLineAnnotation(
+                from: points[idx - 1],
+                to: points[idx],
                 on: page,
                 actionName: "Add Polyline",
                 contents: "Polyline"
+            ) {
+                if let polylineGroupID {
+                    applyPolylineGroupMetadata(
+                        to: segment,
+                        groupID: polylineGroupID,
+                        hatchStyle: hatchStyle,
+                        hatchColor: rectangleFillColor,
+                        backgroundColor: rectangleHatchBackgroundColor,
+                        polygonPoints: closedPolygonPoints
+                    )
+                }
+                createdSegments.append(segment)
+            }
+        }
+        if shouldDrawHatch,
+           let first = points.first,
+           let last = points.last,
+           hypot(last.x - first.x, last.y - first.y) > 0.5,
+           let closing = addLineAnnotation(
+            from: last,
+            to: first,
+            on: page,
+            actionName: "Add Polyline",
+            contents: "Polyline"
+           ) {
+            if let polylineGroupID {
+                applyPolylineGroupMetadata(
+                    to: closing,
+                    groupID: polylineGroupID,
+                    hatchStyle: hatchStyle,
+                    hatchColor: rectangleFillColor,
+                    backgroundColor: rectangleHatchBackgroundColor,
+                    polygonPoints: closedPolygonPoints
+                )
+            }
+            createdSegments.append(closing)
+        }
+        if shouldDrawHatch,
+           let polylineGroupID,
+           createdSegments.count >= 3 {
+            addPolylineHatchOverlay(
+                for: closedPolygonPoints,
+                groupID: polylineGroupID,
+                on: page,
+                style: hatchStyle,
+                hatchColor: rectangleFillColor,
+                backgroundColor: rectangleHatchBackgroundColor,
+                lineWidth: penLineWidth
             )
         }
         return true
@@ -1589,6 +1948,142 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     func cancelPendingPolyline() {
         clearPendingPolyline()
+    }
+
+    private func applyPolylineGroupMetadata(
+        to annotation: PDFAnnotation,
+        groupID: String,
+        hatchStyle: RectangleHatchStyle,
+        hatchColor: NSColor,
+        backgroundColor: NSColor,
+        polygonPoints: [NSPoint]
+    ) {
+        let existing = annotation.userName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let groupMetadata = "DrawbridgePolylineGroup:\(groupID)"
+        let hatchMetadata = "DrawbridgePolylineHatch:\(hatchStyle.metadataToken)"
+        let fillMetadata = "DrawbridgePolylineFill:\(rectFillToken(from: hatchColor))"
+        let bgMetadata = "DrawbridgePolylineBg:\(rectFillToken(from: backgroundColor))"
+        let pointsMetadata = "DrawbridgePolylinePts:\(encodedPolylinePointsToken(polygonPoints))"
+        if existing.isEmpty {
+            annotation.userName = "\(groupMetadata)|\(hatchMetadata)|\(fillMetadata)|\(bgMetadata)|\(pointsMetadata)"
+            return
+        }
+        let parts = existing.split(separator: "|").map(String.init).filter { token in
+            let lower = token.lowercased()
+            return !lower.hasPrefix("drawbridgepolylinegroup:") &&
+                !lower.hasPrefix("drawbridgepolylinehatch:") &&
+                !lower.hasPrefix("drawbridgepolylinefill:") &&
+                !lower.hasPrefix("drawbridgepolylinebg:") &&
+                !lower.hasPrefix("drawbridgepolylinepts:")
+        }
+        annotation.userName = ([groupMetadata, hatchMetadata, fillMetadata, bgMetadata, pointsMetadata] + parts).joined(separator: "|")
+    }
+
+    private func removePolylineHatchOverlays(for groupID: String, on page: PDFPage) {
+        let marker = "PolylineGroup:\(groupID)"
+        let overlays = page.annotations.filter { candidate in
+            isHatchOverlayAnnotation(candidate) &&
+            ((candidate.userName ?? "").contains(marker) || (candidate.contents ?? "").contains(marker))
+        }
+        for overlay in overlays {
+            page.removeAnnotation(overlay)
+        }
+    }
+
+    private func addPolylineHatchOverlay(
+        for points: [NSPoint],
+        groupID: String,
+        on page: PDFPage,
+        style: RectangleHatchStyle,
+        hatchColor: NSColor,
+        backgroundColor: NSColor,
+        lineWidth: CGFloat
+    ) {
+        guard points.count >= 3 else { return }
+        guard style != .none && style != .solid else { return }
+
+        let minX = points.map(\.x).min() ?? 0
+        let minY = points.map(\.y).min() ?? 0
+        let maxX = points.map(\.x).max() ?? 0
+        let maxY = points.map(\.y).max() ?? 0
+        let bounds = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        guard bounds.width > 0.5, bounds.height > 0.5 else { return }
+
+        let localPolygon = points.map { NSPoint(x: $0.x - bounds.minX, y: $0.y - bounds.minY) }
+        let localRect = NSRect(origin: .zero, size: bounds.size)
+        let spacing = max(6.0, min(28.0, 8.0 + lineWidth))
+        let hatchWidth = max(0.35, min(2.5, lineWidth * 0.22))
+
+        let candidateSegments = hatchSegments(in: localRect, style: style, spacing: spacing, shapeType: "square")
+        let clippedSegments = candidateSegments.flatMap { clipSegmentToPolygon($0.0, $0.1, polygon: localPolygon) }
+        guard !clippedSegments.isEmpty else { return }
+
+        removePolylineHatchOverlays(for: groupID, on: page)
+
+        // Background tint to hint fill region without overpowering hatch lines.
+        let backgroundPath = NSBezierPath()
+        backgroundPath.move(to: localPolygon[0])
+        for point in localPolygon.dropFirst() {
+            backgroundPath.line(to: point)
+        }
+        backgroundPath.close()
+        let background = PDFAnnotation(bounds: bounds, forType: .ink, withProperties: nil)
+        background.color = backgroundColor.withAlphaComponent(0.22)
+        background.contents = "DrawbridgeHatchOverlay|PolylineGroup:\(groupID)|Background"
+        background.userName = "DrawbridgeHatchOverlay:PolylineGroup:\(groupID)"
+        backgroundPath.lineWidth = max(0.5, hatchWidth * 0.45)
+        background.add(backgroundPath)
+        assignLineWidth(max(0.5, hatchWidth * 0.45), to: background)
+        page.addAnnotation(background)
+
+        let path = NSBezierPath()
+        path.lineWidth = hatchWidth
+        path.lineCapStyle = .butt
+        path.lineJoinStyle = .miter
+        for segment in clippedSegments {
+            path.move(to: segment.0)
+            path.line(to: segment.1)
+        }
+
+        let overlay = PDFAnnotation(bounds: bounds, forType: .ink, withProperties: nil)
+        overlay.color = hatchColor
+        overlay.contents = "DrawbridgeHatchOverlay|PolylineGroup:\(groupID)|\(style.metadataToken)"
+        overlay.userName = "DrawbridgeHatchOverlay:PolylineGroup:\(groupID)"
+        overlay.add(path)
+        assignLineWidth(hatchWidth, to: overlay)
+        page.addAnnotation(overlay)
+    }
+
+    func restorePolylineHatchOverlays(on page: PDFPage, for annotations: [PDFAnnotation]) {
+        var groupRepresentatives: [String: PDFAnnotation] = [:]
+        for annotation in annotations {
+            guard let groupID = polylineGroupID(for: annotation), !groupID.isEmpty else { continue }
+            if groupRepresentatives[groupID] == nil {
+                groupRepresentatives[groupID] = annotation
+            }
+        }
+
+        for (groupID, representative) in groupRepresentatives {
+            guard let pointsToken = polylinePointsToken(for: representative),
+                  let points = decodedPolylinePointsToken(pointsToken),
+                  points.count >= 3 else {
+                removePolylineHatchOverlays(for: groupID, on: page)
+                continue
+            }
+            let style = polylineHatchStyle(for: representative) ?? .solid
+            let hatchColor = polylineHatchColor(for: representative) ?? rectangleFillColor
+            let backgroundColor = polylineBackgroundColor(for: representative) ?? rectangleHatchBackgroundColor
+            let width = max(0.1, representative.border?.lineWidth ?? penLineWidth)
+            addPolylineHatchOverlay(
+                for: points,
+                groupID: groupID,
+                on: page,
+                style: style,
+                hatchColor: hatchColor,
+                backgroundColor: backgroundColor,
+                lineWidth: width
+            )
+        }
     }
 
     private func updateLinePreview(at locationInView: NSPoint?, orthogonal: Bool) {
@@ -1624,6 +2119,46 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         dragPreviewLayer.isHidden = false
     }
 
+    private func updateCirclePreview(at locationInView: NSPoint?) {
+        guard toolMode == .circle,
+              let page = pendingCirclePage,
+              let center = pendingCircleCenterInPage else {
+            return
+        }
+        let centerInView = convert(center, from: page)
+        let targetInView: NSPoint
+        if let typedTarget = typedLengthPreviewTargetInView(
+            on: page,
+            from: center,
+            fallbackLocationInView: locationInView,
+            orthogonal: false
+        ) {
+            targetInView = typedTarget
+        } else if let locationInView,
+           self.page(for: locationInView, nearest: true) == page {
+            targetInView = snapPointInViewIfNeeded(locationInView, on: page)
+        } else {
+            targetInView = centerInView
+        }
+        let radius = hypot(targetInView.x - centerInView.x, targetInView.y - centerInView.y)
+        guard radius > 0.5 else {
+            dragPreviewLayer.path = nil
+            dragPreviewLayer.isHidden = true
+            return
+        }
+        let rect = NSRect(
+            x: centerInView.x - radius,
+            y: centerInView.y - radius,
+            width: radius * 2.0,
+            height: radius * 2.0
+        )
+        dragPreviewLayer.strokeColor = rectangleStrokeColor.cgColor
+        dragPreviewLayer.fillColor = rectangleFillColor.cgColor
+        dragPreviewLayer.lineWidth = rectangleLineWidth
+        dragPreviewLayer.path = CGPath(ellipseIn: rect, transform: nil)
+        dragPreviewLayer.isHidden = false
+    }
+
     private func clearPendingLine() {
         pendingLinePage = nil
         pendingLineStartInPage = nil
@@ -1635,6 +2170,19 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     func cancelPendingLine() {
         clearPendingLine()
+    }
+
+    private func clearPendingCircle() {
+        pendingCirclePage = nil
+        pendingCircleCenterInPage = nil
+        typedDistanceBuffer = ""
+        hideTypedDistanceHUD()
+        dragPreviewLayer.path = nil
+        dragPreviewLayer.isHidden = true
+    }
+
+    func cancelPendingCircle() {
+        clearPendingCircle()
     }
 
     private func parseFractionOrDecimal(_ raw: String) -> Double? {
@@ -1658,22 +2206,29 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         guard !text.isEmpty else { return nil }
 
         let normalized = text.replacingOccurrences(of: " ", with: "")
+        let parseImperialInches: (String) -> Double? = { token in
+            if token.isEmpty { return 0 }
+            if token.contains("-") {
+                let components = token.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+                let whole = self.parseFractionOrDecimal(String(components.first ?? "")) ?? 0
+                let frac = self.parseFractionOrDecimal(String(components.count > 1 ? components[1] : "")) ?? 0
+                return whole + frac
+            }
+            return self.parseFractionOrDecimal(token)
+        }
         if normalized.contains("'") || normalized.contains("\"") {
-            let feetPart = normalized.split(separator: "'", maxSplits: 1, omittingEmptySubsequences: false)
-            let feetValue = parseFractionOrDecimal(String(feetPart.first ?? "")) ?? 0
+            var feetValue = 0.0
             var inchesValue = 0.0
-            if feetPart.count > 1 {
-                let afterFeet = String(feetPart[1]).replacingOccurrences(of: "\"", with: "")
-                if !afterFeet.isEmpty {
-                    if afterFeet.contains("-") {
-                        let components = afterFeet.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
-                        let whole = parseFractionOrDecimal(String(components.first ?? "")) ?? 0
-                        let frac = parseFractionOrDecimal(String(components.count > 1 ? components[1] : "")) ?? 0
-                        inchesValue = whole + frac
-                    } else {
-                        inchesValue = parseFractionOrDecimal(afterFeet) ?? 0
-                    }
+            if normalized.contains("'") {
+                let feetPart = normalized.split(separator: "'", maxSplits: 1, omittingEmptySubsequences: false)
+                feetValue = parseFractionOrDecimal(String(feetPart.first ?? "")) ?? 0
+                if feetPart.count > 1 {
+                    let afterFeet = String(feetPart[1]).replacingOccurrences(of: "\"", with: "")
+                    inchesValue = parseImperialInches(afterFeet) ?? 0
                 }
+            } else {
+                let inchesToken = normalized.replacingOccurrences(of: "\"", with: "")
+                inchesValue = parseImperialInches(inchesToken) ?? 0
             }
             let feetTotal = feetValue + (inchesValue / 12.0)
             switch measurementUnitLabel {
@@ -1708,6 +2263,662 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
 
         return parseFractionOrDecimal(normalized)
+    }
+
+    func rectangleHatchStyle(for annotation: PDFAnnotation) -> RectangleHatchStyle? {
+        let type = (annotation.type ?? "").lowercased()
+        guard type.contains("square") || type.contains("circle") else { return nil }
+        let metadata = annotation.userName ?? ""
+        guard let markerRange = metadata.range(of: "DrawbridgeRectHatch:", options: .caseInsensitive) else {
+            // Legacy fallback: previous behavior was effectively solid fill.
+            return RectangleHatchStyle.solid
+        }
+        let tokenStart = metadata[markerRange.upperBound...]
+        let token = tokenStart
+            .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
+            .first
+            .map(String.init) ?? ""
+        return RectangleHatchStyle.from(metadataToken: token)
+    }
+
+    private func rectShapeID(for annotation: PDFAnnotation) -> String? {
+        let metadata = annotation.userName ?? ""
+        guard let markerRange = metadata.range(of: "DrawbridgeRectID:", options: .caseInsensitive) else {
+            return nil
+        }
+        let tokenStart = metadata[markerRange.upperBound...]
+        return tokenStart
+            .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
+            .first
+            .map(String.init)
+    }
+
+    private func ensureRectShapeID(for annotation: PDFAnnotation) -> String {
+        if let existing = rectShapeID(for: annotation), !existing.isEmpty {
+            return existing
+        }
+        let created = UUID().uuidString
+        let metadata = annotation.userName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if metadata.isEmpty {
+            annotation.userName = "DrawbridgeRectID:\(created)"
+        } else {
+            annotation.userName = "DrawbridgeRectID:\(created)|\(metadata)"
+        }
+        return created
+    }
+
+    private func polylineGroupID(for annotation: PDFAnnotation) -> String? {
+        let metadata = annotation.userName ?? ""
+        guard let markerRange = metadata.range(of: "DrawbridgePolylineGroup:", options: .caseInsensitive) else {
+            return nil
+        }
+        let tokenStart = metadata[markerRange.upperBound...]
+        return tokenStart
+            .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
+            .first
+            .map(String.init)
+    }
+
+    private func polylineHatchStyle(for annotation: PDFAnnotation) -> RectangleHatchStyle? {
+        let metadata = annotation.userName ?? ""
+        guard let markerRange = metadata.range(of: "DrawbridgePolylineHatch:", options: .caseInsensitive) else {
+            return nil
+        }
+        let tokenStart = metadata[markerRange.upperBound...]
+        let token = tokenStart
+            .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
+            .first
+            .map(String.init) ?? ""
+        return RectangleHatchStyle.from(metadataToken: token)
+    }
+
+    private func polylineHatchColor(for annotation: PDFAnnotation) -> NSColor? {
+        let metadata = annotation.userName ?? ""
+        guard let markerRange = metadata.range(of: "DrawbridgePolylineFill:", options: .caseInsensitive) else {
+            return nil
+        }
+        let tokenStart = metadata[markerRange.upperBound...]
+        let token = tokenStart
+            .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
+            .first
+            .map(String.init) ?? ""
+        return parseRectFillToken(token)
+    }
+
+    private func polylineBackgroundColor(for annotation: PDFAnnotation) -> NSColor? {
+        let metadata = annotation.userName ?? ""
+        guard let markerRange = metadata.range(of: "DrawbridgePolylineBg:", options: .caseInsensitive) else {
+            return nil
+        }
+        let tokenStart = metadata[markerRange.upperBound...]
+        let token = tokenStart
+            .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
+            .first
+            .map(String.init) ?? ""
+        return parseRectFillToken(token)
+    }
+
+    private func polylinePointsToken(for annotation: PDFAnnotation) -> String? {
+        let metadata = annotation.userName ?? ""
+        guard let markerRange = metadata.range(of: "DrawbridgePolylinePts:", options: .caseInsensitive) else {
+            return nil
+        }
+        let tokenStart = metadata[markerRange.upperBound...]
+        return tokenStart
+            .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
+            .first
+            .map(String.init)
+    }
+
+    private func encodedPolylinePointsToken(_ points: [NSPoint]) -> String {
+        points
+            .map { point in
+                let x = String(format: "%.4f", point.x)
+                let y = String(format: "%.4f", point.y)
+                return "\(x),\(y)"
+            }
+            .joined(separator: ";")
+    }
+
+    private func decodedPolylinePointsToken(_ token: String) -> [NSPoint]? {
+        let pairs = token.split(separator: ";")
+        guard pairs.count >= 3 else { return nil }
+        var points: [NSPoint] = []
+        points.reserveCapacity(pairs.count)
+        for pair in pairs {
+            let comps = pair.split(separator: ",")
+            guard comps.count == 2,
+                  let x = Double(comps[0]),
+                  let y = Double(comps[1]) else {
+                return nil
+            }
+            points.append(NSPoint(x: x, y: y))
+        }
+        return points.count >= 3 ? points : nil
+    }
+
+    func isHatchOverlayAnnotation(_ annotation: PDFAnnotation) -> Bool {
+        let contents = (annotation.contents ?? "").lowercased()
+        return contents.hasPrefix("drawbridgehatchoverlay|")
+    }
+
+    func relatedHatchOverlayAnnotations(for annotation: PDFAnnotation, on page: PDFPage) -> [PDFAnnotation] {
+        if let shapeID = rectShapeID(for: annotation), !shapeID.isEmpty {
+            return page.annotations.filter { candidate in
+                isHatchOverlayAnnotation(candidate) &&
+                ((candidate.userName ?? "").contains(shapeID) || (candidate.contents ?? "").contains(shapeID))
+            }
+        }
+        if let groupID = polylineGroupID(for: annotation), !groupID.isEmpty {
+            let marker = "PolylineGroup:\(groupID)"
+            return page.annotations.filter { candidate in
+                isHatchOverlayAnnotation(candidate) &&
+                ((candidate.userName ?? "").contains(marker) || (candidate.contents ?? "").contains(marker))
+            }
+        }
+        return []
+    }
+
+    private func removeHatchOverlays(for shapeID: String, on page: PDFPage) {
+        let overlays = page.annotations.filter { candidate in
+            isHatchOverlayAnnotation(candidate) &&
+            ((candidate.userName ?? "").contains(shapeID) || (candidate.contents ?? "").contains(shapeID))
+        }
+        for overlay in overlays {
+            page.removeAnnotation(overlay)
+        }
+    }
+
+    func rectangleFillColor(for annotation: PDFAnnotation) -> NSColor? {
+        let type = (annotation.type ?? "").lowercased()
+        guard type.contains("square") || type.contains("circle") else { return nil }
+        let metadata = annotation.userName ?? ""
+        if let markerRange = metadata.range(of: "DrawbridgeRectFill:", options: .caseInsensitive) {
+            let tokenStart = metadata[markerRange.upperBound...]
+            let token = tokenStart
+                .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
+                .first
+                .map(String.init) ?? ""
+            if let parsed = parseRectFillToken(token) {
+                return parsed
+            }
+        }
+        if let interior = annotation.interiorColor {
+            if interior.type == .pattern {
+                return nil
+            }
+            return interior
+        }
+        return nil
+    }
+
+    func rectangleHatchBackgroundColor(for annotation: PDFAnnotation) -> NSColor? {
+        let type = (annotation.type ?? "").lowercased()
+        guard type.contains("square") || type.contains("circle") else { return nil }
+        let metadata = annotation.userName ?? ""
+        if let markerRange = metadata.range(of: "DrawbridgeRectBg:", options: .caseInsensitive) {
+            let tokenStart = metadata[markerRange.upperBound...]
+            let token = tokenStart
+                .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
+                .first
+                .map(String.init) ?? ""
+            if let parsed = parseRectFillToken(token) {
+                return parsed
+            }
+        }
+        if let interior = annotation.interiorColor, interior.type != .pattern {
+            return interior
+        }
+        return nil
+    }
+
+    func applyRectangleHatchStyle(
+        _ style: RectangleHatchStyle,
+        to annotation: PDFAnnotation,
+        fillColor: NSColor,
+        backgroundColor: NSColor,
+        lineWidth: CGFloat
+    ) {
+        let shapeID = ensureRectShapeID(for: annotation)
+        let metadata = "DrawbridgeRectHatch:\(style.metadataToken)"
+        let fillMetadata = "DrawbridgeRectFill:\(rectFillToken(from: fillColor))"
+        let bgMetadata = "DrawbridgeRectBg:\(rectFillToken(from: backgroundColor))"
+        let idMetadata = "DrawbridgeRectID:\(shapeID)"
+        let existing = annotation.userName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if existing.isEmpty {
+            annotation.userName = "\(idMetadata)|\(metadata)|\(fillMetadata)|\(bgMetadata)"
+        } else if existing.hasPrefix(Self.calloutGroupPrefix) || existing.hasPrefix(Self.textGroupPrefix) {
+            annotation.userName = existing
+        } else {
+            let parts = existing.split(separator: "|").map(String.init).filter { token in
+                let lower = token.lowercased()
+                return !lower.hasPrefix("drawbridgerecthatch:") &&
+                    !lower.hasPrefix("drawbridgerectfill:") &&
+                    !lower.hasPrefix("drawbridgerectbg:") &&
+                    !lower.hasPrefix("drawbridgerectid:")
+            }
+            annotation.userName = ([idMetadata, metadata, fillMetadata, bgMetadata] + parts).joined(separator: "|")
+        }
+        syncRectangleHatchOverlay(
+            for: annotation,
+            fillColor: fillColor,
+            backgroundColor: backgroundColor,
+            lineWidth: lineWidth
+        )
+    }
+
+    func rebindRectangleHatchIdentityAndSync(for annotation: PDFAnnotation, preferredLineWidth: CGFloat? = nil) {
+        let type = (annotation.type ?? "").lowercased()
+        guard type.contains("square") || type.contains("circle") else { return }
+        let style = rectangleHatchStyle(for: annotation) ?? .solid
+        let fill = rectangleFillColor(for: annotation) ?? rectangleFillColor
+        let background = rectangleHatchBackgroundColor(for: annotation) ?? rectangleHatchBackgroundColor
+        let width = max(0.1, preferredLineWidth ?? annotation.border?.lineWidth ?? rectangleLineWidth)
+
+        let existing = annotation.userName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !existing.isEmpty {
+            let parts = existing
+                .split(separator: "|")
+                .map(String.init)
+                .filter { !$0.lowercased().hasPrefix("drawbridgerectid:") }
+            annotation.userName = parts.isEmpty ? nil : parts.joined(separator: "|")
+        }
+
+        applyRectangleHatchStyle(
+            style,
+            to: annotation,
+            fillColor: fill,
+            backgroundColor: background,
+            lineWidth: width
+        )
+    }
+
+    private func rectFillToken(from color: NSColor) -> String {
+        let rgb = color.usingColorSpace(.deviceRGB) ?? color
+        let r = Int(round(max(0, min(1, rgb.redComponent)) * 255))
+        let g = Int(round(max(0, min(1, rgb.greenComponent)) * 255))
+        let b = Int(round(max(0, min(1, rgb.blueComponent)) * 255))
+        let a = Int(round(max(0, min(1, rgb.alphaComponent)) * 255))
+        return "\(r),\(g),\(b),\(a)"
+    }
+
+    private func parseRectFillToken(_ token: String) -> NSColor? {
+        let comps = token.split(separator: ",").map { Int($0.trimmingCharacters(in: .whitespaces)) ?? -1 }
+        guard comps.count == 4 else { return nil }
+        guard comps.allSatisfy({ (0...255).contains($0) }) else { return nil }
+        return NSColor(
+            calibratedRed: CGFloat(comps[0]) / 255.0,
+            green: CGFloat(comps[1]) / 255.0,
+            blue: CGFloat(comps[2]) / 255.0,
+            alpha: CGFloat(comps[3]) / 255.0
+        )
+    }
+
+    func syncRectangleHatchOverlay(for annotation: PDFAnnotation, fillColor: NSColor, backgroundColor: NSColor, lineWidth: CGFloat) {
+        guard let page = annotation.page else { return }
+        let type = (annotation.type ?? "").lowercased()
+        guard type.contains("square") || type.contains("circle") else { return }
+        let style = rectangleHatchStyle(for: annotation) ?? .solid
+        let shapeID = ensureRectShapeID(for: annotation)
+        removeHatchOverlays(for: shapeID, on: page)
+
+        switch style {
+        case .none:
+            annotation.interiorColor = .clear
+            return
+        case .solid:
+            annotation.interiorColor = fillColor
+            return
+        default:
+            annotation.interiorColor = backgroundColor
+        }
+
+        let bounds = annotation.bounds
+        guard bounds.width > 0.5, bounds.height > 0.5 else { return }
+        let localRect = NSRect(origin: .zero, size: bounds.size)
+        let spacing = max(6.0, min(28.0, 8.0 + lineWidth))
+        let hatchWidth = max(0.35, min(2.5, lineWidth * 0.22))
+        let hatchColor = fillColor
+
+        let segments = hatchSegments(in: localRect, style: style, spacing: spacing, shapeType: type.contains("circle") ? "circle" : "square")
+        guard !segments.isEmpty else { return }
+
+        let path = NSBezierPath()
+        path.lineWidth = hatchWidth
+        path.lineCapStyle = .butt
+        path.lineJoinStyle = .miter
+        for segment in segments {
+            path.move(to: segment.0)
+            path.line(to: segment.1)
+        }
+
+        let overlay = PDFAnnotation(bounds: bounds, forType: .ink, withProperties: nil)
+        overlay.color = hatchColor
+        overlay.contents = "DrawbridgeHatchOverlay|\(shapeID)|\(style.metadataToken)"
+        overlay.userName = "DrawbridgeHatchOverlay:\(shapeID)"
+        overlay.add(path)
+        assignLineWidth(hatchWidth, to: overlay)
+        page.addAnnotation(overlay)
+    }
+
+    private func syncRectangleHatchOverlayIfNeeded(for annotation: PDFAnnotation) {
+        let type = (annotation.type ?? "").lowercased()
+        guard type.contains("square") || type.contains("circle") else { return }
+        let fill = rectangleFillColor(for: annotation) ?? rectangleFillColor
+        let background = rectangleHatchBackgroundColor(for: annotation) ?? rectangleHatchBackgroundColor
+        let width = max(0.1, annotation.border?.lineWidth ?? rectangleLineWidth)
+        syncRectangleHatchOverlay(for: annotation, fillColor: fill, backgroundColor: background, lineWidth: width)
+    }
+
+    private func hatchSegments(in rect: NSRect, style: RectangleHatchStyle, spacing: CGFloat, shapeType: String) -> [(NSPoint, NSPoint)] {
+        var segments: [(NSPoint, NSPoint)] = []
+
+        func addParallel(angle: CGFloat, spacing s: CGFloat) {
+            segments.append(contentsOf: parallelSegments(in: rect, angle: angle, spacing: s))
+        }
+
+        switch style {
+        case .none, .solid:
+            return []
+        case .diagonal:
+            addParallel(angle: .pi / 4, spacing: spacing)
+        case .crosshatch:
+            addParallel(angle: .pi / 4, spacing: spacing)
+            addParallel(angle: -.pi / 4, spacing: spacing)
+        case .metal:
+            // Typical drafting "metal" appearance: dominant 45deg single hatch.
+            addParallel(angle: .pi / 4, spacing: max(4, spacing * 0.65))
+        case .earth:
+            // Soil/earth: layered horizontal strata with occasional short breaks.
+            segments.append(contentsOf: earthSegments(in: rect, spacing: spacing))
+        case .concrete:
+            addParallel(angle: .pi / 4, spacing: spacing * 1.8)
+            addParallel(angle: -.pi / 4, spacing: spacing * 1.8)
+        case .woodVeneer:
+            addParallel(angle: 0, spacing: spacing * 0.95)
+        case .brick:
+            addParallel(angle: 0, spacing: spacing)
+            segments.append(contentsOf: brickVerticalSegments(in: rect, course: spacing))
+        case .insulation:
+            segments.append(contentsOf: insulationSegments(in: rect, spacing: spacing))
+        case .stone:
+            segments.append(contentsOf: stoneSegments(in: rect, course: spacing))
+        }
+
+        if shapeType == "circle" {
+            return segments.compactMap { clipSegmentToEllipse($0.0, $0.1, in: rect) }
+        }
+        return segments.map { clipSegmentToRect($0.0, $0.1, in: rect) }.compactMap { $0 }
+    }
+
+    private func parallelSegments(in rect: NSRect, angle: CGFloat, spacing: CGFloat) -> [(NSPoint, NSPoint)] {
+        let dir = NSPoint(x: cos(angle), y: sin(angle))
+        let normal = NSPoint(x: -sin(angle), y: cos(angle))
+        let corners = [
+            NSPoint(x: rect.minX, y: rect.minY),
+            NSPoint(x: rect.maxX, y: rect.minY),
+            NSPoint(x: rect.minX, y: rect.maxY),
+            NSPoint(x: rect.maxX, y: rect.maxY)
+        ]
+        let projections = corners.map { $0.x * normal.x + $0.y * normal.y }
+        guard let minP = projections.min(), let maxP = projections.max() else { return [] }
+        let diag = hypot(rect.width, rect.height) * 2.0
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        var segments: [(NSPoint, NSPoint)] = []
+        var p = minP - spacing
+        while p <= maxP + spacing {
+            let anchor = NSPoint(
+                x: center.x + normal.x * (p - (center.x * normal.x + center.y * normal.y)),
+                y: center.y + normal.y * (p - (center.x * normal.x + center.y * normal.y))
+            )
+            let a = NSPoint(x: anchor.x - dir.x * diag, y: anchor.y - dir.y * diag)
+            let b = NSPoint(x: anchor.x + dir.x * diag, y: anchor.y + dir.y * diag)
+            segments.append((a, b))
+            p += spacing
+        }
+        return segments
+    }
+
+    private func clipSegmentToRect(_ a: NSPoint, _ b: NSPoint, in rect: NSRect) -> (NSPoint, NSPoint)? {
+        let minX = rect.minX
+        let maxX = rect.maxX
+        let minY = rect.minY
+        let maxY = rect.maxY
+        var t0: CGFloat = 0
+        var t1: CGFloat = 1
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let tests: [(CGFloat, CGFloat)] = [
+            (-dx, a.x - minX), (dx, maxX - a.x),
+            (-dy, a.y - minY), (dy, maxY - a.y)
+        ]
+        for (p, q) in tests {
+            if abs(p) < 0.000001 {
+                if q < 0 { return nil }
+                continue
+            }
+            let r = q / p
+            if p < 0 {
+                if r > t1 { return nil }
+                t0 = max(t0, r)
+            } else {
+                if r < t0 { return nil }
+                t1 = min(t1, r)
+            }
+        }
+        guard t0 <= t1 else { return nil }
+        return (
+            NSPoint(x: a.x + dx * t0, y: a.y + dy * t0),
+            NSPoint(x: a.x + dx * t1, y: a.y + dy * t1)
+        )
+    }
+
+    private func clipSegmentToEllipse(_ a: NSPoint, _ b: NSPoint, in rect: NSRect) -> (NSPoint, NSPoint)? {
+        let cx = rect.midX
+        let cy = rect.midY
+        let rx = max(0.001, rect.width * 0.5)
+        let ry = max(0.001, rect.height * 0.5)
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let ax = (a.x - cx) / rx
+        let ay = (a.y - cy) / ry
+        let bx = dx / rx
+        let by = dy / ry
+        let A = bx * bx + by * by
+        let B = 2.0 * (ax * bx + ay * by)
+        let C = ax * ax + ay * ay - 1.0
+        guard A > 0.0000001 else { return nil }
+        let disc = B * B - 4.0 * A * C
+        if disc < 0 { return nil }
+        let sqrtDisc = sqrt(disc)
+        let tA = (-B - sqrtDisc) / (2.0 * A)
+        let tB = (-B + sqrtDisc) / (2.0 * A)
+        let lo = max(0.0, min(tA, tB))
+        let hi = min(1.0, max(tA, tB))
+        guard lo <= hi else { return nil }
+        return (
+            NSPoint(x: a.x + dx * lo, y: a.y + dy * lo),
+            NSPoint(x: a.x + dx * hi, y: a.y + dy * hi)
+        )
+    }
+
+    private func clipSegmentToPolygon(_ a: NSPoint, _ b: NSPoint, polygon: [NSPoint]) -> [(NSPoint, NSPoint)] {
+        guard polygon.count >= 3 else { return [] }
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let epsilon: CGFloat = 0.0001
+        var ts: [CGFloat] = [0, 1]
+
+        for idx in polygon.indices {
+            let p1 = polygon[idx]
+            let p2 = polygon[(idx + 1) % polygon.count]
+            let ex = p2.x - p1.x
+            let ey = p2.y - p1.y
+            let denom = dx * ey - dy * ex
+            if abs(denom) < epsilon { continue }
+            let ax = p1.x - a.x
+            let ay = p1.y - a.y
+            let t = (ax * ey - ay * ex) / denom
+            let u = (ax * dy - ay * dx) / denom
+            if t >= -epsilon, t <= 1 + epsilon, u >= -epsilon, u <= 1 + epsilon {
+                ts.append(min(1, max(0, t)))
+            }
+        }
+
+        ts.sort()
+        var deduped: [CGFloat] = []
+        deduped.reserveCapacity(ts.count)
+        for value in ts {
+            if let last = deduped.last, abs(last - value) < 0.0005 { continue }
+            deduped.append(value)
+        }
+        guard deduped.count >= 2 else { return [] }
+
+        var clipped: [(NSPoint, NSPoint)] = []
+        for idx in 0..<(deduped.count - 1) {
+            let t0 = deduped[idx]
+            let t1 = deduped[idx + 1]
+            if (t1 - t0) < 0.0005 { continue }
+            let midT = (t0 + t1) * 0.5
+            let mid = NSPoint(x: a.x + dx * midT, y: a.y + dy * midT)
+            if pointInPolygon(mid, polygon: polygon) {
+                let start = NSPoint(x: a.x + dx * t0, y: a.y + dy * t0)
+                let end = NSPoint(x: a.x + dx * t1, y: a.y + dy * t1)
+                clipped.append((start, end))
+            }
+        }
+        return clipped
+    }
+
+    private func pointInPolygon(_ point: NSPoint, polygon: [NSPoint]) -> Bool {
+        guard polygon.count >= 3 else { return false }
+        var inside = false
+        var j = polygon.count - 1
+        for i in 0..<polygon.count {
+            let pi = polygon[i]
+            let pj = polygon[j]
+            let intersects = ((pi.y > point.y) != (pj.y > point.y)) &&
+                (point.x < (pj.x - pi.x) * (point.y - pi.y) / max(0.000001, (pj.y - pi.y)) + pi.x)
+            if intersects {
+                inside.toggle()
+            }
+            j = i
+        }
+        return inside
+    }
+
+    private func brickVerticalSegments(in rect: NSRect, course: CGFloat) -> [(NSPoint, NSPoint)] {
+        guard course > 0.1 else { return [] }
+        var segments: [(NSPoint, NSPoint)] = []
+        var y = rect.minY
+        var row = 0
+        while y < rect.maxY {
+            let y2 = min(rect.maxY, y + course)
+            let offset = (row % 2 == 0) ? 0 : course * 0.5
+            var x = rect.minX + offset
+            while x < rect.maxX {
+                segments.append((NSPoint(x: x, y: y), NSPoint(x: x, y: y2)))
+                x += course
+            }
+            y += course
+            row += 1
+        }
+        return segments
+    }
+
+    private func insulationSegments(in rect: NSRect, spacing: CGFloat) -> [(NSPoint, NSPoint)] {
+        guard spacing > 0.1 else { return [] }
+        var segments: [(NSPoint, NSPoint)] = []
+        var y = rect.minY + spacing * 0.6
+        while y <= rect.maxY + spacing {
+            let amplitude = spacing * 0.35
+            var x = rect.minX - spacing
+            while x < rect.maxX + spacing {
+                let a = NSPoint(x: x, y: y)
+                let b = NSPoint(x: x + spacing * 0.5, y: y + amplitude)
+                let c = NSPoint(x: x + spacing, y: y)
+                segments.append((a, b))
+                segments.append((b, c))
+                x += spacing
+            }
+            y += spacing * 1.35
+        }
+        return segments
+    }
+
+    private func earthSegments(in rect: NSRect, spacing: CGFloat) -> [(NSPoint, NSPoint)] {
+        guard spacing > 0.1 else { return [] }
+        var segments: [(NSPoint, NSPoint)] = []
+        let pitch = max(7.0, spacing * 1.05)
+        let dashLength = max(10.0, spacing * 2.5)
+        let dashGap = max(5.0, spacing * 0.95)
+        let diagonal = hypot(rect.width, rect.height)
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        let maxU = diagonal * 1.8
+        let bandCount = Int((diagonal * 3.2) / pitch) + 8
+        let startBand = -bandCount / 2
+        let endBand = bandCount / 2
+
+        for band in startBand...endBand {
+            let usesPositiveDiagonal = (band % 2 == 0)
+            let angle: CGFloat = usesPositiveDiagonal ? (.pi / 4.0) : (-.pi / 4.0)
+            let dir = NSPoint(x: cos(angle), y: sin(angle))
+            let normal = NSPoint(x: -sin(angle), y: cos(angle))
+            let v = CGFloat(band) * pitch
+            let bandAnchor = NSPoint(x: center.x + normal.x * v, y: center.y + normal.y * v)
+            var u = -maxU + (usesPositiveDiagonal ? 0 : (dashLength * 0.5))
+            while u <= maxU {
+                let start = NSPoint(
+                    x: bandAnchor.x + dir.x * u,
+                    y: bandAnchor.y + dir.y * u
+                )
+                let end = NSPoint(
+                    x: start.x + dir.x * dashLength,
+                    y: start.y + dir.y * dashLength
+                )
+                segments.append((start, end))
+                u += dashLength + dashGap
+            }
+        }
+        return segments
+    }
+
+    private func stoneSegments(in rect: NSRect, course: CGFloat) -> [(NSPoint, NSPoint)] {
+        guard course > 0.1 else { return [] }
+        var segments: [(NSPoint, NSPoint)] = []
+        let rowHeight = max(7.0, course * 0.95)
+        let minStone = max(18.0, rowHeight * 1.8)
+        let maxStone = max(minStone + 8.0, rowHeight * 3.8)
+
+        var y = rect.minY
+        var row = 0
+        while y <= rect.maxY {
+            segments.append((NSPoint(x: rect.minX, y: y), NSPoint(x: rect.maxX, y: y)))
+            let rowTop = min(rect.maxY, y + rowHeight)
+            var x = rect.minX + (row % 2 == 0 ? 0 : rowHeight * 0.7)
+            var stoneIndex = 0
+            while x < rect.maxX {
+                let seed = CGFloat(((row + 1) * 97 + (stoneIndex + 3) * 57) % 1000) / 1000.0
+                let width = minStone + (maxStone - minStone) * seed
+                let jointX = min(rect.maxX, x + width)
+                if jointX < rect.maxX - 0.5 {
+                    // Slightly irregular vertical joints to mimic stone breaks.
+                    let kink = rowHeight * (0.08 + 0.14 * seed)
+                    let midY = y + rowHeight * 0.52
+                    let p1 = NSPoint(x: jointX, y: y)
+                    let p2 = NSPoint(x: jointX + kink, y: midY)
+                    let p3 = NSPoint(x: jointX, y: rowTop)
+                    segments.append((p1, p2))
+                    segments.append((p2, p3))
+                }
+                x = jointX
+                stoneIndex += 1
+            }
+            y += rowHeight
+            row += 1
+        }
+
+        return segments
     }
 
     private func directionPointForTypedDistance(on page: PDFPage, from anchor: NSPoint, orthogonal: Bool) -> NSPoint {
@@ -1779,6 +2990,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 let pointer = lastPointerInView.map { snapPointInViewIfNeeded($0, on: page) }
                 updatePolylinePreview(at: pointer, orthogonal: orthogonal)
             }
+        case .circle:
+            if let page = pendingCirclePage {
+                let pointer = lastPointerInView.map { snapPointInViewIfNeeded($0, on: page) }
+                updateCirclePreview(at: pointer)
+            }
         default:
             break
         }
@@ -1831,6 +3047,27 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             pendingPolylinePointsInPage.append(next)
             typedDistanceBuffer = ""
             updatePolylinePreview(at: lastPointerInView, orthogonal: orthogonal)
+            return true
+        }
+
+        if toolMode == .circle,
+           let page = pendingCirclePage,
+           let center = pendingCircleCenterInPage {
+            let toward = directionPointForTypedDistance(on: page, from: center, orthogonal: false)
+            var dx = toward.x - center.x
+            var dy = toward.y - center.y
+            let magnitude = hypot(dx, dy)
+            if magnitude < 0.001 {
+                dx = 1
+                dy = 0
+            } else {
+                dx /= magnitude
+                dy /= magnitude
+            }
+            let edge = NSPoint(x: center.x + dx * lengthInPoints, y: center.y + dy * lengthInPoints)
+            let radius = hypot(edge.x - center.x, edge.y - center.y)
+            addCircleAnnotation(center: center, radius: radius, on: page)
+            clearPendingCircle()
             return true
         }
 
@@ -2303,14 +3540,23 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func minimumResizeSize(for annotation: PDFAnnotation) -> NSSize {
+        let annotationType = (annotation.type ?? "").lowercased()
+        if annotationType.contains("square") || annotationType.contains("circle") {
+            return NSSize(width: 4.0, height: 4.0)
+        }
         let fontSize = max(6.0, annotation.font?.pointSize ?? textFontSize)
         return NSSize(width: max(120.0, fontSize * 8.0), height: max(34.0, fontSize * 2.4))
     }
 
     private func resizeCornerHit(for annotation: PDFAnnotation, on page: PDFPage, at locationInView: NSPoint) -> ResizeCorner? {
-        guard isEditableTextAnnotation(annotation) else { return nil }
-        // Match handle geometry shown by MainViewController selection overlay for FreeText.
-        let visualRect = rectInView(fromPageRect: annotation.bounds, on: page).insetBy(dx: -4, dy: -4)
+        let annotationType = (annotation.type ?? "").lowercased()
+        let isFreeText = isEditableTextAnnotation(annotation)
+        let isResizableShape = annotationType.contains("square") || annotationType.contains("circle")
+        guard isFreeText || isResizableShape else { return nil }
+
+        // Match handle geometry shown by MainViewController selection overlay.
+        let inset: CGFloat = isFreeText ? -4 : -3
+        let visualRect = rectInView(fromPageRect: annotation.bounds, on: page).insetBy(dx: inset, dy: inset)
         guard visualRect.width > 0.1, visualRect.height > 0.1 else { return nil }
         let handles: [(ResizeCorner, NSPoint)] = [
             (.lowerLeft, NSPoint(x: visualRect.minX, y: visualRect.minY)),
@@ -2318,13 +3564,125 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             (.upperLeft, NSPoint(x: visualRect.minX, y: visualRect.maxY)),
             (.upperRight, NSPoint(x: visualRect.maxX, y: visualRect.maxY))
         ]
-        let threshold: CGFloat = 16.0
+        let threshold: CGFloat = isFreeText ? 16.0 : 20.0
+        let hitSide = threshold * 2.0
         for (corner, point) in handles {
-            if hypot(locationInView.x - point.x, locationInView.y - point.y) <= threshold {
+            let hitRect = NSRect(
+                x: point.x - threshold,
+                y: point.y - threshold,
+                width: hitSide,
+                height: hitSide
+            )
+            if hitRect.contains(locationInView) {
                 return corner
             }
         }
         return nil
+    }
+
+    private func selectedHandleDragTarget(
+        on page: PDFPage,
+        at locationInView: NSPoint,
+        pointInPage _: NSPoint
+    ) -> (annotation: PDFAnnotation, resizeCorner: ResizeCorner?, lineEndpointHandle: LineEndpointHandle?)? {
+        guard let selected = selectedAnnotationsProvider?(page), !selected.isEmpty else { return nil }
+        for annotation in selected {
+            if let endpoint = lineEndpointHit(for: annotation, on: page, at: locationInView) {
+                return (annotation: annotation, resizeCorner: nil, lineEndpointHandle: endpoint)
+            }
+            if let corner = resizeCornerHit(for: annotation, on: page, at: locationInView) {
+                return (annotation: annotation, resizeCorner: corner, lineEndpointHandle: nil)
+            }
+        }
+        return nil
+    }
+
+    private func isLineEndpointEditable(_ annotation: PDFAnnotation) -> Bool {
+        guard let type = annotation.type?.lowercased(), type.contains("ink") else { return false }
+        let contents = (annotation.contents ?? "").lowercased()
+        return contents.contains("line") || contents.contains("polyline")
+    }
+
+    private func lineSegmentInPage(for annotation: PDFAnnotation) -> Segment? {
+        guard isLineEndpointEditable(annotation) else { return nil }
+        let segments = annotationSegmentsInPage(for: annotation)
+        guard !segments.isEmpty else { return nil }
+
+        var endpoints: [NSPoint] = []
+        endpoints.reserveCapacity(segments.count * 2)
+        for segment in segments {
+            endpoints.append(segment.0)
+            endpoints.append(segment.1)
+        }
+        guard endpoints.count >= 2 else {
+            return (start: segments[0].0, end: segments[0].1)
+        }
+
+        var bestPair: (NSPoint, NSPoint)?
+        var bestDistanceSquared: CGFloat = -1
+        for i in 0..<(endpoints.count - 1) {
+            for j in (i + 1)..<endpoints.count {
+                let dx = endpoints[j].x - endpoints[i].x
+                let dy = endpoints[j].y - endpoints[i].y
+                let d2 = dx * dx + dy * dy
+                if d2 > bestDistanceSquared {
+                    bestDistanceSquared = d2
+                    bestPair = (endpoints[i], endpoints[j])
+                }
+            }
+        }
+        guard let pair = bestPair else { return nil }
+        return (start: pair.0, end: pair.1)
+    }
+
+    func primaryLineSegmentInPage(for annotation: PDFAnnotation) -> (NSPoint, NSPoint)? {
+        guard let segment = lineSegmentInPage(for: annotation) else { return nil }
+        return (segment.start, segment.end)
+    }
+
+    private func lineEndpointHit(for annotation: PDFAnnotation, on page: PDFPage, at locationInView: NSPoint) -> LineEndpointHandle? {
+        guard let segment = lineSegmentInPage(for: annotation) else { return nil }
+        let startInView = convert(segment.start, from: page)
+        let endInView = convert(segment.end, from: page)
+        let threshold: CGFloat = 12.0
+        let startDistance = hypot(locationInView.x - startInView.x, locationInView.y - startInView.y)
+        let endDistance = hypot(locationInView.x - endInView.x, locationInView.y - endInView.y)
+        if startDistance > threshold, endDistance > threshold {
+            return nil
+        }
+        return startDistance <= endDistance ? .start : .end
+    }
+
+    private func updateLineAnnotationGeometry(_ annotation: PDFAnnotation, start: NSPoint, end: NSPoint) {
+        let currentLineWidth: CGFloat
+        if let width = annotation.paths?.first?.lineWidth, width > 0 {
+            currentLineWidth = width
+        } else {
+            currentLineWidth = max(0.1, annotation.border?.lineWidth ?? penLineWidth)
+        }
+        let pad = max(4.0, currentLineWidth * 0.5)
+        let minX = min(start.x, end.x)
+        let minY = min(start.y, end.y)
+        let maxX = max(start.x, end.x)
+        let maxY = max(start.y, end.y)
+        let newBounds = NSRect(
+            x: minX - pad,
+            y: minY - pad,
+            width: (maxX - minX) + pad * 2.0,
+            height: (maxY - minY) + pad * 2.0
+        )
+        let localStart = NSPoint(x: start.x - newBounds.origin.x, y: start.y - newBounds.origin.y)
+        let localEnd = NSPoint(x: end.x - newBounds.origin.x, y: end.y - newBounds.origin.y)
+
+        let replacementPath = NSBezierPath()
+        replacementPath.move(to: localStart)
+        replacementPath.line(to: localEnd)
+        replacementPath.lineWidth = currentLineWidth
+
+        annotation.bounds = newBounds
+        assignLineWidth(currentLineWidth, to: annotation)
+        // PDFKit may vend copied paths from `annotation.paths`; replace the path list directly.
+        annotation.setValue([replacementPath], forKey: "paths")
     }
 
     private func initialCalloutDragState(
@@ -2591,7 +3949,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private func updateTypedDistanceHUD() {
         let isLineReady = (toolMode == .line && pendingLinePage != nil && pendingLineStartInPage != nil)
         let isPolylineReady = (toolMode == .polyline && pendingPolylinePage != nil && !pendingPolylinePointsInPage.isEmpty)
-        guard isLineReady || isPolylineReady else {
+        let isCircleReady = (toolMode == .circle && pendingCirclePage != nil && pendingCircleCenterInPage != nil)
+        guard isLineReady || isPolylineReady || isCircleReady else {
             hideTypedDistanceHUD()
             return
         }
@@ -2614,6 +3973,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             anchorPoint = pointer
         } else if toolMode == .line, let page = pendingLinePage, let start = pendingLineStartInPage {
             anchorPoint = convert(start, from: page)
+        } else if toolMode == .circle, let page = pendingCirclePage, let center = pendingCircleCenterInPage {
+            anchorPoint = convert(center, from: page)
         } else if toolMode == .polyline, let page = pendingPolylinePage, let last = pendingPolylinePointsInPage.last {
             anchorPoint = convert(last, from: page)
         } else {
@@ -3029,8 +4390,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         for annotation in page.annotations.reversed() {
             guard annotation.shouldDisplay else { continue }
             if isTextOutlineAnnotation(annotation) { continue }
+            if isHatchOverlayAnnotation(annotation) { continue }
             let annotationType = (annotation.type ?? "").lowercased()
             let isInkLike = annotationType.contains("ink")
+            let contents = (annotation.contents ?? "").lowercased()
+            let isLinework = isInkLike && (contents.contains("line") || contents.contains("polyline"))
+            // Keep line/polyline picking precise so nearby segments are not accidentally selected.
+            let effectiveMaxDistance = isLinework ? min(maxDistance, max(4.0, selectionHitDistanceInPage() * 0.45)) : maxDistance
             let d: CGFloat
             if isInkLike, let strokeDistance = distanceToInkStroke(point, annotation: annotation) {
                 d = strokeDistance
@@ -3039,7 +4405,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             } else {
                 d = distanceToRect(point, rect: annotation.bounds)
             }
-            if d <= bestDistance {
+            if d <= effectiveMaxDistance, d < bestDistance {
                 bestDistance = d
                 best = annotation
             }
@@ -3055,10 +4421,18 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         for annotation in page.annotations.reversed() {
             guard annotation.shouldDisplay else { continue }
             if isTextOutlineAnnotation(annotation) { continue }
+            if isHatchOverlayAnnotation(annotation) { continue }
+            let annotationType = (annotation.type ?? "").lowercased()
+            let contents = (annotation.contents ?? "").lowercased()
+            let isLinework = annotationType.contains("ink") && (contents.contains("line") || contents.contains("polyline"))
+            if isLinework {
+                // Do not use expanded-bounds fallback for linework; it can capture adjacent lines.
+                continue
+            }
             let expanded = annotation.bounds.insetBy(dx: -maxDistance, dy: -maxDistance)
             guard expanded.contains(point) else { continue }
             let d = distanceToRectPerimeter(point, rect: annotation.bounds)
-            if d <= fallbackDistance {
+            if d < fallbackDistance {
                 fallbackDistance = d
                 fallback = annotation
             }
@@ -3096,7 +4470,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func distanceToInkStroke(_ pointInPage: NSPoint, annotation: PDFAnnotation) -> CGFloat? {
-        guard let paths = annotation.value(forKey: "paths") as? [NSBezierPath], !paths.isEmpty else {
+        let directPaths = annotation.paths ?? []
+        let paths: [NSBezierPath]
+        if !directPaths.isEmpty {
+            paths = directPaths
+        } else if let kvcPaths = annotation.value(forKey: "paths") as? [NSBezierPath], !kvcPaths.isEmpty {
+            paths = kvcPaths
+        } else {
             return nil
         }
         var best = CGFloat.greatestFiniteMagnitude
@@ -3650,7 +5030,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     func handleTypedDistanceKey(_ event: NSEvent) -> Bool {
         let noCommandModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).isDisjoint(with: [.command, .option, .control])
         guard noCommandModifiers,
-              toolMode == .line || (toolMode == .polyline && pendingPolylinePage != nil && !pendingPolylinePointsInPage.isEmpty) else {
+              toolMode == .line || (toolMode == .polyline && pendingPolylinePage != nil && !pendingPolylinePointsInPage.isEmpty) || (toolMode == .circle && pendingCirclePage != nil && pendingCircleCenterInPage != nil) else {
             return false
         }
         let ortho = isOrthoConstraintActive(for: event)
@@ -3665,7 +5045,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             }
             return false
         }
-        if let chars = event.charactersIgnoringModifiers,
+        if let chars = event.characters,
            !chars.isEmpty {
             let allowed = CharacterSet(charactersIn: "0123456789./'\"- ")
             let filtered = String(chars.unicodeScalars.filter { allowed.contains($0) })
@@ -3821,6 +5201,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return .cloud
         case "r":
             return .rectangle
+        case "e":
+            return .circle
         case "t":
             return .text
         case "q":
