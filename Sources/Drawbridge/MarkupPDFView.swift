@@ -224,6 +224,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var pendingCalloutGroupID: String?
     private var pendingPolylinePage: PDFPage?
     private var pendingPolylinePointsInPage: [NSPoint] = []
+    private var pendingPolygonPage: PDFPage?
+    private var pendingPolygonPointsInPage: [NSPoint] = []
     private var pendingArrowPage: PDFPage?
     private var pendingArrowStartInPage: NSPoint?
     private var pendingLinePage: PDFPage?
@@ -442,7 +444,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func isOrthoConstraintActive(for event: NSEvent) -> Bool {
-        isOrthoSnapEnabled && (toolMode == .line || toolMode == .polyline)
+        isOrthoSnapEnabled && (toolMode == .line || toolMode == .polyline || toolMode == .polygon)
     }
 
     private func snapPointInPageIfNeeded(_ point: NSPoint, on page: PDFPage) -> NSPoint {
@@ -493,7 +495,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         guard annotation.shouldDisplay else { return false }
         guard let type = annotation.type?.lowercased(), type.contains("ink") else { return false }
         let contents = (annotation.contents ?? "").lowercased()
-        return contents.contains("line") || contents.contains("polyline")
+        return contents.contains("line") || contents.contains("polyline") || contents.contains("polygon")
     }
 
     private func annotationSegmentsInPage(for annotation: PDFAnnotation) -> [(NSPoint, NSPoint)] {
@@ -734,13 +736,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             updateMeasurePreview(with: event)
             return
         }
-        if toolMode == .polyline {
+        if toolMode == .polyline || toolMode == .polygon {
             let locationInView = convert(event.locationInWindow, from: nil)
             let ortho = isOrthoConstraintActive(for: event)
-            if let page = pendingPolylinePage {
-                updatePolylinePreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: ortho)
+            if let page = activePolylineLikePage() {
+                updatePolylineLikePreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: ortho)
             } else {
-                updatePolylinePreview(at: locationInView, orthogonal: ortho)
+                updatePolylineLikePreview(at: locationInView, orthogonal: ortho)
             }
             return
         }
@@ -849,7 +851,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         let createsMarkupTool: Bool
         switch toolMode {
-        case .pen, .arrow, .highlighter, .line, .polyline, .area, .cloud, .rectangle, .circle, .text, .callout, .measure, .calibrate:
+        case .pen, .arrow, .highlighter, .line, .polyline, .polygon, .area, .cloud, .rectangle, .circle, .text, .callout, .measure, .calibrate:
             createsMarkupTool = true
         default:
             createsMarkupTool = false
@@ -1080,7 +1082,39 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             }
             typedDistanceBuffer = ""
             let previewPoint = snapPointInViewIfNeeded(locationInView, on: page)
-            updatePolylinePreview(at: previewPoint, orthogonal: ortho)
+            updatePolylineLikePreview(at: previewPoint, orthogonal: ortho)
+        case .polygon:
+            if inlineTextField != nil {
+                _ = commitInlineTextEditor(cancel: false)
+            }
+            guard let page = page(for: locationInView, nearest: true) else {
+                super.mouseDown(with: event)
+                return
+            }
+            let ortho = isOrthoConstraintActive(for: event)
+            let pointInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
+            let constrainedPointInPage: NSPoint
+            if ortho,
+               pendingPolygonPage === page,
+               let last = pendingPolygonPointsInPage.last {
+                let lastInView = convert(last, from: page)
+                let currentInView = convert(pointInPage, from: page)
+                constrainedPointInPage = snapPointInPageIfNeeded(convert(orthogonalSnapPoint(anchor: lastInView, current: currentInView), to: page), on: page)
+            } else {
+                constrainedPointInPage = pointInPage
+            }
+            if pendingPolygonPage == nil || pendingPolygonPage !== page {
+                pendingPolygonPage = page
+                pendingPolygonPointsInPage = [constrainedPointInPage]
+            } else if event.clickCount >= 2, pendingPolygonPointsInPage.count >= 1 {
+                pendingPolygonPointsInPage.append(constrainedPointInPage)
+                _ = endPendingPolygon()
+            } else {
+                pendingPolygonPointsInPage.append(constrainedPointInPage)
+            }
+            typedDistanceBuffer = ""
+            let previewPoint = snapPointInViewIfNeeded(locationInView, on: page)
+            updatePolylineLikePreview(at: previewPoint, orthogonal: ortho)
         case .area:
             if inlineTextField != nil {
                 _ = commitInlineTextEditor(cancel: false)
@@ -1363,13 +1397,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return
         }
 
-        if toolMode == .polyline {
+        if toolMode == .polyline || toolMode == .polygon {
             let locationInView = convert(event.locationInWindow, from: nil)
             let ortho = isOrthoConstraintActive(for: event)
-            if let page = pendingPolylinePage {
-                updatePolylinePreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: ortho)
+            if let page = activePolylineLikePage() {
+                updatePolylineLikePreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: ortho)
             } else {
-                updatePolylinePreview(at: locationInView, orthogonal: ortho)
+                updatePolylineLikePreview(at: locationInView, orthogonal: ortho)
             }
             return
         }
@@ -1550,6 +1584,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 !(toolMode == .arrow && pendingArrowStartInPage != nil) &&
                 !(toolMode == .line && pendingLineStartInPage != nil) &&
                 !(toolMode == .polyline && !pendingPolylinePointsInPage.isEmpty) &&
+                !(toolMode == .polygon && !pendingPolygonPointsInPage.isEmpty) &&
                 !(toolMode == .area && !pendingAreaPointsInPage.isEmpty) {
                 dragPreviewLayer.isHidden = true
                 dragPreviewLayer.path = nil
@@ -1869,6 +1904,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         dragPreviewLayer.isHidden = true
     }
 
+    private func clearPendingPolygon() {
+        pendingPolygonPage = nil
+        pendingPolygonPointsInPage = []
+        typedDistanceBuffer = ""
+        hideTypedDistanceHUD()
+        dragPreviewLayer.path = nil
+        dragPreviewLayer.isHidden = true
+    }
+
     func endPendingPolyline() -> Bool {
         let hadPending = pendingPolylinePage != nil || !pendingPolylinePointsInPage.isEmpty
         defer { clearPendingPolyline() }
@@ -1876,66 +1920,76 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return hadPending
         }
         let points = pendingPolylinePointsInPage
-        var closedPolygonPoints = points
-        if let first = points.first, let last = points.last,
-           hypot(last.x - first.x, last.y - first.y) > 0.5 {
-            closedPolygonPoints.append(first)
-        }
-        let hatchStyle = rectangleHatchStyle
-        let shouldDrawHatch = points.count >= 3 && hatchStyle != .none && hatchStyle != .solid
-        let polylineGroupID = shouldDrawHatch ? UUID().uuidString : nil
-        var createdSegments: [PDFAnnotation] = []
-        createdSegments.reserveCapacity(points.count + 1)
         for idx in 1..<points.count {
-            if let segment = addLineAnnotation(
+            _ = addLineAnnotation(
                 from: points[idx - 1],
                 to: points[idx],
                 on: page,
                 actionName: "Add Polyline",
                 contents: "Polyline"
-            ) {
-                if let polylineGroupID {
-                    applyPolylineGroupMetadata(
-                        to: segment,
-                        groupID: polylineGroupID,
-                        hatchStyle: hatchStyle,
-                        hatchColor: rectangleFillColor,
-                        backgroundColor: rectangleHatchBackgroundColor,
-                        polygonPoints: closedPolygonPoints
-                    )
-                }
-                createdSegments.append(segment)
-            }
+            )
         }
-        if shouldDrawHatch,
-           let first = points.first,
-           let last = points.last,
-           hypot(last.x - first.x, last.y - first.y) > 0.5,
-           let closing = addLineAnnotation(
-            from: last,
-            to: first,
-            on: page,
-            actionName: "Add Polyline",
-            contents: "Polyline"
-           ) {
-            if let polylineGroupID {
-                applyPolylineGroupMetadata(
-                    to: closing,
-                    groupID: polylineGroupID,
+        return true
+    }
+
+    func cancelPendingPolyline() {
+        clearPendingPolyline()
+    }
+
+    func endPendingPolygon() -> Bool {
+        let hadPending = pendingPolygonPage != nil || !pendingPolygonPointsInPage.isEmpty
+        defer { clearPendingPolygon() }
+        guard let page = pendingPolygonPage, pendingPolygonPointsInPage.count >= 2 else {
+            return hadPending
+        }
+        let points = pendingPolygonPointsInPage
+        var closedPolygonPoints = points
+        if let first = points.first, let last = points.last,
+           hypot(last.x - first.x, last.y - first.y) > 0.5 {
+            closedPolygonPoints.append(first)
+        }
+        guard closedPolygonPoints.count >= 3 else {
+            for idx in 1..<points.count {
+                _ = addLineAnnotation(
+                    from: points[idx - 1],
+                    to: points[idx],
+                    on: page,
+                    actionName: "Add Polygon",
+                    contents: "Polygon"
+                )
+            }
+            return true
+        }
+
+        let hatchStyle = rectangleHatchStyle
+        let polygonGroupID = UUID().uuidString
+        var createdSegments: [PDFAnnotation] = []
+        createdSegments.reserveCapacity(closedPolygonPoints.count)
+
+        for idx in 1..<closedPolygonPoints.count {
+            if let segment = addLineAnnotation(
+                from: closedPolygonPoints[idx - 1],
+                to: closedPolygonPoints[idx],
+                on: page,
+                actionName: "Add Polygon",
+                contents: "Polygon"
+            ) {
+                applyPolygonGroupMetadata(
+                    to: segment,
+                    groupID: polygonGroupID,
                     hatchStyle: hatchStyle,
                     hatchColor: rectangleFillColor,
                     backgroundColor: rectangleHatchBackgroundColor,
                     polygonPoints: closedPolygonPoints
                 )
+                createdSegments.append(segment)
             }
-            createdSegments.append(closing)
         }
-        if shouldDrawHatch,
-           let polylineGroupID,
-           createdSegments.count >= 3 {
-            addPolylineHatchOverlay(
+
+        if !createdSegments.isEmpty, hatchStyle != .none {
+            addPolygonHatchOverlay(
                 for: closedPolygonPoints,
-                groupID: polylineGroupID,
+                groupID: polygonGroupID,
                 on: page,
                 style: hatchStyle,
                 hatchColor: rectangleFillColor,
@@ -1946,11 +2000,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return true
     }
 
-    func cancelPendingPolyline() {
-        clearPendingPolyline()
+    func cancelPendingPolygon() {
+        clearPendingPolygon()
     }
 
-    private func applyPolylineGroupMetadata(
+    private func applyPolygonGroupMetadata(
         to annotation: PDFAnnotation,
         groupID: String,
         hatchStyle: RectangleHatchStyle,
@@ -1959,28 +2013,28 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         polygonPoints: [NSPoint]
     ) {
         let existing = annotation.userName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let groupMetadata = "DrawbridgePolylineGroup:\(groupID)"
-        let hatchMetadata = "DrawbridgePolylineHatch:\(hatchStyle.metadataToken)"
-        let fillMetadata = "DrawbridgePolylineFill:\(rectFillToken(from: hatchColor))"
-        let bgMetadata = "DrawbridgePolylineBg:\(rectFillToken(from: backgroundColor))"
-        let pointsMetadata = "DrawbridgePolylinePts:\(encodedPolylinePointsToken(polygonPoints))"
+        let groupMetadata = "DrawbridgePolygonGroup:\(groupID)"
+        let hatchMetadata = "DrawbridgePolygonHatch:\(hatchStyle.metadataToken)"
+        let fillMetadata = "DrawbridgePolygonFill:\(rectFillToken(from: hatchColor))"
+        let bgMetadata = "DrawbridgePolygonBg:\(rectFillToken(from: backgroundColor))"
+        let pointsMetadata = "DrawbridgePolygonPts:\(encodedPolygonPointsToken(polygonPoints))"
         if existing.isEmpty {
             annotation.userName = "\(groupMetadata)|\(hatchMetadata)|\(fillMetadata)|\(bgMetadata)|\(pointsMetadata)"
             return
         }
         let parts = existing.split(separator: "|").map(String.init).filter { token in
             let lower = token.lowercased()
-            return !lower.hasPrefix("drawbridgepolylinegroup:") &&
-                !lower.hasPrefix("drawbridgepolylinehatch:") &&
-                !lower.hasPrefix("drawbridgepolylinefill:") &&
-                !lower.hasPrefix("drawbridgepolylinebg:") &&
-                !lower.hasPrefix("drawbridgepolylinepts:")
+            return !lower.hasPrefix("drawbridgepolygongroup:") &&
+                !lower.hasPrefix("drawbridgepolygonhatch:") &&
+                !lower.hasPrefix("drawbridgepolygonfill:") &&
+                !lower.hasPrefix("drawbridgepolygonbg:") &&
+                !lower.hasPrefix("drawbridgepolygonpts:")
         }
         annotation.userName = ([groupMetadata, hatchMetadata, fillMetadata, bgMetadata, pointsMetadata] + parts).joined(separator: "|")
     }
 
-    private func removePolylineHatchOverlays(for groupID: String, on page: PDFPage) {
-        let marker = "PolylineGroup:\(groupID)"
+    private func removePolygonHatchOverlays(for groupID: String, on page: PDFPage) {
+        let marker = "PolygonGroup:\(groupID)"
         let overlays = page.annotations.filter { candidate in
             isHatchOverlayAnnotation(candidate) &&
             ((candidate.userName ?? "").contains(marker) || (candidate.contents ?? "").contains(marker))
@@ -1990,7 +2044,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
     }
 
-    private func addPolylineHatchOverlay(
+    private func addPolygonHatchOverlay(
         for points: [NSPoint],
         groupID: String,
         on page: PDFPage,
@@ -2000,7 +2054,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         lineWidth: CGFloat
     ) {
         guard points.count >= 3 else { return }
-        guard style != .none && style != .solid else { return }
+        guard style != .none else { return }
 
         let minX = points.map(\.x).min() ?? 0
         let minY = points.map(\.y).min() ?? 0
@@ -2014,11 +2068,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let spacing = max(6.0, min(28.0, 8.0 + lineWidth))
         let hatchWidth = max(0.35, min(2.5, lineWidth * 0.22))
 
-        let candidateSegments = hatchSegments(in: localRect, style: style, spacing: spacing, shapeType: "square")
-        let clippedSegments = candidateSegments.flatMap { clipSegmentToPolygon($0.0, $0.1, polygon: localPolygon) }
-        guard !clippedSegments.isEmpty else { return }
-
-        removePolylineHatchOverlays(for: groupID, on: page)
+        removePolygonHatchOverlays(for: groupID, on: page)
 
         // Background tint to hint fill region without overpowering hatch lines.
         let backgroundPath = NSBezierPath()
@@ -2028,13 +2078,19 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         backgroundPath.close()
         let background = PDFAnnotation(bounds: bounds, forType: .ink, withProperties: nil)
-        background.color = backgroundColor.withAlphaComponent(0.22)
-        background.contents = "DrawbridgeHatchOverlay|PolylineGroup:\(groupID)|Background"
-        background.userName = "DrawbridgeHatchOverlay:PolylineGroup:\(groupID)"
+        background.color = (style == .solid) ? hatchColor : backgroundColor.withAlphaComponent(0.22)
+        background.contents = "DrawbridgeHatchOverlay|PolygonGroup:\(groupID)|Background"
+        background.userName = "DrawbridgeHatchOverlay:PolygonGroup:\(groupID)"
         backgroundPath.lineWidth = max(0.5, hatchWidth * 0.45)
         background.add(backgroundPath)
         assignLineWidth(max(0.5, hatchWidth * 0.45), to: background)
         page.addAnnotation(background)
+
+        guard style != .solid else { return }
+
+        let candidateSegments = hatchSegments(in: localRect, style: style, spacing: spacing, shapeType: "square")
+        let clippedSegments = candidateSegments.flatMap { clipSegmentToPolygon($0.0, $0.1, polygon: localPolygon) }
+        guard !clippedSegments.isEmpty else { return }
 
         let path = NSBezierPath()
         path.lineWidth = hatchWidth
@@ -2047,34 +2103,34 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         let overlay = PDFAnnotation(bounds: bounds, forType: .ink, withProperties: nil)
         overlay.color = hatchColor
-        overlay.contents = "DrawbridgeHatchOverlay|PolylineGroup:\(groupID)|\(style.metadataToken)"
-        overlay.userName = "DrawbridgeHatchOverlay:PolylineGroup:\(groupID)"
+        overlay.contents = "DrawbridgeHatchOverlay|PolygonGroup:\(groupID)|\(style.metadataToken)"
+        overlay.userName = "DrawbridgeHatchOverlay:PolygonGroup:\(groupID)"
         overlay.add(path)
         assignLineWidth(hatchWidth, to: overlay)
         page.addAnnotation(overlay)
     }
 
-    func restorePolylineHatchOverlays(on page: PDFPage, for annotations: [PDFAnnotation]) {
+    func restorePolygonHatchOverlays(on page: PDFPage, for annotations: [PDFAnnotation]) {
         var groupRepresentatives: [String: PDFAnnotation] = [:]
         for annotation in annotations {
-            guard let groupID = polylineGroupID(for: annotation), !groupID.isEmpty else { continue }
+            guard let groupID = polygonGroupID(for: annotation), !groupID.isEmpty else { continue }
             if groupRepresentatives[groupID] == nil {
                 groupRepresentatives[groupID] = annotation
             }
         }
 
         for (groupID, representative) in groupRepresentatives {
-            guard let pointsToken = polylinePointsToken(for: representative),
-                  let points = decodedPolylinePointsToken(pointsToken),
+            guard let pointsToken = polygonPointsToken(for: representative),
+                  let points = decodedPolygonPointsToken(pointsToken),
                   points.count >= 3 else {
-                removePolylineHatchOverlays(for: groupID, on: page)
+                removePolygonHatchOverlays(for: groupID, on: page)
                 continue
             }
-            let style = polylineHatchStyle(for: representative) ?? .solid
-            let hatchColor = polylineHatchColor(for: representative) ?? rectangleFillColor
-            let backgroundColor = polylineBackgroundColor(for: representative) ?? rectangleHatchBackgroundColor
+            let style = polygonHatchStyle(for: representative) ?? .solid
+            let hatchColor = polygonHatchColor(for: representative) ?? rectangleFillColor
+            let backgroundColor = polygonBackgroundColor(for: representative) ?? rectangleHatchBackgroundColor
             let width = max(0.1, representative.border?.lineWidth ?? penLineWidth)
-            addPolylineHatchOverlay(
+            addPolygonHatchOverlay(
                 for: points,
                 groupID: groupID,
                 on: page,
@@ -2307,23 +2363,34 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return created
     }
 
-    private func polylineGroupID(for annotation: PDFAnnotation) -> String? {
+    private func polygonGroupID(for annotation: PDFAnnotation) -> String? {
         let metadata = annotation.userName ?? ""
-        guard let markerRange = metadata.range(of: "DrawbridgePolylineGroup:", options: .caseInsensitive) else {
-            return nil
+        if let markerRange = metadata.range(of: "DrawbridgePolygonGroup:", options: .caseInsensitive) {
+            let tokenStart = metadata[markerRange.upperBound...]
+            return tokenStart
+                .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
+                .first
+                .map(String.init)
         }
-        let tokenStart = metadata[markerRange.upperBound...]
-        return tokenStart
-            .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
-            .first
-            .map(String.init)
+        if let markerRange = metadata.range(of: "DrawbridgePolylineGroup:", options: .caseInsensitive) {
+            let tokenStart = metadata[markerRange.upperBound...]
+            return tokenStart
+                .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
+                .first
+                .map(String.init)
+        }
+        return nil
     }
 
-    private func polylineHatchStyle(for annotation: PDFAnnotation) -> RectangleHatchStyle? {
+    private func polygonHatchStyle(for annotation: PDFAnnotation) -> RectangleHatchStyle? {
         let metadata = annotation.userName ?? ""
-        guard let markerRange = metadata.range(of: "DrawbridgePolylineHatch:", options: .caseInsensitive) else {
-            return nil
+        let markerRange: Range<String.Index>?
+        if let polygonMarker = metadata.range(of: "DrawbridgePolygonHatch:", options: .caseInsensitive) {
+            markerRange = polygonMarker
+        } else {
+            markerRange = metadata.range(of: "DrawbridgePolylineHatch:", options: .caseInsensitive)
         }
+        guard let markerRange else { return nil }
         let tokenStart = metadata[markerRange.upperBound...]
         let token = tokenStart
             .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
@@ -2332,11 +2399,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return RectangleHatchStyle.from(metadataToken: token)
     }
 
-    private func polylineHatchColor(for annotation: PDFAnnotation) -> NSColor? {
+    private func polygonHatchColor(for annotation: PDFAnnotation) -> NSColor? {
         let metadata = annotation.userName ?? ""
-        guard let markerRange = metadata.range(of: "DrawbridgePolylineFill:", options: .caseInsensitive) else {
-            return nil
+        let markerRange: Range<String.Index>?
+        if let polygonMarker = metadata.range(of: "DrawbridgePolygonFill:", options: .caseInsensitive) {
+            markerRange = polygonMarker
+        } else {
+            markerRange = metadata.range(of: "DrawbridgePolylineFill:", options: .caseInsensitive)
         }
+        guard let markerRange else { return nil }
         let tokenStart = metadata[markerRange.upperBound...]
         let token = tokenStart
             .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
@@ -2345,11 +2416,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return parseRectFillToken(token)
     }
 
-    private func polylineBackgroundColor(for annotation: PDFAnnotation) -> NSColor? {
+    private func polygonBackgroundColor(for annotation: PDFAnnotation) -> NSColor? {
         let metadata = annotation.userName ?? ""
-        guard let markerRange = metadata.range(of: "DrawbridgePolylineBg:", options: .caseInsensitive) else {
-            return nil
+        let markerRange: Range<String.Index>?
+        if let polygonMarker = metadata.range(of: "DrawbridgePolygonBg:", options: .caseInsensitive) {
+            markerRange = polygonMarker
+        } else {
+            markerRange = metadata.range(of: "DrawbridgePolylineBg:", options: .caseInsensitive)
         }
+        guard let markerRange else { return nil }
         let tokenStart = metadata[markerRange.upperBound...]
         let token = tokenStart
             .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
@@ -2358,19 +2433,26 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return parseRectFillToken(token)
     }
 
-    private func polylinePointsToken(for annotation: PDFAnnotation) -> String? {
+    private func polygonPointsToken(for annotation: PDFAnnotation) -> String? {
         let metadata = annotation.userName ?? ""
-        guard let markerRange = metadata.range(of: "DrawbridgePolylinePts:", options: .caseInsensitive) else {
-            return nil
+        if let markerRange = metadata.range(of: "DrawbridgePolygonPts:", options: .caseInsensitive) {
+            let tokenStart = metadata[markerRange.upperBound...]
+            return tokenStart
+                .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
+                .first
+                .map(String.init)
         }
-        let tokenStart = metadata[markerRange.upperBound...]
-        return tokenStart
-            .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
-            .first
-            .map(String.init)
+        if let markerRange = metadata.range(of: "DrawbridgePolylinePts:", options: .caseInsensitive) {
+            let tokenStart = metadata[markerRange.upperBound...]
+            return tokenStart
+                .split(separator: "|", maxSplits: 1, omittingEmptySubsequences: true)
+                .first
+                .map(String.init)
+        }
+        return nil
     }
 
-    private func encodedPolylinePointsToken(_ points: [NSPoint]) -> String {
+    private func encodedPolygonPointsToken(_ points: [NSPoint]) -> String {
         points
             .map { point in
                 let x = String(format: "%.4f", point.x)
@@ -2380,7 +2462,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             .joined(separator: ";")
     }
 
-    private func decodedPolylinePointsToken(_ token: String) -> [NSPoint]? {
+    private func decodedPolygonPointsToken(_ token: String) -> [NSPoint]? {
         let pairs = token.split(separator: ";")
         guard pairs.count >= 3 else { return nil }
         var points: [NSPoint] = []
@@ -2409,11 +2491,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 ((candidate.userName ?? "").contains(shapeID) || (candidate.contents ?? "").contains(shapeID))
             }
         }
-        if let groupID = polylineGroupID(for: annotation), !groupID.isEmpty {
-            let marker = "PolylineGroup:\(groupID)"
+        if let groupID = polygonGroupID(for: annotation), !groupID.isEmpty {
+            let marker = "PolygonGroup:\(groupID)"
+            let legacyMarker = "PolylineGroup:\(groupID)"
             return page.annotations.filter { candidate in
                 isHatchOverlayAnnotation(candidate) &&
-                ((candidate.userName ?? "").contains(marker) || (candidate.contents ?? "").contains(marker))
+                ((candidate.userName ?? "").contains(marker) ||
+                 (candidate.contents ?? "").contains(marker) ||
+                 (candidate.userName ?? "").contains(legacyMarker) ||
+                 (candidate.contents ?? "").contains(legacyMarker))
             }
         }
         return []
@@ -2985,10 +3071,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 let pointer = lastPointerInView.map { snapPointInViewIfNeeded($0, on: page) }
                 updateLinePreview(at: pointer, orthogonal: orthogonal)
             }
-        case .polyline:
-            if let page = pendingPolylinePage, !pendingPolylinePointsInPage.isEmpty {
+        case .polyline, .polygon:
+            if let page = activePolylineLikePage(), !activePolylineLikePoints().isEmpty {
                 let pointer = lastPointerInView.map { snapPointInViewIfNeeded($0, on: page) }
-                updatePolylinePreview(at: pointer, orthogonal: orthogonal)
+                updatePolylineLikePreview(at: pointer, orthogonal: orthogonal)
             }
         case .circle:
             if let page = pendingCirclePage {
@@ -3046,7 +3132,28 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             let next = NSPoint(x: anchor.x + dx * lengthInPoints, y: anchor.y + dy * lengthInPoints)
             pendingPolylinePointsInPage.append(next)
             typedDistanceBuffer = ""
-            updatePolylinePreview(at: lastPointerInView, orthogonal: orthogonal)
+            updatePolylineLikePreview(at: lastPointerInView, orthogonal: orthogonal)
+            return true
+        }
+
+        if toolMode == .polygon,
+           let page = pendingPolygonPage,
+           let anchor = pendingPolygonPointsInPage.last {
+            let toward = directionPointForTypedDistance(on: page, from: anchor, orthogonal: orthogonal)
+            var dx = toward.x - anchor.x
+            var dy = toward.y - anchor.y
+            let magnitude = hypot(dx, dy)
+            if magnitude < 0.001 {
+                dx = 1
+                dy = 0
+            } else {
+                dx /= magnitude
+                dy /= magnitude
+            }
+            let next = NSPoint(x: anchor.x + dx * lengthInPoints, y: anchor.y + dy * lengthInPoints)
+            pendingPolygonPointsInPage.append(next)
+            typedDistanceBuffer = ""
+            updatePolylineLikePreview(at: lastPointerInView, orthogonal: orthogonal)
             return true
         }
 
@@ -3600,7 +3707,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private func isLineEndpointEditable(_ annotation: PDFAnnotation) -> Bool {
         guard let type = annotation.type?.lowercased(), type.contains("ink") else { return false }
         let contents = (annotation.contents ?? "").lowercased()
-        return contents.contains("line") || contents.contains("polyline")
+        return contents.contains("line") || contents.contains("polyline") || contents.contains("polygon")
     }
 
     private func lineSegmentInPage(for annotation: PDFAnnotation) -> Segment? {
@@ -3949,8 +4056,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private func updateTypedDistanceHUD() {
         let isLineReady = (toolMode == .line && pendingLinePage != nil && pendingLineStartInPage != nil)
         let isPolylineReady = (toolMode == .polyline && pendingPolylinePage != nil && !pendingPolylinePointsInPage.isEmpty)
+        let isPolygonReady = (toolMode == .polygon && pendingPolygonPage != nil && !pendingPolygonPointsInPage.isEmpty)
         let isCircleReady = (toolMode == .circle && pendingCirclePage != nil && pendingCircleCenterInPage != nil)
-        guard isLineReady || isPolylineReady || isCircleReady else {
+        guard isLineReady || isPolylineReady || isPolygonReady || isCircleReady else {
             hideTypedDistanceHUD()
             return
         }
@@ -3976,6 +4084,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         } else if toolMode == .circle, let page = pendingCirclePage, let center = pendingCircleCenterInPage {
             anchorPoint = convert(center, from: page)
         } else if toolMode == .polyline, let page = pendingPolylinePage, let last = pendingPolylinePointsInPage.last {
+            anchorPoint = convert(last, from: page)
+        } else if toolMode == .polygon, let page = pendingPolygonPage, let last = pendingPolygonPointsInPage.last {
             anchorPoint = convert(last, from: page)
         } else {
             hideTypedDistanceHUD()
@@ -4169,20 +4279,35 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         dragPreviewLayer.lineDashPattern = nil
     }
 
-    private func updatePolylinePreview(at locationInView: NSPoint?, orthogonal: Bool) {
-        guard toolMode == .polyline,
-              let page = pendingPolylinePage,
-              !pendingPolylinePointsInPage.isEmpty else {
+    private func activePolylineLikePage() -> PDFPage? {
+        if toolMode == .polygon {
+            return pendingPolygonPage
+        }
+        return pendingPolylinePage
+    }
+
+    private func activePolylineLikePoints() -> [NSPoint] {
+        if toolMode == .polygon {
+            return pendingPolygonPointsInPage
+        }
+        return pendingPolylinePointsInPage
+    }
+
+    private func updatePolylineLikePreview(at locationInView: NSPoint?, orthogonal: Bool) {
+        guard toolMode == .polyline || toolMode == .polygon,
+              let page = activePolylineLikePage() else {
             return
         }
+        let points = activePolylineLikePoints()
+        guard !points.isEmpty else { return }
 
         let path = CGMutablePath()
-        let startInView = convert(pendingPolylinePointsInPage[0], from: page)
+        let startInView = convert(points[0], from: page)
         path.move(to: startInView)
-        for point in pendingPolylinePointsInPage.dropFirst() {
+        for point in points.dropFirst() {
             path.addLine(to: convert(point, from: page))
         }
-        if let anchor = pendingPolylinePointsInPage.last,
+        if let anchor = points.last,
            let typedTarget = typedLengthPreviewTargetInView(
                 on: page,
                 from: anchor,
@@ -4193,7 +4318,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         } else if let locationInView,
            self.page(for: locationInView, nearest: true) == page {
             let snappedCurrent = snapPointInViewIfNeeded(locationInView, on: page)
-            if orthogonal, let last = pendingPolylinePointsInPage.last {
+            if orthogonal, let last = points.last {
                 let lastInView = convert(last, from: page)
                 let orthogonalPoint = orthogonalSnapPoint(anchor: lastInView, current: snappedCurrent)
                 path.addLine(to: snapPointInViewIfNeeded(orthogonalPoint, on: page))
@@ -4394,7 +4519,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             let annotationType = (annotation.type ?? "").lowercased()
             let isInkLike = annotationType.contains("ink")
             let contents = (annotation.contents ?? "").lowercased()
-            let isLinework = isInkLike && (contents.contains("line") || contents.contains("polyline"))
+            let isLinework = isInkLike && (contents.contains("line") || contents.contains("polyline") || contents.contains("polygon"))
             // Keep line/polyline picking precise so nearby segments are not accidentally selected.
             let effectiveMaxDistance = isLinework ? min(maxDistance, max(4.0, selectionHitDistanceInPage() * 0.45)) : maxDistance
             let d: CGFloat
@@ -4424,7 +4549,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             if isHatchOverlayAnnotation(annotation) { continue }
             let annotationType = (annotation.type ?? "").lowercased()
             let contents = (annotation.contents ?? "").lowercased()
-            let isLinework = annotationType.contains("ink") && (contents.contains("line") || contents.contains("polyline"))
+            let isLinework = annotationType.contains("ink") && (contents.contains("line") || contents.contains("polyline") || contents.contains("polygon"))
             if isLinework {
                 // Do not use expanded-bounds fallback for linework; it can capture adjacent lines.
                 continue
@@ -5030,7 +5155,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     func handleTypedDistanceKey(_ event: NSEvent) -> Bool {
         let noCommandModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).isDisjoint(with: [.command, .option, .control])
         guard noCommandModifiers,
-              toolMode == .line || (toolMode == .polyline && pendingPolylinePage != nil && !pendingPolylinePointsInPage.isEmpty) || (toolMode == .circle && pendingCirclePage != nil && pendingCircleCenterInPage != nil) else {
+              toolMode == .line ||
+              (toolMode == .polyline && pendingPolylinePage != nil && !pendingPolylinePointsInPage.isEmpty) ||
+              (toolMode == .polygon && pendingPolygonPage != nil && !pendingPolygonPointsInPage.isEmpty) ||
+              (toolMode == .circle && pendingCirclePage != nil && pendingCircleCenterInPage != nil) else {
             return false
         }
         let ortho = isOrthoConstraintActive(for: event)
@@ -5063,6 +5191,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return
         }
         let noCommandModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).isDisjoint(with: [.command, .option, .control])
+        if noCommandModifiers,
+           (event.keyCode == 36 || event.keyCode == 76),
+           typedDistanceBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           toolMode == .polygon,
+           pendingPolygonPage != nil,
+           pendingPolygonPointsInPage.count >= 2 {
+            _ = endPendingPolygon()
+            return
+        }
         if noCommandModifiers {
             switch event.keyCode {
             case 123, 126: // Left / Up
@@ -5194,7 +5331,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         case "l":
             return .line
         case "p":
-            return .polyline
+            return isShift ? .polygon : .polyline
         case "h":
             return .highlighter
         case "c":

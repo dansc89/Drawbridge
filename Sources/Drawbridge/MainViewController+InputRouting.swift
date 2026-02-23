@@ -51,7 +51,7 @@ extension MainViewController {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let optionNowDown = modifiers.contains(.option)
         defer { isOrthoModifierKeyDown = optionNowDown }
-        guard pdfView.toolMode == .line || pdfView.toolMode == .polyline else {
+        guard pdfView.toolMode == .line || pdfView.toolMode == .polyline || pdfView.toolMode == .polygon else {
             return event
         }
         if optionNowDown && !isOrthoModifierKeyDown && modifiers.isDisjoint(with: [.command, .shift, .control]) {
@@ -159,6 +159,7 @@ extension MainViewController {
             pdfView.cancelPendingMeasurement()
             pdfView.cancelPendingCallout()
             pdfView.cancelPendingPolyline()
+            pdfView.cancelPendingPolygon()
             pdfView.cancelPendingArrow()
             pdfView.cancelPendingLine()
             pdfView.cancelPendingArea()

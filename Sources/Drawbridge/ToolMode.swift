@@ -7,6 +7,7 @@ enum ToolMode {
     case arrow
     case line
     case polyline
+    case polygon
     case area
     case highlighter
     case cloud

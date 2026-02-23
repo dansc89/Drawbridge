@@ -8,6 +8,7 @@ enum ShortcutAction: String, CaseIterable {
     case areaTool
     case lineTool
     case polylineTool
+    case polygonTool
     case highlighterTool
     case cloudTool
     case rectangleTool
@@ -28,6 +29,7 @@ enum ShortcutAction: String, CaseIterable {
         case .areaTool: return "Area Tool"
         case .lineTool: return "Line Tool"
         case .polylineTool: return "Polyline Tool"
+        case .polygonTool: return "Polygon Tool"
         case .highlighterTool: return "Highlighter Tool"
         case .cloudTool: return "Cloud Tool"
         case .rectangleTool: return "Rectangle Tool"
@@ -80,6 +82,7 @@ extension MainViewController {
             .areaTool: ShortcutBinding(key: "a", requiresShift: true),
             .lineTool: ShortcutBinding(key: "l", requiresShift: false),
             .polylineTool: ShortcutBinding(key: "p", requiresShift: false),
+            .polygonTool: ShortcutBinding(key: "p", requiresShift: true),
             .highlighterTool: ShortcutBinding(key: "h", requiresShift: false),
             .cloudTool: ShortcutBinding(key: "c", requiresShift: false),
             .rectangleTool: ShortcutBinding(key: "r", requiresShift: false),
@@ -161,6 +164,8 @@ extension MainViewController {
             setTool(.line)
         case .polylineTool:
             setTool(.polyline)
+        case .polygonTool:
+            setTool(.polygon)
         case .highlighterTool:
             setTool(.highlighter)
         case .cloudTool:
