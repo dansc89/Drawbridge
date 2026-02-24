@@ -1,0 +1,27 @@
+{
+  "name": "drawbridge-sync-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Drawbridge cloud sync backend (sessions, uploads, realtime ops)",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "migrate": "node scripts/migrate.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^12.1.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5-lts.2",
+    "uuid": "^11.1.0",
+    "ws": "^8.18.0"
+  }
+}

@@ -2,6 +2,59 @@ import AppKit
 
 @MainActor
 extension MainViewController {
+    func hasEditablePolygonSelection() -> Bool {
+        guard pdfView.toolMode == .select,
+              let document = pdfView.document else { return false }
+        for item in currentSelectedMarkupItems() {
+            guard let page = document.page(at: item.pageIndex) else { continue }
+            if pdfView.polygonVerticesInPage(for: item.annotation)?.count ?? 0 >= 3,
+               item.annotation.page === page {
+                return true
+            }
+        }
+        return false
+    }
+
+    func setPolygonVertexEditMode(_ enabled: Bool) {
+        isPolygonVertexEditModeEnabled = enabled
+        pdfView.polygonVertexEditModeEnabled = enabled
+        updateStatusBar()
+    }
+
+    @discardableResult
+    private func togglePolygonVertexEditModeShortcut() -> Bool {
+        guard hasEditablePolygonSelection() else { return false }
+        setPolygonVertexEditMode(!isPolygonVertexEditModeEnabled)
+        return true
+    }
+
+    func cancelPendingMarkupInteractions(except preservedMode: ToolMode? = nil) {
+        if preservedMode != .measure {
+            pdfView.cancelPendingMeasurement()
+        }
+        if preservedMode != .callout {
+            pdfView.cancelPendingCallout()
+        }
+        if preservedMode != .polyline {
+            pdfView.cancelPendingPolyline()
+        }
+        if preservedMode != .polygon {
+            pdfView.cancelPendingPolygon()
+        }
+        if preservedMode != .arrow {
+            pdfView.cancelPendingArrow()
+        }
+        if preservedMode != .line {
+            pdfView.cancelPendingLine()
+        }
+        if preservedMode != .area {
+            pdfView.cancelPendingArea()
+        }
+        if preservedMode != .circle {
+            pdfView.cancelPendingCircle()
+        }
+    }
+
     func installScrollMonitorIfNeeded() {
         guard scrollEventMonitor == nil else { return }
         scrollEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
@@ -141,6 +194,14 @@ extension MainViewController {
             return event
         }
 
+        if modifiers.isDisjoint(with: [.command, .option, .control]),
+           event.charactersIgnoringModifiers?.lowercased() == "a",
+           pdfView.toolMode == .select,
+           togglePolygonVertexEditModeShortcut() {
+            lastUserInteractionAt = Date()
+            return nil
+        }
+
         if event.keyCode == 53 {
             lastUserInteractionAt = Date()
             handleEscapePress()
@@ -156,13 +217,7 @@ extension MainViewController {
 
     func handleEscapePress() {
         if escapePressTracker.registerPress() {
-            pdfView.cancelPendingMeasurement()
-            pdfView.cancelPendingCallout()
-            pdfView.cancelPendingPolyline()
-            pdfView.cancelPendingPolygon()
-            pdfView.cancelPendingArrow()
-            pdfView.cancelPendingLine()
-            pdfView.cancelPendingArea()
+            cancelPendingMarkupInteractions()
             if pdfView.toolMode != .select {
                 setTool(.select)
             }

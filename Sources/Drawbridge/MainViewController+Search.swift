@@ -44,19 +44,13 @@ extension MainViewController {
     }
 
     @objc func selectNextSearchHit() {
-        guard !searchHits.isEmpty else {
-            NSSound.beep()
-            return
-        }
+        guard guardOrBeep(!searchHits.isEmpty) else { return }
         searchHitIndex = (searchHitIndex + 1) % searchHits.count
         revealCurrentSearchHit()
     }
 
     @objc func selectPreviousSearchHit() {
-        guard !searchHits.isEmpty else {
-            NSSound.beep()
-            return
-        }
+        guard guardOrBeep(!searchHits.isEmpty) else { return }
         searchHitIndex = (searchHitIndex - 1 + searchHits.count) % searchHits.count
         revealCurrentSearchHit()
     }

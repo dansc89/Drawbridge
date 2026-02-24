@@ -3,6 +3,17 @@ import PDFKit
 
 @MainActor
 extension MainViewController {
+    func markDocumentClean(updateStatusBarValue: Bool = true) {
+        markupChangeVersion = 0
+        lastAutosavedChangeVersion = 0
+        lastMarkupEditAt = .distantPast
+        lastUserInteractionAt = .distantPast
+        view.window?.isDocumentEdited = false
+        if updateStatusBarValue {
+            updateStatusBar()
+        }
+    }
+
     func sidecarURL(for sourcePDFURL: URL) -> URL {
         snapshotStore.sidecarURL(for: sourcePDFURL)
     }
@@ -70,11 +81,11 @@ extension MainViewController {
                 guard success else {
                     PerformanceMetrics.end(saveSpan, extra: ["result": "failed"])
                     self.updateBusyIndicatorDetail(String(format: "Project save failed after %.2fs", elapsed))
-                    let alert = NSAlert()
-                    alert.messageText = "Failed to save project"
-                    alert.informativeText = "Could not write \(sidecar.lastPathComponent)."
-                    alert.alertStyle = .warning
-                    alert.runModal()
+                    self.runAlert(
+                        title: "Failed to save project",
+                        informativeText: "Could not write \(sidecar.lastPathComponent).",
+                        style: .warning
+                    )
                     return
                 }
                 self.updateBusyIndicatorDetail(String(format: "Saved project in %.2fs", elapsed))
@@ -86,25 +97,14 @@ extension MainViewController {
                         "cached_markups": "\(self.totalCachedAnnotationCount())"
                     ]
                 )
-                self.markupChangeVersion = 0
-                self.lastAutosavedChangeVersion = 0
-                self.lastMarkupEditAt = .distantPast
-                self.lastUserInteractionAt = .distantPast
-                self.view.window?.isDocumentEdited = false
-                self.updateStatusBar()
+                self.markDocumentClean()
             }
         }
     }
 
     func persistDocument(to url: URL, adoptAsPrimaryDocument: Bool, busyMessage: String, document: PDFDocument? = nil) {
-        guard let document = document ?? pdfView.document else {
-            NSSound.beep()
-            return
-        }
-        guard !persistenceCoordinator.isManualSaveInFlight else {
-            NSSound.beep()
-            return
-        }
+        guard let document = document ?? pdfView.document else { beep(); return }
+        guard guardOrBeep(!persistenceCoordinator.isManualSaveInFlight) else { return }
         // Prevent expensive markup-list rebuild work from competing with save completion on main.
         pendingMarkupsRefreshWorkItem?.cancel()
         pendingMarkupsRefreshWorkItem = nil
@@ -215,15 +215,17 @@ extension MainViewController {
                     } else {
                         self.updateBusyIndicatorDetail(String(format: "Failed after %.2fs", elapsed))
                     }
-                    let alert = NSAlert()
-                    alert.messageText = "Failed to save PDF"
+                    let informativeText: String
                     if let errorDescription, !errorDescription.isEmpty {
-                        alert.informativeText = "Could not save \(targetURL.lastPathComponent).\n\n\(errorDescription)"
+                        informativeText = "Could not save \(targetURL.lastPathComponent).\n\n\(errorDescription)"
                     } else {
-                        alert.informativeText = "Could not save \(targetURL.lastPathComponent)."
+                        informativeText = "Could not save \(targetURL.lastPathComponent)."
                     }
-                    alert.alertStyle = .warning
-                    alert.runModal()
+                    self.runAlert(
+                        title: "Failed to save PDF",
+                        informativeText: informativeText,
+                        style: .warning
+                    )
                     return
                 }
 
@@ -250,11 +252,7 @@ extension MainViewController {
                     self.onDocumentOpened?(newDocumentURL)
                 }
 
-                self.markupChangeVersion = 0
-                self.lastAutosavedChangeVersion = 0
-                self.lastMarkupEditAt = .distantPast
-                self.lastUserInteractionAt = .distantPast
-                self.view.window?.isDocumentEdited = false
+                self.markDocumentClean(updateStatusBarValue: false)
                 self.performRefreshMarkups(selecting: self.currentSelectedAnnotation(), forceImmediate: true)
                 self.updateStatusBar()
             }
@@ -355,12 +353,7 @@ extension MainViewController {
                 if success {
                     self.lastAutosaveAt = Date()
                     if self.markupChangeVersion <= snapshotVersion {
-                        self.markupChangeVersion = 0
-                        self.lastAutosavedChangeVersion = 0
-                        self.lastMarkupEditAt = .distantPast
-                        self.lastUserInteractionAt = .distantPast
-                        self.view.window?.isDocumentEdited = false
-                        self.updateStatusBar()
+                        self.markDocumentClean()
                     } else {
                         self.lastAutosavedChangeVersion = snapshotVersion
                     }
@@ -406,20 +399,15 @@ extension MainViewController {
         do {
             try snapshotStore.writeSnapshotOrThrow(snapshot, to: sidecar)
         } catch {
-            let alert = NSAlert()
-            alert.messageText = "Failed to save changes"
-            alert.informativeText = "Could not write changes to disk.\n\n\(error.localizedDescription)"
-            alert.alertStyle = .warning
-            alert.runModal()
+            runAlert(
+                title: "Failed to save changes",
+                informativeText: "Could not write changes to disk.\n\n\(error.localizedDescription)",
+                style: .warning
+            )
             return false
         }
 
-        markupChangeVersion = 0
-        lastAutosavedChangeVersion = 0
-        lastMarkupEditAt = .distantPast
-        lastUserInteractionAt = .distantPast
-        view.window?.isDocumentEdited = false
-        updateStatusBar()
+        markDocumentClean()
         return true
     }
 }

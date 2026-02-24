@@ -1,0 +1,28 @@
+services:
+  drawbridge-sync-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: drawbridge-sync-api
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./storage:/app/storage
+
+  minio:
+    image: minio/minio:latest
+    container_name: drawbridge-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-drawbridge}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-drawbridge-change-me}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ./minio-data:/data

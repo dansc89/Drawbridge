@@ -33,3 +33,7 @@ If you hit an issue, open a GitHub issue with:
 ## Developer Docs
 
 Developer/build/release docs are in `DEVELOPMENT.md`.
+
+## Cloud Backend
+
+Backend API and deployment docs for account auth, uploads, sessions, and realtime sync are in `Backend/README.md`.

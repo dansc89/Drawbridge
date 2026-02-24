@@ -25,6 +25,12 @@ extension MainViewController {
                         annotationsToDelete.append((page: page, annotation: sibling))
                     }
                 }
+                for sibling in pdfView.relatedPolygonMarkupAnnotations(for: item.annotation, on: page) where sibling !== item.annotation {
+                    let siblingID = ObjectIdentifier(sibling)
+                    if seen.insert(siblingID).inserted {
+                        annotationsToDelete.append((page: page, annotation: sibling))
+                    }
+                }
                 for sibling in pdfView.relatedHatchOverlayAnnotations(for: item.annotation, on: page) where sibling !== item.annotation {
                     let siblingID = ObjectIdentifier(sibling)
                     if seen.insert(siblingID).inserted {
@@ -34,6 +40,12 @@ extension MainViewController {
             }
         } else if let direct = lastDirectlySelectedAnnotation, let page = direct.page {
             annotationsToDelete.append((page: page, annotation: direct))
+            for sibling in pdfView.relatedPolygonMarkupAnnotations(for: direct, on: page) where sibling !== direct {
+                let siblingID = ObjectIdentifier(sibling)
+                if seen.insert(siblingID).inserted {
+                    annotationsToDelete.append((page: page, annotation: sibling))
+                }
+            }
             for sibling in pdfView.relatedHatchOverlayAnnotations(for: direct, on: page) where sibling !== direct {
                 let siblingID = ObjectIdentifier(sibling)
                 if seen.insert(siblingID).inserted {
@@ -41,7 +53,7 @@ extension MainViewController {
                 }
             }
         } else {
-            NSSound.beep()
+            beep()
             return
         }
 
@@ -56,10 +68,7 @@ extension MainViewController {
 
     @objc func editSelectedMarkupText() {
         let row = markupsTable.selectedRow
-        guard row >= 0, row < markupItems.count else {
-            NSSound.beep()
-            return
-        }
+        guard guardOrBeep(row >= 0 && row < markupItems.count) else { return }
 
         let item = markupItems[row]
         let alert = NSAlert()
@@ -149,17 +158,7 @@ extension MainViewController {
     }
 
     func assignLineWidth(_ lineWidth: CGFloat, to annotation: PDFAnnotation) {
-        let normalized = max(0.0, lineWidth)
-        let border = annotation.border ?? PDFBorder()
-        border.lineWidth = normalized
-        annotation.border = border
-        let annotationType = (annotation.type ?? "").lowercased()
-        if annotationType.contains("ink"),
-           let paths = annotation.paths {
-            for path in paths {
-                path.lineWidth = normalized
-            }
-        }
+        AnnotationStyleMutations.assignLineWidth(lineWidth, to: annotation)
     }
 
     func registerAnnotationStateUndo(annotation: PDFAnnotation, previous: AnnotationSnapshot, actionName: String) {
@@ -190,15 +189,9 @@ extension MainViewController {
     }
 
     func reorderSelectedMarkups(_ action: AnnotationReorderAction) {
-        guard let document = pdfView.document else {
-            NSSound.beep()
-            return
-        }
+        guard let document = pdfView.document else { beep(); return }
         let selectedItems = currentSelectedMarkupItems()
-        guard !selectedItems.isEmpty else {
-            NSSound.beep()
-            return
-        }
+        guard guardOrBeep(!selectedItems.isEmpty) else { return }
 
         var groupedByPage: [ObjectIdentifier: (page: PDFPage, ids: Set<ObjectIdentifier>)] = [:]
         for item in selectedItems {
@@ -209,6 +202,9 @@ extension MainViewController {
             }
             groupedByPage[pageID]?.ids.insert(ObjectIdentifier(item.annotation))
             for sibling in relatedCalloutAnnotations(for: item.annotation, on: page) {
+                groupedByPage[pageID]?.ids.insert(ObjectIdentifier(sibling))
+            }
+            for sibling in pdfView.relatedPolygonMarkupAnnotations(for: item.annotation, on: page) {
                 groupedByPage[pageID]?.ids.insert(ObjectIdentifier(sibling))
             }
             for sibling in pdfView.relatedHatchOverlayAnnotations(for: item.annotation, on: page) {
@@ -232,10 +228,7 @@ extension MainViewController {
             }
         }
 
-        guard changedAny else {
-            NSSound.beep()
-            return
-        }
+        guard guardOrBeep(changedAny) else { return }
         commitMarkupMutation(selecting: firstSelected ?? currentSelectedAnnotation())
     }
 
@@ -294,18 +287,29 @@ extension MainViewController {
 
 
     func selectMarkupFromPageClick(page: PDFPage, annotation: PDFAnnotation) {
-        lastDirectlySelectedAnnotation = annotation
-        guard let document = pdfView.document else { return }
-        let pageIndex = document.index(for: page)
-        if pageIndex < 0 {
-            NSSound.beep()
+        let resolvedAnnotation = pdfView.normalizeLegacyPolygonGroupIfNeeded(for: annotation, on: page)
+        if resolvedAnnotation !== annotation {
+            markPageMarkupCacheDirty(page)
+            commitMarkupMutation(selecting: resolvedAnnotation, forceImmediateRefresh: true)
             return
         }
 
-        if !markupItems.contains(where: { $0.pageIndex == pageIndex && $0.annotation === annotation }) {
-            performRefreshMarkups(selecting: annotation)
+        lastDirectlySelectedAnnotation = resolvedAnnotation
+        guard let document = pdfView.document else { return }
+        let pageIndex = document.index(for: page)
+        if pageIndex < 0 {
+            beep()
+            return
         }
-        let related = Set(relatedCalloutAnnotations(for: annotation, on: page).map(ObjectIdentifier.init))
+
+        if !markupItems.contains(where: { $0.pageIndex == pageIndex && $0.annotation === resolvedAnnotation }) {
+            performRefreshMarkups(selecting: resolvedAnnotation)
+        }
+        var related = Set(relatedCalloutAnnotations(for: resolvedAnnotation, on: page).map(ObjectIdentifier.init))
+        related.insert(ObjectIdentifier(resolvedAnnotation))
+        for sibling in pdfView.relatedPolygonMarkupAnnotations(for: resolvedAnnotation, on: page) {
+            related.insert(ObjectIdentifier(sibling))
+        }
         let relatedRows = IndexSet(markupItems.enumerated().compactMap { idx, item in
             guard item.pageIndex == pageIndex else { return nil }
             return related.contains(ObjectIdentifier(item.annotation)) ? idx : nil
@@ -315,8 +319,8 @@ extension MainViewController {
             return
         }
 
-        let targetRow = markupItems.firstIndex(where: { $0.pageIndex == pageIndex && $0.annotation === annotation })
-            ?? nearestMarkupRow(to: annotation.bounds, onPageIndex: pageIndex)
+        let targetRow = markupItems.firstIndex(where: { $0.pageIndex == pageIndex && $0.annotation === resolvedAnnotation })
+            ?? nearestMarkupRow(to: resolvedAnnotation.bounds, onPageIndex: pageIndex)
         if let row = targetRow {
             applyMarkupTableSelectionRows(IndexSet(integer: row))
             return

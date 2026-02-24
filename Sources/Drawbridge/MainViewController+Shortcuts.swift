@@ -20,26 +20,59 @@ enum ShortcutAction: String, CaseIterable {
     case toggleGrid
     case toggleOrtho
 
-    var displayName: String {
+    var toolMode: ToolMode? {
         switch self {
-        case .selectTool: return "Select Tool"
-        case .grabTool: return "Grab Tool"
-        case .penTool: return "Pen Tool"
-        case .arrowTool: return "Arrow Tool"
-        case .areaTool: return "Area Tool"
-        case .lineTool: return "Line Tool"
-        case .polylineTool: return "Polyline Tool"
-        case .polygonTool: return "Polygon Tool"
-        case .highlighterTool: return "Highlighter Tool"
-        case .cloudTool: return "Cloud Tool"
-        case .rectangleTool: return "Rectangle Tool"
-        case .ellipseTool: return "Ellipse Tool"
-        case .textTool: return "Text Tool"
-        case .calloutTool: return "Callout Tool"
-        case .measureTool: return "Measure Tool"
-        case .calibrateTool: return "Calibrate Tool"
+        case .selectTool: return .select
+        case .grabTool: return .grab
+        case .penTool: return .pen
+        case .arrowTool: return .arrow
+        case .areaTool: return .area
+        case .lineTool: return .line
+        case .polylineTool: return .polyline
+        case .polygonTool: return .polygon
+        case .highlighterTool: return .highlighter
+        case .cloudTool: return .cloud
+        case .rectangleTool: return .rectangle
+        case .ellipseTool: return .circle
+        case .textTool: return .text
+        case .calloutTool: return .callout
+        case .measureTool: return .measure
+        case .calibrateTool: return .calibrate
+        case .toggleGrid, .toggleOrtho: return nil
+        }
+    }
+
+    var defaultBinding: ShortcutBinding {
+        switch self {
+        case .selectTool: return ShortcutBinding(key: "v", requiresShift: false)
+        case .grabTool: return ShortcutBinding(key: "g", requiresShift: false)
+        case .penTool: return ShortcutBinding(key: "d", requiresShift: false)
+        case .arrowTool: return ShortcutBinding(key: "a", requiresShift: false)
+        case .areaTool: return ShortcutBinding(key: "a", requiresShift: true)
+        case .lineTool: return ShortcutBinding(key: "l", requiresShift: false)
+        case .polylineTool: return ShortcutBinding(key: "p", requiresShift: false)
+        case .polygonTool: return ShortcutBinding(key: "p", requiresShift: true)
+        case .highlighterTool: return ShortcutBinding(key: "h", requiresShift: false)
+        case .cloudTool: return ShortcutBinding(key: "c", requiresShift: false)
+        case .rectangleTool: return ShortcutBinding(key: "r", requiresShift: false)
+        case .ellipseTool: return ShortcutBinding(key: "e", requiresShift: false)
+        case .textTool: return ShortcutBinding(key: "t", requiresShift: false)
+        case .calloutTool: return ShortcutBinding(key: "q", requiresShift: false)
+        case .measureTool: return ShortcutBinding(key: "m", requiresShift: false)
+        case .calibrateTool: return ShortcutBinding(key: "k", requiresShift: false)
+        case .toggleGrid: return ShortcutBinding(key: "x", requiresShift: false)
+        case .toggleOrtho: return ShortcutBinding(key: "o", requiresShift: false)
+        }
+    }
+
+    var displayName: String {
+        if let mode = toolMode {
+            return "\(mode.shortcutDisplayName) Tool"
+        }
+        switch self {
         case .toggleGrid: return "Toggle Grid"
         case .toggleOrtho: return "Toggle Ortho"
+        default: return "Shortcut"
         }
     }
 }
@@ -74,26 +107,11 @@ extension MainViewController {
     private static let shortcutsDefaultsKey = "DrawbridgeShortcutBindings"
 
     func defaultShortcutBindings() -> [ShortcutAction: ShortcutBinding] {
-        [
-            .selectTool: ShortcutBinding(key: "v", requiresShift: false),
-            .grabTool: ShortcutBinding(key: "g", requiresShift: false),
-            .penTool: ShortcutBinding(key: "d", requiresShift: false),
-            .arrowTool: ShortcutBinding(key: "a", requiresShift: false),
-            .areaTool: ShortcutBinding(key: "a", requiresShift: true),
-            .lineTool: ShortcutBinding(key: "l", requiresShift: false),
-            .polylineTool: ShortcutBinding(key: "p", requiresShift: false),
-            .polygonTool: ShortcutBinding(key: "p", requiresShift: true),
-            .highlighterTool: ShortcutBinding(key: "h", requiresShift: false),
-            .cloudTool: ShortcutBinding(key: "c", requiresShift: false),
-            .rectangleTool: ShortcutBinding(key: "r", requiresShift: false),
-            .ellipseTool: ShortcutBinding(key: "e", requiresShift: false),
-            .textTool: ShortcutBinding(key: "t", requiresShift: false),
-            .calloutTool: ShortcutBinding(key: "q", requiresShift: false),
-            .measureTool: ShortcutBinding(key: "m", requiresShift: false),
-            .calibrateTool: ShortcutBinding(key: "k", requiresShift: false),
-            .toggleGrid: ShortcutBinding(key: "x", requiresShift: false),
-            .toggleOrtho: ShortcutBinding(key: "o", requiresShift: false)
-        ]
+        var bindings: [ShortcutAction: ShortcutBinding] = [:]
+        for action in ShortcutAction.allCases {
+            bindings[action] = action.defaultBinding
+        }
+        return bindings
     }
 
     func loadShortcutBindings() {
@@ -149,43 +167,17 @@ extension MainViewController {
 
     @discardableResult
     func performShortcutAction(_ action: ShortcutAction) -> Bool {
+        if let mode = action.toolMode {
+            setTool(mode)
+            return true
+        }
         switch action {
-        case .selectTool:
-            setTool(.select)
-        case .grabTool:
-            setTool(.grab)
-        case .penTool:
-            setTool(.pen)
-        case .arrowTool:
-            setTool(.arrow)
-        case .areaTool:
-            setTool(.area)
-        case .lineTool:
-            setTool(.line)
-        case .polylineTool:
-            setTool(.polyline)
-        case .polygonTool:
-            setTool(.polygon)
-        case .highlighterTool:
-            setTool(.highlighter)
-        case .cloudTool:
-            setTool(.cloud)
-        case .rectangleTool:
-            setTool(.rectangle)
-        case .ellipseTool:
-            setTool(.circle)
-        case .textTool:
-            setTool(.text)
-        case .calloutTool:
-            setTool(.callout)
-        case .measureTool:
-            setTool(.measure)
-        case .calibrateTool:
-            setTool(.calibrate)
         case .toggleGrid:
             toggleGridVisibilityShortcut()
         case .toggleOrtho:
             setOrthoSnapEnabled(!isOrthoSnapEnabled)
+        default:
+            return false
         }
         return true
     }
