@@ -99,7 +99,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let chromeBackgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1.0)
     private let panelBackgroundColor = NSColor(calibratedWhite: 0.12, alpha: 1.0)
     private let sidebarBackgroundColor = NSColor(calibratedWhite: 0.14, alpha: 1.0)
-    private let snapshotLayerOptions = [
+    let snapshotLayerOptions = [
         "DEFAULT",
         "ARCHITECTURAL",
         "STRUCTURAL",
@@ -198,8 +198,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let statusZoomLabel = NSTextField(labelWithString: "Zoom: 100%")
     private let statusScaleLabel = NSTextField(labelWithString: "Scale: 1.0 ft")
     private let statusLayerLabel = NSTextField(labelWithString: "Layer:")
-    private let statusLayerPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let statusLayerColorWell = NSColorWell(frame: .zero)
+    let statusLayerPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    let statusLayerColorWell = NSColorWell(frame: .zero)
     private let measurementCountLabel = NSTextField(labelWithString: "Measurements: 0")
     private let measurementTotalLabel = NSTextField(labelWithString: "Total Length: 0")
     private let toolSettingsSectionButton = NSButton(title: "Tool Settings", target: nil, action: nil)
@@ -210,8 +210,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let snapSectionContent = NSStackView(frame: .zero)
     private let snapRowsStack = NSStackView(frame: .zero)
     private let layersSectionButton = NSButton(title: "", target: nil, action: nil)
-    private let layersSectionContent = NSStackView(frame: .zero)
-    private let layersRowsStack = NSStackView(frame: .zero)
+    let layersSectionContent = NSStackView(frame: .zero)
+    let layersRowsStack = NSStackView(frame: .zero)
     let toolSettingsToolLabel = NSTextField(labelWithString: "Active Tool: Pen")
     let toolSettingsStrokeTitleLabel = NSTextField(labelWithString: "Color:")
     let toolSettingsFillTitleLabel = NSTextField(labelWithString: "Fill:")
@@ -377,10 +377,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var pendingScaleReminderSuppressionOneShot = false
     var toolSettingsByTool: [ToolMode: ToolSettingsState] = [:]
     var shortcutBindings: [ShortcutAction: ShortcutBinding] = [:]
-    private var layerVisibilityByName: [String: Bool] = [:]
-    private var layerTintColorByName: [String: NSColor] = [:]
-    private var layerToggleSwitches: [String: NSSwitch] = [:]
-    private var layerTintColorWells: [String: NSColorWell] = [:]
+    var layerVisibilityByName: [String: Bool] = [:]
+    var layerTintColorByName: [String: NSColor] = [:]
+    var layerVisibilityButtons: [String: NSButton] = [:]
+    var layerTintColorWells: [String: NSColorWell] = [:]
     var onDocumentOpened: ((URL) -> Void)?
     private var sidebarContainerView: NSView?
     private var lastSidebarExpandedWidth: CGFloat = 240
@@ -1421,252 +1421,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         applyToolSettingsToPDFView()
     }
 
-    private func ensureLayerVisibilityDefaults() {
-        for layer in snapshotLayerOptions where layerVisibilityByName[layer] == nil {
-            layerVisibilityByName[layer] = true
-        }
-    }
-
-    private func tintColor(forSnapshotLayer layer: String) -> NSColor? {
-        if let override = layerTintColorByName[layer] {
-            return override
-        }
-        switch layer {
-        case "DEFAULT":
-            return nil
-        case "ARCHITECTURAL":
-            return NSColor(calibratedWhite: 0.72, alpha: 1.0) // light gray
-        case "STRUCTURAL":
-            return .systemRed
-        case "MECHANICAL":
-            return .systemGreen
-        case "ELECTRICAL":
-            return .systemOrange
-        case "PLUMBING":
-            return .systemBlue
-        case "CIVL":
-            return .systemTeal
-        case "LANDSCAPE":
-            return NSColor.systemGreen.blended(withFraction: 0.35, of: .systemBrown) ?? .systemGreen
-        default:
-            return .systemRed
-        }
-    }
-
-    private func applyLayerRenderingStyle(to snapshot: PDFSnapshotAnnotation, layer: String) {
-        if let tint = tintColor(forSnapshotLayer: layer) {
-            snapshot.renderTintColor = tint
-            snapshot.renderTintStrength = 1.0
-            snapshot.lineworkOnlyTint = true
-        } else {
-            snapshot.renderTintColor = nil
-            snapshot.renderTintStrength = 0.0
-            snapshot.lineworkOnlyTint = false
-        }
-    }
-
-    private func selectedStatusLayerName() -> String {
-        let selected = statusLayerPopup.titleOfSelectedItem?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !selected.isEmpty {
-            return selected
-        }
-        return snapshotLayerOptions.first ?? "DEFAULT"
-    }
-
-    private func refreshStatusLayerControls() {
-        let layer = selectedStatusLayerName()
-        let isDefaultLayer = layer == "DEFAULT"
-        statusLayerColorWell.isEnabled = !isDefaultLayer
-        if let tint = tintColor(forSnapshotLayer: layer) {
-            statusLayerColorWell.color = tint.withAlphaComponent(1.0)
-        } else {
-            statusLayerColorWell.color = .white
-        }
-    }
-
-    private func refreshLayerTintColorWell(for layer: String) {
-        guard let well = layerTintColorWells[layer] else { return }
-        well.isEnabled = (layer != "DEFAULT")
-        if let tint = tintColor(forSnapshotLayer: layer) {
-            well.color = tint.withAlphaComponent(1.0)
-        } else {
-            well.color = .white
-        }
-    }
-
-    private func applyLayerTintColorToAllSnapshots(layer: String) {
-        guard let document = pdfView.document else { return }
-        var changedAny = false
-        for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex) else { continue }
-            var markedDirty = false
-            for annotation in page.annotations {
-                guard let snapshot = annotation as? PDFSnapshotAnnotation else { continue }
-                let snapshotLayer = snapshot.snapshotLayerName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                guard snapshotLayer == layer else { continue }
-                applyLayerRenderingStyle(to: snapshot, layer: layer)
-                changedAny = true
-                markedDirty = true
-            }
-            if markedDirty {
-                markPageMarkupCacheDirty(page)
-            }
-        }
-        guard changedAny else { return }
-        markMarkupChanged()
-        applySnapshotLayerVisibility()
-        updateToolSettingsUIForCurrentTool()
-        updateStatusBar()
-        scheduleAutosave()
-    }
-
-    private func promptSnapshotLayerSelection(
-        defaultLayer: String = "ARCHITECTURAL",
-        messageText: String = "What layer?",
-        informativeText: String = "Choose the layer for this pasted grab.",
-        confirmTitle: String = "Apply",
-        cancelTitle: String = "Cancel"
-    ) -> String? {
-        ensureLayerVisibilityDefaults()
-        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 28), pullsDown: false)
-        popup.addItems(withTitles: snapshotLayerOptions)
-        if let idx = snapshotLayerOptions.firstIndex(of: defaultLayer) {
-            popup.selectItem(at: idx)
-        } else {
-            popup.selectItem(at: 0)
-        }
-
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 40))
-        popup.translatesAutoresizingMaskIntoConstraints = false
-        accessory.addSubview(popup)
-        NSLayoutConstraint.activate([
-            popup.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
-            popup.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
-            popup.centerYAnchor.constraint(equalTo: accessory.centerYAnchor)
-        ])
-
-        let alert = NSAlert()
-        alert.messageText = messageText
-        alert.informativeText = informativeText
-        alert.alertStyle = .informational
-        alert.accessoryView = accessory
-        alert.addButton(withTitle: confirmTitle)
-        alert.addButton(withTitle: cancelTitle)
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        return popup.titleOfSelectedItem
-    }
-
-    private func configureLayersSectionUI() {
-        ensureLayerVisibilityDefaults()
-        layersSectionContent.orientation = .vertical
-        layersSectionContent.spacing = 6
-        layersRowsStack.orientation = .vertical
-        layersRowsStack.spacing = 4
-
-        for view in layersRowsStack.arrangedSubviews {
-            layersRowsStack.removeArrangedSubview(view)
-            view.removeFromSuperview()
-        }
-        layerToggleSwitches.removeAll()
-        layerTintColorWells.removeAll()
-
-        for layer in snapshotLayerOptions {
-            let colorWell = NSColorWell(frame: .zero)
-            colorWell.identifier = NSUserInterfaceItemIdentifier(layer)
-            colorWell.target = self
-            colorWell.action = #selector(layerTintColorWellChanged(_:))
-            colorWell.translatesAutoresizingMaskIntoConstraints = false
-            colorWell.widthAnchor.constraint(equalToConstant: 22).isActive = true
-            colorWell.heightAnchor.constraint(equalToConstant: 16).isActive = true
-            layerTintColorWells[layer] = colorWell
-            refreshLayerTintColorWell(for: layer)
-
-            let label = NSTextField(labelWithString: layer)
-            label.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-            label.lineBreakMode = .byTruncatingTail
-
-            let toggle = NSSwitch(frame: .zero)
-            toggle.state = (layerVisibilityByName[layer] ?? true) ? .on : .off
-            toggle.target = self
-            toggle.action = #selector(layerToggleChanged(_:))
-            toggle.identifier = NSUserInterfaceItemIdentifier(layer)
-            layerToggleSwitches[layer] = toggle
-
-            let row = NSStackView(views: [colorWell, label, NSView(), toggle])
-            row.orientation = .horizontal
-            row.spacing = 8
-            row.alignment = .centerY
-            layersRowsStack.addArrangedSubview(row)
-        }
-
-        layersSectionContent.addArrangedSubview(layersRowsStack)
-    }
-
-    @objc private func layerToggleChanged(_ sender: NSSwitch) {
-        guard let layer = sender.identifier?.rawValue, !layer.isEmpty else { return }
-        layerVisibilityByName[layer] = (sender.state == .on)
-        applySnapshotLayerVisibility()
-    }
-
-    @objc private func statusLayerSelectionChanged(_ sender: NSPopUpButton) {
-        _ = sender
-        refreshStatusLayerControls()
-    }
-
-    @objc private func statusLayerColorChanged(_ sender: NSColorWell) {
-        let layer = selectedStatusLayerName()
-        guard layer != "DEFAULT" else {
-            refreshStatusLayerControls()
-            return
-        }
-        layerTintColorByName[layer] = sender.color.withAlphaComponent(1.0)
-        applyLayerTintColorToAllSnapshots(layer: layer)
-        refreshLayerTintColorWell(for: layer)
-        refreshStatusLayerControls()
-    }
-
-    @objc private func layerTintColorWellChanged(_ sender: NSColorWell) {
-        guard let layer = sender.identifier?.rawValue, !layer.isEmpty else { return }
-        guard layer != "DEFAULT" else {
-            refreshLayerTintColorWell(for: layer)
-            return
-        }
-        layerTintColorByName[layer] = sender.color.withAlphaComponent(1.0)
-        applyLayerTintColorToAllSnapshots(layer: layer)
-        refreshLayerTintColorWell(for: layer)
-        if selectedStatusLayerName() == layer {
-            refreshStatusLayerControls()
-        }
-    }
-
-    private func applySnapshotLayerVisibility() {
-        guard let document = pdfView.document else { return }
-        ensureLayerVisibilityDefaults()
-        var hidSelectedSnapshot = false
-        for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex) else { continue }
-            for annotation in page.annotations {
-                guard let snapshot = annotation as? PDFSnapshotAnnotation else { continue }
-                let layer = snapshot.snapshotLayerName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                let isVisible = layer.isEmpty ? true : (layerVisibilityByName[layer] ?? true)
-                snapshot.shouldDisplay = isVisible
-                snapshot.shouldPrint = isVisible
-                if !isVisible, lastDirectlySelectedAnnotation === snapshot {
-                    hidSelectedSnapshot = true
-                }
-            }
-        }
-        if hidSelectedSnapshot {
-            clearMarkupSelection()
-        } else {
-            updateSelectionOverlay()
-            updateToolSettingsUIForCurrentTool()
-            updateStatusBar()
-        }
-        pdfView.needsDisplay = true
-    }
-
     private func configureActionsPopup(highlightButton: NSButton, exportButton: NSButton, refreshMarkupsButton: NSButton, deleteMarkupButton: NSButton, editMarkupButton: NSButton) {
         actionsPopup.removeAllItems()
         actionsPopup.addItem(withTitle: "")
@@ -1870,62 +1624,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         clearSelectionOverlayLayers()
         updateToolSettingsUIForCurrentTool()
         updateStatusBar()
-    }
-
-    func promptSnapshotLayerAssignmentIfNeeded() {
-        let snapshots = currentSelectedMarkupItems().compactMap { $0.annotation as? PDFSnapshotAnnotation }
-        guard snapshots.count == 1, let selectedSnapshot = snapshots.first else { return }
-        let currentLayer = selectedSnapshot.snapshotLayerName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard currentLayer.isEmpty else { return }
-        guard let layer = promptSnapshotLayerSelection(
-            defaultLayer: "ARCHITECTURAL",
-            messageText: "Assign Snapshot Layer",
-            informativeText: "Choose the layer for this pasted grab markup.",
-            confirmTitle: "Assign Layer",
-            cancelTitle: "Skip"
-        ), !layer.isEmpty else { return }
-        assignLayer(layer, to: [selectedSnapshot])
-    }
-
-    private func assignSnapshotLayerForCurrentSelection() {
-        let selectedSnapshots = currentSelectedMarkupItems().compactMap { $0.annotation as? PDFSnapshotAnnotation }
-        let snapshots: [PDFSnapshotAnnotation]
-        if !selectedSnapshots.isEmpty {
-            snapshots = selectedSnapshots
-        } else if let direct = lastDirectlySelectedAnnotation as? PDFSnapshotAnnotation {
-            snapshots = [direct]
-        } else {
-            beep()
-            return
-        }
-
-        let defaultLayer: String
-        if snapshots.count == 1 {
-            let current = snapshots[0].snapshotLayerName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            defaultLayer = current.isEmpty ? "ARCHITECTURAL" : current
-        } else {
-            defaultLayer = "ARCHITECTURAL"
-        }
-        guard let layer = promptSnapshotLayerSelection(defaultLayer: defaultLayer), !layer.isEmpty else { return }
-        assignLayer(layer, to: snapshots)
-    }
-
-    private func assignLayer(_ layer: String, to snapshots: [PDFSnapshotAnnotation]) {
-        guard !snapshots.isEmpty else { return }
-        for annotation in snapshots {
-            let previous = snapshot(for: annotation)
-            annotation.snapshotLayerName = layer
-            applyLayerRenderingStyle(to: annotation, layer: layer)
-            registerAnnotationStateUndo(annotation: annotation, previous: previous, actionName: "Assign Snapshot Layer")
-            markPageMarkupCacheDirty(annotation.page)
-        }
-        markMarkupChanged()
-        applySnapshotLayerVisibility()
-        performRefreshMarkups(selecting: snapshots.first)
-        updateSelectionOverlay()
-        updateToolSettingsUIForCurrentTool()
-        updateStatusBar()
-        scheduleAutosave()
     }
 
     private func configureEmptyStateView() {
