@@ -33,6 +33,7 @@ If you hit an issue, open a GitHub issue with:
 ## Developer Docs
 
 Developer/build/release docs are in `DEVELOPMENT.md`.
+For trusted macOS distribution (Developer ID signing + Apple notarization), see the same doc.
 
 ## Cloud Backend
 

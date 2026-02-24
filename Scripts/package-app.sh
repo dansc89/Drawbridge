@@ -23,6 +23,7 @@ if [[ ! "$APP_VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
   APP_VERSION="0.0.0"
 fi
 BUILD_NUMBER="${DRAWBRIDGE_BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo "1")}"
+SIGN_IDENTITY="${DRAWBRIDGE_CODESIGN_IDENTITY:-}"
 
 echo "Building release binary..."
 swift build -c release
@@ -104,8 +105,16 @@ cat > "$PLIST_PATH" <<EOF
 </plist>
 EOF
 
-echo "Ad-hoc signing app bundle..."
-codesign --force --deep --sign - "$APP_DIR"
+if [[ -n "$SIGN_IDENTITY" ]]; then
+  echo "Signing app bundle with Developer ID identity: $SIGN_IDENTITY"
+  codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_DIR"
+else
+  echo "No DRAWBRIDGE_CODESIGN_IDENTITY set. Using ad-hoc signing (not trusted for internet distribution)."
+  codesign --force --deep --sign - "$APP_DIR"
+fi
+
+echo "Verifying app signature..."
+codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
 # Automatically create a checkpoint for quick rollback.
 CHECKPOINT_LABEL="${CHECKPOINT_LABEL:-}"

@@ -39,6 +39,56 @@ Launch:
 open /Users/danielnguyen/Drawbridge/dist/Drawbridge.app
 ```
 
+## Trusted macOS Distribution (Sign + Notarize)
+
+### 1) Confirm Developer ID identity is installed
+
+```bash
+security find-identity -v -p codesigning
+```
+
+You need a `Developer ID Application:` identity in the output.
+
+### 2) Build with Developer ID signing
+
+```bash
+cd /Users/danielnguyen/Drawbridge
+export DRAWBRIDGE_CODESIGN_IDENTITY="Developer ID Application: <Your Name> (<TEAMID>)"
+./Scripts/package-app.sh
+```
+
+### 3) Store notarization profile (one-time)
+
+```bash
+cd /Users/danielnguyen/Drawbridge
+./Scripts/setup-notary-profile.sh drawbridge-notary <apple-id-email> <TEAMID> <app-specific-password>
+```
+
+### 4) Notarize + staple app (and optional DMG)
+
+App only:
+
+```bash
+cd /Users/danielnguyen/Drawbridge
+export DRAWBRIDGE_NOTARY_PROFILE="drawbridge-notary"
+./Scripts/notarize-release.sh dist/Drawbridge.app
+```
+
+App + DMG:
+
+```bash
+cd /Users/danielnguyen/Drawbridge
+export DRAWBRIDGE_NOTARY_PROFILE="drawbridge-notary"
+./Scripts/notarize-release.sh dist/Drawbridge.app dist/Drawbridge-vX.Y.Z.dmg
+```
+
+### 5) Verify Gatekeeper acceptance
+
+```bash
+spctl -a -vv dist/Drawbridge.app
+xcrun stapler validate dist/Drawbridge.app
+```
+
 ## Optional Install To Applications
 
 ```bash

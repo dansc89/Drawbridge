@@ -22,6 +22,27 @@ jobs:
         with:
           xcode-version: latest-stable
 
+      - name: Import Developer ID certificate
+        env:
+          APPLE_DEVELOPER_ID_CERT_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_BASE64 }}
+          APPLE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+          APPLE_DEVELOPER_ID_SIGNING_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_SIGNING_IDENTITY }}
+        run: |
+          if [[ -z "${APPLE_DEVELOPER_ID_CERT_BASE64}" || -z "${APPLE_DEVELOPER_ID_CERT_PASSWORD}" || -z "${APPLE_DEVELOPER_ID_SIGNING_IDENTITY}" ]]; then
+            echo "Missing signing secrets (APPLE_DEVELOPER_ID_CERT_BASE64 / APPLE_DEVELOPER_ID_CERT_PASSWORD / APPLE_DEVELOPER_ID_SIGNING_IDENTITY)."
+            exit 1
+          fi
+          CERT_PATH="$RUNNER_TEMP/developer-id.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build-signing.keychain-db"
+          echo -n "$APPLE_DEVELOPER_ID_CERT_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$APPLE_DEVELOPER_ID_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN_PATH"
+          echo "DRAWBRIDGE_CODESIGN_IDENTITY=$APPLE_DEVELOPER_ID_SIGNING_IDENTITY" >> "$GITHUB_ENV"
+
       - name: Build app bundle
         run: ./Scripts/package-app.sh
 
@@ -40,6 +61,26 @@ jobs:
 
           echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
           echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
+
+      - name: Notarize app and DMG
+        env:
+          DRAWBRIDGE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          DRAWBRIDGE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          DRAWBRIDGE_NOTARY_APP_PASSWORD: ${{ secrets.APPLE_NOTARY_APP_PASSWORD }}
+        run: |
+          if [[ -z "${DRAWBRIDGE_NOTARY_APPLE_ID}" || -z "${DRAWBRIDGE_NOTARY_TEAM_ID}" || -z "${DRAWBRIDGE_NOTARY_APP_PASSWORD}" ]]; then
+            echo "Missing notarization secrets (APPLE_NOTARY_APPLE_ID / APPLE_NOTARY_TEAM_ID / APPLE_NOTARY_APP_PASSWORD)."
+            exit 1
+          fi
+          ./Scripts/notarize-release.sh "dist/Drawbridge.app" "${DMG_PATH}"
+
+      - name: Rebuild ZIP from stapled app
+        run: |
+          VERSION_TAG="${GITHUB_REF_NAME:-manual}"
+          APP_NAME="Drawbridge"
+          ZIP_PATH="dist/${APP_NAME}-${VERSION_TAG}.zip"
+          rm -f "$ZIP_PATH"
+          ditto -c -k --sequesterRsrc --keepParent "dist/${APP_NAME}.app" "$ZIP_PATH"
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
