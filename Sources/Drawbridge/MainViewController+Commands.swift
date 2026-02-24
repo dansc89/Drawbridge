@@ -100,16 +100,10 @@ extension MainViewController {
             guard let keyField = keyFields[action],
                   let modifierPopup = modifierPopups[action] else { continue }
             let rawKey = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard rawKey.count == 1, rawKey.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
-                NSSound.beep()
-                return
-            }
+            guard guardOrBeep(rawKey.count == 1 && rawKey.unicodeScalars.allSatisfy({ allowed.contains($0) })) else { return }
             let requiresShift = modifierPopup.indexOfSelectedItem == 1
             let combo = "\(requiresShift ? "s" : "n"):\(rawKey)"
-            guard !seenCombos.contains(combo) else {
-                NSSound.beep()
-                return
-            }
+            guard guardOrBeep(!seenCombos.contains(combo)) else { return }
             seenCombos.insert(combo)
             updated[action] = ShortcutBinding(key: rawKey, requiresShift: requiresShift)
         }
@@ -227,10 +221,7 @@ extension MainViewController {
     }
 
     private func cycleDocument(step: Int) {
-        guard sessionDocumentURLs.count > 1 else {
-            NSSound.beep()
-            return
-        }
+        guard guardOrBeep(sessionDocumentURLs.count > 1) else { return }
 
         guard confirmDiscardUnsavedChangesIfNeeded() else {
             return
@@ -255,15 +246,9 @@ extension MainViewController {
             NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: sender)
             return
         }
-        guard let document = pdfView.document else {
-            NSSound.beep()
-            return
-        }
+        guard let document = pdfView.document else { beep(); return }
         let selectedItems = currentSelectedMarkupItems()
-        guard !selectedItems.isEmpty else {
-            NSSound.beep()
-            return
-        }
+        guard guardOrBeep(!selectedItems.isEmpty) else { return }
 
         var uniqueByID: [ObjectIdentifier: (pageIndex: Int, annotation: PDFAnnotation)] = [:]
         for item in selectedItems {
@@ -284,16 +269,10 @@ extension MainViewController {
                 lineWidth: resolvedLineWidth(for: entry.annotation)
             )
         }
-        guard !records.isEmpty else {
-            NSSound.beep()
-            return
-        }
+        guard guardOrBeep(!records.isEmpty) else { return }
 
         let payload = MarkupClipboardPayload(sourceDocumentPageCount: document.pageCount, records: records)
-        guard let encoded = try? PropertyListEncoder().encode(payload) else {
-            NSSound.beep()
-            return
-        }
+        guard let encoded = try? PropertyListEncoder().encode(payload) else { beep(); return }
         let board = NSPasteboard.general
         board.clearContents()
         board.setData(encoded, forType: markupClipboardPasteboardType)
@@ -323,15 +302,9 @@ extension MainViewController {
             textView.selectAll(nil)
             return
         }
-        guard let document = pdfView.document, let page = pdfView.currentPage else {
-            NSSound.beep()
-            return
-        }
+        guard let document = pdfView.document, let page = pdfView.currentPage else { beep(); return }
         let pageIndex = document.index(for: page)
-        guard pageIndex >= 0 else {
-            NSSound.beep()
-            return
-        }
+        guard guardOrBeep(pageIndex >= 0) else { return }
         let rows = IndexSet(markupItems.enumerated().compactMap { idx, item in
             item.pageIndex == pageIndex ? idx : nil
         })
@@ -351,10 +324,7 @@ extension MainViewController {
     @objc func commandToggleSidebar(_ sender: Any?) { toggleSidebar() }
     @objc func commandQuickStart(_ sender: Any?) { showQuickStartGuide() }
     @objc func commandFocusSearch(_ sender: Any?) {
-        guard pdfView.document != nil else {
-            NSSound.beep()
-            return
-        }
+        guard guardOrBeep(pdfView.document != nil) else { return }
         ensureSearchPanel()
         if let panel = searchPanel {
             if let window = view.window {
@@ -531,7 +501,7 @@ extension MainViewController {
             goToPageIndex(pageNumber - 1)
             return
         }
-        NSSound.beep()
+        beep()
     }
 
     private func navigatePage(delta: Int) {

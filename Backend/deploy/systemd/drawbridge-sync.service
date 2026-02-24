@@ -1,0 +1,17 @@
+[Unit]
+Description=Drawbridge Sync Backend
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/drawbridge/Backend
+EnvironmentFile=/opt/drawbridge/Backend/.env
+ExecStart=/usr/bin/node /opt/drawbridge/Backend/src/server.js
+Restart=always
+RestartSec=2
+User=drawbridge
+Group=drawbridge
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

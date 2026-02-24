@@ -9,6 +9,19 @@ cd /Users/danielnguyen/Drawbridge
 swift run
 ```
 
+## Run Backend (Cloud Sync)
+
+```bash
+cd /Users/danielnguyen/Drawbridge/Backend
+cp .env.example .env
+npm install
+npm run start
+```
+
+Backend docs:
+
+`/Users/danielnguyen/Drawbridge/Backend/README.md`
+
 ## Build A Launchable `.app` Bundle
 
 ```bash

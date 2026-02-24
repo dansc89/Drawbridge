@@ -102,10 +102,7 @@ extension MainViewController {
     }
 
     @objc func commandSetDrawingScale(_ sender: Any?) {
-        guard pdfView.document != nil else {
-            NSSound.beep()
-            return
-        }
+        guard guardOrBeep(pdfView.document != nil) else { return }
 
         let alert = NSAlert()
         alert.messageText = "Set Drawing Scale"
@@ -187,18 +184,12 @@ extension MainViewController {
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        guard let drawingInches = parseArchitecturalInches(drawingField.stringValue),
-              drawingInches > 0 else {
-            NSSound.beep()
-            return
-        }
+        guard let drawingInches = MeasurementParsing.parseArchitecturalInches(drawingField.stringValue),
+              guardOrBeep(drawingInches > 0) else { return }
         let feet = max(0, realFeetField.doubleValue)
         let inches = max(0, realInchesField.doubleValue)
         let realFeet = feet + (inches / 12.0)
-        guard realFeet > 0 else {
-            NSSound.beep()
-            return
-        }
+        guard guardOrBeep(realFeet > 0) else { return }
 
         applyDrawingScale(drawingInches: drawingInches, realFeet: realFeet)
         selectPresetForArchitecturalScale(drawingInches: drawingInches, realFeet: realFeet)
@@ -248,44 +239,8 @@ extension MainViewController {
         return bestLabel
     }
 
-    private func parseArchitecturalInches(_ raw: String) -> Double? {
-        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return nil }
-
-        if let decimal = Double(value) {
-            return decimal
-        }
-
-        let parts = value.split(separator: " ")
-        if parts.count == 2,
-           let whole = Double(parts[0]),
-           let fraction = parseFraction(parts[1]) {
-            return whole + fraction
-        }
-
-        return parseFraction(Substring(value))
-    }
-
-    private func parseFraction(_ fraction: Substring) -> Double? {
-        let items = fraction.split(separator: "/")
-        guard items.count == 2,
-              let numerator = Double(items[0]),
-              let denominator = Double(items[1]),
-              denominator != 0 else { return nil }
-        return numerator / denominator
-    }
-
     func baseUnitsPerPoint(for unit: String) -> CGFloat {
-        switch unit {
-        case "in":
-            return 1.0 / 72.0
-        case "ft":
-            return 1.0 / 864.0
-        case "m":
-            return 0.0003527777778
-        default:
-            return 1.0
-        }
+        MeasurementParsing.baseUnitsPerPoint(for: unit)
     }
 
     func showCalibrationDialog(distanceInPoints: CGFloat) {
@@ -321,10 +276,7 @@ extension MainViewController {
 
         let knownDistance = CGFloat(knownDistanceField.doubleValue)
         let selectedUnit = unitPopup.titleOfSelectedItem ?? "ft"
-        guard knownDistance > 0, let points = pendingCalibrationDistanceInPoints, points > 0 else {
-            NSSound.beep()
-            return
-        }
+        guard knownDistance > 0, let points = pendingCalibrationDistanceInPoints, guardOrBeep(points > 0) else { return }
 
         let unitsPerPoint = knownDistance / points
         let base = baseUnitsPerPoint(for: selectedUnit)
@@ -393,10 +345,7 @@ extension MainViewController {
     }
 
     @objc func commandLockScaleToPages(_ sender: Any?) {
-        guard let document = pdfView.document else {
-            NSSound.beep()
-            return
-        }
+        guard let document = pdfView.document else { beep(); return }
         let currentIndex = max(0, document.index(for: pdfView.currentPage ?? document.page(at: 0)!))
         let currentPageNumber = currentIndex + 1
         let currentScale = currentMeasurementScaleState()
@@ -465,10 +414,7 @@ extension MainViewController {
         let end = max(1, min(document.pageCount, endField.integerValue))
         let lower = min(start, end) - 1
         let upper = max(start, end) - 1
-        guard lower <= upper else {
-            NSSound.beep()
-            return
-        }
+        guard guardOrBeep(lower <= upper) else { return }
 
         for pageIndex in lower...upper {
             pageScaleLocks[pageIndex] = lockState
@@ -489,10 +435,7 @@ extension MainViewController {
     }
 
     @objc func commandClearScaleLocks(_ sender: Any?) {
-        guard let document = pdfView.document else {
-            NSSound.beep()
-            return
-        }
+        guard let document = pdfView.document else { beep(); return }
         let alert = NSAlert()
         alert.messageText = "Clear Scale Locks"
         alert.informativeText = "Choose whether to clear all locked page scales, or only for a page range."

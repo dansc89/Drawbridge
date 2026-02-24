@@ -146,11 +146,11 @@ extension MainViewController {
                     snapshot.lineworkOnlyTint = true
                     didEdit = true
                 } else {
+                    let inferredTool = inferredToolMode(for: annotation)
                     annotation.color = stroke
                     if annotationType.contains("square") || annotationType.contains("circle") {
-                        let inferred = inferredToolMode(for: annotation)
-                        if inferred == .rectangle || inferred == .circle {
-                            let updatedWidth = widthValue(for: selectedLineWeightLevel(), tool: inferred)
+                        if inferredTool == .rectangle || inferredTool == .circle {
+                            let updatedWidth = widthValue(for: selectedLineWeightLevel(), tool: inferredTool)
                             assignLineWidth(updatedWidth, to: annotation)
                             pdfView.applyRectangleHatchStyle(
                                 rectangleHatchStyle,
@@ -163,8 +163,18 @@ extension MainViewController {
                             annotation.interiorColor = fill
                         }
                     }
+                    if inferredTool == .polygon {
+                        let updatedWidth = widthValue(for: selectedLineWeightLevel(), tool: .polygon)
+                        assignLineWidth(updatedWidth, to: annotation)
+                        pdfView.applyPolygonHatchStyle(
+                            rectangleHatchStyle,
+                            to: annotation,
+                            fillColor: fill,
+                            backgroundColor: hatchBackground,
+                            lineWidth: updatedWidth
+                        )
+                    }
                     if !annotationType.contains("highlight") {
-                        let inferredTool = inferredToolMode(for: annotation)
                         let updatedWidth = widthValue(for: selectedLineWeightLevel(), tool: inferredTool)
                         assignLineWidth(updatedWidth, to: annotation)
                     }
@@ -421,17 +431,19 @@ extension MainViewController {
                 toolSettingsStrokeTitleLabel.stringValue = "Color:"
                 let contents = (primary.contents ?? "").lowercased()
                 let isRectangleMarkup = (inferredTool == .rectangle || inferredTool == .circle) && (annotationType.contains("square") || annotationType.contains("circle"))
-                toolSettingsFillTitleLabel.stringValue = isRectangleMarkup ? "Hatch Color:" : "Fill:"
+                let isPolygonMarkup = inferredTool == .polygon && annotationType.contains("ink") && contents.contains("polygon")
+                let supportsHatch = isRectangleMarkup || isPolygonMarkup
+                toolSettingsFillTitleLabel.stringValue = supportsHatch ? "Hatch Color:" : "Fill:"
                 let isArrowMarkup =
                     contents.contains("arrow|style:") ||
                     contents.contains("arrow dot|") ||
                     contents.contains("arrow square|") ||
                     contents.contains("callout leader|arrow:")
-                toolSettingsFillRow.isHidden = !(annotationType.contains("square") || annotationType.contains("circle"))
-                toolSettingsHatchRow.isHidden = !isRectangleMarkup
-                toolSettingsHatchPopup.isEnabled = isRectangleMarkup
-                toolSettingsHatchBackgroundRow.isHidden = !isRectangleMarkup
-                toolSettingsHatchBackgroundColorWell.isEnabled = isRectangleMarkup
+                toolSettingsFillRow.isHidden = !(supportsHatch || annotationType.contains("square") || annotationType.contains("circle"))
+                toolSettingsHatchRow.isHidden = !supportsHatch
+                toolSettingsHatchPopup.isEnabled = supportsHatch
+                toolSettingsHatchBackgroundRow.isHidden = !supportsHatch
+                toolSettingsHatchBackgroundColorWell.isEnabled = supportsHatch
                 toolSettingsFontRow.isHidden = true
                 toolSettingsArrowRow.isHidden = !isArrowMarkup
                 toolSettingsArrowPopup.isEnabled = isArrowMarkup
@@ -459,6 +471,13 @@ extension MainViewController {
                     let baseFill = pdfView.rectangleFillColor(for: primary) ?? NSColor.systemYellow
                     toolSettingsFillColorWell.color = baseFill.withAlphaComponent(1.0)
                     let baseBackground = pdfView.rectangleHatchBackgroundColor(for: primary) ?? NSColor.white
+                    toolSettingsHatchBackgroundColorWell.color = baseBackground.withAlphaComponent(1.0)
+                } else if isPolygonMarkup {
+                    let hatch = pdfView.polygonStoredHatchStyle(for: primary) ?? .solid
+                    selectRectangleHatchStyle(hatch)
+                    let baseFill = pdfView.polygonStoredHatchColor(for: primary) ?? pdfView.rectangleFillColor
+                    toolSettingsFillColorWell.color = baseFill.withAlphaComponent(1.0)
+                    let baseBackground = pdfView.polygonStoredHatchBackgroundColor(for: primary) ?? pdfView.rectangleHatchBackgroundColor
                     toolSettingsHatchBackgroundColorWell.color = baseBackground.withAlphaComponent(1.0)
                 } else {
                     toolSettingsFillColorWell.color = (primary.interiorColor ?? NSColor.systemYellow).withAlphaComponent(1.0)
