@@ -3,6 +3,157 @@ import Foundation
 import PDFKit
 
 @MainActor
+private final class BatchCombineOrderWindowController: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
+    private var urls: [URL]
+    private let panel: NSPanel
+    private let tableView = NSTableView(frame: .zero)
+    private var modalResult: NSApplication.ModalResponse = .cancel
+
+    init(urls: [URL]) {
+        self.urls = urls
+        self.panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 430),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        super.init()
+        configurePanel()
+    }
+
+    func runModal() -> [URL]? {
+        NSApp.activate(ignoringOtherApps: true)
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+        modalResult = NSApp.runModal(for: panel)
+        panel.orderOut(nil)
+        return modalResult == .OK ? urls : nil
+    }
+
+    private func configurePanel() {
+        panel.title = "Batch Combine PDFs"
+        panel.isReleasedWhenClosed = false
+        panel.delegate = self
+
+        let content = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
+        content.translatesAutoresizingMaskIntoConstraints = false
+        panel.contentView = content
+
+        let title = NSTextField(labelWithString: "Arrange PDFs in the order they should be combined:")
+        title.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+
+        let scroll = NSScrollView(frame: .zero)
+        scroll.borderType = .bezelBorder
+        scroll.hasVerticalScroller = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("file"))
+        column.title = "PDF File"
+        column.width = 520
+        tableView.addTableColumn(column)
+        tableView.headerView = nil
+        tableView.rowHeight = 24
+        tableView.usesAlternatingRowBackgroundColors = true
+        tableView.delegate = self
+        tableView.dataSource = self
+        tableView.target = self
+        tableView.doubleAction = #selector(moveSelectedDown)
+        scroll.documentView = tableView
+
+        let moveUpButton = NSButton(title: "Move Up", target: self, action: #selector(moveSelectedUp))
+        let moveDownButton = NSButton(title: "Move Down", target: self, action: #selector(moveSelectedDown))
+        let removeButton = NSButton(title: "Remove", target: self, action: #selector(removeSelected))
+        let combineButton = NSButton(title: "Combine", target: self, action: #selector(confirmCombine))
+        combineButton.keyEquivalent = "\r"
+        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancel))
+        cancelButton.keyEquivalent = "\u{1b}"
+
+        let controlsRow = NSStackView(views: [moveUpButton, moveDownButton, removeButton, NSView(), cancelButton, combineButton])
+        controlsRow.orientation = .horizontal
+        controlsRow.spacing = 8
+        controlsRow.alignment = .centerY
+
+        let stack = NSStackView(views: [title, scroll, controlsRow])
+        stack.orientation = .vertical
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -14),
+            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 280)
+        ])
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        urls.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let identifier = NSUserInterfaceItemIdentifier("pdfRow")
+        let field: NSTextField
+        if let existing = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTextField {
+            field = existing
+        } else {
+            field = NSTextField(labelWithString: "")
+            field.identifier = identifier
+            field.lineBreakMode = .byTruncatingMiddle
+            field.font = NSFont.systemFont(ofSize: 12)
+        }
+        guard row >= 0, row < urls.count else { return field }
+        field.stringValue = "\(row + 1). \(urls[row].lastPathComponent)"
+        return field
+    }
+
+    @objc private func moveSelectedUp() {
+        let row = tableView.selectedRow
+        guard row > 0, row < urls.count else { return }
+        urls.swapAt(row, row - 1)
+        tableView.reloadData()
+        tableView.selectRowIndexes(IndexSet(integer: row - 1), byExtendingSelection: false)
+    }
+
+    @objc private func moveSelectedDown() {
+        let row = tableView.selectedRow
+        guard row >= 0, row < urls.count - 1 else { return }
+        urls.swapAt(row, row + 1)
+        tableView.reloadData()
+        tableView.selectRowIndexes(IndexSet(integer: row + 1), byExtendingSelection: false)
+    }
+
+    @objc private func removeSelected() {
+        let row = tableView.selectedRow
+        guard row >= 0, row < urls.count else { return }
+        urls.remove(at: row)
+        tableView.reloadData()
+        let next = min(row, max(0, urls.count - 1))
+        if !urls.isEmpty {
+            tableView.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
+        }
+    }
+
+    @objc private func confirmCombine() {
+        guard !urls.isEmpty else { NSSound.beep(); return }
+        modalResult = .OK
+        NSApp.stopModal(withCode: .OK)
+    }
+
+    @objc private func cancel() {
+        modalResult = .cancel
+        NSApp.stopModal(withCode: .cancel)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if NSApp.modalWindow === panel {
+            NSApp.stopModal(withCode: .cancel)
+        }
+    }
+}
+
+@MainActor
 extension MainViewController {
     @objc func commandOpen(_ sender: Any?) { openPDF() }
     @objc func commandNew(_ sender: Any?) { createNewPDFAction() }
@@ -11,6 +162,7 @@ extension MainViewController {
     @objc func commandExportCSV(_ sender: Any?) { exportMarkupsCSV() }
     @objc func commandExportPagesAsJPEG(_ sender: Any?) { exportPagesAsJPEG() }
     @objc func commandConvertImagesToPDF(_ sender: Any?) { convertImageFolderToPDF() }
+    @objc func commandBatchCombinePDFs(_ sender: Any?) { batchCombinePDFs() }
     @objc func commandBatchLinkSheetNumbers(_ sender: Any?) { startAutoLinkSheetNumbersFlow() }
     @objc func commandAutoGenerateSheetNames(_ sender: Any?) { startAutoGenerateSheetNamesFlow() }
     @objc func commandSetScale(_ sender: Any?) { commandSetDrawingScale(sender) }
@@ -391,6 +543,100 @@ extension MainViewController {
         openDocument(at: url)
     }
 
+    private func batchCombinePDFs() {
+        let openPanel = NSOpenPanel()
+        openPanel.allowedContentTypes = [.pdf]
+        openPanel.allowsMultipleSelection = true
+        openPanel.canChooseFiles = true
+        openPanel.canChooseDirectories = false
+        openPanel.canCreateDirectories = false
+        openPanel.prompt = "Select"
+        openPanel.message = "Select the PDF files to combine."
+        guard openPanel.runModal() == .OK else { return }
+
+        let selected = openPanel.urls
+            .map { $0.standardizedFileURL }
+            .filter { $0.pathExtension.lowercased() == "pdf" }
+        guard guardOrBeep(!selected.isEmpty) else { return }
+
+        let orderController = BatchCombineOrderWindowController(urls: selected)
+        guard let ordered = orderController.runModal(), !ordered.isEmpty else { return }
+
+        let defaultName = ordered.count == 1
+            ? "\(ordered[0].deletingPathExtension().lastPathComponent)-combined.pdf"
+            : "Combined-\(ordered.count)-files.pdf"
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.pdf]
+        savePanel.nameFieldStringValue = defaultName
+        savePanel.prompt = "Combine"
+        guard savePanel.runModal() == .OK, let outputURL = savePanel.url else { return }
+
+        beginBusyIndicator("Combining PDFs…", detail: "Preparing files…", lockInteraction: false)
+        defer { endBusyIndicator() }
+
+        let combined = PDFDocument()
+        var failedFiles: [String] = []
+        var insertedPages = 0
+        for (fileIndex, sourceURL) in ordered.enumerated() {
+            updateBusyIndicatorDetail("Reading \(fileIndex + 1)/\(ordered.count) • \(sourceURL.lastPathComponent)")
+            updateBusyIndicatorSubdetail("\(insertedPages) pages merged")
+            updateBusyIndicatorProgress(current: fileIndex + 1, total: max(1, ordered.count))
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
+
+            guard let sourceDocument = PDFDocument(url: sourceURL), sourceDocument.pageCount > 0 else {
+                failedFiles.append(sourceURL.lastPathComponent)
+                continue
+            }
+            for pageIndex in 0..<sourceDocument.pageCount {
+                guard let page = sourceDocument.page(at: pageIndex) else { continue }
+                if let copy = page.copy() as? PDFPage {
+                    combined.insert(copy, at: combined.pageCount)
+                    insertedPages += 1
+                }
+            }
+        }
+
+        guard combined.pageCount > 0 else {
+            runAlert(
+                title: "Batch Combine Failed",
+                informativeText: "No pages were merged. Check that the selected files are valid PDFs.",
+                style: .warning
+            )
+            return
+        }
+
+        updateBusyIndicatorDetail("Writing combined PDF…")
+        updateBusyIndicatorSubdetail("\(combined.pageCount) pages total")
+        _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
+        guard combined.write(to: outputURL, withOptions: nil) else {
+            runAlert(
+                title: "Failed to Save Combined PDF",
+                informativeText: "Could not write \(outputURL.lastPathComponent).",
+                style: .warning
+            )
+            return
+        }
+
+        openDocument(at: outputURL)
+
+        if failedFiles.isEmpty {
+            runAlert(
+                title: "Batch Combine Complete",
+                informativeText: "Created \(outputURL.lastPathComponent) with \(combined.pageCount) pages."
+            )
+        } else {
+            let preview = failedFiles.prefix(8).joined(separator: ", ")
+            let suffix = failedFiles.count > 8 ? ", …" : ""
+            runAlert(
+                title: "Batch Combine Complete with Issues",
+                informativeText: """
+                Created \(outputURL.lastPathComponent) with \(combined.pageCount) pages.
+                Could not read: \(preview)\(suffix)
+                """
+            )
+        }
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         guard let action = menuItem.action else { return true }
         let hasDocument = (pdfView.document != nil)
@@ -402,7 +648,8 @@ extension MainViewController {
              #selector(commandNew(_:)),
              #selector(commandKeyboardShortcuts(_:)),
              #selector(commandPerformanceSettings(_:)),
-             #selector(commandConvertImagesToPDF(_:)):
+             #selector(commandConvertImagesToPDF(_:)),
+             #selector(commandBatchCombinePDFs(_:)):
             return true
         case #selector(commandCycleNextDocument(_:)),
              #selector(commandCyclePreviousDocument(_:)):

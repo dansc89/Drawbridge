@@ -203,6 +203,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let saveCopyItem = fileMenu.addItem(withTitle: "Save As PDF...", action: #selector(MainViewController.commandSaveCopy(_:)), keyEquivalent: "S")
         saveCopyItem.keyEquivalentModifierMask = [.command, .shift]
         saveCopyItem.target = controller
+        fileMenu.addItem(NSMenuItem.separator())
+        fileMenu.addItem(withTitle: "Batch Combine PDFs…", action: #selector(MainViewController.commandBatchCombinePDFs(_:)), keyEquivalent: "").target = controller
         fileMenu.addItem(withTitle: "Convert...", action: #selector(MainViewController.commandConvertImagesToPDF(_:)), keyEquivalent: "").target = controller
         let exportCSVItem = fileMenu.addItem(withTitle: "Export Markups CSV...", action: #selector(MainViewController.commandExportCSV(_:)), keyEquivalent: "e")
         exportCSVItem.keyEquivalentModifierMask = [.command, .shift]

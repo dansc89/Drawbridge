@@ -102,17 +102,41 @@ extension MainViewController {
         }
     }
 
-    func persistDocument(to url: URL, adoptAsPrimaryDocument: Bool, busyMessage: String, document: PDFDocument? = nil) {
+    func persistDocument(
+        to url: URL,
+        adoptAsPrimaryDocument: Bool,
+        busyMessage: String,
+        document: PDFDocument? = nil,
+        showBusyOverlay: Bool = true,
+        deferEmbeddedWrite: Bool = true,
+        embeddedSaveToken: Int = 0
+    ) {
         guard let document = document ?? pdfView.document else { beep(); return }
-        guard guardOrBeep(!persistenceCoordinator.isManualSaveInFlight) else { return }
+        applyPageLabelOverridesToDocumentIfNeeded(document)
+        if deferEmbeddedWrite && !adoptAsPrimaryDocument && !showBusyOverlay {
+            persistFastSnapshotThenDeferredEmbeddedSave(to: url, document: document)
+            return
+        }
+        if persistenceCoordinator.isManualSaveInFlight {
+            // Keep Save instant: coalesce repeated Cmd+S requests while a save is in flight.
+            if !adoptAsPrimaryDocument {
+                queuedFastEmbeddedSave = true
+            }
+            return
+        }
+        let startedMarkupVersion = markupChangeVersion
+        let savingDocumentID = ObjectIdentifier(document)
+        let canonicalTargetURL = canonicalDocumentURL(url)
         // Prevent expensive markup-list rebuild work from competing with save completion on main.
         pendingMarkupsRefreshWorkItem?.cancel()
         pendingMarkupsRefreshWorkItem = nil
         markupsScanGeneration += 1
         persistenceCoordinator.beginManualSave()
         isSavingDocumentOperation = true
-        beginBusyIndicator(busyMessage, detail: "Generating PDF…", lockInteraction: false)
-        startSaveProgressTracking(phase: "Generating")
+        if showBusyOverlay {
+            beginBusyIndicator(busyMessage, detail: "Generating PDF…", lockInteraction: false)
+            startSaveProgressTracking(phase: "Generating")
+        }
         let targetURL = url
         let originDocumentURLForAdoption = openDocumentURL.map { canonicalDocumentURL($0) }
         let startedAt = CFAbsoluteTimeGetCurrent()
@@ -120,8 +144,9 @@ extension MainViewController {
         let destinationAlreadyExists = FileManager.default.fileExists(atPath: targetURL.path)
         let destinationIsFileProvider = Self.isLikelyFileProviderURL(targetURL)
         let fallbackStagingURL = destinationAlreadyExists ? saveStagingFileURL(for: targetURL) : targetURL
+        let saveQoS: DispatchQoS.QoSClass = showBusyOverlay ? .userInitiated : .utility
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        DispatchQueue.global(qos: saveQoS).async { [weak self] in
             var success = false
             var errorDescription: String?
             var writeElapsed: Double = 0
@@ -136,9 +161,11 @@ extension MainViewController {
                 writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
 
                 if success {
-                    Task { @MainActor [weak self] in
-                        self?.saveGenerateElapsed = writeElapsed
-                        self?.updateSaveProgressPhase("Committing")
+                    if showBusyOverlay {
+                        Task { @MainActor [weak self] in
+                            self?.saveGenerateElapsed = writeElapsed
+                            self?.updateSaveProgressPhase("Committing")
+                        }
                     }
                     let commitStartedAt = CFAbsoluteTimeGetCurrent()
                     do {
@@ -162,17 +189,21 @@ extension MainViewController {
 
                 if !success {
                     // Fallback path: stage + commit if direct overwrite fails.
-                    Task { @MainActor [weak self] in
-                        self?.updateSaveProgressPhase("Retrying")
+                    if showBusyOverlay {
+                        Task { @MainActor [weak self] in
+                            self?.updateSaveProgressPhase("Retrying")
+                        }
                     }
                     let stagingURL = fallbackStagingURL
                     let stagedWriteStartedAt = CFAbsoluteTimeGetCurrent()
                     success = Self.writePDFDocument(documentBox.document, to: stagingURL)
                     writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
                     if success {
-                        Task { @MainActor [weak self] in
-                            self?.saveGenerateElapsed = writeElapsed
-                            self?.updateSaveProgressPhase("Committing")
+                        if showBusyOverlay {
+                            Task { @MainActor [weak self] in
+                                self?.saveGenerateElapsed = writeElapsed
+                                self?.updateSaveProgressPhase("Committing")
+                            }
                         }
                         let commitStartedAt = CFAbsoluteTimeGetCurrent()
                         do {
@@ -197,23 +228,31 @@ extension MainViewController {
 
             DispatchQueue.main.async {
                 guard let self else { return }
+                let currentDocumentID = self.pdfView.document.map(ObjectIdentifier.init)
+                let currentURL = self.openDocumentURL.map { self.canonicalDocumentURL($0) }
+                let saveContextStillActive = (currentDocumentID == savingDocumentID) && (currentURL == canonicalTargetURL)
                 defer {
-                    self.stopSaveProgressTracking()
-                    self.endBusyIndicator()
+                    if showBusyOverlay {
+                        self.stopSaveProgressTracking()
+                        self.endBusyIndicator()
+                    }
                     self.isSavingDocumentOperation = false
                     self.persistenceCoordinator.endManualSave {
                         self.scheduleAutosave()
+                        self.runQueuedFastEmbeddedSaveIfNeeded()
                     }
                 }
 
                 self.saveGenerateElapsed = writeElapsed
                 guard success else {
-                    if writeElapsed > 0, commitElapsed > 0 {
-                        self.updateBusyIndicatorDetail(
-                            String(format: "Write %.2fs • Commit %.2fs • Failed", writeElapsed, commitElapsed)
-                        )
-                    } else {
-                        self.updateBusyIndicatorDetail(String(format: "Failed after %.2fs", elapsed))
+                    if showBusyOverlay {
+                        if writeElapsed > 0, commitElapsed > 0 {
+                            self.updateBusyIndicatorDetail(
+                                String(format: "Write %.2fs • Commit %.2fs • Failed", writeElapsed, commitElapsed)
+                            )
+                        } else {
+                            self.updateBusyIndicatorDetail(String(format: "Failed after %.2fs", elapsed))
+                        }
                     }
                     let informativeText: String
                     if let errorDescription, !errorDescription.isEmpty {
@@ -229,12 +268,14 @@ extension MainViewController {
                     return
                 }
 
-                if writeElapsed > 0, commitElapsed > 0 {
-                    self.updateBusyIndicatorDetail(
-                        String(format: "Write %.2fs • Commit %.2fs • Done", writeElapsed, commitElapsed)
-                    )
-                } else {
-                    self.updateBusyIndicatorDetail(String(format: "Saved in %.2fs", elapsed))
+                if showBusyOverlay {
+                    if writeElapsed > 0, commitElapsed > 0 {
+                        self.updateBusyIndicatorDetail(
+                            String(format: "Write %.2fs • Commit %.2fs • Done", writeElapsed, commitElapsed)
+                        )
+                    } else {
+                        self.updateBusyIndicatorDetail(String(format: "Saved in %.2fs", elapsed))
+                    }
                 }
 
                 if adoptAsPrimaryDocument {
@@ -252,11 +293,67 @@ extension MainViewController {
                     self.onDocumentOpened?(newDocumentURL)
                 }
 
-                self.markDocumentClean(updateStatusBarValue: false)
-                self.performRefreshMarkups(selecting: self.currentSelectedAnnotation(), forceImmediate: true)
-                self.updateStatusBar()
+                if saveContextStillActive || adoptAsPrimaryDocument {
+                    if embeddedSaveToken > 0 {
+                        self.lastEmbeddedSaveCompletedVersion = max(self.lastEmbeddedSaveCompletedVersion, embeddedSaveToken)
+                    } else {
+                        self.lastEmbeddedSaveCompletedVersion = max(self.lastEmbeddedSaveCompletedVersion, startedMarkupVersion)
+                    }
+                    if self.markupChangeVersion <= startedMarkupVersion {
+                        self.markDocumentClean(updateStatusBarValue: false)
+                    } else {
+                        self.lastAutosavedChangeVersion = max(self.lastAutosavedChangeVersion, startedMarkupVersion)
+                    }
+                    if adoptAsPrimaryDocument {
+                        // Save As/open-document transitions may need a model refresh.
+                        self.performRefreshMarkups(selecting: self.currentSelectedAnnotation(), forceImmediate: true)
+                    }
+                    self.updateStatusBar()
+                }
             }
         }
+    }
+
+    private func persistFastSnapshotThenDeferredEmbeddedSave(to url: URL, document: PDFDocument) {
+        let sourceURL = canonicalDocumentURL(url)
+        let currentDocumentID = ObjectIdentifier(document)
+        deferredEmbeddedSaveRequestedVersion += 1
+        let saveToken = deferredEmbeddedSaveRequestedVersion
+        let activeDocumentID = pdfView.document.map(ObjectIdentifier.init)
+        let activeURL = openDocumentURL.map { canonicalDocumentURL($0) }
+        let saveContextStillActive = (activeDocumentID == currentDocumentID) && (activeURL == sourceURL)
+        if saveContextStillActive {
+            markDocumentClean(updateStatusBarValue: true)
+        }
+        scheduleDeferredEmbeddedSave(to: sourceURL, documentID: currentDocumentID, requestedVersion: saveToken)
+    }
+
+    private func scheduleDeferredEmbeddedSave(to url: URL, documentID: ObjectIdentifier, requestedVersion: Int) {
+        deferredEmbeddedSaveRequestedVersion = max(deferredEmbeddedSaveRequestedVersion, requestedVersion)
+        deferredEmbeddedSaveWorkItem?.cancel()
+        let canonicalURL = canonicalDocumentURL(url)
+        let workItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.deferredEmbeddedSaveWorkItem = nil
+                guard self.deferredEmbeddedSaveRequestedVersion > self.lastEmbeddedSaveCompletedVersion else { return }
+                guard let liveDocument = self.pdfView.document,
+                      ObjectIdentifier(liveDocument) == documentID else { return }
+                guard let activeURL = self.openDocumentURL.map({ self.canonicalDocumentURL($0) }),
+                      activeURL == canonicalURL else { return }
+                self.persistDocument(
+                    to: canonicalURL,
+                    adoptAsPrimaryDocument: false,
+                    busyMessage: "Saving PDF…",
+                    document: liveDocument,
+                    showBusyOverlay: false,
+                    deferEmbeddedWrite: false,
+                    embeddedSaveToken: requestedVersion
+                )
+            }
+        }
+        deferredEmbeddedSaveWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: workItem)
     }
 
     nonisolated static func temporaryLocalSaveURL(for destinationURL: URL) -> URL {
@@ -377,37 +474,61 @@ extension MainViewController {
     func saveCurrentDocumentForClosePrompt() -> Bool {
         guard let document = pdfView.document else { return true }
         if let sourceURL = openDocumentURL {
-            return persistProjectSnapshotSynchronously(document: document, for: sourceURL, busyMessage: "Saving Changes…")
+            return flushEmbeddedSaveBeforeClose(to: sourceURL, document: document)
         }
         // Unsaved new document path still requires Save As flow.
         saveDocumentAsProject(document: document)
         return false
     }
 
-    func persistProjectSnapshotSynchronously(document: PDFDocument, for sourcePDFURL: URL, busyMessage: String) -> Bool {
-        persistenceCoordinator.beginManualSave()
-        beginBusyIndicator(busyMessage, detail: "Saving…", lockInteraction: true)
-        defer {
-            endBusyIndicator()
-            persistenceCoordinator.endManualSave {
-                scheduleAutosave()
-            }
-        }
+    private func flushEmbeddedSaveBeforeClose(to sourceURL: URL, document: PDFDocument) -> Bool {
+        deferredEmbeddedSaveWorkItem?.cancel()
+        deferredEmbeddedSaveWorkItem = nil
 
-        let sidecar = sidecarURL(for: sourcePDFURL)
-        let snapshot = buildSidecarSnapshot(document: document, sourcePDFURL: sourcePDFURL)
-        do {
-            try snapshotStore.writeSnapshotOrThrow(snapshot, to: sidecar)
-        } catch {
-            runAlert(
-                title: "Failed to save changes",
-                informativeText: "Could not write changes to disk.\n\n\(error.localizedDescription)",
-                style: .warning
-            )
+        // If a prior save is running, wait for it to settle before issuing the final blocking flush.
+        let settleDeadline = Date().addingTimeInterval(60)
+        while (isSavingDocumentOperation || persistenceCoordinator.isManualSaveInFlight), Date() < settleDeadline {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        if isSavingDocumentOperation || persistenceCoordinator.isManualSaveInFlight {
             return false
         }
 
-        markDocumentClean()
-        return true
+        deferredEmbeddedSaveRequestedVersion += 1
+        let flushToken = deferredEmbeddedSaveRequestedVersion
+        persistDocument(
+            to: sourceURL,
+            adoptAsPrimaryDocument: false,
+            busyMessage: "Saving PDF…",
+            document: document,
+            showBusyOverlay: true,
+            deferEmbeddedWrite: false,
+            embeddedSaveToken: flushToken
+        )
+
+        let flushDeadline = Date().addingTimeInterval(90)
+        while Date() < flushDeadline {
+            let completed = lastEmbeddedSaveCompletedVersion >= flushToken
+            if completed && !isSavingDocumentOperation {
+                return true
+            }
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        return lastEmbeddedSaveCompletedVersion >= flushToken
+    }
+
+    private func runQueuedFastEmbeddedSaveIfNeeded() {
+        guard queuedFastEmbeddedSave else { return }
+        queuedFastEmbeddedSave = false
+        guard let document = pdfView.document,
+              let sourceURL = openDocumentURL else { return }
+        persistDocument(
+            to: sourceURL,
+            adoptAsPrimaryDocument: false,
+            busyMessage: "Saving PDF…",
+            document: document,
+            showBusyOverlay: false,
+            deferEmbeddedWrite: true
+        )
     }
 }
