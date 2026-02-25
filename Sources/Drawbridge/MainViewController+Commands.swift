@@ -9,6 +9,9 @@ extension MainViewController {
     @objc func commandSave(_ sender: Any?) { saveDocument() }
     @objc func commandSaveCopy(_ sender: Any?) { saveCopy() }
     @objc func commandExportCSV(_ sender: Any?) { exportMarkupsCSV() }
+    @objc func commandExportPagesAsJPEG(_ sender: Any?) { exportPagesAsJPEG() }
+    @objc func commandConvertImagesToPDF(_ sender: Any?) { convertImageFolderToPDF() }
+    @objc func commandBatchLinkSheetNumbers(_ sender: Any?) { startAutoLinkSheetNumbersFlow() }
     @objc func commandAutoGenerateSheetNames(_ sender: Any?) { startAutoGenerateSheetNamesFlow() }
     @objc func commandSetScale(_ sender: Any?) { commandSetDrawingScale(sender) }
     @objc func commandLockScalePages(_ sender: Any?) { commandLockScaleToPages(sender) }
@@ -34,10 +37,17 @@ extension MainViewController {
             label.font = NSFont.systemFont(ofSize: 12, weight: .medium)
 
             let modifierPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-            modifierPopup.addItems(withTitles: ["None", "Shift"])
-            modifierPopup.selectItem(at: binding.requiresShift ? 1 : 0)
+            modifierPopup.addItems(withTitles: ["None", "Shift", "Cmd+Shift"])
+            switch binding.modifier {
+            case .plain:
+                modifierPopup.selectItem(at: 0)
+            case .shift:
+                modifierPopup.selectItem(at: 1)
+            case .commandShift:
+                modifierPopup.selectItem(at: 2)
+            }
             modifierPopup.translatesAutoresizingMaskIntoConstraints = false
-            modifierPopup.widthAnchor.constraint(equalToConstant: 78).isActive = true
+            modifierPopup.widthAnchor.constraint(equalToConstant: 108).isActive = true
 
             let keyField = NSTextField(string: binding.key.uppercased())
             keyField.alignment = .center
@@ -101,11 +111,19 @@ extension MainViewController {
                   let modifierPopup = modifierPopups[action] else { continue }
             let rawKey = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             guard guardOrBeep(rawKey.count == 1 && rawKey.unicodeScalars.allSatisfy({ allowed.contains($0) })) else { return }
-            let requiresShift = modifierPopup.indexOfSelectedItem == 1
-            let combo = "\(requiresShift ? "s" : "n"):\(rawKey)"
+            let modifier: ShortcutModifier
+            switch modifierPopup.indexOfSelectedItem {
+            case 1:
+                modifier = .shift
+            case 2:
+                modifier = .commandShift
+            default:
+                modifier = .plain
+            }
+            let combo = "\(modifier.rawValue):\(rawKey)"
             guard guardOrBeep(!seenCombos.contains(combo)) else { return }
             seenCombos.insert(combo)
-            updated[action] = ShortcutBinding(key: rawKey, requiresShift: requiresShift)
+            updated[action] = ShortcutBinding(key: rawKey, modifier: modifier)
         }
         shortcutBindings = updated
         saveShortcutBindings()
@@ -341,6 +359,14 @@ extension MainViewController {
     @objc func commandZoomOut(_ sender: Any?) { zoom(by: 1.0 / 1.12) }
     @objc func commandPreviousPage(_ sender: Any?) { navigatePage(delta: -1) }
     @objc func commandNextPage(_ sender: Any?) { navigatePage(delta: 1) }
+    @objc func commandNavigateBack(_ sender: Any?) {
+        guard guardOrBeep(pdfView.navigateBackInHistory()) else { return }
+        updateStatusBar()
+    }
+    @objc func commandNavigateForward(_ sender: Any?) {
+        guard guardOrBeep(pdfView.navigateForwardInHistory()) else { return }
+        updateStatusBar()
+    }
     @objc func commandActualSize(_ sender: Any?) {
         guard pdfView.document != nil else { return }
         pdfView.autoScales = false
@@ -375,7 +401,8 @@ extension MainViewController {
         case #selector(commandOpen(_:)),
              #selector(commandNew(_:)),
              #selector(commandKeyboardShortcuts(_:)),
-             #selector(commandPerformanceSettings(_:)):
+             #selector(commandPerformanceSettings(_:)),
+             #selector(commandConvertImagesToPDF(_:)):
             return true
         case #selector(commandCycleNextDocument(_:)),
              #selector(commandCyclePreviousDocument(_:)):
@@ -385,7 +412,9 @@ extension MainViewController {
         case #selector(commandSave(_:)),
              #selector(commandSaveCopy(_:)),
              #selector(commandExportCSV(_:)),
+             #selector(commandExportPagesAsJPEG(_:)),
              #selector(commandAutoGenerateSheetNames(_:)),
+             #selector(commandBatchLinkSheetNumbers(_:)),
              #selector(commandSetScale(_:)),
              #selector(commandLockScalePages(_:)),
              #selector(commandClearScalePages(_:)),
@@ -537,7 +566,7 @@ extension MainViewController {
             destinationPoint = NSPoint(x: pageBounds.midX, y: pageBounds.midY)
         }
         let destination = PDFDestination(page: page, at: destinationPoint)
-        pdfView.go(to: destination)
+        pdfView.navigateToDestinationWithHistory(destination)
         updateStatusBar()
     }
 

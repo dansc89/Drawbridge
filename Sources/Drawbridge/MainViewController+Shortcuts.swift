@@ -1,5 +1,20 @@
 import AppKit
 
+enum ShortcutModifier: String, CaseIterable {
+    case plain
+    case shift
+    case commandShift
+
+    var requiresShift: Bool {
+        switch self {
+        case .plain:
+            return false
+        case .shift, .commandShift:
+            return true
+        }
+    }
+}
+
 enum ShortcutAction: String, CaseIterable {
     case selectTool
     case grabTool
@@ -44,24 +59,24 @@ enum ShortcutAction: String, CaseIterable {
 
     var defaultBinding: ShortcutBinding {
         switch self {
-        case .selectTool: return ShortcutBinding(key: "v", requiresShift: false)
-        case .grabTool: return ShortcutBinding(key: "g", requiresShift: false)
-        case .penTool: return ShortcutBinding(key: "d", requiresShift: false)
-        case .arrowTool: return ShortcutBinding(key: "a", requiresShift: false)
-        case .areaTool: return ShortcutBinding(key: "a", requiresShift: true)
-        case .lineTool: return ShortcutBinding(key: "l", requiresShift: false)
-        case .polylineTool: return ShortcutBinding(key: "p", requiresShift: false)
-        case .polygonTool: return ShortcutBinding(key: "p", requiresShift: true)
-        case .highlighterTool: return ShortcutBinding(key: "h", requiresShift: false)
-        case .cloudTool: return ShortcutBinding(key: "c", requiresShift: false)
-        case .rectangleTool: return ShortcutBinding(key: "r", requiresShift: false)
-        case .ellipseTool: return ShortcutBinding(key: "e", requiresShift: false)
-        case .textTool: return ShortcutBinding(key: "t", requiresShift: false)
-        case .calloutTool: return ShortcutBinding(key: "q", requiresShift: false)
-        case .measureTool: return ShortcutBinding(key: "m", requiresShift: false)
-        case .calibrateTool: return ShortcutBinding(key: "k", requiresShift: false)
-        case .toggleGrid: return ShortcutBinding(key: "x", requiresShift: false)
-        case .toggleOrtho: return ShortcutBinding(key: "o", requiresShift: false)
+        case .selectTool: return ShortcutBinding(key: "v", modifier: .plain)
+        case .grabTool: return ShortcutBinding(key: "g", modifier: .plain)
+        case .penTool: return ShortcutBinding(key: "d", modifier: .plain)
+        case .arrowTool: return ShortcutBinding(key: "a", modifier: .plain)
+        case .areaTool: return ShortcutBinding(key: "a", modifier: .shift)
+        case .lineTool: return ShortcutBinding(key: "l", modifier: .plain)
+        case .polylineTool: return ShortcutBinding(key: "p", modifier: .plain)
+        case .polygonTool: return ShortcutBinding(key: "p", modifier: .commandShift)
+        case .highlighterTool: return ShortcutBinding(key: "h", modifier: .plain)
+        case .cloudTool: return ShortcutBinding(key: "c", modifier: .plain)
+        case .rectangleTool: return ShortcutBinding(key: "r", modifier: .plain)
+        case .ellipseTool: return ShortcutBinding(key: "e", modifier: .plain)
+        case .textTool: return ShortcutBinding(key: "t", modifier: .plain)
+        case .calloutTool: return ShortcutBinding(key: "q", modifier: .plain)
+        case .measureTool: return ShortcutBinding(key: "m", modifier: .plain)
+        case .calibrateTool: return ShortcutBinding(key: "k", modifier: .plain)
+        case .toggleGrid: return ShortcutBinding(key: "x", modifier: .plain)
+        case .toggleOrtho: return ShortcutBinding(key: "o", modifier: .plain)
         }
     }
 
@@ -79,10 +94,14 @@ enum ShortcutAction: String, CaseIterable {
 
 struct ShortcutBinding: Equatable {
     var key: String
-    var requiresShift: Bool
+    var modifier: ShortcutModifier
 
     var encoded: String {
-        "\(requiresShift ? "shift" : "plain"):\(key)"
+        "\(modifier.rawValue):\(key)"
+    }
+
+    var requiresShift: Bool {
+        modifier.requiresShift
     }
 
     static func decode(_ encoded: String) -> ShortcutBinding? {
@@ -91,14 +110,8 @@ struct ShortcutBinding: Equatable {
         let modifier = parts[0]
         let key = parts[1].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard key.count == 1 else { return nil }
-        switch modifier {
-        case "plain":
-            return ShortcutBinding(key: key, requiresShift: false)
-        case "shift":
-            return ShortcutBinding(key: key, requiresShift: true)
-        default:
-            return nil
-        }
+        guard let parsedModifier = ShortcutModifier(rawValue: modifier) else { return nil }
+        return ShortcutBinding(key: key, modifier: parsedModifier)
     }
 }
 
@@ -126,6 +139,14 @@ extension MainViewController {
                   let binding = ShortcutBinding.decode(rawBinding) else { continue }
             loaded[action] = binding
         }
+        // Migrate legacy Shift+P binding to Cmd+Shift+P.
+        if loaded[.polygonTool] == ShortcutBinding(key: "p", modifier: .shift) {
+            loaded[.polygonTool] = ShortcutBinding(key: "p", modifier: .commandShift)
+        }
+        // Keep Cmd+Shift+A reserved for sheet-name/bookmark auto-generation.
+        if loaded[.areaTool] == ShortcutBinding(key: "a", modifier: .commandShift) {
+            loaded[.areaTool] = ShortcutBinding(key: "a", modifier: .shift)
+        }
         shortcutBindings = loaded
     }
 
@@ -149,16 +170,28 @@ extension MainViewController {
 
     func shortcutAction(for event: NSEvent) -> ShortcutAction? {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard modifiers.isDisjoint(with: [.command, .option, .control]),
-              let chars = event.charactersIgnoringModifiers?.lowercased(),
+        let isCommandShift = modifiers == [.command, .shift]
+        let isShiftOnly = modifiers == [.shift]
+        let isPlain = modifiers.isDisjoint(with: [.command, .option, .control, .shift])
+        let modifier: ShortcutModifier
+        if isCommandShift {
+            modifier = .commandShift
+        } else if isShiftOnly {
+            modifier = .shift
+        } else if isPlain {
+            modifier = .plain
+        } else {
+            return nil
+        }
+
+        guard let chars = event.charactersIgnoringModifiers?.lowercased(),
               let key = chars.first.map(String.init),
               key.count == 1 else {
             return nil
         }
-        let requiresShift = modifiers.contains(.shift)
         for action in ShortcutAction.allCases {
             guard let binding = shortcutBindings[action] else { continue }
-            if binding.key == key, binding.requiresShift == requiresShift {
+            if binding.key == key, binding.modifier == modifier {
                 return action
             }
         }

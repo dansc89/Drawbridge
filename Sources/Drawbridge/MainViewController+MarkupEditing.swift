@@ -13,6 +13,7 @@ extension MainViewController {
                 guard row >= 0, row < markupItems.count else { continue }
                 let item = markupItems[row]
                 guard let page = pdfView.document?.page(at: item.pageIndex) else { continue }
+                if isProtectedAutoSheetLink(item.annotation) { continue }
 
                 let primaryID = ObjectIdentifier(item.annotation)
                 if seen.insert(primaryID).inserted {
@@ -39,6 +40,10 @@ extension MainViewController {
                 }
             }
         } else if let direct = lastDirectlySelectedAnnotation, let page = direct.page {
+            guard !isProtectedAutoSheetLink(direct) else {
+                beep()
+                return
+            }
             annotationsToDelete.append((page: page, annotation: direct))
             for sibling in pdfView.relatedPolygonMarkupAnnotations(for: direct, on: page) where sibling !== direct {
                 let siblingID = ObjectIdentifier(sibling)
@@ -56,8 +61,13 @@ extension MainViewController {
             beep()
             return
         }
+        guard !annotationsToDelete.isEmpty else {
+            beep()
+            return
+        }
 
         for entry in annotationsToDelete {
+            if isProtectedAutoSheetLink(entry.annotation) { continue }
             registerAnnotationPresenceUndo(page: entry.page, annotation: entry.annotation, shouldExist: true, actionName: "Delete Markup")
             entry.page.removeAnnotation(entry.annotation)
             markPageMarkupCacheDirty(entry.page)

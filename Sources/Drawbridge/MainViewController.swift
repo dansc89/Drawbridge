@@ -44,6 +44,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let sheetNumber: String
         let sheetTitle: String
     }
+    private struct OCRLineHit {
+        let text: String
+        let rectInPage: NSRect
+    }
     enum AnnotationReorderAction: String {
         case bringToFront
         case sendToBack
@@ -155,6 +159,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let actionsPopup = NSPopUpButton(frame: .zero, pullsDown: true)
     private let openButton = NSButton(title: "Open", target: nil, action: nil)
     private let autoNameSheetsButton = NSButton(title: "", target: nil, action: nil)
+    private let batchLinkSheetsButton = NSButton(title: "", target: nil, action: nil)
     private let highlightButton = NSButton(title: "Highlight Selection", target: nil, action: nil)
     private let exportButton = NSButton(title: "Save As PDF", target: nil, action: nil)
     private let gridToggleButton = NSButton(title: "", target: nil, action: nil)
@@ -190,7 +195,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }()
     private let busyStatusLabel = NSTextField(labelWithString: "Working…")
     private let busyDetailLabel = NSTextField(labelWithString: "")
+    private let busySubdetailLabel = NSTextField(labelWithString: "")
     private let busyProgressIndicator = NSProgressIndicator(frame: .zero)
+    private let busyCancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+    private var busyCancelHandler: (() -> Void)?
+    private var isJPEGExportCancellationRequested = false
     private let statusToolLabel = NSTextField(labelWithString: "Tool: Pen")
     let statusToolsHintLabel = NSTextField(labelWithString: "Shortcuts customizable in Drawbridge > Keyboard Shortcuts…")
     private let statusPageSizeLabel = NSTextField(labelWithString: "Size: -")
@@ -366,6 +375,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var pendingSheetNumberZone: NormalizedPageRect?
     private var pendingSheetTitleZone: NormalizedPageRect?
     private var autoNamePreviousToolMode: ToolMode?
+    private var autoLinkCaptureReferencePageIndex: Int?
+    private var autoLinkPreviousToolMode: ToolMode?
+    private let autoSheetLinkAnnotationMarker = "DrawbridgeAutoSheetLink"
     var pageScaleLocks: [Int: PageScaleLock] = [:]
     var lastScaleLockAppliedPageIndex: Int = -1
     var lastExplicitScaleSetDocumentID: ObjectIdentifier?
@@ -380,7 +392,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var layerVisibilityByName: [String: Bool] = [:]
     var layerTintColorByName: [String: NSColor] = [:]
     var layerVisibilityButtons: [String: NSButton] = [:]
-    var layerTintColorWells: [String: NSColorWell] = [:]
+    var layerTintColorWells: [String: NSButton] = [:]
+    var activeLayerTintSelection: String?
     var onDocumentOpened: ((URL) -> Void)?
     private var sidebarContainerView: NSView?
     private var lastSidebarExpandedWidth: CGFloat = 240
@@ -545,6 +558,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         openButton.action = #selector(openPDF)
         autoNameSheetsButton.target = self
         autoNameSheetsButton.action = #selector(commandAutoGenerateSheetNames(_:))
+        batchLinkSheetsButton.target = self
+        batchLinkSheetsButton.action = #selector(commandBatchLinkSheetNumbers(_:))
         emptyStateOpenButton.title = "Open Existing PDF"
         emptyStateOpenButton.target = self
         emptyStateOpenButton.action = #selector(openPDF)
@@ -764,7 +779,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             self?.showCaptureToast("Captured - Cmd+Shift+V to paste in place")
         }
         pdfView.onRegionCaptured = { [weak self] page, rectInPage in
-            self?.handleAutoNameRegionCaptured(on: page, rectInPage: rectInPage)
+            guard let self else { return }
+            if self.autoNameCapturePhase != nil {
+                self.handleAutoNameRegionCaptured(on: page, rectInPage: rectInPage)
+                return
+            }
+            if self.autoLinkCaptureReferencePageIndex != nil {
+                self.handleAutoLinkRegionCaptured(on: page, rectInPage: rectInPage)
+            }
         }
         pdfView.shouldBeginMarkupInteraction = { [weak self] in
             self?.ensureWorkingCopyBeforeFirstMarkup() ?? true
@@ -802,7 +824,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             statusBar.heightAnchor.constraint(equalToConstant: 28),
             busyOverlayView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             busyOverlayView.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            busyOverlayView.widthAnchor.constraint(equalToConstant: 300),
+            busyOverlayView.widthAnchor.constraint(equalToConstant: 420),
             captureToastView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 16),
             captureToastView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             captureToastView.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
@@ -1092,7 +1114,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         document.insert(page, at: max(0, document.pageCount))
         commitMarkupMutation(selecting: nil, forceImmediateRefresh: true)
         reloadBookmarks()
-        pdfView.go(to: page)
+        pdfView.navigateToPageWithHistory(page)
         DispatchQueue.main.async { [weak self] in
             self?.requestChromeRefresh(immediate: true)
         }
@@ -1206,7 +1228,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guard row >= 0, let document = pdfView.document, row < document.pageCount, let page = document.page(at: row) else {
             return
         }
-        pdfView.go(to: page)
+        pdfView.navigateToPageWithHistory(page)
         pagesTableView.deselectAll(nil)
         requestChromeRefresh(immediate: true)
     }
@@ -1218,7 +1240,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
               let destination = outline.destination else {
             return
         }
-        pdfView.go(to: destination)
+        pdfView.navigateToDestinationWithHistory(destination)
         bookmarksOutlineView.deselectAll(nil)
         requestChromeRefresh(immediate: true)
     }
@@ -1511,13 +1533,24 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         busyDetailLabel.textColor = .secondaryLabelColor
         busyDetailLabel.stringValue = ""
 
+        busySubdetailLabel.alignment = .center
+        busySubdetailLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        busySubdetailLabel.textColor = .secondaryLabelColor
+        busySubdetailLabel.stringValue = ""
+
         busyProgressIndicator.style = .bar
         busyProgressIndicator.isIndeterminate = true
         busyProgressIndicator.controlSize = .small
         busyProgressIndicator.translatesAutoresizingMaskIntoConstraints = false
-        busyProgressIndicator.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        busyProgressIndicator.widthAnchor.constraint(equalToConstant: 340).isActive = true
 
-        let stack = NSStackView(views: [busyStatusLabel, busyDetailLabel, busyProgressIndicator])
+        busyCancelButton.bezelStyle = .rounded
+        busyCancelButton.controlSize = .small
+        busyCancelButton.target = self
+        busyCancelButton.action = #selector(handleBusyCancel(_:))
+        busyCancelButton.isHidden = true
+
+        let stack = NSStackView(views: [busyStatusLabel, busyDetailLabel, busySubdetailLabel, busyProgressIndicator, busyCancelButton])
         stack.orientation = .vertical
         stack.spacing = 8
         stack.alignment = .centerX
@@ -1531,6 +1564,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             stack.trailingAnchor.constraint(equalTo: busyOverlayView.trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: busyOverlayView.bottomAnchor)
         ])
+    }
+
+    @objc private func handleBusyCancel(_ sender: Any?) {
+        busyCancelHandler?()
     }
 
     private func configureCaptureToast() {
@@ -1587,6 +1624,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         busyOperationDepth += 1
         busyStatusLabel.stringValue = message
         busyDetailLabel.stringValue = detail ?? ""
+        busySubdetailLabel.stringValue = ""
+        busyProgressIndicator.isIndeterminate = true
+        busyProgressIndicator.doubleValue = 0
+        setBusyCancelAction(nil)
         if busyOperationDepth == 1 {
             busyInteractionLocked = lockInteraction
             view.window?.ignoresMouseEvents = lockInteraction
@@ -1608,12 +1649,51 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         view.window?.ignoresMouseEvents = false
         busyInteractionLocked = false
         busyProgressIndicator.stopAnimation(nil)
+        busyProgressIndicator.isIndeterminate = true
+        busyProgressIndicator.minValue = 0
+        busyProgressIndicator.maxValue = 100
+        busyProgressIndicator.doubleValue = 0
         busyOverlayView.isHidden = true
         busyDetailLabel.stringValue = ""
+        busySubdetailLabel.stringValue = ""
+        setBusyCancelAction(nil)
+    }
+
+    func updateBusyIndicatorStatus(_ status: String) {
+        busyStatusLabel.stringValue = status
+        busyOverlayView.displayIfNeeded()
     }
 
     func updateBusyIndicatorDetail(_ detail: String) {
         busyDetailLabel.stringValue = detail
+        busyOverlayView.displayIfNeeded()
+    }
+
+    func updateBusyIndicatorSubdetail(_ detail: String) {
+        busySubdetailLabel.stringValue = detail
+        busyOverlayView.displayIfNeeded()
+    }
+
+    func updateBusyIndicatorProgress(current: Int, total: Int) {
+        guard total > 0 else { return }
+        busyProgressIndicator.isIndeterminate = false
+        busyProgressIndicator.minValue = 0
+        busyProgressIndicator.maxValue = Double(total)
+        busyProgressIndicator.doubleValue = Double(max(0, min(current, total)))
+        busyOverlayView.displayIfNeeded()
+    }
+
+    func setBusyCancelAction(_ handler: (() -> Void)?, title: String = "Cancel", enabled: Bool = true) {
+        busyCancelHandler = handler
+        if handler == nil {
+            busyCancelButton.isHidden = true
+            busyCancelButton.isEnabled = true
+            busyCancelButton.title = "Cancel"
+            return
+        }
+        busyCancelButton.title = title
+        busyCancelButton.isEnabled = enabled
+        busyCancelButton.isHidden = false
         busyOverlayView.displayIfNeeded()
     }
 
@@ -1692,6 +1772,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         autoNameSheetsButton.imagePosition = .imageOnly
         autoNameSheetsButton.bezelStyle = .texturedRounded
         autoNameSheetsButton.toolTip = "Auto-Generate Sheet Names/Bookmarks"
+        batchLinkSheetsButton.image = NSImage(systemSymbolName: "link.badge.plus", accessibilityDescription: "Batch Link Sheet Numbers")
+            ?? NSImage(systemSymbolName: "link", accessibilityDescription: "Batch Link Sheet Numbers")
+        batchLinkSheetsButton.imagePosition = .imageOnly
+        batchLinkSheetsButton.bezelStyle = .texturedRounded
+        batchLinkSheetsButton.toolTip = "Batch Link Sheet Numbers (Cmd+Shift+H)"
 
         actionsPopup.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "Actions")
         actionsPopup.imagePosition = .imageOnly
@@ -1743,6 +1828,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if toolbarControlsStack.arrangedSubviews.isEmpty {
             toolbarControlsStack.addArrangedSubview(openButton)
             toolbarControlsStack.addArrangedSubview(autoNameSheetsButton)
+            toolbarControlsStack.addArrangedSubview(batchLinkSheetsButton)
             toolbarControlsStack.addArrangedSubview(toolSelector)
         }
 
@@ -3294,7 +3380,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                         self.dirtyMarkupPageIndexes.remove(pageIndex)
                         continue
                     }
-                    let annotations = page.annotations.filter { !self.pdfView.isHatchOverlayAnnotation($0) }
+                    let annotations = page.annotations.filter(self.isUserEditableMarkup)
                     let previousCount = self.pageMarkupCache[pageIndex]?.count ?? 0
                     self.pageMarkupCache[pageIndex] = annotations
                     self.pageMarkupSearchIndex.removeValue(forKey: pageIndex)
@@ -3400,7 +3486,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if let cached = pageMarkupCache[pageIndex] {
             return cached
         }
-        return document.page(at: pageIndex)?.annotations.filter { !pdfView.isHatchOverlayAnnotation($0) } ?? []
+        return document.page(at: pageIndex)?.annotations.filter(isUserEditableMarkup) ?? []
     }
 
     func searchableAnnotationText(for annotation: PDFAnnotation, pageIndex: Int) -> String {
@@ -3796,7 +3882,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         for pageIndex in 0..<document.pageCount {
             guard let page = document.page(at: pageIndex) else { continue }
-            for annotation in page.annotations where !pdfView.isHatchOverlayAnnotation(annotation) {
+            for annotation in page.annotations where isUserEditableMarkup(annotation) {
                 let b = annotation.bounds
                 let fields = [
                     csvEscape(displayPageLabel(forPageIndex: pageIndex)),
@@ -3821,6 +3907,347 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 style: .warning
             )
         }
+    }
+
+    private struct JPEGExportPreset {
+        let title: String
+        let compressionQuality: CGFloat
+        let dpi: CGFloat
+    }
+
+    private func jpegExportPresetSelection() -> JPEGExportPreset? {
+        let presets: [JPEGExportPreset] = [
+            .init(title: "Low (60%)", compressionQuality: 0.60, dpi: 120),
+            .init(title: "Medium (75%)", compressionQuality: 0.75, dpi: 150),
+            .init(title: "High (90%)", compressionQuality: 0.90, dpi: 200),
+            .init(title: "Maximum (100%)", compressionQuality: 1.0, dpi: 300)
+        ]
+
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 28), pullsDown: false)
+        popup.addItems(withTitles: presets.map(\.title))
+        popup.selectItem(at: 2)
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 42))
+        popup.translatesAutoresizingMaskIntoConstraints = false
+        accessory.addSubview(popup)
+        NSLayoutConstraint.activate([
+            popup.leadingAnchor.constraint(equalTo: accessory.leadingAnchor),
+            popup.trailingAnchor.constraint(equalTo: accessory.trailingAnchor),
+            popup.centerYAnchor.constraint(equalTo: accessory.centerYAnchor)
+        ])
+
+        let response = runAlert(
+            title: "JPEG Export Quality",
+            informativeText: "Choose image quality for all exported pages.",
+            buttons: ["Export", "Cancel"],
+            accessoryView: accessory,
+            activateApp: true
+        )
+        guard response == .alertFirstButtonReturn else { return nil }
+        let selected = max(0, min(popup.indexOfSelectedItem, presets.count - 1))
+        return presets[selected]
+    }
+
+    private func promptJPEGExportDestination(defaultFolderName: String) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Choose Folder"
+        panel.message = "Select a destination folder for exported JPEG pages."
+        guard panel.runModal() == .OK, let root = panel.url else { return nil }
+
+        let output = root.appendingPathComponent(defaultFolderName, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+            return output
+        } catch {
+            runAlert(
+                title: "Failed to create export folder",
+                informativeText: error.localizedDescription,
+                style: .warning
+            )
+            return nil
+        }
+    }
+
+    private func pageJPEGImage(page: PDFPage, dpi: CGFloat) -> CGImage? {
+        let displayBox = pdfView.displayBox
+        var bounds = page.bounds(for: displayBox).standardized
+        if bounds.width <= 1 || bounds.height <= 1 {
+            bounds = page.bounds(for: .cropBox).standardized
+        }
+        if bounds.width <= 1 || bounds.height <= 1 {
+            bounds = page.bounds(for: .mediaBox).standardized
+        }
+        guard bounds.width > 1, bounds.height > 1 else { return nil }
+        let scale = max(1.0, dpi / 72.0)
+        let targetSize = NSSize(
+            width: max(1, (bounds.width * scale).rounded(.up)),
+            height: max(1, (bounds.height * scale).rounded(.up))
+        )
+        let thumb = page.thumbnail(of: targetSize, for: displayBox)
+        if let cgImage = thumb.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            return cgImage
+        }
+        guard let tiffData = thumb.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiffData) else {
+            return nil
+        }
+        return rep.cgImage
+    }
+
+    private func sanitizedFilename(_ raw: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " -_"))
+        let cleanedScalars = raw.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
+        let cleaned = String(cleanedScalars).trimmingCharacters(in: CharacterSet(charactersIn: " .-"))
+        return cleaned.isEmpty ? "Page" : cleaned
+    }
+
+    private func shortDuration(_ seconds: TimeInterval) -> String {
+        let clamped = max(0, Int(seconds.rounded()))
+        let m = clamped / 60
+        let s = clamped % 60
+        if m > 0 {
+            return "\(m)m \(s)s"
+        }
+        return "\(s)s"
+    }
+
+    private func jpegImageURLs(in folderURL: URL) -> [URL] {
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: folderURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        let extensions = Set(["jpg", "jpeg"])
+        return urls.filter { url in
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
+                  values.isRegularFile == true else { return false }
+            return extensions.contains(url.pathExtension.lowercased())
+        }.sorted {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        }
+    }
+
+    private func applyImageFilenameBookmarks(to document: PDFDocument, imageURLs: [URL]) {
+        let root = PDFOutline()
+        let setLabelSelector = NSSelectorFromString("setLabel:")
+        for (index, imageURL) in imageURLs.enumerated() {
+            guard let page = document.page(at: index) else { continue }
+            let title = imageURL.deletingPathExtension().lastPathComponent
+            let bookmark = PDFOutline()
+            bookmark.label = title
+            bookmark.destination = PDFDestination(page: page, at: NSPoint(x: 0, y: page.bounds(for: .cropBox).maxY))
+            root.insertChild(bookmark, at: root.numberOfChildren)
+
+            // Best-effort page label assignment for viewers that support embedded page labels.
+            if page.responds(to: setLabelSelector) {
+                _ = page.perform(setLabelSelector, with: title)
+            }
+        }
+        document.outlineRoot = root
+    }
+
+    func convertImageFolderToPDF() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Select Folder"
+        panel.message = "Select a folder containing JPG images to convert into one multi-page PDF."
+        guard panel.runModal() == .OK, let folderURL = panel.url else { return }
+
+        let imageURLs = jpegImageURLs(in: folderURL)
+        guard !imageURLs.isEmpty else {
+            runAlert(
+                title: "No JPG Files Found",
+                informativeText: "No .jpg or .jpeg files were found in the selected folder.",
+                style: .warning
+            )
+            return
+        }
+
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.pdf]
+        savePanel.nameFieldStringValue = "\(folderURL.lastPathComponent).pdf"
+        savePanel.prompt = "Convert"
+        guard savePanel.runModal() == .OK, let outputURL = savePanel.url else { return }
+
+        beginBusyIndicator("Converting Images to PDF…", detail: "0/\(imageURLs.count)")
+        updateBusyIndicatorSubdetail("Building pages…")
+        updateBusyIndicatorProgress(current: 0, total: imageURLs.count)
+        defer { endBusyIndicator() }
+
+        let pdf = PDFDocument()
+        var failed: [String] = []
+        for (idx, imageURL) in imageURLs.enumerated() {
+            autoreleasepool {
+                if let image = NSImage(contentsOf: imageURL),
+                   let page = PDFPage(image: image) {
+                    pdf.insert(page, at: pdf.pageCount)
+                } else {
+                    failed.append(imageURL.lastPathComponent)
+                }
+            }
+            let done = idx + 1
+            updateBusyIndicatorDetail("\(done)/\(imageURLs.count) • \(imageURL.lastPathComponent)")
+            updateBusyIndicatorSubdetail("Output: \(outputURL.lastPathComponent)")
+            updateBusyIndicatorProgress(current: done, total: imageURLs.count)
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
+        }
+
+        guard pdf.pageCount > 0 else {
+            runAlert(
+                title: "Conversion Failed",
+                informativeText: "No images could be converted into PDF pages.",
+                style: .warning
+            )
+            return
+        }
+
+        applyImageFilenameBookmarks(to: pdf, imageURLs: imageURLs)
+
+        guard pdf.write(to: outputURL) else {
+            runAlert(
+                title: "Failed to Save PDF",
+                informativeText: "Could not write the converted PDF to:\n\(outputURL.path)",
+                style: .warning
+            )
+            return
+        }
+
+        if failed.isEmpty {
+            runAlert(
+                title: "Conversion Complete",
+                informativeText: "Created \(outputURL.lastPathComponent) with \(pdf.pageCount) pages."
+            )
+        } else {
+            let preview = failed.prefix(10).joined(separator: ", ")
+            let suffix = failed.count > 10 ? ", …" : ""
+            runAlert(
+                title: "Conversion Complete with Issues",
+                informativeText: """
+                Created \(outputURL.lastPathComponent) with \(pdf.pageCount) pages.
+
+                Skipped files: \(preview)\(suffix)
+                """,
+                style: .warning
+            )
+        }
+    }
+
+    @objc func exportPagesAsJPEG() {
+        guard let document = pdfView.document else { beep(); return }
+        guard let preset = jpegExportPresetSelection() else { return }
+
+        let baseName = sanitizedFilename((openDocumentURL?.deletingPathExtension().lastPathComponent) ?? "Drawbridge Export")
+        guard let exportDirectory = promptJPEGExportDestination(defaultFolderName: "\(baseName) - JPG Pages") else { return }
+
+        isJPEGExportCancellationRequested = false
+        beginBusyIndicator("Exporting JPEG Pages…", detail: "Preparing export…", lockInteraction: false)
+        setBusyCancelAction({ [weak self] in
+            guard let self else { return }
+            self.isJPEGExportCancellationRequested = true
+            self.setBusyCancelAction(self.busyCancelHandler, title: "Canceling…", enabled: false)
+            self.updateBusyIndicatorDetail("Stopping after current page…")
+            self.updateBusyIndicatorSubdetail("")
+        }, title: "Cancel Export")
+        updateBusyIndicatorDetail("0/\(document.pageCount) • \(preset.title), \(Int(preset.dpi)) DPI")
+        updateBusyIndicatorSubdetail("ETA --")
+        updateBusyIndicatorProgress(current: 0, total: document.pageCount)
+        defer { endBusyIndicator() }
+
+        let start = Date()
+        var successCount = 0
+        var failedPages: [Int] = []
+        for pageIndex in 0..<document.pageCount {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
+            if isJPEGExportCancellationRequested {
+                break
+            }
+            let completedBefore = pageIndex
+            let percentBefore = Int((Double(completedBefore) / Double(max(1, document.pageCount)) * 100.0).rounded())
+            let pageLabel = displayPageLabel(forPageIndex: pageIndex)
+            updateBusyIndicatorStatus("Exporting JPEG Pages… \(percentBefore)%")
+            updateBusyIndicatorDetail("Rendering \(pageIndex + 1)/\(document.pageCount) • \(pageLabel)")
+            updateBusyIndicatorSubdetail("ETA calculating…")
+            updateBusyIndicatorProgress(current: completedBefore, total: document.pageCount)
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
+
+            guard let page = document.page(at: pageIndex),
+                  let image = pageJPEGImage(page: page, dpi: preset.dpi) else {
+                failedPages.append(pageIndex + 1)
+                let completed = pageIndex + 1
+                let elapsed = Date().timeIntervalSince(start)
+                let avg = elapsed / Double(max(1, completed))
+                let remaining = avg * Double(max(0, document.pageCount - completed))
+                let percent = Int((Double(completed) / Double(max(1, document.pageCount)) * 100.0).rounded())
+                updateBusyIndicatorStatus("Exporting JPEG Pages… \(percent)%")
+                updateBusyIndicatorDetail("\(completed)/\(document.pageCount) • \(preset.title), \(Int(preset.dpi)) DPI")
+                updateBusyIndicatorSubdetail("ETA \(shortDuration(remaining))")
+                updateBusyIndicatorProgress(current: completed, total: document.pageCount)
+                continue
+            }
+
+            let filename = String(format: "Page-%04d - %@.jpg", pageIndex + 1, sanitizedFilename(pageLabel))
+            let destination = exportDirectory.appendingPathComponent(filename)
+            guard let destinationRef = CGImageDestinationCreateWithURL(destination as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
+                failedPages.append(pageIndex + 1)
+                continue
+            }
+            let options = [kCGImageDestinationLossyCompressionQuality: preset.compressionQuality] as CFDictionary
+            CGImageDestinationAddImage(destinationRef, image, options)
+            if CGImageDestinationFinalize(destinationRef) {
+                successCount += 1
+            } else {
+                failedPages.append(pageIndex + 1)
+            }
+
+            let completed = pageIndex + 1
+            let elapsed = Date().timeIntervalSince(start)
+            let avg = elapsed / Double(max(1, completed))
+            let remaining = avg * Double(max(0, document.pageCount - completed))
+            let percent = Int((Double(completed) / Double(max(1, document.pageCount)) * 100.0).rounded())
+            updateBusyIndicatorStatus("Exporting JPEG Pages… \(percent)%")
+            updateBusyIndicatorDetail("\(completed)/\(document.pageCount) • \(filename)")
+            updateBusyIndicatorSubdetail("ETA \(shortDuration(remaining))")
+            updateBusyIndicatorProgress(current: completed, total: document.pageCount)
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
+        }
+
+        if isJPEGExportCancellationRequested {
+            runAlert(
+                title: "JPEG Export Canceled",
+                informativeText: "Exported \(successCount) of \(document.pageCount) page(s) to:\n\(exportDirectory.path)"
+            )
+            return
+        }
+
+        if failedPages.isEmpty {
+            runAlert(
+                title: "JPEG Export Complete",
+                informativeText: "Exported \(successCount) page(s) to:\n\(exportDirectory.path)"
+            )
+            return
+        }
+
+        let failurePreview = failedPages.prefix(12).map(String.init).joined(separator: ", ")
+        let suffix = failedPages.count > 12 ? ", …" : ""
+        runAlert(
+            title: "JPEG Export Completed with Issues",
+            informativeText: """
+            Exported \(successCount) page(s) to:
+            \(exportDirectory.path)
+
+            Failed page(s): \(failurePreview)\(suffix)
+            """,
+            style: .warning
+        )
     }
 
 
@@ -4166,7 +4593,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guard let page = pdfView.document?.page(at: item.pageIndex) else { return }
 
         let destination = PDFDestination(page: page, at: NSPoint(x: item.annotation.bounds.minX, y: item.annotation.bounds.maxY))
-        pdfView.go(to: destination)
+        pdfView.navigateToDestinationWithHistory(destination)
         updateSelectionOverlay()
     }
 
@@ -4445,6 +4872,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             }
             pageJumpField.isEnabled = false
             autoNameSheetsButton.isEnabled = true
+            batchLinkSheetsButton.isEnabled = true
         } else {
             statusPageSizeLabel.stringValue = "Size: -"
             statusPageLabel.stringValue = "Page: -"
@@ -4457,6 +4885,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             pagesTableView.deselectAll(nil)
             pageJumpField.isEnabled = false
             autoNameSheetsButton.isEnabled = false
+            batchLinkSheetsButton.isEnabled = false
         }
 
         let zoomPercent = Int(round(pdfView.scaleFactor * 100))
@@ -4878,6 +5307,444 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         let applyPageLabels = (applyPagesResponse == .alertFirstButtonReturn)
         applyAutoNamedSheets(generated, to: document, applyPageLabels: applyPageLabels)
+    }
+
+    func startAutoLinkSheetNumbersFlow() {
+        guard let document = pdfView.document,
+              let currentPage = pdfView.currentPage else {
+            beep()
+            return
+        }
+        autoLinkCaptureReferencePageIndex = document.index(for: currentPage)
+        guard guardOrBeep((autoLinkCaptureReferencePageIndex ?? -1) >= 0) else { return }
+        autoLinkPreviousToolMode = pdfView.toolMode
+        setTool(.select)
+
+        let alert = NSAlert()
+        alert.messageText = "Batch Link: Capture SHEET NUMBER Zone"
+        alert.informativeText = "Drag a rectangle over the SHEET NUMBER area on a typical sheet. Drawbridge will OCR this zone across all pages and create hyperlinks to associated pages."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Capture Zone")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            cancelAutoLinkCapture()
+            return
+        }
+        pdfView.beginRegionCaptureMode()
+    }
+
+    private func cancelAutoLinkCapture() {
+        pdfView.cancelRegionCaptureMode()
+        autoLinkCaptureReferencePageIndex = nil
+        if let previous = autoLinkPreviousToolMode {
+            setTool(previous)
+        }
+        autoLinkPreviousToolMode = nil
+    }
+
+    private func handleAutoLinkRegionCaptured(on page: PDFPage, rectInPage: NSRect) {
+        guard let document = pdfView.document,
+              let referenceIndex = autoLinkCaptureReferencePageIndex,
+              let referencePage = document.page(at: referenceIndex) else {
+            cancelAutoLinkCapture()
+            return
+        }
+        let currentIndex = document.index(for: page)
+        guard currentIndex == referenceIndex else {
+            runAlert(
+                title: "Capture On Reference Page",
+                informativeText: "Please capture on the same page where Batch Link started.",
+                style: .warning
+            )
+            pdfView.beginRegionCaptureMode()
+            return
+        }
+
+        let normalizedZone = normalize(rectInPage: rectInPage, for: referencePage)
+        runBatchLinkUsingSheetNumberZone(normalizedZone)
+    }
+
+    private func runBatchLinkUsingSheetNumberZone(_ normalizedZone: NormalizedPageRect) {
+        guard let document = pdfView.document else {
+            cancelAutoLinkCapture()
+            return
+        }
+        guard let referenceIndex = autoLinkCaptureReferencePageIndex,
+              referenceIndex >= 0,
+              referenceIndex < document.pageCount else {
+            cancelAutoLinkCapture()
+            return
+        }
+
+        beginBusyIndicator("Batch Linking Sheet Numbers…", detail: "Reading sheet numbers…")
+        defer {
+            endBusyIndicator()
+            if let previous = autoLinkPreviousToolMode {
+                setTool(previous)
+            }
+            autoLinkPreviousToolMode = nil
+            autoLinkCaptureReferencePageIndex = nil
+        }
+
+        var sheetTokenToPageIndex: [String: Int] = [:]
+        var canonicalSheetTokenToPageIndex: [String: Int] = [:]
+        updateBusyIndicatorStatus("Batch Linking Sheet Numbers…")
+        updateBusyIndicatorDetail("Step 1/3: Reading sheet numbers…")
+        updateBusyIndicatorSubdetail("0 found")
+        updateBusyIndicatorProgress(current: 0, total: document.pageCount)
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            updateBusyIndicatorProgress(current: pageIndex + 1, total: document.pageCount)
+            updateBusyIndicatorDetail("Step 1/3: Reading sheet numbers… \(pageIndex + 1)/\(document.pageCount)")
+            let numberRect = denormalize(rect: normalizedZone, for: page)
+            let raw = extractText(from: page, rectInPage: numberRect)
+            let tokens = extractSheetTokens(from: raw)
+            guard !tokens.isEmpty else {
+                updateBusyIndicatorSubdetail("\(sheetTokenToPageIndex.count) found")
+                continue
+            }
+            // The captured zone should represent one page's sheet number.
+            // If OCR/text finds multiple tokens in that zone (index pages, schedules),
+            // skip it to avoid creating wrong/self destinations.
+            let uniqueTokens = Array(Set(tokens))
+            guard uniqueTokens.count == 1, let token = uniqueTokens.first else {
+                updateBusyIndicatorSubdetail("\(sheetTokenToPageIndex.count) found")
+                continue
+            }
+            if sheetTokenToPageIndex[token] == nil {
+                sheetTokenToPageIndex[token] = pageIndex
+            }
+            let canonical = canonicalizeSheetToken(token)
+            if !canonical.isEmpty, canonicalSheetTokenToPageIndex[canonical] == nil {
+                canonicalSheetTokenToPageIndex[canonical] = pageIndex
+            }
+            updateBusyIndicatorSubdetail("\(sheetTokenToPageIndex.count) found")
+        }
+
+        guard !sheetTokenToPageIndex.isEmpty else {
+            runAlert(
+                title: "No Sheet Numbers Detected",
+                informativeText: "Could not detect sheet numbers from the captured zone.",
+                style: .warning
+            )
+            return
+        }
+
+        let clearPrompt = NSAlert()
+        clearPrompt.messageText = "Replace Existing Batch Links?"
+        clearPrompt.informativeText = "Delete existing auto-generated sheet links before creating new ones?"
+        clearPrompt.alertStyle = .informational
+        clearPrompt.addButton(withTitle: "Yes, Replace")
+        clearPrompt.addButton(withTitle: "No, Keep Existing")
+        clearPrompt.addButton(withTitle: "Cancel")
+        let clearResponse = clearPrompt.runModal()
+        if clearResponse == .alertThirdButtonReturn {
+            return
+        }
+        let shouldClearExisting = (clearResponse == .alertFirstButtonReturn)
+
+        if shouldClearExisting {
+            updateBusyIndicatorStatus("Batch Linking Sheet Numbers…")
+            updateBusyIndicatorDetail("Step 0/3: Removing existing batch links…")
+            updateBusyIndicatorSubdetail("0 links removed")
+            updateBusyIndicatorProgress(current: 0, total: max(1, document.pageCount))
+            var removedLinks = 0
+            removeAutoSheetLinks(in: document) { currentPage, totalPages, removedSoFar in
+                removedLinks = removedSoFar
+                self.updateBusyIndicatorProgress(current: currentPage, total: max(1, totalPages))
+                self.updateBusyIndicatorDetail("Step 0/3: Removing existing batch links… \(currentPage)/\(totalPages)")
+                self.updateBusyIndicatorSubdetail("\(removedSoFar) links removed")
+            }
+            updateBusyIndicatorSubdetail("\(removedLinks) links removed")
+        }
+
+        updateBusyIndicatorStatus("Batch Linking Sheet Numbers…")
+        updateBusyIndicatorDetail("Step 2/3: Linking text matches…")
+        updateBusyIndicatorSubdetail("0 links created")
+        var addedLinks = 0
+        var touchedPageIDs = Set<ObjectIdentifier>()
+        typealias LinkTarget = (destination: PDFDestination, targetPageIndex: Int)
+        var linkTargetsByToken: [String: LinkTarget] = [:]
+        var linkTargetsByCanonicalToken: [String: LinkTarget] = [:]
+        for (sheetToken, targetPageIndex) in sheetTokenToPageIndex.sorted(by: { $0.key < $1.key }) {
+            guard targetPageIndex >= 0,
+                  targetPageIndex < document.pageCount,
+                  let targetPage = document.page(at: targetPageIndex) else { continue }
+            let target: LinkTarget = (bookmarkStyleDestination(for: targetPage), targetPageIndex)
+            linkTargetsByToken[sheetToken] = target
+            let canonical = canonicalizeSheetToken(sheetToken)
+            if !canonical.isEmpty {
+                linkTargetsByCanonicalToken[canonical] = target
+            }
+        }
+        for (canonical, targetPageIndex) in canonicalSheetTokenToPageIndex {
+            guard linkTargetsByCanonicalToken[canonical] == nil,
+                  targetPageIndex >= 0,
+                  targetPageIndex < document.pageCount,
+                  let targetPage = document.page(at: targetPageIndex) else { continue }
+            linkTargetsByCanonicalToken[canonical] = (bookmarkStyleDestination(for: targetPage), targetPageIndex)
+        }
+
+        var createdBoundsKeys = Set<String>()
+        let sortedTargets = linkTargetsByToken.sorted(by: { $0.key < $1.key })
+        updateBusyIndicatorProgress(current: 0, total: max(1, sortedTargets.count))
+        for (targetIndex, pair) in sortedTargets.enumerated() {
+            let (sheetToken, target) = pair
+            updateBusyIndicatorProgress(current: targetIndex + 1, total: max(1, sortedTargets.count))
+            updateBusyIndicatorDetail("Step 2/3: Linking text matches… \(targetIndex + 1)/\(sortedTargets.count)")
+            let selections = document.findString(sheetToken, withOptions: [.caseInsensitive])
+            for selection in selections {
+                for page in selection.pages {
+                    guard let sourcePageIndex = pageIndex(for: page, in: document) else { continue }
+                    if target.targetPageIndex == sourcePageIndex {
+                        continue
+                    }
+                    let bounds = selection.bounds(for: page).insetBy(dx: -1.5, dy: -1.0)
+                    guard bounds.width > 0.5, bounds.height > 0.5 else { continue }
+                    let key = "\(sourcePageIndex):\(sheetToken):\(bounds.origin.x.rounded()):\(bounds.origin.y.rounded()):\(bounds.width.rounded()):\(bounds.height.rounded())"
+                    if createdBoundsKeys.contains(key) { continue }
+                    createdBoundsKeys.insert(key)
+                    addAutoSheetLink(on: page, bounds: bounds, destination: target.destination)
+                    touchedPageIDs.insert(ObjectIdentifier(page))
+                    addedLinks += 1
+                }
+            }
+            updateBusyIndicatorSubdetail("\(addedLinks) links created")
+        }
+
+        // OCR fallback for scanned pages with no selectable text.
+        updateBusyIndicatorDetail("Step 3/3: OCR fallback + linking…")
+        updateBusyIndicatorProgress(current: 0, total: document.pageCount)
+        for sourcePageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: sourcePageIndex) else { continue }
+            updateBusyIndicatorProgress(current: sourcePageIndex + 1, total: document.pageCount)
+            updateBusyIndicatorDetail("Step 3/3: OCR fallback + linking… \(sourcePageIndex + 1)/\(document.pageCount)")
+            let ocrHits = recognizeTextLines(in: page)
+            for hit in ocrHits {
+                let tokens = extractSheetTokens(from: hit.text)
+                guard !tokens.isEmpty else { continue }
+                let expanded = hit.rectInPage.insetBy(dx: -2, dy: -1)
+                for token in tokens {
+                    let canonical = canonicalizeSheetToken(token)
+                    let target = linkTargetsByToken[token] ?? linkTargetsByCanonicalToken[canonical]
+                    guard let target else { continue }
+                    if target.targetPageIndex == sourcePageIndex {
+                        continue
+                    }
+                    let key = "\(sourcePageIndex):\(token):\(expanded.origin.x.rounded()):\(expanded.origin.y.rounded()):\(expanded.width.rounded()):\(expanded.height.rounded())"
+                    if createdBoundsKeys.contains(key) { continue }
+                    createdBoundsKeys.insert(key)
+                    addAutoSheetLink(on: page, bounds: expanded, destination: target.destination)
+                    touchedPageIDs.insert(ObjectIdentifier(page))
+                    addedLinks += 1
+                }
+            }
+            updateBusyIndicatorSubdetail("\(addedLinks) links created")
+        }
+
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex),
+                  touchedPageIDs.contains(ObjectIdentifier(page)) else { continue }
+            markPageMarkupCacheDirty(page)
+        }
+
+        if addedLinks > 0 {
+            markMarkupChangedAndScheduleAutosave()
+            refreshMarkups()
+        }
+        reloadBookmarks()
+        updateStatusBar()
+
+        runAlert(
+            title: "Batch Link Complete",
+            informativeText: "Detected \(sheetTokenToPageIndex.count) sheet numbers and created \(addedLinks) hyperlink(s) across \(document.pageCount) page(s)."
+        )
+    }
+
+    private func pageIndex(for page: PDFPage, in document: PDFDocument) -> Int? {
+        let index = document.index(for: page)
+        return index >= 0 ? index : nil
+    }
+
+    private func bookmarkStyleDestination(for page: PDFPage) -> PDFDestination {
+        let cropBounds = page.bounds(for: .cropBox)
+        return PDFDestination(page: page, at: NSPoint(x: cropBounds.minX, y: cropBounds.maxY))
+    }
+
+    func isProtectedAutoSheetLink(_ annotation: PDFAnnotation) -> Bool {
+        let type = (annotation.type ?? "").lowercased()
+        guard type == PDFAnnotationSubtype.link.rawValue.lowercased() else { return false }
+        let marker = autoSheetLinkAnnotationMarker
+        let rawValues = [annotation.userName, annotation.contents]
+        return rawValues.contains { raw in
+            guard let raw else { return false }
+            return raw.contains(marker)
+        }
+    }
+
+    func isUserEditableMarkup(_ annotation: PDFAnnotation) -> Bool {
+        !pdfView.isHatchOverlayAnnotation(annotation) && !isProtectedAutoSheetLink(annotation)
+    }
+
+    private func addAutoSheetLink(on page: PDFPage, bounds: NSRect, destination: PDFDestination) {
+        let link = PDFAnnotation(bounds: bounds, forType: .link, withProperties: nil)
+        let border = PDFBorder()
+        border.lineWidth = 0
+        link.border = border
+        link.color = .clear
+        link.isReadOnly = true
+        if let destinationPage = destination.page,
+           let document = page.document {
+            let destinationPageIndex = document.index(for: destinationPage)
+            if destinationPageIndex >= 0 {
+                let metadata = "\(autoSheetLinkAnnotationMarker):\(destinationPageIndex)"
+                link.userName = metadata
+                link.contents = metadata
+            } else {
+                link.contents = autoSheetLinkAnnotationMarker
+            }
+        } else {
+            link.contents = autoSheetLinkAnnotationMarker
+        }
+        link.destination = destination
+        link.action = PDFActionGoTo(destination: destination)
+        link.setValue(destination, forAnnotationKey: .destination)
+        page.addAnnotation(link)
+    }
+
+    private func removeAutoSheetLinks(
+        in document: PDFDocument,
+        progress: ((Int, Int, Int) -> Void)? = nil
+    ) {
+        var removedCount = 0
+        let totalPages = max(1, document.pageCount)
+        if document.pageCount == 0 {
+            progress?(1, totalPages, removedCount)
+            return
+        }
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            let linksToRemove = page.annotations.filter(isProtectedAutoSheetLink)
+            if !linksToRemove.isEmpty {
+                for link in linksToRemove {
+                    page.removeAnnotation(link)
+                    removedCount += 1
+                }
+                markPageMarkupCacheDirty(page)
+            }
+            progress?(pageIndex + 1, totalPages, removedCount)
+        }
+    }
+
+    private func extractPrimarySheetToken(from raw: String) -> String? {
+        extractSheetTokens(from: raw).first
+    }
+
+    private func extractSheetTokens(from raw: String) -> [String] {
+        let cleaned = cleanDetectedSheetText(raw).uppercased()
+        guard !cleaned.isEmpty else { return [] }
+        let separators = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ",;:()[]{}"))
+        let candidates = cleaned.components(separatedBy: separators).map {
+            $0.trimmingCharacters(in: CharacterSet(charactersIn: ".-_/\\"))
+        }.filter { !$0.isEmpty }
+
+        var matches: [String] = []
+        matches.reserveCapacity(candidates.count)
+        for token in candidates {
+            if token.range(of: #"\d"#, options: .regularExpression) != nil,
+               token.range(of: #"[A-Z]"#, options: .regularExpression) != nil,
+               (token.contains("-") || token.contains(".")) {
+                matches.append(token)
+            }
+        }
+        if matches.isEmpty {
+            for token in candidates {
+                if token.range(of: #"\d"#, options: .regularExpression) != nil,
+                   token.range(of: #"[A-Z]"#, options: .regularExpression) != nil {
+                    matches.append(token)
+                }
+            }
+        }
+        var deduped: [String] = []
+        var seen = Set<String>()
+        for token in matches where !seen.contains(token) {
+            seen.insert(token)
+            deduped.append(token)
+        }
+        return deduped
+    }
+
+    private func canonicalizeSheetToken(_ token: String) -> String {
+        token.uppercased().unicodeScalars
+            .filter { CharacterSet.alphanumerics.contains($0) }
+            .map(String.init)
+            .joined()
+    }
+
+    private func recognizeTextLines(in page: PDFPage) -> [OCRLineHit] {
+        let pageBounds = page.bounds(for: .mediaBox)
+        guard pageBounds.width > 1, pageBounds.height > 1 else { return [] }
+        let scale: CGFloat = 2.0
+        let width = Int((pageBounds.width * scale).rounded(.up))
+        let height = Int((pageBounds.height * scale).rounded(.up))
+        guard width > 0, height > 0 else { return [] }
+
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return []
+        }
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.scaleBy(x: scale, y: scale)
+        context.translateBy(x: -pageBounds.minX, y: -pageBounds.minY)
+        page.draw(with: .mediaBox, to: context)
+        guard let image = context.makeImage() else { return [] }
+
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        request.minimumTextHeight = 0.005
+        let handler = VNImageRequestHandler(cgImage: image, orientation: .up, options: [:])
+        do {
+            try handler.perform([request])
+        } catch {
+            return []
+        }
+        guard let observations = request.results, !observations.isEmpty else { return [] }
+
+        var hits: [OCRLineHit] = []
+        hits.reserveCapacity(observations.count)
+        let imageWidth = CGFloat(width)
+        let imageHeight = CGFloat(height)
+        for observation in observations {
+            guard let top = observation.topCandidates(1).first else { continue }
+            let text = cleanDetectedSheetText(top.string)
+            guard !text.isEmpty else { continue }
+            let box = observation.boundingBox
+            let rectPx = NSRect(
+                x: box.minX * imageWidth,
+                y: box.minY * imageHeight,
+                width: box.width * imageWidth,
+                height: box.height * imageHeight
+            )
+            let rectInPage = NSRect(
+                x: pageBounds.minX + rectPx.minX / scale,
+                y: pageBounds.minY + rectPx.minY / scale,
+                width: rectPx.width / scale,
+                height: rectPx.height / scale
+            )
+            if rectInPage.width > 1, rectInPage.height > 1 {
+                hits.append(OCRLineHit(text: text, rectInPage: rectInPage))
+            }
+        }
+        return hits
     }
 
     private func applyAutoNamedSheets(_ sheets: [AutoNamedSheet], to document: PDFDocument, applyPageLabels: Bool) {

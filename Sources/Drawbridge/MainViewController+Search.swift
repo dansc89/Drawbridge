@@ -206,13 +206,13 @@ extension MainViewController {
         }
         switch searchHits[searchHitIndex] {
         case let .document(selection: selection, pageIndex: _, preview: preview):
-            pdfView.go(to: selection)
+            pdfView.navigateToSelectionWithHistory(selection)
             pdfView.setCurrentSelection(selection, animate: true)
             updateSearchControlsState(overridePreview: preview)
         case let .markup(pageIndex: pageIndex, annotation: annotation, preview: preview):
             if let page = pdfView.document?.page(at: pageIndex) {
                 let destination = PDFDestination(page: page, at: NSPoint(x: annotation.bounds.minX, y: annotation.bounds.maxY))
-                pdfView.go(to: destination)
+                pdfView.navigateToDestinationWithHistory(destination)
                 selectMarkupFromPageClick(page: page, annotation: annotation)
             }
             updateSearchControlsState(overridePreview: preview)

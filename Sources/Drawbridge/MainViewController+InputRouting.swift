@@ -118,6 +118,24 @@ extension MainViewController {
         guard view.window?.isKeyWindow == true else { return event }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
+        let optionNavigationModifiersAllowed =
+            modifiers.contains(.option) &&
+            modifiers.isDisjoint(with: [.command, .control, .shift])
+        if optionNavigationModifiersAllowed {
+            switch event.keyCode {
+            case 123: // Option + Left
+                lastUserInteractionAt = Date()
+                commandNavigateBack(nil)
+                return nil
+            case 124: // Option + Right
+                lastUserInteractionAt = Date()
+                commandNavigateForward(nil)
+                return nil
+            default:
+                break
+            }
+        }
+
         if modifiers == [.command],
            event.charactersIgnoringModifiers?.lowercased() == "a" {
             lastUserInteractionAt = Date()
@@ -145,10 +163,35 @@ extension MainViewController {
             pasteGrabSnapshotInPlace()
             return nil
         }
+        if modifiers == [.command, .shift],
+           (view.window?.firstResponder is NSTextView) == false,
+           (view.window?.firstResponder is NSTextField) == false,
+           event.charactersIgnoringModifiers?.lowercased() == "a" {
+            lastUserInteractionAt = Date()
+            commandAutoGenerateSheetNames(nil)
+            return nil
+        }
+        if modifiers == [.command, .shift],
+           (view.window?.firstResponder is NSTextView) == false,
+           (view.window?.firstResponder is NSTextField) == false,
+           event.charactersIgnoringModifiers?.lowercased() == "h" {
+            lastUserInteractionAt = Date()
+            commandBatchLinkSheetNumbers(nil)
+            return nil
+        }
         if modifiers == [.command],
            event.charactersIgnoringModifiers?.lowercased() == "w" {
             lastUserInteractionAt = Date()
             commandCloseDocument(nil)
+            return nil
+        }
+
+        if modifiers == [.command, .shift],
+           (view.window?.firstResponder is NSTextView) == false,
+           (view.window?.firstResponder is NSTextField) == false,
+           let action = shortcutAction(for: event),
+           performShortcutAction(action) {
+            lastUserInteractionAt = Date()
             return nil
         }
 

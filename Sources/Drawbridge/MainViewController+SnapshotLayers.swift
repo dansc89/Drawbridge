@@ -1,6 +1,35 @@
 import AppKit
 import PDFKit
 
+private final class LayerColorChipButton: NSButton {
+    var swatchColor: NSColor = .white {
+        didSet { needsDisplay = true }
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isBordered = false
+        setButtonType(.momentaryChange)
+        imagePosition = .noImage
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let insetRect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let corner = min(insetRect.width, insetRect.height) * 0.5
+        let path = NSBezierPath(roundedRect: insetRect, xRadius: corner, yRadius: corner)
+        swatchColor.setFill()
+        path.fill()
+        NSColor.black.withAlphaComponent(0.45).setStroke()
+        path.lineWidth = 1.0
+        path.stroke()
+    }
+}
+
 @MainActor
 extension MainViewController {
     func ensureLayerVisibilityDefaults() {
@@ -67,13 +96,14 @@ extension MainViewController {
     }
 
     func refreshLayerTintColorWell(for layer: String) {
-        guard let well = layerTintColorWells[layer] else { return }
-        well.isEnabled = (layer != "DEFAULT")
+        guard let colorButton = layerTintColorWells[layer] as? LayerColorChipButton else { return }
+        colorButton.isEnabled = (layer != "DEFAULT")
         if let tint = tintColor(forSnapshotLayer: layer) {
-            well.color = tint.withAlphaComponent(1.0)
+            colorButton.swatchColor = tint.withAlphaComponent(1.0)
         } else {
-            well.color = .white
+            colorButton.swatchColor = .white
         }
+        colorButton.alphaValue = (layer == "DEFAULT") ? 0.65 : 1.0
     }
 
     func refreshLayerVisibilityButton(for layer: String) {
@@ -173,13 +203,13 @@ extension MainViewController {
             layerVisibilityButtons[layer] = visibilityButton
             refreshLayerVisibilityButton(for: layer)
 
-            let colorWell = NSColorWell(frame: .zero)
+            let colorWell = LayerColorChipButton(frame: .zero)
             colorWell.identifier = NSUserInterfaceItemIdentifier(layer)
             colorWell.target = self
             colorWell.action = #selector(layerTintColorWellChanged(_:))
             colorWell.translatesAutoresizingMaskIntoConstraints = false
-            colorWell.widthAnchor.constraint(equalToConstant: 22).isActive = true
-            colorWell.heightAnchor.constraint(equalToConstant: 16).isActive = true
+            colorWell.widthAnchor.constraint(equalToConstant: 14).isActive = true
+            colorWell.heightAnchor.constraint(equalToConstant: 14).isActive = true
             layerTintColorWells[layer] = colorWell
             refreshLayerTintColorWell(for: layer)
 
@@ -222,12 +252,23 @@ extension MainViewController {
         refreshStatusLayerControls()
     }
 
-    @objc func layerTintColorWellChanged(_ sender: NSColorWell) {
+    @objc func layerTintColorWellChanged(_ sender: NSButton) {
         guard let layer = sender.identifier?.rawValue, !layer.isEmpty else { return }
         guard layer != "DEFAULT" else {
             refreshLayerTintColorWell(for: layer)
             return
         }
+        activeLayerTintSelection = layer
+        let panel = NSColorPanel.shared
+        panel.color = (tintColor(forSnapshotLayer: layer) ?? .white).withAlphaComponent(1.0)
+        panel.setTarget(self)
+        panel.setAction(#selector(layerTintColorPanelChanged(_:)))
+        panel.orderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc func layerTintColorPanelChanged(_ sender: NSColorPanel) {
+        guard let layer = activeLayerTintSelection, layer != "DEFAULT" else { return }
         layerTintColorByName[layer] = sender.color.withAlphaComponent(1.0)
         applyLayerTintColorToAllSnapshots(layer: layer)
         refreshLayerTintColorWell(for: layer)
