@@ -161,6 +161,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let prefsItem = appMenu.addItem(withTitle: "Performance Settings…", action: #selector(MainViewController.commandPerformanceSettings(_:)), keyEquivalent: "")
         prefsItem.target = controller
         appMenu.addItem(NSMenuItem.separator())
+        let hideItem = appMenu.addItem(withTitle: "Hide Drawbridge", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        hideItem.target = NSApp
+        let hideOthersItem = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthersItem.keyEquivalentModifierMask = [.command, .option]
+        hideOthersItem.target = NSApp
+        let showAllItem = appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        showAllItem.target = NSApp
+        appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit Drawbridge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
@@ -195,8 +203,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let saveCopyItem = fileMenu.addItem(withTitle: "Save As PDF...", action: #selector(MainViewController.commandSaveCopy(_:)), keyEquivalent: "S")
         saveCopyItem.keyEquivalentModifierMask = [.command, .shift]
         saveCopyItem.target = controller
+        fileMenu.addItem(withTitle: "Convert...", action: #selector(MainViewController.commandConvertImagesToPDF(_:)), keyEquivalent: "").target = controller
         let exportCSVItem = fileMenu.addItem(withTitle: "Export Markups CSV...", action: #selector(MainViewController.commandExportCSV(_:)), keyEquivalent: "e")
         exportCSVItem.keyEquivalentModifierMask = [.command, .shift]
+        let exportJPGItem = fileMenu.addItem(withTitle: "Export Pages as JPEG...", action: #selector(MainViewController.commandExportPagesAsJPEG(_:)), keyEquivalent: "j")
+        exportJPGItem.keyEquivalentModifierMask = [.command, .shift]
+        exportJPGItem.target = controller
         fileItem.submenu = fileMenu
 
         let editItem = NSMenuItem()
@@ -222,8 +234,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainMenu.addItem(markupsItem)
         let markupsMenu = NSMenu(title: "Markups")
         let highlightItem = markupsMenu.addItem(withTitle: "Highlight Selection", action: #selector(MainViewController.commandHighlight(_:)), keyEquivalent: "h")
-        highlightItem.keyEquivalentModifierMask = [.command, .shift]
-        markupsMenu.addItem(withTitle: "Auto-Generate Sheet Names/Bookmarks…", action: #selector(MainViewController.commandAutoGenerateSheetNames(_:)), keyEquivalent: "").target = controller
+        highlightItem.keyEquivalentModifierMask = [.command, .option]
+        let autoNamesItem = markupsMenu.addItem(withTitle: "Auto-Generate Sheet Names/Bookmarks…", action: #selector(MainViewController.commandAutoGenerateSheetNames(_:)), keyEquivalent: "a")
+        autoNamesItem.keyEquivalentModifierMask = [.command, .shift]
+        autoNamesItem.target = controller
+        let batchLinkItem = markupsMenu.addItem(withTitle: "Batch Link Sheet Numbers…", action: #selector(MainViewController.commandBatchLinkSheetNumbers(_:)), keyEquivalent: "h")
+        batchLinkItem.keyEquivalentModifierMask = [.command, .shift]
+        batchLinkItem.target = controller
         markupsMenu.addItem(NSMenuItem.separator())
         markupsMenu.addItem(withTitle: "Refresh Markups", action: #selector(MainViewController.commandRefreshMarkups(_:)), keyEquivalent: "r").target = controller
         markupsMenu.addItem(withTitle: "Edit Selected Markup", action: #selector(MainViewController.commandEditMarkup(_:)), keyEquivalent: "e").target = controller

@@ -49,6 +49,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let tickAngle: CGFloat
         let labelOffset: CGFloat
     }
+    private struct ViewportHistoryEntry {
+        let pageIndex: Int
+        let point: NSPoint
+        let scale: CGFloat
+    }
     private static let calloutGroupPrefix = "DrawbridgeCallout:"
     private static let textGroupPrefix = "DrawbridgeText:"
     private static let textOutlineMarker = "Drawbridge Text Outline"
@@ -221,6 +226,12 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var movingAnnotationStartBoundsByID: [ObjectIdentifier: NSRect] = [:]
     private var movingPolygonOriginalPointsByID: [ObjectIdentifier: [NSPoint]] = [:]
     private var didMoveAnnotation = false
+    private var delegatedLinkMouseDownToSuper = false
+    private var navigationBackStack: [ViewportHistoryEntry] = []
+    private var navigationForwardStack: [ViewportHistoryEntry] = []
+    private var applyingHistoryNavigation = false
+    private let navigationHistoryLimit = 300
+    private var navigationHistoryDocumentID: ObjectIdentifier?
     private var fenceStartInView: NSPoint?
     private var fencePage: PDFPage?
     private var pendingCalloutPage: PDFPage?
@@ -866,6 +877,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        delegatedLinkMouseDownToSuper = false
         let locationInView = convert(event.locationInWindow, from: nil)
         lastPointerInView = locationInView
         if isRegionCaptureModeEnabled {
@@ -879,6 +891,21 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             dragPreviewLayer.path = CGPath(rect: NSRect(origin: locationInView, size: .zero), transform: nil)
             dragPreviewLayer.isHidden = false
             return
+        }
+        let eventModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.clickCount == 1,
+           eventModifiers.isDisjoint(with: [.command, .shift, .option, .control]),
+           let page = page(for: locationInView, nearest: true) {
+            let pointInPage = convert(locationInView, to: page)
+            if let linkAnnotation = linkAnnotation(at: pointInPage, on: page) {
+                if followLinkIfPossible(linkAnnotation) {
+                    return
+                }
+                delegatedLinkMouseDownToSuper = true
+                super.mouseDown(with: event)
+                onViewportChanged?()
+                return
+            }
         }
         let createsMarkupTool: Bool
         switch toolMode {
@@ -1638,6 +1665,12 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if delegatedLinkMouseDownToSuper {
+            delegatedLinkMouseDownToSuper = false
+            super.mouseUp(with: event)
+            onViewportChanged?()
+            return
+        }
         if isRegionCaptureModeEnabled {
             defer {
                 regionCaptureStartInView = nil
@@ -1704,7 +1737,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 let p2 = convert(NSPoint(x: rectInView.maxX, y: rectInView.maxY), to: page)
                 let box = normalizedRect(from: p1, to: p2)
                 let hits = page.annotations.filter { candidate in
-                    !isHatchOverlayAnnotation(candidate) && candidate.bounds.intersects(box)
+                    !isHatchOverlayAnnotation(candidate) &&
+                        !isLinkAnnotation(candidate) &&
+                        candidate.bounds.intersects(box)
                 }
                 onAnnotationsBoxSelected?(page, hits)
                 return
@@ -5097,6 +5132,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         // Prefer visible vector snapshot overlays directly under the cursor.
         for annotation in page.annotations.reversed() {
             guard annotation.shouldDisplay else { continue }
+            if isLinkAnnotation(annotation) { continue }
             if annotation is PDFSnapshotAnnotation, annotation.bounds.contains(point) {
                 return annotation
             }
@@ -5106,6 +5142,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         var bestDistance = maxDistance
         for annotation in page.annotations.reversed() {
             guard annotation.shouldDisplay else { continue }
+            if isLinkAnnotation(annotation) { continue }
             if isTextOutlineAnnotation(annotation) { continue }
             if isHatchOverlayAnnotation(annotation) { continue }
             let annotationType = (annotation.type ?? "").lowercased()
@@ -5142,6 +5179,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         var fallbackDistance = maxDistance
         for annotation in page.annotations.reversed() {
             guard annotation.shouldDisplay else { continue }
+            if isLinkAnnotation(annotation) { continue }
             if isTextOutlineAnnotation(annotation) { continue }
             if isHatchOverlayAnnotation(annotation) { continue }
             let annotationType = (annotation.type ?? "").lowercased()
@@ -5163,6 +5201,249 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return fallback
         }
         return best
+    }
+
+    private func isLinkAnnotation(_ annotation: PDFAnnotation) -> Bool {
+        let type = (annotation.type ?? "").lowercased()
+        if type == PDFAnnotationSubtype.link.rawValue.lowercased() {
+            return true
+        }
+        if annotation.destination != nil {
+            return true
+        }
+        if annotation.value(forAnnotationKey: .destination) as? PDFDestination != nil {
+            return true
+        }
+        if annotation.action as? PDFActionGoTo != nil {
+            return true
+        }
+        let marker = "DrawbridgeAutoSheetLink"
+        if (annotation.userName?.contains(marker) ?? false) || (annotation.contents?.contains(marker) ?? false) {
+            return true
+        }
+        return false
+    }
+
+    private func linkAnnotation(at pointInPage: NSPoint, on page: PDFPage) -> PDFAnnotation? {
+        if let direct = page.annotation(at: pointInPage), isLinkAnnotation(direct) {
+            return direct
+        }
+        let expandedHitInset: CGFloat = max(1.5, selectionHitDistanceInPage() * 0.35)
+        var nearest: (annotation: PDFAnnotation, distance: CGFloat)?
+        for annotation in page.annotations.reversed() {
+            guard isLinkAnnotation(annotation) else { continue }
+            let directBounds = annotation.bounds
+            if directBounds.contains(pointInPage) {
+                return annotation
+            }
+            let expandedBounds = directBounds.insetBy(dx: -expandedHitInset, dy: -expandedHitInset)
+            guard expandedBounds.contains(pointInPage) else { continue }
+            let distance = distanceToRect(pointInPage, rect: directBounds)
+            if let currentNearest = nearest {
+                if distance < currentNearest.distance {
+                    nearest = (annotation, distance)
+                }
+            } else {
+                nearest = (annotation, distance)
+            }
+        }
+        return nearest?.annotation
+    }
+
+    @discardableResult
+    private func followLinkIfPossible(_ annotation: PDFAnnotation) -> Bool {
+        let destinationPageIndex = destinationPageIndexFromLinkMetadata(annotation)
+        let shouldFitTargetPage = destinationPageIndex != nil
+        if let destinationPageIndex,
+           let document,
+           destinationPageIndex >= 0,
+           destinationPageIndex < document.pageCount,
+           let page = document.page(at: destinationPageIndex) {
+            navigateToLinkTarget(page: page, destination: nil, fitWholePage: true)
+            onViewportChanged?()
+            return true
+        }
+        if let destination = annotation.destination,
+           let resolved = destinationIfValidInCurrentDocument(destination) {
+            navigateToLinkTarget(page: resolved.page, destination: resolved, fitWholePage: shouldFitTargetPage)
+            onViewportChanged?()
+            return true
+        }
+        if let destination = annotation.value(forAnnotationKey: .destination) as? PDFDestination,
+           let resolved = destinationIfValidInCurrentDocument(destination) {
+            navigateToLinkTarget(page: resolved.page, destination: resolved, fitWholePage: shouldFitTargetPage)
+            onViewportChanged?()
+            return true
+        }
+        if let action = annotation.action as? PDFActionGoTo,
+           let resolved = destinationIfValidInCurrentDocument(action.destination) {
+            navigateToLinkTarget(page: resolved.page, destination: resolved, fitWholePage: shouldFitTargetPage)
+            onViewportChanged?()
+            return true
+        }
+        return false
+    }
+
+    private func navigateToLinkTarget(page: PDFPage?, destination: PDFDestination?, fitWholePage: Bool) {
+        guard let page else {
+            if let destination {
+                navigateToDestinationWithHistory(destination)
+            }
+            return
+        }
+        if fitWholePage {
+            navigateToPageWithHistory(page)
+            autoScales = true
+            let fit = scaleFactorForSizeToFit
+            if fit > 0 {
+                scaleFactor = fit
+                autoScales = false
+            }
+            return
+        }
+        if let destination {
+            navigateToDestinationWithHistory(destination)
+        } else {
+            navigateToPageWithHistory(page)
+        }
+    }
+
+    private func resetNavigationHistoryIfNeeded() {
+        guard let document else {
+            navigationBackStack.removeAll(keepingCapacity: true)
+            navigationForwardStack.removeAll(keepingCapacity: true)
+            navigationHistoryDocumentID = nil
+            return
+        }
+        let docID = ObjectIdentifier(document)
+        guard navigationHistoryDocumentID != docID else { return }
+        navigationBackStack.removeAll(keepingCapacity: true)
+        navigationForwardStack.removeAll(keepingCapacity: true)
+        navigationHistoryDocumentID = docID
+    }
+
+    private func currentViewportHistoryEntry() -> ViewportHistoryEntry? {
+        guard let document,
+              let page = currentPage else { return nil }
+        let pageIndex = document.index(for: page)
+        guard pageIndex >= 0 else { return nil }
+        let point = currentDestination?.point ?? convert(NSPoint(x: bounds.midX, y: bounds.midY), to: page)
+        return ViewportHistoryEntry(pageIndex: pageIndex, point: point, scale: scaleFactor)
+    }
+
+    private func isSameHistoryEntry(_ lhs: ViewportHistoryEntry, _ rhs: ViewportHistoryEntry) -> Bool {
+        if lhs.pageIndex != rhs.pageIndex { return false }
+        if abs(lhs.scale - rhs.scale) > 0.0005 { return false }
+        return abs(lhs.point.x - rhs.point.x) <= 1.0 && abs(lhs.point.y - rhs.point.y) <= 1.0
+    }
+
+    private func pushBackHistoryCurrentLocation() {
+        resetNavigationHistoryIfNeeded()
+        guard let entry = currentViewportHistoryEntry() else { return }
+        if let last = navigationBackStack.last, isSameHistoryEntry(last, entry) {
+            return
+        }
+        navigationBackStack.append(entry)
+        if navigationBackStack.count > navigationHistoryLimit {
+            navigationBackStack.removeFirst(navigationBackStack.count - navigationHistoryLimit)
+        }
+    }
+
+    private func applyHistoryEntry(_ entry: ViewportHistoryEntry) -> Bool {
+        guard let document,
+              entry.pageIndex >= 0,
+              entry.pageIndex < document.pageCount,
+              let page = document.page(at: entry.pageIndex) else {
+            return false
+        }
+        applyingHistoryNavigation = true
+        defer { applyingHistoryNavigation = false }
+        autoScales = false
+        let clampedScale = min(max(minScaleFactor, entry.scale), maxScaleFactor)
+        scaleFactor = clampedScale
+        go(to: PDFDestination(page: page, at: entry.point))
+        onViewportChanged?()
+        return true
+    }
+
+    func navigateToDestinationWithHistory(_ destination: PDFDestination) {
+        if !applyingHistoryNavigation {
+            pushBackHistoryCurrentLocation()
+            navigationForwardStack.removeAll(keepingCapacity: true)
+        }
+        go(to: destination)
+        onViewportChanged?()
+    }
+
+    func navigateToPageWithHistory(_ page: PDFPage) {
+        if !applyingHistoryNavigation {
+            pushBackHistoryCurrentLocation()
+            navigationForwardStack.removeAll(keepingCapacity: true)
+        }
+        go(to: page)
+        onViewportChanged?()
+    }
+
+    func navigateToSelectionWithHistory(_ selection: PDFSelection) {
+        if !applyingHistoryNavigation {
+            pushBackHistoryCurrentLocation()
+            navigationForwardStack.removeAll(keepingCapacity: true)
+        }
+        go(to: selection)
+        onViewportChanged?()
+    }
+
+    @discardableResult
+    func navigateBackInHistory() -> Bool {
+        resetNavigationHistoryIfNeeded()
+        guard let target = navigationBackStack.popLast() else { return false }
+        if let current = currentViewportHistoryEntry() {
+            navigationForwardStack.append(current)
+            if navigationForwardStack.count > navigationHistoryLimit {
+                navigationForwardStack.removeFirst(navigationForwardStack.count - navigationHistoryLimit)
+            }
+        }
+        return applyHistoryEntry(target)
+    }
+
+    @discardableResult
+    func navigateForwardInHistory() -> Bool {
+        resetNavigationHistoryIfNeeded()
+        guard let target = navigationForwardStack.popLast() else { return false }
+        if let current = currentViewportHistoryEntry() {
+            navigationBackStack.append(current)
+            if navigationBackStack.count > navigationHistoryLimit {
+                navigationBackStack.removeFirst(navigationBackStack.count - navigationHistoryLimit)
+            }
+        }
+        return applyHistoryEntry(target)
+    }
+
+    private func destinationIfValidInCurrentDocument(_ destination: PDFDestination) -> PDFDestination? {
+        guard let page = destination.page else { return nil }
+        guard let document else { return destination }
+        let pageIndex = document.index(for: page)
+        guard pageIndex >= 0 else { return nil }
+        if let resolvedPage = document.page(at: pageIndex) {
+            return PDFDestination(page: resolvedPage, at: destination.point)
+        }
+        return destination
+    }
+
+    private func destinationPageIndexFromLinkMetadata(_ annotation: PDFAnnotation) -> Int? {
+        let candidates = [annotation.userName, annotation.contents]
+        for candidate in candidates {
+            guard let raw = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty else { continue }
+            let marker = "DrawbridgeAutoSheetLink:"
+            if raw.hasPrefix(marker) {
+                let suffix = raw.dropFirst(marker.count)
+                if let index = Int(suffix) {
+                    return index
+                }
+            }
+        }
+        return nil
     }
 
     private func selectionHitDistanceInPage() -> CGFloat {

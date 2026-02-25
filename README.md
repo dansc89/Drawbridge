@@ -34,6 +34,7 @@ If you hit an issue, open a GitHub issue with:
 
 Developer/build/release docs are in `DEVELOPMENT.md`.
 For trusted macOS distribution (Developer ID signing + Apple notarization), see the same doc.
+User manual is in `USER_MANUAL.md`.
 
 ## Cloud Backend
 
