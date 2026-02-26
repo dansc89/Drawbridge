@@ -6,7 +6,7 @@ Drawbridge is a native macOS PDF markup and takeoff app built for architects, de
 
 ## Requirements
 
-- Apple Silicon Mac (M1/M2/M3/M4)
+- Apple Silicon Mac (M1 or newer)
 - macOS 13.0 or newer
 
 ## Download
