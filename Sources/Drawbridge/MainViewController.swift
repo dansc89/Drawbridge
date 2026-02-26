@@ -202,6 +202,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let busyCancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private var busyCancelHandler: (() -> Void)?
     private var isJPEGExportCancellationRequested = false
+    private var isBatchJPEGExportCancellationRequested = false
     private let statusToolLabel = NSTextField(labelWithString: "Tool: Pen")
     let statusToolsHintLabel = NSTextField(labelWithString: "Shortcuts customizable in Drawbridge > Keyboard Shortcuts…")
     private let statusPageSizeLabel = NSTextField(labelWithString: "Size: -")
@@ -4067,6 +4068,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
     }
 
+    private func uniqueSubdirectoryURL(baseName: String, in root: URL) -> URL {
+        var candidate = root.appendingPathComponent(baseName, isDirectory: true)
+        var counter = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = root.appendingPathComponent("\(baseName) \(counter)", isDirectory: true)
+            counter += 1
+        }
+        return candidate
+    }
+
     private func pageJPEGImage(page: PDFPage, dpi: CGFloat) -> CGImage? {
         let displayBox = pdfView.displayBox
         var bounds = page.bounds(for: displayBox).standardized
@@ -4274,8 +4285,20 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             updateBusyIndicatorProgress(current: completedBefore, total: document.pageCount)
             _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
 
-            guard let page = document.page(at: pageIndex),
-                  let image = pageJPEGImage(page: page, dpi: preset.dpi) else {
+            var exportSucceeded = false
+            if let page = document.page(at: pageIndex) {
+                autoreleasepool {
+                    guard let image = pageJPEGImage(page: page, dpi: preset.dpi) else { return }
+                    let filename = String(format: "Page-%04d - %@.jpg", pageIndex + 1, sanitizedFilename(pageLabel))
+                    let destination = exportDirectory.appendingPathComponent(filename)
+                    guard let destinationRef = CGImageDestinationCreateWithURL(destination as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return }
+                    let options = [kCGImageDestinationLossyCompressionQuality: preset.compressionQuality] as CFDictionary
+                    CGImageDestinationAddImage(destinationRef, image, options)
+                    exportSucceeded = CGImageDestinationFinalize(destinationRef)
+                }
+            }
+
+            if !exportSucceeded {
                 failedPages.append(pageIndex + 1)
                 let completed = pageIndex + 1
                 let elapsed = Date().timeIntervalSince(start)
@@ -4290,18 +4313,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             }
 
             let filename = String(format: "Page-%04d - %@.jpg", pageIndex + 1, sanitizedFilename(pageLabel))
-            let destination = exportDirectory.appendingPathComponent(filename)
-            guard let destinationRef = CGImageDestinationCreateWithURL(destination as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else {
-                failedPages.append(pageIndex + 1)
-                continue
-            }
-            let options = [kCGImageDestinationLossyCompressionQuality: preset.compressionQuality] as CFDictionary
-            CGImageDestinationAddImage(destinationRef, image, options)
-            if CGImageDestinationFinalize(destinationRef) {
-                successCount += 1
-            } else {
-                failedPages.append(pageIndex + 1)
-            }
+            successCount += 1
 
             let completed = pageIndex + 1
             let elapsed = Date().timeIntervalSince(start)
@@ -4340,6 +4352,166 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             \(exportDirectory.path)
 
             Failed page(s): \(failurePreview)\(suffix)
+            """,
+            style: .warning
+        )
+    }
+
+    @objc func batchExportPDFsAsJPEG() {
+        guard let preset = jpegExportPresetSelection() else { return }
+
+        let openPanel = NSOpenPanel()
+        openPanel.allowedContentTypes = [.pdf]
+        openPanel.allowsMultipleSelection = true
+        openPanel.canChooseFiles = true
+        openPanel.canChooseDirectories = false
+        openPanel.canCreateDirectories = false
+        openPanel.prompt = "Select"
+        openPanel.message = "Select PDF files to batch export as JPG pages."
+        guard openPanel.runModal() == .OK else { return }
+
+        let selected = openPanel.urls
+            .map { $0.standardizedFileURL }
+            .filter { $0.pathExtension.lowercased() == "pdf" }
+        guard guardOrBeep(!selected.isEmpty) else { return }
+
+        let destinationPanel = NSOpenPanel()
+        destinationPanel.canChooseFiles = false
+        destinationPanel.canChooseDirectories = true
+        destinationPanel.canCreateDirectories = true
+        destinationPanel.allowsMultipleSelection = false
+        destinationPanel.prompt = "Choose Folder"
+        destinationPanel.message = "Select the destination root folder. One JPG folder will be created per PDF."
+        guard destinationPanel.runModal() == .OK, let exportRoot = destinationPanel.url else { return }
+
+        var filesWithPages: [(url: URL, document: PDFDocument, pageCount: Int)] = []
+        var unreadableFiles: [String] = []
+        for url in selected {
+            guard let document = PDFDocument(url: url), document.pageCount > 0 else {
+                unreadableFiles.append(url.lastPathComponent)
+                continue
+            }
+            filesWithPages.append((url, document, document.pageCount))
+        }
+
+        guard !filesWithPages.isEmpty else {
+            runAlert(
+                title: "Batch Export Failed",
+                informativeText: "None of the selected files could be opened as valid PDFs.",
+                style: .warning
+            )
+            return
+        }
+
+        let totalPages = filesWithPages.reduce(0) { $0 + $1.pageCount }
+        isBatchJPEGExportCancellationRequested = false
+        beginBusyIndicator("Batch Exporting JPG Pages…", detail: "Preparing files…", lockInteraction: false)
+        setBusyCancelAction({ [weak self] in
+            guard let self else { return }
+            self.isBatchJPEGExportCancellationRequested = true
+            self.setBusyCancelAction(self.busyCancelHandler, title: "Canceling…", enabled: false)
+            self.updateBusyIndicatorDetail("Stopping after current page…")
+            self.updateBusyIndicatorSubdetail("")
+        }, title: "Cancel Export")
+        updateBusyIndicatorProgress(current: 0, total: max(1, totalPages))
+        defer { endBusyIndicator() }
+
+        let start = Date()
+        var processedPages = 0
+        var exportedPages = 0
+        var exportedFiles = 0
+        var fileIssues: [String] = []
+
+        for (fileIndex, fileInfo) in filesWithPages.enumerated() {
+            if isBatchJPEGExportCancellationRequested { break }
+            let document = fileInfo.document
+
+            let baseName = sanitizedFilename(fileInfo.url.deletingPathExtension().lastPathComponent)
+            let exportFolder = uniqueSubdirectoryURL(baseName: "\(baseName) - JPG Pages", in: exportRoot)
+            do {
+                try FileManager.default.createDirectory(at: exportFolder, withIntermediateDirectories: true)
+            } catch {
+                fileIssues.append("\(fileInfo.url.lastPathComponent): failed to create output folder")
+                continue
+            }
+
+            var successForFile = 0
+            var failedForFile = 0
+            for pageIndex in 0..<document.pageCount {
+                _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
+                if isBatchJPEGExportCancellationRequested { break }
+
+                let page = document.page(at: pageIndex)
+                let pageLabel = (page?.label).flatMap { $0.isEmpty ? nil : $0 } ?? "Page \(pageIndex + 1)"
+                updateBusyIndicatorStatus("Batch Exporting JPG Pages…")
+                updateBusyIndicatorDetail("File \(fileIndex + 1)/\(filesWithPages.count): \(fileInfo.url.lastPathComponent) • Page \(pageIndex + 1)/\(document.pageCount)")
+                let elapsed = Date().timeIntervalSince(start)
+                let avg = elapsed / Double(max(1, processedPages))
+                let remaining = avg * Double(max(0, totalPages - processedPages))
+                updateBusyIndicatorSubdetail("Exported \(processedPages)/\(totalPages) pages • ETA \(shortDuration(remaining))")
+                updateBusyIndicatorProgress(current: processedPages, total: max(1, totalPages))
+
+                var exportSucceeded = false
+                if let page {
+                    autoreleasepool {
+                        guard let image = pageJPEGImage(page: page, dpi: preset.dpi) else { return }
+                        let filename = String(format: "Page-%04d - %@.jpg", pageIndex + 1, sanitizedFilename(pageLabel))
+                        let destination = exportFolder.appendingPathComponent(filename)
+                        guard let destinationRef = CGImageDestinationCreateWithURL(destination as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return }
+                        let options = [kCGImageDestinationLossyCompressionQuality: preset.compressionQuality] as CFDictionary
+                        CGImageDestinationAddImage(destinationRef, image, options)
+                        exportSucceeded = CGImageDestinationFinalize(destinationRef)
+                    }
+                }
+
+                if exportSucceeded {
+                    successForFile += 1
+                    exportedPages += 1
+                } else {
+                    failedForFile += 1
+                }
+                processedPages += 1
+            }
+
+            if successForFile > 0 {
+                exportedFiles += 1
+            }
+            if failedForFile > 0 {
+                fileIssues.append("\(fileInfo.url.lastPathComponent): failed \(failedForFile) page(s)")
+            }
+        }
+
+        if isBatchJPEGExportCancellationRequested {
+            runAlert(
+                title: "Batch JPG Export Canceled",
+                informativeText: "Exported \(exportedPages) page(s) across \(exportedFiles) PDF(s) to:\n\(exportRoot.path)"
+            )
+            return
+        }
+
+        if !unreadableFiles.isEmpty {
+            let preview = unreadableFiles.prefix(8).joined(separator: ", ")
+            let suffix = unreadableFiles.count > 8 ? ", …" : ""
+            fileIssues.append("Unreadable PDF(s): \(preview)\(suffix)")
+        }
+
+        if fileIssues.isEmpty {
+            runAlert(
+                title: "Batch JPG Export Complete",
+                informativeText: "Exported \(exportedPages) page(s) from \(exportedFiles) PDF(s) to:\n\(exportRoot.path)"
+            )
+            return
+        }
+
+        let preview = fileIssues.prefix(8).joined(separator: "\n")
+        let suffix = fileIssues.count > 8 ? "\n…" : ""
+        runAlert(
+            title: "Batch JPG Export Complete with Issues",
+            informativeText: """
+            Exported \(exportedPages) page(s) from \(exportedFiles) PDF(s) to:
+            \(exportRoot.path)
+
+            \(preview)\(suffix)
             """,
             style: .warning
         )

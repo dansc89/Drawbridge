@@ -161,6 +161,7 @@ extension MainViewController {
     @objc func commandSaveCopy(_ sender: Any?) { saveCopy() }
     @objc func commandExportCSV(_ sender: Any?) { exportMarkupsCSV() }
     @objc func commandExportPagesAsJPEG(_ sender: Any?) { exportPagesAsJPEG() }
+    @objc func commandBatchExportPDFsAsJPEG(_ sender: Any?) { batchExportPDFsAsJPEG() }
     @objc func commandConvertImagesToPDF(_ sender: Any?) { convertImageFolderToPDF() }
     @objc func commandBatchCombinePDFs(_ sender: Any?) { batchCombinePDFs() }
     @objc func commandBatchLinkSheetNumbers(_ sender: Any?) { startAutoLinkSheetNumbersFlow() }
@@ -171,6 +172,11 @@ extension MainViewController {
     @objc func commandToggleOrthoSnap(_ sender: Any?) {
         let enabled = !isOrthoSnapEnabled
         setOrthoSnapEnabled(enabled)
+        (sender as? NSMenuItem)?.state = enabled ? .on : .off
+    }
+    @objc func commandToggleHyperlinkHighlights(_ sender: Any?) {
+        let enabled = !isHyperlinkHighlightsVisible
+        setHyperlinkHighlightsVisible(enabled)
         (sender as? NSMenuItem)?.state = enabled ? .on : .off
     }
     @objc func commandKeyboardShortcuts(_ sender: Any?) {
@@ -649,7 +655,8 @@ extension MainViewController {
              #selector(commandKeyboardShortcuts(_:)),
              #selector(commandPerformanceSettings(_:)),
              #selector(commandConvertImagesToPDF(_:)),
-             #selector(commandBatchCombinePDFs(_:)):
+             #selector(commandBatchCombinePDFs(_:)),
+             #selector(commandBatchExportPDFsAsJPEG(_:)):
             return true
         case #selector(commandCycleNextDocument(_:)),
              #selector(commandCyclePreviousDocument(_:)):
@@ -666,6 +673,7 @@ extension MainViewController {
              #selector(commandLockScalePages(_:)),
              #selector(commandClearScalePages(_:)),
              #selector(commandToggleOrthoSnap(_:)),
+             #selector(commandToggleHyperlinkHighlights(_:)),
              #selector(commandRefreshMarkups(_:)),
              #selector(commandSelectAll(_:)),
              #selector(commandFocusSearch(_:)),
@@ -687,6 +695,9 @@ extension MainViewController {
              #selector(selectCalibrateTool(_:)):
             if action == #selector(commandToggleOrthoSnap(_:)) {
                 menuItem.state = isOrthoSnapEnabled ? .on : .off
+            }
+            if action == #selector(commandToggleHyperlinkHighlights(_:)) {
+                menuItem.state = isHyperlinkHighlightsVisible ? .on : .off
             }
             return hasDocument
         case #selector(commandHighlight(_:)):

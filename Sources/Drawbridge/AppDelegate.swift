@@ -205,7 +205,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         saveCopyItem.target = controller
         fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: "Batch Combine PDFs…", action: #selector(MainViewController.commandBatchCombinePDFs(_:)), keyEquivalent: "").target = controller
-        fileMenu.addItem(withTitle: "Convert...", action: #selector(MainViewController.commandConvertImagesToPDF(_:)), keyEquivalent: "").target = controller
+        let convertRoot = NSMenuItem(title: "Convert...", action: nil, keyEquivalent: "")
+        let convertMenu = NSMenu(title: "Convert")
+        convertMenu.addItem(withTitle: "JPG Folder to PDF…", action: #selector(MainViewController.commandConvertImagesToPDF(_:)), keyEquivalent: "").target = controller
+        convertMenu.addItem(withTitle: "Batch Export PDFs as JPEGs…", action: #selector(MainViewController.commandBatchExportPDFsAsJPEG(_:)), keyEquivalent: "").target = controller
+        convertRoot.submenu = convertMenu
+        fileMenu.addItem(convertRoot)
         let exportCSVItem = fileMenu.addItem(withTitle: "Export Markups CSV...", action: #selector(MainViewController.commandExportCSV(_:)), keyEquivalent: "e")
         exportCSVItem.keyEquivalentModifierMask = [.command, .shift]
         let exportJPGItem = fileMenu.addItem(withTitle: "Export Pages as JPEG...", action: #selector(MainViewController.commandExportPagesAsJPEG(_:)), keyEquivalent: "j")
@@ -298,6 +303,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         snapOrthoItem.keyEquivalentModifierMask = [.command, .option]
         snapOrthoItem.target = controller
         snapOrthoItem.state = controller.isOrthoSnapEnabled ? .on : .off
+        let linkHighlightsItem = viewMenu.addItem(withTitle: "Show Hyperlink Highlights", action: #selector(MainViewController.commandToggleHyperlinkHighlights(_:)), keyEquivalent: "h")
+        linkHighlightsItem.keyEquivalentModifierMask = [.command, .option, .shift]
+        linkHighlightsItem.target = controller
+        linkHighlightsItem.state = controller.isHyperlinkHighlightsVisible ? .on : .off
         viewMenu.addItem(NSMenuItem.separator())
         let toggleSidebarItem = viewMenu.addItem(withTitle: "Toggle Sidebar", action: #selector(MainViewController.commandToggleSidebar(_:)), keyEquivalent: "s")
         toggleSidebarItem.keyEquivalentModifierMask = [.command, .option]
@@ -325,7 +334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 Drawbridge
 Version \(version) (\(build))
 
-Native macOS PDF markup and takeoff app for architects and designers.
+Drawbridge is a native macOS PDF editor for architects, designers, and engineers, built on the idea that drawing can bridge people, disciplines, and decisions in one shared workflow.
 
 System Requirements:
 • Apple Silicon Mac (M1/M2/M3/M4)
