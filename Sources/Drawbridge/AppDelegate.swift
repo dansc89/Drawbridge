@@ -337,7 +337,7 @@ Version \(version) (\(build))
 Drawbridge is a native macOS PDF editor for architects, designers, and engineers, built on the idea that drawing can bridge people, disciplines, and decisions in one shared workflow.
 
 System Requirements:
-• Apple Silicon Mac (M1/M2/M3/M4)
+• Apple Silicon Mac (M1 or newer)
 • macOS \(minimumSupportedMacOSVersion) or newer
 """
         alert.alertStyle = .informational
