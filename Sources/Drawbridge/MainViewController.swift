@@ -118,6 +118,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     static let defaultsIndexCapKey = "DrawbridgeIndexCap"
     static let defaultsWatchdogEnabledKey = "DrawbridgeWatchdogEnabled"
     static let defaultsWatchdogThresholdSecondsKey = "DrawbridgeWatchdogThresholdSeconds"
+    static let defaultsHyperlinkHighlightsVisibleKey = "DrawbridgeHyperlinkHighlightsVisible"
+    static let defaultsHyperlinkHighlightsDefaultMigrationKey = "DrawbridgeHyperlinkHighlightsDefaultMigrationV1"
     private static let markupCopyDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -206,9 +208,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let statusPageLabel = NSTextField(labelWithString: "Page: -")
     private let statusZoomLabel = NSTextField(labelWithString: "Zoom: 100%")
     private let statusScaleLabel = NSTextField(labelWithString: "Scale: 1.0 ft")
-    private let statusLayerLabel = NSTextField(labelWithString: "Layer:")
-    let statusLayerPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    let statusLayerColorWell = NSColorWell(frame: .zero)
     private let measurementCountLabel = NSTextField(labelWithString: "Measurements: 0")
     private let measurementTotalLabel = NSTextField(labelWithString: "Total Length: 0")
     private let toolSettingsSectionButton = NSButton(title: "Tool Settings", target: nil, action: nil)
@@ -367,6 +366,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var hasPromptedForInitialMarkupSaveCopy = false
     var isPresentingInitialMarkupSaveCopyPrompt = false
     var isGridVisible = false
+    var isHyperlinkHighlightsVisible = false
     var isPolygonVertexEditModeEnabled = false
     var isOrthoModifierKeyDown = false
     var isOrthoSnapEnabled = true
@@ -499,6 +499,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     override func viewDidLoad() {
         super.viewDidLoad()
         registerDefaultPerformanceSettingsIfNeeded()
+        migrateHyperlinkHighlightsDefaultIfNeeded()
+        isHyperlinkHighlightsVisible = UserDefaults.standard.bool(forKey: Self.defaultsHyperlinkHighlightsVisibleKey)
         loadShortcutBindings()
         setupUI()
         NotificationCenter.default.addObserver(
@@ -637,6 +639,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             self?.lastUserInteractionAt = Date()
             self?.requestChromeRefresh()
             self?.updateSelectionOverlay()
+            self?.pdfView.refreshHyperlinkHighlights()
         }
         pdfView.onCalibrationDistanceMeasured = { [weak self] distance in
             self?.showCalibrationDialog(distanceInPoints: distance)
@@ -799,6 +802,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfView.layer?.addSublayer(selectedTextOverlayLayer)
         pdfView.layer?.addSublayer(selectedLineEndpointHaloLayer)
         pdfView.layer?.addSublayer(selectedLineEndpointOverlayLayer)
+        pdfView.setHyperlinkHighlightsVisible(isHyperlinkHighlightsVisible)
 
         view.addSubview(splitView)
         view.addSubview(documentTabsBar)
@@ -1005,6 +1009,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pagesTableView.style = .sourceList
         pagesTableView.selectionHighlightStyle = .none
         pagesTableView.allowsEmptySelection = true
+        pagesTableView.allowsMultipleSelection = true
         pagesTableView.backgroundColor = sidebarBackgroundColor
         pagesTableView.gridStyleMask = []
         pagesTableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
@@ -1017,6 +1022,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let renamePageItem = NSMenuItem(title: "Rename Page Label…", action: #selector(renamePageLabelFromSidebar), keyEquivalent: "")
         renamePageItem.target = self
         pagesContextMenu.addItem(renamePageItem)
+        pagesContextMenu.addItem(NSMenuItem.separator())
+        let deletePagesItem = NSMenuItem(title: "Delete Page(s)…", action: #selector(deletePagesFromSidebar), keyEquivalent: "")
+        deletePagesItem.target = self
+        pagesContextMenu.addItem(deletePagesItem)
         pagesTableView.menu = pagesContextMenu
 
         thumbnailScrollView.borderType = .noBorder
@@ -1331,6 +1340,74 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         markMarkupChangedAndScheduleAutosave()
     }
 
+    @objc private func deletePagesFromSidebar() {
+        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
+        guard let document = pdfView.document else {
+            beep()
+            return
+        }
+        let pageIndexes = selectedSidebarPageIndexesForDeletion()
+        guard !pageIndexes.isEmpty else {
+            beep()
+            return
+        }
+
+        let deletePrompt = NSAlert()
+        let pageCountText = pageIndexes.count == 1 ? "page" : "pages"
+        deletePrompt.messageText = "Delete \(pageIndexes.count) \(pageCountText)?"
+        deletePrompt.informativeText = "This removes the selected page(s) from the PDF."
+        deletePrompt.alertStyle = .warning
+        deletePrompt.addButton(withTitle: "Delete Pages")
+        deletePrompt.addButton(withTitle: "Cancel")
+        guard deletePrompt.runModal() == .alertFirstButtonReturn else { return }
+
+        let removedPageSet = Set(pageIndexes)
+        let matchingBookmarkCount = countBookmarksDirectlyTargetingPages(removedPageSet, in: document)
+        var removeAssociatedBookmarks = false
+        if matchingBookmarkCount > 0 {
+            let bookmarkPrompt = NSAlert()
+            let bookmarkCountText = matchingBookmarkCount == 1 ? "bookmark" : "bookmarks"
+            bookmarkPrompt.messageText = "Remove associated \(bookmarkCountText)?"
+            bookmarkPrompt.informativeText = "Found \(matchingBookmarkCount) bookmark(s) pointing to the page(s) being deleted."
+            bookmarkPrompt.alertStyle = .informational
+            bookmarkPrompt.addButton(withTitle: "Remove Bookmarks")
+            bookmarkPrompt.addButton(withTitle: "Keep Bookmarks")
+            bookmarkPrompt.addButton(withTitle: "Cancel")
+            let response = bookmarkPrompt.runModal()
+            if response == .alertThirdButtonReturn {
+                return
+            }
+            removeAssociatedBookmarks = (response == .alertFirstButtonReturn)
+        }
+
+        if removeAssociatedBookmarks {
+            _ = removeBookmarksTargetingPages(removedPageSet, in: document)
+            // Bookmark path keys can shift after structural edits.
+            bookmarkLabelOverrides.removeAll()
+        }
+
+        let sortedDescending = pageIndexes.sorted(by: >)
+        for pageIndex in sortedDescending where pageIndex >= 0 && pageIndex < document.pageCount {
+            document.removePage(at: pageIndex)
+        }
+        remapPageIndexedStateAfterDeletingPages(pageIndexes)
+
+        if document.pageCount > 0 {
+            let targetIndex = min(pageIndexes.min() ?? 0, document.pageCount - 1)
+            if let targetPage = document.page(at: max(0, targetIndex)) {
+                pdfView.navigateToPageWithHistory(targetPage)
+            }
+        } else {
+            clearMarkupSelection()
+        }
+
+        clearMarkupCache()
+        markMarkupChangedAndScheduleAutosave()
+        performRefreshMarkups(selecting: nil, forceImmediate: true)
+        reloadBookmarks()
+        requestChromeRefresh(immediate: true)
+    }
+
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         guard outlineView == bookmarksOutlineView else { return 0 }
         let node = (item as? PDFOutline) ?? pdfView.document?.outlineRoot
@@ -1486,35 +1563,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         statusBar.wantsLayer = true
         statusBar.layer?.backgroundColor = panelBackgroundColor.cgColor
 
-        let labels = [statusPageSizeLabel, statusPageLabel, statusZoomLabel, statusScaleLabel, statusLayerLabel]
+        let labels = [statusPageSizeLabel, statusPageLabel, statusZoomLabel, statusScaleLabel]
         labels.forEach {
             $0.font = NSFont.systemFont(ofSize: 11, weight: .regular)
             $0.textColor = .secondaryLabelColor
         }
-        statusLayerLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        statusLayerPopup.removeAllItems()
-        statusLayerPopup.addItems(withTitles: snapshotLayerOptions)
-        statusLayerPopup.selectItem(withTitle: "ARCHITECTURAL")
-        statusLayerPopup.font = NSFont.systemFont(ofSize: 11, weight: .regular)
-        statusLayerPopup.target = self
-        statusLayerPopup.action = #selector(statusLayerSelectionChanged(_:))
-        statusLayerPopup.translatesAutoresizingMaskIntoConstraints = false
-        statusLayerPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 130).isActive = true
-
-        statusLayerColorWell.target = self
-        statusLayerColorWell.action = #selector(statusLayerColorChanged(_:))
-        statusLayerColorWell.translatesAutoresizingMaskIntoConstraints = false
-        statusLayerColorWell.widthAnchor.constraint(equalToConstant: 28).isActive = true
-        statusLayerColorWell.heightAnchor.constraint(equalToConstant: 18).isActive = true
 
         let stack = NSStackView(views: labels)
         stack.orientation = .horizontal
         stack.spacing = 14
         stack.edgeInsets = NSEdgeInsets(top: 4, left: 10, bottom: 4, right: 8)
-        stack.addArrangedSubview(NSView())
-        stack.addArrangedSubview(statusLayerPopup)
-        stack.addArrangedSubview(statusLayerColorWell)
         stack.translatesAutoresizingMaskIntoConstraints = false
         statusBar.addSubview(stack)
 
@@ -1524,7 +1582,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             stack.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor)
         ])
-        refreshStatusLayerControls()
     }
 
     private func configureBusyOverlay() {
@@ -1898,6 +1955,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         gridToggleButton.state = visible ? .on : .off
         pdfView.setGridVisible(visible)
         applyToggleIconAppearance(gridToggleButton, enabled: visible)
+    }
+
+    func setHyperlinkHighlightsVisible(_ visible: Bool) {
+        isHyperlinkHighlightsVisible = visible
+        UserDefaults.standard.set(visible, forKey: Self.defaultsHyperlinkHighlightsVisibleKey)
+        pdfView.setHyperlinkHighlightsVisible(visible)
+        if let item = NSApp.mainMenu?.item(withTitle: "View")?.submenu?.items.first(where: { $0.action == #selector(commandToggleHyperlinkHighlights(_:)) }) {
+            item.state = visible ? .on : .off
+        }
     }
 
     func toggleGridVisibilityShortcut() {
@@ -3042,7 +3108,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 adoptAsPrimaryDocument: false,
                 busyMessage: "Saving PDF…",
                 document: document,
-                showBusyOverlay: false
+                showBusyOverlay: false,
+                deferEmbeddedWrite: false
             )
         } else {
             saveDocumentAsProject(document: document)
@@ -3629,6 +3696,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if defaults.object(forKey: Self.defaultsWatchdogThresholdSecondsKey) == nil {
             defaults.set(2.5, forKey: Self.defaultsWatchdogThresholdSecondsKey)
         }
+        if defaults.object(forKey: Self.defaultsHyperlinkHighlightsVisibleKey) == nil {
+            defaults.set(false, forKey: Self.defaultsHyperlinkHighlightsVisibleKey)
+        }
+    }
+
+    private func migrateHyperlinkHighlightsDefaultIfNeeded() {
+        let defaults = UserDefaults.standard
+        if defaults.bool(forKey: Self.defaultsHyperlinkHighlightsDefaultMigrationKey) {
+            return
+        }
+        defaults.set(true, forKey: Self.defaultsHyperlinkHighlightsVisibleKey)
+        defaults.set(true, forKey: Self.defaultsHyperlinkHighlightsDefaultMigrationKey)
     }
 
     func configuredIndexCap() -> Int {
@@ -5038,6 +5117,17 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
     }
 
+    func embeddedPageLabelsForSave(in document: PDFDocument) -> [Int: String] {
+        var labels: [Int: String] = [:]
+        labels.reserveCapacity(document.pageCount)
+        for pageIndex in 0..<document.pageCount {
+            let label = displayPageLabel(forPageIndex: pageIndex).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !label.isEmpty, label != "\(pageIndex + 1)" else { continue }
+            labels[pageIndex] = label
+        }
+        return labels
+    }
+
     private func formattedPageSize(for page: PDFPage) -> String {
         let bounds = page.bounds(for: .mediaBox)
         let widthInches = max(0, bounds.width) / 72.0
@@ -5136,6 +5226,129 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private func bookmarkContainsCurrentPage(_ outline: PDFOutline) -> Bool {
         guard sidebarCurrentPageIndex >= 0 else { return false }
         return destinationPageIndex(for: outline) == sidebarCurrentPageIndex
+    }
+
+    private func selectedSidebarPageIndexesForDeletion() -> [Int] {
+        guard let document = pdfView.document else { return [] }
+        let clickedRow = pagesTableView.clickedRow
+        if clickedRow >= 0,
+           clickedRow < document.pageCount,
+           !pagesTableView.selectedRowIndexes.contains(clickedRow) {
+            return [clickedRow]
+        }
+        var indexes = Array(pagesTableView.selectedRowIndexes).filter { $0 >= 0 && $0 < document.pageCount }
+        if indexes.isEmpty {
+            let selected = pagesTableView.selectedRow
+            if selected >= 0, selected < document.pageCount {
+                indexes = [selected]
+            }
+        }
+        return indexes.sorted()
+    }
+
+    private func directDestinationPageIndex(for outline: PDFOutline, in document: PDFDocument) -> Int? {
+        if let destinationPage = outline.destination?.page {
+            let index = document.index(for: destinationPage)
+            return index >= 0 ? index : nil
+        }
+        if let goToAction = outline.action as? PDFActionGoTo,
+           let destinationPage = goToAction.destination.page {
+            let index = document.index(for: destinationPage)
+            return index >= 0 ? index : nil
+        }
+        return nil
+    }
+
+    private func countBookmarksDirectlyTargetingPages(_ pageIndexes: Set<Int>, in document: PDFDocument) -> Int {
+        guard !pageIndexes.isEmpty, let root = document.outlineRoot else { return 0 }
+        var count = 0
+        func walk(_ node: PDFOutline) {
+            if let targetIndex = directDestinationPageIndex(for: node, in: document),
+               pageIndexes.contains(targetIndex) {
+                count += 1
+            }
+            guard node.numberOfChildren > 0 else { return }
+            for childIndex in 0..<node.numberOfChildren {
+                if let child = node.child(at: childIndex) {
+                    walk(child)
+                }
+            }
+        }
+        walk(root)
+        return count
+    }
+
+    private func removeBookmarksTargetingPages(_ pageIndexes: Set<Int>, in document: PDFDocument) -> Int {
+        guard !pageIndexes.isEmpty, let root = document.outlineRoot else { return 0 }
+        var removedCount = 0
+
+        func cloneWithoutRemovedNodes(_ node: PDFOutline) -> PDFOutline? {
+            if let targetIndex = directDestinationPageIndex(for: node, in: document),
+               pageIndexes.contains(targetIndex) {
+                removedCount += 1
+                return nil
+            }
+
+            let clone = PDFOutline()
+            clone.label = node.label
+            clone.destination = node.destination
+            clone.action = node.action
+            clone.isOpen = node.isOpen
+            for childIndex in 0..<node.numberOfChildren {
+                guard let child = node.child(at: childIndex),
+                      let clonedChild = cloneWithoutRemovedNodes(child) else { continue }
+                clone.insertChild(clonedChild, at: clone.numberOfChildren)
+            }
+            return clone
+        }
+
+        let newRoot = PDFOutline()
+        for childIndex in 0..<root.numberOfChildren {
+            guard let child = root.child(at: childIndex),
+                  let clonedChild = cloneWithoutRemovedNodes(child) else { continue }
+            newRoot.insertChild(clonedChild, at: newRoot.numberOfChildren)
+        }
+        document.outlineRoot = newRoot
+        return removedCount
+    }
+
+    private func remapPageIndexedStateAfterDeletingPages(_ removedPageIndexes: [Int]) {
+        let sortedRemoved = removedPageIndexes.sorted()
+        guard !sortedRemoved.isEmpty else { return }
+        let removedSet = Set(sortedRemoved)
+
+        func remapIndex(_ oldIndex: Int) -> Int? {
+            if removedSet.contains(oldIndex) { return nil }
+            var shift = 0
+            for removed in sortedRemoved {
+                if removed < oldIndex {
+                    shift += 1
+                } else {
+                    break
+                }
+            }
+            return oldIndex - shift
+        }
+
+        var remappedPageLabels: [Int: String] = [:]
+        for (pageIndex, label) in pageLabelOverrides {
+            guard let newIndex = remapIndex(pageIndex) else { continue }
+            remappedPageLabels[newIndex] = label
+        }
+        pageLabelOverrides = remappedPageLabels
+
+        var remappedPageScaleLocks: [Int: PageScaleLock] = [:]
+        for (pageIndex, lock) in pageScaleLocks {
+            guard let newIndex = remapIndex(pageIndex) else { continue }
+            remappedPageScaleLocks[newIndex] = lock
+        }
+        pageScaleLocks = remappedPageScaleLocks
+
+        explicitScaleSetPageIndexes = Set(explicitScaleSetPageIndexes.compactMap(remapIndex))
+        lastScaleLockAppliedPageIndex = remapIndex(lastScaleLockAppliedPageIndex) ?? -1
+        lastExplicitScaleSetPageIndex = remapIndex(lastExplicitScaleSetPageIndex) ?? -1
+        pendingScaleReminderSuppressionPageIndex = remapIndex(pendingScaleReminderSuppressionPageIndex) ?? -1
+        sidebarCurrentPageIndex = remapIndex(sidebarCurrentPageIndex) ?? -1
     }
 
     func startAutoGenerateSheetNamesFlow() {
@@ -5417,9 +5630,71 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         var sheetTokenToPageIndex: [String: Int] = [:]
         var canonicalSheetTokenToPageIndex: [String: Int] = [:]
+        var tokenConfidenceByToken: [String: Int] = [:]
+        var tokenConfidenceByCanonical: [String: Int] = [:]
+        let batchStartedAt = Date()
+        var stageStartedAt = Date()
+
+        func contextualSubdetail(prefix: String, current: Int, total: Int) -> String {
+            let safeTotal = max(1, total)
+            let done = max(0, min(current, safeTotal))
+            let percent = Int((Double(done) / Double(safeTotal) * 100).rounded())
+            let elapsed = shortDuration(Date().timeIntervalSince(batchStartedAt))
+            guard done > 0 else {
+                return "\(prefix) • \(done)/\(safeTotal) (\(percent)%) • ETA -- • elapsed \(elapsed)"
+            }
+            let stageElapsed = Date().timeIntervalSince(stageStartedAt)
+            let remaining = stageElapsed * Double(safeTotal - done) / Double(done)
+            return "\(prefix) • \(done)/\(safeTotal) (\(percent)%) • ETA \(shortDuration(remaining)) • elapsed \(elapsed)"
+        }
+
+        func preferredZoneToken(from candidates: [String], labelCanonicalTokens: Set<String>) -> String? {
+            func score(_ token: String) -> Int {
+                let canonical = canonicalizeSheetToken(token)
+                var value = 0
+                if !canonical.isEmpty, labelCanonicalTokens.contains(canonical) {
+                    value += 100
+                }
+                if !canonical.isEmpty, tokenConfidenceByCanonical[canonical] != nil {
+                    value += 30
+                }
+                if token.range(of: #"[A-Z]{1,4}\d{1,3}[._\-]\d{1,3}"#, options: .regularExpression) != nil {
+                    value += 40
+                }
+                if token.contains(".") || token.contains("-") {
+                    value += 15
+                }
+                if canonical.count >= 3, canonical.count <= 10 {
+                    value += 10
+                }
+                if token.range(of: #"\d"#, options: .regularExpression) != nil {
+                    value += 8
+                }
+                if token.range(of: #"[A-Z]"#, options: .regularExpression) != nil {
+                    value += 8
+                }
+                if canonical.count > 14 {
+                    value -= 10
+                }
+                return value
+            }
+
+            return candidates.sorted { lhs, rhs in
+                let lhsScore = score(lhs)
+                let rhsScore = score(rhs)
+                if lhsScore != rhsScore {
+                    return lhsScore > rhsScore
+                }
+                if lhs.count != rhs.count {
+                    return lhs.count < rhs.count
+                }
+                return lhs < rhs
+            }.first
+        }
+
         updateBusyIndicatorStatus("Batch Linking Sheet Numbers…")
         updateBusyIndicatorDetail("Step 1/3: Reading sheet numbers…")
-        updateBusyIndicatorSubdetail("0 found")
+        updateBusyIndicatorSubdetail(contextualSubdetail(prefix: "0 found", current: 0, total: document.pageCount))
         updateBusyIndicatorProgress(current: 0, total: document.pageCount)
         for pageIndex in 0..<document.pageCount {
             guard let page = document.page(at: pageIndex) else { continue }
@@ -5429,35 +5704,56 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             let raw = extractText(from: page, rectInPage: numberRect)
             let tokens = extractSheetTokens(from: raw)
             guard !tokens.isEmpty else {
-                updateBusyIndicatorSubdetail("\(sheetTokenToPageIndex.count) found")
+                updateBusyIndicatorSubdetail(
+                    contextualSubdetail(
+                        prefix: "\(sheetTokenToPageIndex.count) found",
+                        current: pageIndex + 1,
+                        total: document.pageCount
+                    )
+                )
                 continue
             }
             let uniqueTokens = Array(Set(tokens))
             let labelCanonicalTokens = Set(extractSheetTokens(from: page.label ?? "").map(canonicalizeSheetToken))
-            let token: String
-            if let labelMatched = uniqueTokens.first(where: { labelCanonicalTokens.contains(canonicalizeSheetToken($0)) }) {
-                token = labelMatched
-            } else if uniqueTokens.count == 1, let only = uniqueTokens.first {
-                token = only
-            } else {
-                // Ambiguous zone read: skip rather than risk wrong destination mapping.
-                updateBusyIndicatorSubdetail("\(sheetTokenToPageIndex.count) found")
+            guard let token = preferredZoneToken(from: uniqueTokens, labelCanonicalTokens: labelCanonicalTokens) else {
+                updateBusyIndicatorSubdetail(
+                    contextualSubdetail(
+                        prefix: "\(sheetTokenToPageIndex.count) found",
+                        current: pageIndex + 1,
+                        total: document.pageCount
+                    )
+                )
                 continue
             }
-            if sheetTokenToPageIndex[token] == nil {
-                sheetTokenToPageIndex[token] = pageIndex
-            }
             let canonical = canonicalizeSheetToken(token)
-            if !canonical.isEmpty, canonicalSheetTokenToPageIndex[canonical] == nil {
-                canonicalSheetTokenToPageIndex[canonical] = pageIndex
+            let zoneConfidence = (!canonical.isEmpty && labelCanonicalTokens.contains(canonical)) ? 2 : 1
+            let existingTokenConfidence = tokenConfidenceByToken[token] ?? 0
+            if existingTokenConfidence <= zoneConfidence {
+                sheetTokenToPageIndex[token] = pageIndex
+                tokenConfidenceByToken[token] = zoneConfidence
             }
-            updateBusyIndicatorSubdetail("\(sheetTokenToPageIndex.count) found")
+            if !canonical.isEmpty {
+                let existingCanonicalConfidence = tokenConfidenceByCanonical[canonical] ?? 0
+                if existingCanonicalConfidence <= zoneConfidence {
+                    canonicalSheetTokenToPageIndex[canonical] = pageIndex
+                    tokenConfidenceByCanonical[canonical] = zoneConfidence
+                }
+            }
+            updateBusyIndicatorSubdetail(
+                contextualSubdetail(
+                    prefix: "\(sheetTokenToPageIndex.count) found",
+                    current: pageIndex + 1,
+                    total: document.pageCount
+                )
+            )
         }
 
         supplementSheetTokenMapFromExistingLabelsAndBookmarks(
             document: document,
             sheetTokenToPageIndex: &sheetTokenToPageIndex,
-            canonicalSheetTokenToPageIndex: &canonicalSheetTokenToPageIndex
+            canonicalSheetTokenToPageIndex: &canonicalSheetTokenToPageIndex,
+            tokenConfidenceByToken: &tokenConfidenceByToken,
+            tokenConfidenceByCanonical: &tokenConfidenceByCanonical
         )
 
         guard !sheetTokenToPageIndex.isEmpty else {
@@ -5483,23 +5779,37 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let shouldClearExisting = (clearResponse == .alertFirstButtonReturn)
 
         if shouldClearExisting {
+            stageStartedAt = Date()
             updateBusyIndicatorStatus("Batch Linking Sheet Numbers…")
             updateBusyIndicatorDetail("Step 0/3: Removing existing batch links…")
-            updateBusyIndicatorSubdetail("0 links removed")
+            updateBusyIndicatorSubdetail(contextualSubdetail(prefix: "0 links removed", current: 0, total: document.pageCount))
             updateBusyIndicatorProgress(current: 0, total: max(1, document.pageCount))
             var removedLinks = 0
             removeAutoSheetLinks(in: document) { currentPage, totalPages, removedSoFar in
                 removedLinks = removedSoFar
                 self.updateBusyIndicatorProgress(current: currentPage, total: max(1, totalPages))
                 self.updateBusyIndicatorDetail("Step 0/3: Removing existing batch links… \(currentPage)/\(totalPages)")
-                self.updateBusyIndicatorSubdetail("\(removedSoFar) links removed")
+                self.updateBusyIndicatorSubdetail(
+                    contextualSubdetail(
+                        prefix: "\(removedSoFar) links removed",
+                        current: currentPage,
+                        total: totalPages
+                    )
+                )
             }
-            updateBusyIndicatorSubdetail("\(removedLinks) links removed")
+            updateBusyIndicatorSubdetail(
+                contextualSubdetail(
+                    prefix: "\(removedLinks) links removed",
+                    current: document.pageCount,
+                    total: document.pageCount
+                )
+            )
         }
 
+        stageStartedAt = Date()
         updateBusyIndicatorStatus("Batch Linking Sheet Numbers…")
         updateBusyIndicatorDetail("Step 2/3: Linking text matches…")
-        updateBusyIndicatorSubdetail("0 links created")
+        updateBusyIndicatorSubdetail(contextualSubdetail(prefix: "0 links created", current: 0, total: 1))
         var addedLinks = 0
         var touchedPageIDs = Set<ObjectIdentifier>()
         typealias LinkTarget = (destination: PDFDestination, targetPageIndex: Int)
@@ -5526,6 +5836,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         var createdBoundsKeys = Set<String>()
         let sortedTargets = linkTargetsByToken.sorted(by: { $0.key < $1.key })
+        let linkingTargetTotal = max(1, sortedTargets.count)
+        updateBusyIndicatorSubdetail(contextualSubdetail(prefix: "\(addedLinks) links created", current: 0, total: linkingTargetTotal))
         updateBusyIndicatorProgress(current: 0, total: max(1, sortedTargets.count))
         for (targetIndex, pair) in sortedTargets.enumerated() {
             let (sheetToken, target) = pair
@@ -5548,13 +5860,21 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                     addedLinks += 1
                 }
             }
-            updateBusyIndicatorSubdetail("\(addedLinks) links created")
+            updateBusyIndicatorSubdetail(
+                contextualSubdetail(
+                    prefix: "\(addedLinks) links created",
+                    current: targetIndex + 1,
+                    total: linkingTargetTotal
+                )
+            )
         }
 
         // Supplementary pass for selectable text that can be missed by findString
         // (font encoding quirks, punctuation boundaries, etc.).
+        stageStartedAt = Date()
         updateBusyIndicatorDetail("Step 2/3: Scanning selectable text…")
         updateBusyIndicatorProgress(current: 0, total: document.pageCount)
+        updateBusyIndicatorSubdetail(contextualSubdetail(prefix: "\(addedLinks) links created", current: 0, total: document.pageCount))
         for sourcePageIndex in 0..<document.pageCount {
             guard let page = document.page(at: sourcePageIndex) else { continue }
             updateBusyIndicatorProgress(current: sourcePageIndex + 1, total: document.pageCount)
@@ -5576,23 +5896,32 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 touchedPageIDs.insert(ObjectIdentifier(page))
                 addedLinks += 1
             }
-            updateBusyIndicatorSubdetail("\(addedLinks) links created")
+            updateBusyIndicatorSubdetail(
+                contextualSubdetail(
+                    prefix: "\(addedLinks) links created",
+                    current: sourcePageIndex + 1,
+                    total: document.pageCount
+                )
+            )
         }
 
         // OCR fallback for scanned pages with no selectable text.
+        stageStartedAt = Date()
         updateBusyIndicatorDetail("Step 3/3: OCR fallback + linking…")
         updateBusyIndicatorProgress(current: 0, total: document.pageCount)
+        updateBusyIndicatorSubdetail(contextualSubdetail(prefix: "\(addedLinks) links created", current: 0, total: document.pageCount))
+        let ocrCustomWords = Array(linkTargetsByToken.keys)
         for sourcePageIndex in 0..<document.pageCount {
             guard let page = document.page(at: sourcePageIndex) else { continue }
             updateBusyIndicatorProgress(current: sourcePageIndex + 1, total: document.pageCount)
             updateBusyIndicatorDetail("Step 3/3: OCR fallback + linking… \(sourcePageIndex + 1)/\(document.pageCount)")
-            let ocrHits = recognizeTextLines(in: page)
+            let ocrHits = recognizeTextLines(in: page, customWords: ocrCustomWords)
             for hit in ocrHits {
                 let tokens = extractSheetTokens(from: hit.text)
                 guard !tokens.isEmpty else { continue }
                 for token in tokens {
-                    // OCR text is noisy; exact-token destination mapping avoids wrong-page regressions.
-                    let target = linkTargetsByToken[token]
+                    let canonical = canonicalizeSheetToken(token)
+                    let target = linkTargetsByToken[token] ?? linkTargetsByCanonicalToken[canonical]
                     guard let target else { continue }
                     if target.targetPageIndex == sourcePageIndex {
                         continue
@@ -5606,7 +5935,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                     addedLinks += 1
                 }
             }
-            updateBusyIndicatorSubdetail("\(addedLinks) links created")
+            updateBusyIndicatorSubdetail(
+                contextualSubdetail(
+                    prefix: "\(addedLinks) links created",
+                    current: sourcePageIndex + 1,
+                    total: document.pageCount
+                )
+            )
         }
 
         for pageIndex in 0..<document.pageCount {
@@ -5618,6 +5953,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if addedLinks > 0 {
             markMarkupChangedAndScheduleAutosave()
             refreshMarkups()
+            pdfView.refreshHyperlinkHighlights()
         }
         reloadBookmarks()
         updateStatusBar()
@@ -5634,8 +5970,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func bookmarkStyleDestination(for page: PDFPage) -> PDFDestination {
-        let cropBounds = page.bounds(for: .cropBox)
-        return PDFDestination(page: page, at: NSPoint(x: cropBounds.minX, y: cropBounds.maxY))
+        let destination = PDFDestination(
+            page: page,
+            at: NSPoint(x: kPDFDestinationUnspecifiedValue, y: kPDFDestinationUnspecifiedValue)
+        )
+        destination.zoom = kPDFDestinationUnspecifiedValue
+        return destination
     }
 
     func isProtectedAutoSheetLink(_ annotation: PDFAnnotation) -> Bool {
@@ -5673,9 +6013,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         } else {
             link.contents = autoSheetLinkAnnotationMarker
         }
-        link.destination = destination
+        // Prefer action-only encoding for external viewer compatibility.
+        // Some viewers prioritize /Dest over /A and preserve current zoom.
+        link.destination = nil
         link.action = PDFActionGoTo(destination: destination)
-        link.setValue(destination, forAnnotationKey: .destination)
         page.addAnnotation(link)
     }
 
@@ -5783,16 +6124,27 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private func supplementSheetTokenMapFromExistingLabelsAndBookmarks(
         document: PDFDocument,
         sheetTokenToPageIndex: inout [String: Int],
-        canonicalSheetTokenToPageIndex: inout [String: Int]
+        canonicalSheetTokenToPageIndex: inout [String: Int],
+        tokenConfidenceByToken: inout [String: Int],
+        tokenConfidenceByCanonical: inout [String: Int]
     ) {
         for pageIndex in 0..<document.pageCount {
             guard let page = document.page(at: pageIndex) else { continue }
             let pageLabelTokens = extractSheetTokens(from: page.label ?? "")
-            for token in pageLabelTokens where sheetTokenToPageIndex[token] == nil {
-                sheetTokenToPageIndex[token] = pageIndex
+            for token in pageLabelTokens {
+                let labelConfidence = 4
+                let existingTokenConfidence = tokenConfidenceByToken[token] ?? 0
+                if existingTokenConfidence <= labelConfidence {
+                    sheetTokenToPageIndex[token] = pageIndex
+                    tokenConfidenceByToken[token] = labelConfidence
+                }
                 let canonical = canonicalizeSheetToken(token)
-                if !canonical.isEmpty, canonicalSheetTokenToPageIndex[canonical] == nil {
-                    canonicalSheetTokenToPageIndex[canonical] = pageIndex
+                if !canonical.isEmpty {
+                    let existingCanonicalConfidence = tokenConfidenceByCanonical[canonical] ?? 0
+                    if existingCanonicalConfidence <= labelConfidence {
+                        canonicalSheetTokenToPageIndex[canonical] = pageIndex
+                        tokenConfidenceByCanonical[canonical] = labelConfidence
+                    }
                 }
             }
         }
@@ -5801,11 +6153,20 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             guard let outline else { return }
             let titleTokens = extractSheetTokens(from: outline.label ?? "")
             if let pageIndex = destinationPageIndex(for: outline), pageIndex >= 0, pageIndex < document.pageCount {
-                for token in titleTokens where sheetTokenToPageIndex[token] == nil {
-                    sheetTokenToPageIndex[token] = pageIndex
+                for token in titleTokens {
+                    let bookmarkConfidence = 3
+                    let existingTokenConfidence = tokenConfidenceByToken[token] ?? 0
+                    if existingTokenConfidence <= bookmarkConfidence {
+                        sheetTokenToPageIndex[token] = pageIndex
+                        tokenConfidenceByToken[token] = bookmarkConfidence
+                    }
                     let canonical = canonicalizeSheetToken(token)
-                    if !canonical.isEmpty, canonicalSheetTokenToPageIndex[canonical] == nil {
-                        canonicalSheetTokenToPageIndex[canonical] = pageIndex
+                    if !canonical.isEmpty {
+                        let existingCanonicalConfidence = tokenConfidenceByCanonical[canonical] ?? 0
+                        if existingCanonicalConfidence <= bookmarkConfidence {
+                            canonicalSheetTokenToPageIndex[canonical] = pageIndex
+                            tokenConfidenceByCanonical[canonical] = bookmarkConfidence
+                        }
                     }
                 }
             }
@@ -5845,13 +6206,24 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return hits
     }
 
-    private func recognizeTextLines(in page: PDFPage) -> [OCRLineHit] {
-        recognizeTextLines(
+    private func recognizeTextLines(in page: PDFPage, customWords: [String] = []) -> [OCRLineHit] {
+        let words = Array(Set(customWords.filter { !$0.isEmpty }))
+        let primary = recognizeTextLines(
             in: page,
             scale: 2.0,
             minimumTextHeight: 0.005,
             recognitionLevel: .accurate,
-            customWords: []
+            customWords: words
+        )
+        if !primary.isEmpty {
+            return primary
+        }
+        return recognizeTextLines(
+            in: page,
+            scale: 3.0,
+            minimumTextHeight: 0.0035,
+            recognitionLevel: .accurate,
+            customWords: words
         )
     }
 
@@ -5944,8 +6316,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             let item = PDFOutline()
             let cleanedTitle = sheet.sheetTitle.isEmpty ? "Untitled" : sheet.sheetTitle
             item.label = "\(sheet.sheetNumber) - \(cleanedTitle)"
-            let target = NSPoint(x: 0, y: page.bounds(for: .mediaBox).maxY)
-            item.destination = PDFDestination(page: page, at: target)
+            item.destination = bookmarkStyleDestination(for: page)
             root.insertChild(item, at: root.numberOfChildren)
         }
         document.outlineRoot = root
@@ -6131,6 +6502,19 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func confirmDiscardUnsavedChangesIfNeeded() -> Bool {
+        // If Save is currently writing, wait before allowing close/quit so users cannot
+        // close into an out-of-date on-disk PDF state.
+        if isSavingDocumentOperation || persistenceCoordinator.isManualSaveInFlight {
+            guard waitForInFlightSaveToSettle() else {
+                runAlert(
+                    title: "Save Still In Progress",
+                    informativeText: "Drawbridge is still writing your PDF. Please wait a moment and try again.",
+                    style: .warning
+                )
+                return false
+            }
+        }
+
         guard hasUnsavedChanges() else {
             return true
         }

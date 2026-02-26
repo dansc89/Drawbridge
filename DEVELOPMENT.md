@@ -163,6 +163,13 @@ git tag v0.1.4
 git push origin v0.1.4
 ```
 
+Standard local publish command (ensures DMG is uploaded to the release):
+
+```bash
+cd /Users/danielnguyen/Drawbridge
+./Scripts/publish-release.sh v0.1.4 dist/Drawbridge-v0.1.4.dmg
+```
+
 Latest release URL:
 
 `https://github.com/dansc89/Drawbridge/releases/latest`
@@ -234,3 +241,38 @@ Install launchd automation (daily 2:00 AM):
 cd /Users/danielnguyen/Drawbridge
 ./Scripts/install-nightly-stress-launchd.sh
 ```
+
+## Compatibility Gate (Internal)
+
+Run backend-only compatibility and save-performance validation:
+
+```bash
+cd /Users/danielnguyen/Drawbridge
+./Scripts/run-compat-gate.sh smoke
+```
+
+Standard release-grade profile:
+
+```bash
+cd /Users/danielnguyen/Drawbridge
+./Scripts/run-compat-gate.sh standard
+```
+
+Notes:
+- This is non-UI validation only (no user-facing prompts or controls).
+- Gate fails on persistence regressions or p95 save-write threshold regressions.
+
+## Link Compatibility Variant Export (Internal)
+
+Generate backend-only hyperlink destination variants for external viewer A/B checks:
+
+```bash
+cd /Users/danielnguyen/Drawbridge
+./Scripts/export-link-compat-variants.sh /absolute/path/to/file.pdf /absolute/path/to/output-dir
+```
+
+Output files:
+- `*.links-fit.pdf`
+- `*.links-fith.pdf`
+- `*.links-fitr.pdf`
+- `*.links-xyz0.pdf`
