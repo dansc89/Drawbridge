@@ -141,6 +141,7 @@ extension MainViewController {
         let originDocumentURLForAdoption = openDocumentURL.map { canonicalDocumentURL($0) }
         let startedAt = CFAbsoluteTimeGetCurrent()
         let documentBox = PDFDocumentBox(document: document)
+        let pageLabelsForEmbeddedSave = embeddedPageLabelsForSave(in: document)
         let destinationAlreadyExists = FileManager.default.fileExists(atPath: targetURL.path)
         let destinationIsFileProvider = Self.isLikelyFileProviderURL(targetURL)
         let fallbackStagingURL = destinationAlreadyExists ? saveStagingFileURL(for: targetURL) : targetURL
@@ -157,7 +158,7 @@ extension MainViewController {
                 // Render locally first, then do a single commit to the destination path.
                 let localStagingURL = Self.temporaryLocalSaveURL(for: targetURL)
                 let stagedWriteStartedAt = CFAbsoluteTimeGetCurrent()
-                success = Self.writePDFDocument(documentBox.document, to: localStagingURL)
+                success = Self.writePDFDocument(documentBox.document, to: localStagingURL, pageLabels: pageLabelsForEmbeddedSave)
                 writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
 
                 if success {
@@ -184,7 +185,7 @@ extension MainViewController {
             } else if destinationAlreadyExists {
                 // Fast path: overwrite directly to avoid expensive replace/copy on file-provider volumes.
                 let directWriteStartedAt = CFAbsoluteTimeGetCurrent()
-                success = Self.writePDFDocument(documentBox.document, to: targetURL)
+                success = Self.writePDFDocument(documentBox.document, to: targetURL, pageLabels: pageLabelsForEmbeddedSave)
                 writeElapsed = CFAbsoluteTimeGetCurrent() - directWriteStartedAt
 
                 if !success {
@@ -196,7 +197,7 @@ extension MainViewController {
                     }
                     let stagingURL = fallbackStagingURL
                     let stagedWriteStartedAt = CFAbsoluteTimeGetCurrent()
-                    success = Self.writePDFDocument(documentBox.document, to: stagingURL)
+                    success = Self.writePDFDocument(documentBox.document, to: stagingURL, pageLabels: pageLabelsForEmbeddedSave)
                     writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
                     if success {
                         if showBusyOverlay {
@@ -221,7 +222,7 @@ extension MainViewController {
                 }
             } else {
                 let writeStartedAt = CFAbsoluteTimeGetCurrent()
-                success = Self.writePDFDocument(documentBox.document, to: targetURL)
+                success = Self.writePDFDocument(documentBox.document, to: targetURL, pageLabels: pageLabelsForEmbeddedSave)
                 writeElapsed = CFAbsoluteTimeGetCurrent() - writeStartedAt
             }
             let elapsed = CFAbsoluteTimeGetCurrent() - startedAt
@@ -387,9 +388,24 @@ extension MainViewController {
         }
     }
 
-    nonisolated static func writePDFDocument(_ document: PDFDocument, to url: URL) -> Bool {
+    nonisolated static func writePDFDocument(_ document: PDFDocument, to url: URL, pageLabels: [Int: String]) -> Bool {
         // `write(to:withOptions:)` is materially faster than `write(to:)` on large drawing sets.
-        return document.write(to: url, withOptions: nil)
+        guard document.write(to: url, withOptions: nil) else {
+            return false
+        }
+        if !pageLabels.isEmpty {
+            do {
+                try PDFPageLabelsEmbedder.embedPageLabels(pageLabels, in: url)
+            } catch {
+                return false
+            }
+        }
+        do {
+            try PDFAutoSheetLinkFitDestinationRewriter.rewriteAutoSheetLinksToFit(in: url)
+            return true
+        } catch {
+            return false
+        }
     }
 
     func autosaveDirectoryURL() -> URL? {
@@ -481,16 +497,20 @@ extension MainViewController {
         return false
     }
 
+    func waitForInFlightSaveToSettle(timeout: TimeInterval = 90) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while (isSavingDocumentOperation || persistenceCoordinator.isManualSaveInFlight), Date() < deadline {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        return !(isSavingDocumentOperation || persistenceCoordinator.isManualSaveInFlight)
+    }
+
     private func flushEmbeddedSaveBeforeClose(to sourceURL: URL, document: PDFDocument) -> Bool {
         deferredEmbeddedSaveWorkItem?.cancel()
         deferredEmbeddedSaveWorkItem = nil
 
         // If a prior save is running, wait for it to settle before issuing the final blocking flush.
-        let settleDeadline = Date().addingTimeInterval(60)
-        while (isSavingDocumentOperation || persistenceCoordinator.isManualSaveInFlight), Date() < settleDeadline {
-            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
-        }
-        if isSavingDocumentOperation || persistenceCoordinator.isManualSaveInFlight {
+        if !waitForInFlightSaveToSettle(timeout: 60) {
             return false
         }
 
@@ -528,7 +548,7 @@ extension MainViewController {
             busyMessage: "Saving PDF…",
             document: document,
             showBusyOverlay: false,
-            deferEmbeddedWrite: true
+            deferEmbeddedWrite: false
         )
     }
 }

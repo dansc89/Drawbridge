@@ -311,6 +311,20 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         ]
         return layer
     }()
+    private let hyperlinkOverlayLayer: CAShapeLayer = {
+        let layer = CAShapeLayer()
+        layer.strokeColor = NSColor.systemBlue.withAlphaComponent(0.85).cgColor
+        layer.fillColor = NSColor.systemBlue.withAlphaComponent(0.10).cgColor
+        layer.lineWidth = 1.35
+        layer.lineJoin = .round
+        layer.zPosition = 6
+        layer.isHidden = true
+        layer.actions = [
+            "path": NSNull(),
+            "hidden": NSNull()
+        ]
+        return layer
+    }()
     private let textEditCaretLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
         layer.strokeColor = NSColor.systemBlue.cgColor
@@ -357,7 +371,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }()
     private var pendingContextMenuHitAnnotation: PDFAnnotation?
     private var textEditCaretTimer: Timer?
+    private weak var observedClipView: NSClipView?
     private var isGridVisible = false
+    private var areHyperlinkHighlightsVisible = false
+    private var didInstallViewportObservers = false
     private var isOrthoSnapEnabled = true
     private var isEndpointSnapEnabled = true
     private var isMidpointSnapEnabled = true
@@ -404,6 +421,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.addSublayer(gridOverlayLayer)
+        layer?.addSublayer(hyperlinkOverlayLayer)
         layer?.addSublayer(calloutTextBoxPreviewLayer)
         layer?.addSublayer(dragPreviewLayer)
         layer?.addSublayer(dropHighlightLayer)
@@ -416,10 +434,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         displaysPageBreaks = true
         refreshAppearanceColors()
         registerForDraggedTypes([.fileURL])
+        installViewportObserversIfNeeded()
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -448,12 +471,23 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         super.layout()
         let insetBounds = bounds.insetBy(dx: 24, dy: 24)
         dropHighlightLayer.path = CGPath(roundedRect: insetBounds, cornerWidth: 14, cornerHeight: 14, transform: nil)
+        installClipViewObserverIfNeeded()
         updateGridOverlayIfNeeded()
+        updateHyperlinkOverlayIfNeeded()
     }
 
     func setGridVisible(_ visible: Bool) {
         isGridVisible = visible
         updateGridOverlayIfNeeded()
+    }
+
+    func setHyperlinkHighlightsVisible(_ visible: Bool) {
+        areHyperlinkHighlightsVisible = visible
+        updateHyperlinkOverlayIfNeeded(forceHideWhenDisabled: true)
+    }
+
+    func refreshHyperlinkHighlights() {
+        updateHyperlinkOverlayIfNeeded()
     }
 
     func setOrthoSnapEnabled(_ enabled: Bool) {
@@ -474,6 +508,95 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     private func isOrthoConstraintActive(for event: NSEvent) -> Bool {
         isOrthoSnapEnabled && (toolMode == .line || toolMode == .polyline || toolMode == .polygon)
+    }
+
+    private func installViewportObserversIfNeeded() {
+        guard !didInstallViewportObservers else { return }
+        didInstallViewportObservers = true
+        let center = NotificationCenter.default
+        let names: [Notification.Name] = [
+            .PDFViewPageChanged,
+            .PDFViewScaleChanged,
+            .PDFViewDocumentChanged
+        ]
+        for name in names {
+            center.addObserver(self, selector: #selector(handlePDFViewportChangedNotification(_:)), name: name, object: self)
+        }
+    }
+
+    private func installClipViewObserverIfNeeded() {
+        guard let clipView = enclosingScrollView?.contentView else { return }
+        if observedClipView === clipView {
+            return
+        }
+        if let observedClipView {
+            NotificationCenter.default.removeObserver(
+                self,
+                name: NSView.boundsDidChangeNotification,
+                object: observedClipView
+            )
+        }
+        observedClipView = clipView
+        clipView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleClipViewBoundsDidChange(_:)),
+            name: NSView.boundsDidChangeNotification,
+            object: clipView
+        )
+    }
+
+    @objc private func handlePDFViewportChangedNotification(_ notification: Notification) {
+        _ = notification
+        updateHyperlinkOverlayIfNeeded()
+    }
+
+    @objc private func handleClipViewBoundsDidChange(_ notification: Notification) {
+        _ = notification
+        updateHyperlinkOverlayIfNeeded()
+    }
+
+    private func updateHyperlinkOverlayIfNeeded(forceHideWhenDisabled: Bool = false) {
+        guard areHyperlinkHighlightsVisible else {
+            if forceHideWhenDisabled {
+                hyperlinkOverlayLayer.path = nil
+                hyperlinkOverlayLayer.isHidden = true
+            }
+            return
+        }
+        guard document != nil else {
+            hyperlinkOverlayLayer.path = nil
+            hyperlinkOverlayLayer.isHidden = true
+            return
+        }
+
+        let pagesToRender: [PDFPage] = {
+            if !visiblePages.isEmpty {
+                return visiblePages
+            }
+            if let currentPage { return [currentPage] }
+            return []
+        }()
+        guard !pagesToRender.isEmpty else {
+            hyperlinkOverlayLayer.path = nil
+            hyperlinkOverlayLayer.isHidden = true
+            return
+        }
+
+        let expandedVisibleBounds = bounds.insetBy(dx: -24, dy: -24)
+        let path = CGMutablePath()
+        var hasAny = false
+        for page in pagesToRender {
+            for annotation in page.annotations where annotation.shouldDisplay && isLinkAnnotation(annotation) {
+                let rectInView = convert(annotation.bounds, from: page).standardized
+                guard !rectInView.isEmpty, rectInView.intersects(expandedVisibleBounds) else { continue }
+                path.addRect(rectInView)
+                hasAny = true
+            }
+        }
+
+        hyperlinkOverlayLayer.path = hasAny ? path : nil
+        hyperlinkOverlayLayer.isHidden = !hasAny
     }
 
     private func snapPointInPageIfNeeded(_ point: NSPoint, on page: PDFPage) -> NSPoint {

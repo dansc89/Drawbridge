@@ -28,5 +28,12 @@ run_tier "tier-10k" 200 50
 run_tier "tier-25k" 250 100
 run_tier "tier-50k" 500 100
 
-echo "Nightly suite complete. Log: $LOG"
+{
+  echo "===== compat-gate ====="
+  date
+  ./Scripts/run-compat-gate.sh standard
+  date
+  echo
+} | tee -a "$LOG"
 
+echo "Nightly suite complete. Log: $LOG"

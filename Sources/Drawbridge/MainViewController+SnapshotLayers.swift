@@ -76,25 +76,6 @@ extension MainViewController {
         }
     }
 
-    func selectedStatusLayerName() -> String {
-        let selected = statusLayerPopup.titleOfSelectedItem?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !selected.isEmpty {
-            return selected
-        }
-        return snapshotLayerOptions.first ?? "DEFAULT"
-    }
-
-    func refreshStatusLayerControls() {
-        let layer = selectedStatusLayerName()
-        let isDefaultLayer = layer == "DEFAULT"
-        statusLayerColorWell.isEnabled = !isDefaultLayer
-        if let tint = tintColor(forSnapshotLayer: layer) {
-            statusLayerColorWell.color = tint.withAlphaComponent(1.0)
-        } else {
-            statusLayerColorWell.color = .white
-        }
-    }
-
     func refreshLayerTintColorWell(for layer: String) {
         guard let colorButton = layerTintColorWells[layer] as? LayerColorChipButton else { return }
         colorButton.isEnabled = (layer != "DEFAULT")
@@ -235,23 +216,6 @@ extension MainViewController {
         applySnapshotLayerVisibility()
     }
 
-    @objc func statusLayerSelectionChanged(_ sender: NSPopUpButton) {
-        _ = sender
-        refreshStatusLayerControls()
-    }
-
-    @objc func statusLayerColorChanged(_ sender: NSColorWell) {
-        let layer = selectedStatusLayerName()
-        guard layer != "DEFAULT" else {
-            refreshStatusLayerControls()
-            return
-        }
-        layerTintColorByName[layer] = sender.color.withAlphaComponent(1.0)
-        applyLayerTintColorToAllSnapshots(layer: layer)
-        refreshLayerTintColorWell(for: layer)
-        refreshStatusLayerControls()
-    }
-
     @objc func layerTintColorWellChanged(_ sender: NSButton) {
         guard let layer = sender.identifier?.rawValue, !layer.isEmpty else { return }
         guard layer != "DEFAULT" else {
@@ -272,9 +236,6 @@ extension MainViewController {
         layerTintColorByName[layer] = sender.color.withAlphaComponent(1.0)
         applyLayerTintColorToAllSnapshots(layer: layer)
         refreshLayerTintColorWell(for: layer)
-        if selectedStatusLayerName() == layer {
-            refreshStatusLayerControls()
-        }
     }
 
     func applySnapshotLayerVisibility() {

@@ -8,7 +8,12 @@ PAGES="${1:-300}"
 MARKUPS_PER_PAGE="${2:-100}"
 OUT="${3:-$ROOT_DIR/dist/stress/Drawbridge-Stress.pdf}"
 ITERATIONS="${4:-1}"
+SAVE_ITERATIONS="${5:-0}"
+EXTRA_ARGS=()
+if [ "$#" -gt 5 ]; then
+  EXTRA_ARGS=("${@:6}")
+fi
 
 mkdir -p "$(dirname "$OUT")"
 
-swift run Drawbridge --stress --pages "$PAGES" --markups-per-page "$MARKUPS_PER_PAGE" --out "$OUT" --iterations "$ITERATIONS"
+swift run Drawbridge --stress --pages "$PAGES" --markups-per-page "$MARKUPS_PER_PAGE" --out "$OUT" --iterations "$ITERATIONS" --save-iterations "$SAVE_ITERATIONS" "${EXTRA_ARGS[@]}"
