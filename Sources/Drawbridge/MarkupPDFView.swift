@@ -1539,14 +1539,18 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 }
                 return
             }
+            if movingPolygonVertexIndex != nil,
+               isPolygonMarkup(annotation),
+               movingPolygonPointsAtDragStart.count < 3 {
+                movingPolygonPointsAtDragStart = polygonVerticesInPage(for: annotation) ?? []
+            }
             if let vertexIndex = movingPolygonVertexIndex,
                isPolygonMarkup(annotation),
                movingPolygonPointsAtDragStart.indices.contains(vertexIndex),
                movingPolygonPointsAtDragStart.count >= 3 {
                 var points = movingPolygonPointsAtDragStart
                 points[vertexIndex] = currentPoint
-                updatePolygonAnnotationGeometry(annotation, points: points)
-                syncPolygonHatchOverlayIfNeeded(for: annotation)
+                updatePolygonGeometryForGroup(anchor: annotation, points: points)
                 didMoveAnnotation = true
                 needsDisplay = true
                 onViewportChanged?()
@@ -2128,22 +2132,24 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func captureSnapshotVectorData(on page: PDFPage, in pageRect: NSRect) -> Data? {
-        guard pageRect.width > 1, pageRect.height > 1 else { return nil }
+        let pageBounds = page.bounds(for: displayBox)
+        let clippedRect = pageRect.intersection(pageBounds)
+        guard clippedRect.width > 1, clippedRect.height > 1 else { return nil }
 
         let buffer = NSMutableData()
         guard let consumer = CGDataConsumer(data: buffer as CFMutableData) else {
             return nil
         }
 
-        var mediaBox = CGRect(origin: .zero, size: pageRect.size)
+        var mediaBox = CGRect(origin: .zero, size: clippedRect.size)
         guard let context = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
             return nil
         }
 
         context.beginPDFPage(nil)
         context.saveGState()
-        context.translateBy(x: -pageRect.minX, y: -pageRect.minY)
-        page.draw(with: .mediaBox, to: context)
+        context.translateBy(x: -clippedRect.minX, y: -clippedRect.minY)
+        page.draw(with: displayBox, to: context)
         context.restoreGState()
         context.endPDFPage()
         context.closePDF()
@@ -4540,6 +4546,19 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             annotation.border = priorBorder
         }
         writePolygonPointsMetadata(normalized, on: annotation)
+    }
+
+    private func updatePolygonGeometryForGroup(anchor: PDFAnnotation, points: [NSPoint]) {
+        let normalized = normalizedPolygonPoints(points)
+        guard normalized.count >= 3 else { return }
+        var targets: [PDFAnnotation] = [anchor]
+        if let page = anchor.page {
+            targets.append(contentsOf: relatedPolygonMarkupAnnotations(for: anchor, on: page))
+        }
+        for target in targets {
+            updatePolygonAnnotationGeometry(target, points: normalized)
+            syncPolygonHatchOverlayIfNeeded(for: target)
+        }
     }
 
     private func initialCalloutDragState(
