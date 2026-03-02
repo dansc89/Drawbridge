@@ -268,7 +268,14 @@ extension MainViewController {
             guard let keyField = keyFields[action],
                   let modifierPopup = modifierPopups[action] else { continue }
             let rawKey = keyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard guardOrBeep(rawKey.count == 1 && rawKey.unicodeScalars.allSatisfy({ allowed.contains($0) })) else { return }
+            guard rawKey.count == 1, rawKey.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
+                runAlert(
+                    title: "Invalid Shortcut Key",
+                    informativeText: "Each shortcut must use a single supported character.",
+                    style: .warning
+                )
+                return
+            }
             let modifier: ShortcutModifier
             switch modifierPopup.indexOfSelectedItem {
             case 1:
@@ -279,7 +286,14 @@ extension MainViewController {
                 modifier = .plain
             }
             let combo = "\(modifier.rawValue):\(rawKey)"
-            guard guardOrBeep(!seenCombos.contains(combo)) else { return }
+            guard !seenCombos.contains(combo) else {
+                runAlert(
+                    title: "Duplicate Shortcut",
+                    informativeText: "Each shortcut combination can only be assigned once.",
+                    style: .warning
+                )
+                return
+            }
             seenCombos.insert(combo)
             updated[action] = ShortcutBinding(key: rawKey, modifier: modifier)
         }

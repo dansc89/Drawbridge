@@ -4,6 +4,22 @@ import PDFKit
 
 @MainActor
 extension MainViewController {
+    private func truncatedSearchPreview(_ text: String, maxLength: Int = 140) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalized.count > maxLength else { return normalized }
+        let end = normalized.index(normalized.startIndex, offsetBy: maxLength)
+        return "\(normalized[..<end])…"
+    }
+
+    private func showSearchNoResultsFeedback() {
+        toolbarSearchCountLabel.stringValue = "No results"
+        toolbarSearchCountLabel.toolTip = "No matches found in document text or markups."
+        NSSound.beep()
+    }
+
     func ensureSearchPanel() {
         guard searchPanel == nil else { return }
         let panel = NSPanel(
@@ -44,13 +60,19 @@ extension MainViewController {
     }
 
     @objc func selectNextSearchHit() {
-        guard guardOrBeep(!searchHits.isEmpty) else { return }
+        guard !searchHits.isEmpty else {
+            showSearchNoResultsFeedback()
+            return
+        }
         searchHitIndex = (searchHitIndex + 1) % searchHits.count
         revealCurrentSearchHit()
     }
 
     @objc func selectPreviousSearchHit() {
-        guard guardOrBeep(!searchHits.isEmpty) else { return }
+        guard !searchHits.isEmpty else {
+            showSearchNoResultsFeedback()
+            return
+        }
         searchHitIndex = (searchHitIndex - 1 + searchHits.count) % searchHits.count
         revealCurrentSearchHit()
     }
@@ -213,7 +235,7 @@ extension MainViewController {
             if let page = pdfView.document?.page(at: pageIndex) {
                 let destination = PDFDestination(page: page, at: NSPoint(x: annotation.bounds.minX, y: annotation.bounds.maxY))
                 pdfView.navigateToDestinationWithHistory(destination)
-                selectMarkupFromPageClick(page: page, annotation: annotation)
+                selectMarkupFromPageClick(page: page, annotation: annotation, additive: false)
             }
             updateSearchControlsState(overridePreview: preview)
         }
@@ -229,7 +251,7 @@ extension MainViewController {
         if hasResults, searchHitIndex >= 0 {
             let index = min(searchHitIndex + 1, searchHits.count)
             toolbarSearchCountLabel.stringValue = "\(index)/\(searchHits.count)"
-            let preview = (overridePreview ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let preview = truncatedSearchPreview(overridePreview ?? "")
             if !preview.isEmpty {
                 toolbarSearchCountLabel.toolTip = preview
             } else {
@@ -237,8 +259,13 @@ extension MainViewController {
             }
         } else {
             let hasQuery = !toolbarSearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            toolbarSearchCountLabel.stringValue = hasQuery ? "0" : ""
-            toolbarSearchCountLabel.toolTip = nil
+            if hasQuery {
+                toolbarSearchCountLabel.stringValue = "0/0"
+                toolbarSearchCountLabel.toolTip = "No matches found in document text or markups."
+            } else {
+                toolbarSearchCountLabel.stringValue = ""
+                toolbarSearchCountLabel.toolTip = nil
+            }
         }
     }
 }

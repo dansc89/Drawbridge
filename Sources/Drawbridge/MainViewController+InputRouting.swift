@@ -259,12 +259,15 @@ extension MainViewController {
     }
 
     func handleEscapePress() {
-        if escapePressTracker.registerPress() {
-            cancelPendingMarkupInteractions()
-            if pdfView.toolMode != .select {
-                setTool(.select)
-            }
+        cancelPendingMarkupInteractions()
+        if pdfView.toolMode != .select {
+            setTool(.select)
+            clearMarkupSelection()
+            return
+        }
+        if currentSelectedMarkupItem() != nil {
             clearMarkupSelection()
         }
+        escapePressTracker.reset()
     }
 }

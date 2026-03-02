@@ -3,6 +3,115 @@ import PDFKit
 
 @MainActor
 extension MainViewController {
+    @objc func applySelectedMarkupsToPages() {
+        guard let document = pdfView.document else { beep(); return }
+        let sourceRecords = makeSelectedMarkupClipboardRecords(in: document)
+        guard !sourceRecords.isEmpty else {
+            runAlert(
+                title: "No Markup Selected",
+                informativeText: "Select a markup, then choose Apply to Pages.",
+                style: .warning
+            )
+            return
+        }
+
+        let sourcePageIndexes = Set(sourceRecords.map(\.pageIndex))
+        let defaultRange = "1-\(max(1, document.pageCount))"
+        let pagesField = NSTextField(string: defaultRange)
+        pagesField.placeholderString = "1-20, 22, 24-30"
+        pagesField.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        pagesField.translatesAutoresizingMaskIntoConstraints = false
+        pagesField.widthAnchor.constraint(equalToConstant: 260).isActive = true
+
+        let helperLabel = NSTextField(labelWithString: "Pages (1-\(document.pageCount)). Ranges and commas are supported.")
+        helperLabel.textColor = .secondaryLabelColor
+        helperLabel.font = NSFont.systemFont(ofSize: 11)
+
+        let stack = NSStackView(views: [pagesField, helperLabel])
+        stack.orientation = .vertical
+        stack.spacing = 6
+
+        let response = runAlert(
+            title: "Apply to Pages",
+            informativeText: "Copies selected markup to the same coordinates on target pages. Source pages are skipped.",
+            style: .informational,
+            buttons: ["Apply", "Cancel"],
+            accessoryView: stack,
+            activateApp: true
+        )
+        guard response == .alertFirstButtonReturn else { return }
+
+        let rawInput = pagesField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parsedPages = parsePageSelectionInput(rawInput, maxPageCount: document.pageCount) else {
+            runAlert(
+                title: "Invalid Page Selection",
+                informativeText: "Use formats like 1-20, 22, 24-30.",
+                style: .warning
+            )
+            return
+        }
+
+        var targetPageIndexes = parsedPages
+        for sourcePageIndex in sourcePageIndexes {
+            targetPageIndexes.remove(sourcePageIndex)
+        }
+        guard !targetPageIndexes.isEmpty else {
+            runAlert(
+                title: "No Target Pages",
+                informativeText: "All selected pages are source pages. Choose at least one different target page.",
+                style: .warning
+            )
+            return
+        }
+
+        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
+
+        let actionName = "Apply Markup to Pages"
+        var firstApplied: PDFAnnotation?
+        var appliedCount = 0
+        var appliedByPageIndex: [Int: [PDFAnnotation]] = [:]
+
+        for pageIndex in targetPageIndexes.sorted() {
+            guard let page = document.page(at: pageIndex) else { continue }
+            for record in sourceRecords {
+                guard let annotation = decodeAnnotationForApplyToPages(from: record.archivedAnnotation) else { continue }
+                if let lineWidth = record.lineWidth, lineWidth > 0 {
+                    assignLineWidth(lineWidth, to: annotation)
+                }
+                page.addAnnotation(annotation)
+                pdfView.rebindRectangleHatchIdentityAndSync(for: annotation, preferredLineWidth: record.lineWidth)
+                registerAnnotationPresenceUndo(page: page, annotation: annotation, shouldExist: false, actionName: actionName)
+                markPageMarkupCacheDirty(page)
+                if firstApplied == nil {
+                    firstApplied = annotation
+                }
+                appliedByPageIndex[pageIndex, default: []].append(annotation)
+                appliedCount += 1
+            }
+        }
+
+        guard appliedCount > 0 else {
+            runAlert(
+                title: "Nothing Applied",
+                informativeText: "Drawbridge could not clone the selected markup to the requested pages.",
+                style: .warning
+            )
+            return
+        }
+
+        for (pageIndex, annotations) in appliedByPageIndex {
+            guard let page = document.page(at: pageIndex), !annotations.isEmpty else { continue }
+            pdfView.restorePolygonHatchOverlays(on: page, for: annotations)
+        }
+
+        commitMarkupMutation(selecting: firstApplied, forceImmediateRefresh: true)
+
+        runAlert(
+            title: "Applied to Pages",
+            informativeText: "Applied \(appliedCount) markup\(appliedCount == 1 ? "" : "s") across \(appliedByPageIndex.count) page\(appliedByPageIndex.count == 1 ? "" : "s")."
+        )
+    }
+
     @objc func deleteSelectedMarkup() {
         let selectedRows = markupsTable.selectedRowIndexes
         var annotationsToDelete: [(page: PDFPage, annotation: PDFAnnotation)] = []
@@ -296,7 +405,7 @@ extension MainViewController {
     }
 
 
-    func selectMarkupFromPageClick(page: PDFPage, annotation: PDFAnnotation) {
+    func selectMarkupFromPageClick(page: PDFPage, annotation: PDFAnnotation, additive: Bool = false) {
         let resolvedAnnotation = pdfView.normalizeLegacyPolygonGroupIfNeeded(for: annotation, on: page)
         if resolvedAnnotation !== annotation {
             markPageMarkupCacheDirty(page)
@@ -325,18 +434,34 @@ extension MainViewController {
             return related.contains(ObjectIdentifier(item.annotation)) ? idx : nil
         })
         if !relatedRows.isEmpty {
-            applyMarkupTableSelectionRows(relatedRows)
+            if additive {
+                applyMarkupTableSelectionRows(markupsTable.selectedRowIndexes.union(relatedRows))
+            } else {
+                applyMarkupTableSelectionRows(relatedRows)
+            }
             return
         }
 
         let targetRow = markupItems.firstIndex(where: { $0.pageIndex == pageIndex && $0.annotation === resolvedAnnotation })
             ?? nearestMarkupRow(to: resolvedAnnotation.bounds, onPageIndex: pageIndex)
         if let row = targetRow {
-            applyMarkupTableSelectionRows(IndexSet(integer: row))
+            if additive {
+                var merged = markupsTable.selectedRowIndexes
+                merged.insert(row)
+                applyMarkupTableSelectionRows(merged)
+            } else {
+                applyMarkupTableSelectionRows(IndexSet(integer: row))
+            }
             return
         }
         // Keep the clicked annotation selected even when the table is filtered/capped and has no matching row.
-        clearMarkupTableSelectionUI()
+        if !additive {
+            clearMarkupTableSelectionUI()
+        } else {
+            updateSelectionOverlay()
+            updateToolSettingsUIForCurrentTool()
+            updateStatusBar()
+        }
     }
 
     private func nearestMarkupRow(to bounds: NSRect, onPageIndex pageIndex: Int) -> Int? {
@@ -423,5 +548,79 @@ extension MainViewController {
         // For ungrouped free-text markups, avoid proximity auto-linking to nearby callouts.
         // This prevents normal T textboxes from accidentally dragging adjacent Q leaders.
         return [annotation]
+    }
+
+    private func makeSelectedMarkupClipboardRecords(in document: PDFDocument) -> [MarkupClipboardRecord] {
+        let selectedItems = currentSelectedMarkupItems()
+        guard !selectedItems.isEmpty else { return [] }
+
+        var uniqueByID: [ObjectIdentifier: (pageIndex: Int, annotation: PDFAnnotation)] = [:]
+        for item in selectedItems {
+            guard let page = document.page(at: item.pageIndex) else { continue }
+            uniqueByID[ObjectIdentifier(item.annotation)] = (item.pageIndex, item.annotation)
+            for sibling in relatedCalloutAnnotations(for: item.annotation, on: page) where sibling !== item.annotation {
+                uniqueByID[ObjectIdentifier(sibling)] = (item.pageIndex, sibling)
+            }
+        }
+
+        return uniqueByID.values.compactMap { entry in
+            let archived = (try? NSKeyedArchiver.archivedData(withRootObject: entry.annotation, requiringSecureCoding: true))
+                ?? (try? NSKeyedArchiver.archivedData(withRootObject: entry.annotation, requiringSecureCoding: false))
+            guard let archived else { return nil }
+            return MarkupClipboardRecord(
+                pageIndex: entry.pageIndex,
+                archivedAnnotation: archived,
+                lineWidth: resolvedLineWidth(for: entry.annotation)
+            )
+        }
+    }
+
+    private func decodeAnnotationForApplyToPages(from data: Data) -> PDFAnnotation? {
+        if let secure = try? NSKeyedUnarchiver.unarchivedObject(ofClass: PDFAnnotation.self, from: data) {
+            return secure
+        }
+        guard let unarchiver = try? NSKeyedUnarchiver(forReadingFrom: data) else {
+            return nil
+        }
+        unarchiver.requiresSecureCoding = false
+        let decoded = unarchiver.decodeObject(of: PDFAnnotation.self, forKey: NSKeyedArchiveRootObjectKey)
+        unarchiver.finishDecoding()
+        return decoded
+    }
+
+    private func parsePageSelectionInput(_ raw: String, maxPageCount: Int) -> IndexSet? {
+        let normalized = raw
+            .replacingOccurrences(of: "–", with: "-")
+            .replacingOccurrences(of: "—", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty, maxPageCount > 0 else { return nil }
+
+        let separators = CharacterSet(charactersIn: ",; ").union(.newlines)
+        let tokens = normalized.components(separatedBy: separators).filter { !$0.isEmpty }
+        guard !tokens.isEmpty else { return nil }
+
+        var indexes = IndexSet()
+        for token in tokens {
+            let bounds = token.split(separator: "-", omittingEmptySubsequences: false).map(String.init)
+            if bounds.count == 1 {
+                guard let pageNumber = Int(bounds[0]), pageNumber >= 1, pageNumber <= maxPageCount else {
+                    return nil
+                }
+                indexes.insert(pageNumber - 1)
+                continue
+            }
+            guard bounds.count == 2,
+                  let rawStart = Int(bounds[0]),
+                  let rawEnd = Int(bounds[1]),
+                  rawStart >= 1, rawEnd >= 1,
+                  rawStart <= maxPageCount, rawEnd <= maxPageCount else {
+                return nil
+            }
+            let lower = min(rawStart, rawEnd) - 1
+            let upper = max(rawStart, rawEnd) - 1
+            indexes.insert(integersIn: lower...upper)
+        }
+
+        return indexes.isEmpty ? nil : indexes
     }
 }
