@@ -179,6 +179,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     let toolbarSearchCountLabel = NSTextField(labelWithString: "")
     var searchPanel: NSPanel?
     private let documentTabsBar = NSView(frame: .zero)
+    private let documentTabsScrollView = NSScrollView(frame: .zero)
     private let documentTabsStack = NSStackView(frame: .zero)
     private let statusBar = NSView(frame: .zero)
     private let busyOverlayView = NSView(frame: .zero)
@@ -357,10 +358,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var captureToastHideWorkItem: DispatchWorkItem?
     private var grabClipboardPDFData: Data?
     private var grabClipboardPageRect: NSRect?
+    private var grabClipboardSnapshotURL: URL?
+    private var grabClipboardCaptureID = UUID()
     private var grabClipboardTintBlendStyle: PDFSnapshotAnnotation.TintBlendStyle = .screen
+    private var grabSnapshotPreferredLayer = "ARCHITECTURAL"
     weak var lastDirectlySelectedAnnotation: PDFAnnotation?
     private var groupedPasteDragPageID: ObjectIdentifier?
     private var groupedPasteDragAnnotationIDs: Set<ObjectIdentifier> = []
+    private var cachedMarkupPasteboardChangeCount = -1
+    private var cachedMarkupPasteboardPayload: MarkupClipboardPayload?
     private var sidebarCurrentPageIndex: Int = -1
     private var bookmarkLabelOverrides: [String: String] = [:]
     private var pageLabelOverrides: [Int: String] = [:]
@@ -749,8 +755,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 .map(\.annotation)
                 .filter { $0.page === page }
         }
-        pdfView.onAnnotationClicked = { [weak self] page, annotation in
-            self?.selectMarkupFromPageClick(page: page, annotation: annotation)
+        pdfView.onAnnotationClicked = { [weak self] page, annotation, additive in
+            self?.selectMarkupFromPageClick(page: page, annotation: annotation, additive: additive)
         }
         pdfView.onReorderActionRequested = { [weak self] action in
             guard let self else { return }
@@ -768,6 +774,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfView.onAssignLayerRequested = { [weak self] in
             self?.assignSnapshotLayerForCurrentSelection()
         }
+        pdfView.onApplyToPagesRequested = { [weak self] in
+            self?.applySelectedMarkupsToPages()
+        }
         pdfView.onAnnotationsBoxSelected = { [weak self] page, annotations in
             self?.selectMarkupsFromFence(page: page, annotations: annotations)
         }
@@ -778,9 +787,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             self?.presentDroppedImageScaleDialog(page: page, annotation: annotation, baseBounds: baseBounds)
         }
         pdfView.onSnapshotCaptured = { [weak self] pdfData, pageRect in
+            let captureID = UUID()
+            self?.grabClipboardCaptureID = captureID
             self?.grabClipboardPDFData = pdfData
             self?.grabClipboardPageRect = pageRect
+            self?.grabClipboardSnapshotURL = nil
             self?.grabClipboardTintBlendStyle = self?.preferredSnapshotTintBlendStyle(for: pdfData) ?? .screen
+            self?.warmGrabSnapshotPersistence(pdfData, captureID: captureID)
             let board = NSPasteboard.general
             board.clearContents()
             board.setData(pdfData, forType: .pdf)
@@ -1813,7 +1826,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc private func showOpenRecentMenuFromEmptyState(_ sender: NSButton) {
-        guard let menu = openRecentMenuFromMainMenu() else { beep(); return }
+        guard let menu = openRecentMenuFromMainMenu() else {
+            runAlert(
+                title: "Open Recent Unavailable",
+                informativeText: "No recent documents are currently available.",
+                style: .warning
+            )
+            return
+        }
         NSApp.activate(ignoringOtherApps: true)
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
     }
@@ -1908,14 +1928,20 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolbarSearchField.action = #selector(searchFieldChanged)
         toolbarSearchField.translatesAutoresizingMaskIntoConstraints = false
         toolbarSearchField.widthAnchor.constraint(equalToConstant: 330).isActive = true
-        toolbarSearchPrevButton.title = "◀"
+        toolbarSearchPrevButton.title = ""
+        toolbarSearchPrevButton.image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Previous Result")
+            ?? NSImage(systemSymbolName: "arrow.left", accessibilityDescription: "Previous Result")
+        toolbarSearchPrevButton.imagePosition = .imageOnly
         toolbarSearchPrevButton.bezelStyle = .texturedRounded
         toolbarSearchPrevButton.target = self
         toolbarSearchPrevButton.action = #selector(selectPreviousSearchHit)
         toolbarSearchPrevButton.toolTip = "Previous Result"
         toolbarSearchPrevButton.setButtonType(.momentaryPushIn)
         toolbarSearchPrevButton.controlSize = .small
-        toolbarSearchNextButton.title = "▶"
+        toolbarSearchNextButton.title = ""
+        toolbarSearchNextButton.image = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: "Next Result")
+            ?? NSImage(systemSymbolName: "arrow.right", accessibilityDescription: "Next Result")
+        toolbarSearchNextButton.imagePosition = .imageOnly
         toolbarSearchNextButton.bezelStyle = .texturedRounded
         toolbarSearchNextButton.target = self
         toolbarSearchNextButton.action = #selector(selectNextSearchHit)
@@ -2165,18 +2191,34 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         documentTabsBar.layer?.backgroundColor = panelBackgroundColor.cgColor
         documentTabsBar.translatesAutoresizingMaskIntoConstraints = false
 
+        documentTabsScrollView.drawsBackground = false
+        documentTabsScrollView.borderType = .noBorder
+        documentTabsScrollView.hasHorizontalScroller = true
+        documentTabsScrollView.hasVerticalScroller = false
+        documentTabsScrollView.autohidesScrollers = true
+        documentTabsScrollView.horizontalScrollElasticity = .automatic
+        documentTabsScrollView.verticalScrollElasticity = .none
+        documentTabsScrollView.translatesAutoresizingMaskIntoConstraints = false
+
         documentTabsStack.orientation = .horizontal
         documentTabsStack.alignment = .centerY
         documentTabsStack.spacing = 6
         documentTabsStack.edgeInsets = NSEdgeInsets(top: 2, left: 10, bottom: 2, right: 10)
         documentTabsStack.translatesAutoresizingMaskIntoConstraints = false
-        documentTabsBar.addSubview(documentTabsStack)
+        documentTabsScrollView.documentView = documentTabsStack
+        documentTabsBar.addSubview(documentTabsScrollView)
 
         NSLayoutConstraint.activate([
-            documentTabsStack.topAnchor.constraint(equalTo: documentTabsBar.topAnchor),
-            documentTabsStack.leadingAnchor.constraint(equalTo: documentTabsBar.leadingAnchor),
-            documentTabsStack.trailingAnchor.constraint(lessThanOrEqualTo: documentTabsBar.trailingAnchor),
-            documentTabsStack.bottomAnchor.constraint(equalTo: documentTabsBar.bottomAnchor)
+            documentTabsScrollView.topAnchor.constraint(equalTo: documentTabsBar.topAnchor),
+            documentTabsScrollView.leadingAnchor.constraint(equalTo: documentTabsBar.leadingAnchor),
+            documentTabsScrollView.trailingAnchor.constraint(equalTo: documentTabsBar.trailingAnchor),
+            documentTabsScrollView.bottomAnchor.constraint(equalTo: documentTabsBar.bottomAnchor),
+
+            documentTabsStack.topAnchor.constraint(equalTo: documentTabsScrollView.contentView.topAnchor),
+            documentTabsStack.leadingAnchor.constraint(equalTo: documentTabsScrollView.contentView.leadingAnchor),
+            documentTabsStack.trailingAnchor.constraint(equalTo: documentTabsScrollView.contentView.trailingAnchor),
+            documentTabsStack.bottomAnchor.constraint(equalTo: documentTabsScrollView.contentView.bottomAnchor),
+            documentTabsStack.heightAnchor.constraint(equalTo: documentTabsScrollView.contentView.heightAnchor)
         ])
     }
 
@@ -2276,20 +2318,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         toolSelector.selectedSegmentBezelColor = NSColor.systemBlue.withAlphaComponent(0.9)
         toolSelector.wantsLayer = true
-
-        toolSelector.setToolTip("Select (V)", forSegment: 0)
-        toolSelector.setToolTip("Grab (G)", forSegment: 1)
-        toolSelector.setToolTip("Draw (D)", forSegment: 2)
-        toolSelector.setToolTip("Arrow (A)", forSegment: 3)
-        toolSelector.setToolTip("Line (L)", forSegment: 4)
-        toolSelector.setToolTip("Polyline (P)", forSegment: 5)
-        toolSelector.setToolTip("Polygon (Shift+P)", forSegment: 6)
-        toolSelector.setToolTip("Highlighter (H)", forSegment: 7)
-        toolSelector.setToolTip("Cloud (C)", forSegment: 8)
-        toolSelector.setToolTip("Rectangle (R)", forSegment: 9)
-        toolSelector.setToolTip("Ellipse (E)", forSegment: 10)
-        toolSelector.setToolTip("Text (T)", forSegment: 11)
-        toolSelector.setToolTip("Callout (Q)", forSegment: 12)
+        refreshToolbarShortcutTooltips()
         refreshToolSegmentIcons()
     }
 
@@ -2301,9 +2330,39 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         takeoffSelector.setWidth(44, forSegment: 1)
         takeoffSelector.selectedSegmentBezelColor = NSColor.systemBlue.withAlphaComponent(0.9)
         takeoffSelector.wantsLayer = true
-        takeoffSelector.setToolTip("Area (Shift+A)", forSegment: 0)
-        takeoffSelector.setToolTip("Measure (M)", forSegment: 1)
+        refreshToolbarShortcutTooltips()
         refreshTakeoffSegmentIcons()
+    }
+
+    func refreshToolbarShortcutTooltips() {
+        let primaryTooltips: [(Int, String, ShortcutAction)] = [
+            (0, "Select", .selectTool),
+            (1, "Grab", .grabTool),
+            (2, "Draw", .penTool),
+            (3, "Arrow", .arrowTool),
+            (4, "Line", .lineTool),
+            (5, "Polyline", .polylineTool),
+            (6, "Polygon", .polygonTool),
+            (7, "Highlighter", .highlighterTool),
+            (8, "Cloud", .cloudTool),
+            (9, "Rectangle", .rectangleTool),
+            (10, "Ellipse", .ellipseTool),
+            (11, "Text", .textTool),
+            (12, "Callout", .calloutTool)
+        ]
+        for (segment, title, action) in primaryTooltips where segment < toolSelector.segmentCount {
+            toolSelector.setToolTip("\(title) (\(shortcutDisplayString(for: action)))", forSegment: segment)
+        }
+
+        let takeoffTooltips: [(Int, String, ShortcutAction)] = [
+            (0, "Area", .areaTool),
+            (1, "Measure", .measureTool)
+        ]
+        for (segment, title, action) in takeoffTooltips where segment < takeoffSelector.segmentCount {
+            takeoffSelector.setToolTip("\(title) (\(shortcutDisplayString(for: action)))", forSegment: segment)
+        }
+
+        gridToggleButton.toolTip = "Show/Hide Grid (\(shortcutDisplayString(for: .toggleGrid)))"
     }
 
     private func symbolImage(
@@ -2931,17 +2990,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             beep()
             return
         }
-        guard let selectedLayer = promptSnapshotLayerSelection() else {
-            return
-        }
-
-        guard let snapshotURL = persistGrabSnapshotPDFData(pdfData) else { beep(); return }
+        let selectedLayer = resolvedGrabSnapshotLayer()
+        guard let snapshotURL = resolvedGrabSnapshotURL(for: pdfData) else { beep(); return }
 
         let destinationRect = adjustedGrabPasteRect(sourceRect, on: page)
         let annotation = PDFSnapshotAnnotation(bounds: destinationRect, snapshotURL: snapshotURL)
         annotation.renderOpacity = 1.0
         annotation.tintBlendStyle = grabClipboardTintBlendStyle
         annotation.snapshotLayerName = selectedLayer
+        grabSnapshotPreferredLayer = selectedLayer
         applyLayerRenderingStyle(to: annotation, layer: selectedLayer)
         page.addAnnotation(annotation)
         registerAnnotationPresenceUndo(page: page, annotation: annotation, shouldExist: false, actionName: "Paste Grab Snapshot")
@@ -2979,7 +3036,46 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return rect
     }
 
-    private func persistGrabSnapshotPDFData(_ data: Data) -> URL? {
+    private func resolvedGrabSnapshotLayer() -> String {
+        let selectedSnapshots = currentSelectedMarkupItems().compactMap { $0.annotation as? PDFSnapshotAnnotation }
+        if let firstLayer = selectedSnapshots
+            .lazy
+            .compactMap({ $0.snapshotLayerName?.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .first(where: { !$0.isEmpty }) {
+            return firstLayer
+        }
+        return grabSnapshotPreferredLayer
+    }
+
+    private func resolvedGrabSnapshotURL(for data: Data) -> URL? {
+        if let cached = grabClipboardSnapshotURL,
+           FileManager.default.fileExists(atPath: cached.path) {
+            return cached
+        }
+        guard let persisted = persistGrabSnapshotPDFData(data, captureID: grabClipboardCaptureID) else {
+            return nil
+        }
+        grabClipboardSnapshotURL = persisted
+        return persisted
+    }
+
+    private func warmGrabSnapshotPersistence(_ data: Data, captureID: UUID) {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let url = MainViewController.persistGrabSnapshotPDFDataToDisk(data, captureID: captureID) else {
+                return
+            }
+            DispatchQueue.main.async {
+                guard let self, self.grabClipboardCaptureID == captureID else { return }
+                self.grabClipboardSnapshotURL = url
+            }
+        }
+    }
+
+    private func persistGrabSnapshotPDFData(_ data: Data, captureID: UUID) -> URL? {
+        MainViewController.persistGrabSnapshotPDFDataToDisk(data, captureID: captureID)
+    }
+
+    nonisolated private static func persistGrabSnapshotPDFDataToDisk(_ data: Data, captureID: UUID) -> URL? {
         do {
             let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             let directory = root?
@@ -2987,8 +3083,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 .appendingPathComponent("GrabSnapshots", isDirectory: true)
             guard let directory else { return nil }
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let url = directory.appendingPathComponent("grab-\(UUID().uuidString).pdf")
-            try data.write(to: url, options: .atomic)
+            let url = directory.appendingPathComponent("grab-\(captureID.uuidString).pdf")
+            if !FileManager.default.fileExists(atPath: url.path) {
+                try data.write(to: url, options: .atomic)
+            }
             return url
         } catch {
             return nil
@@ -3172,12 +3270,27 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return insecure
     }
 
+    private func decodeMarkupClipboardPayloadFromPasteboard() -> MarkupClipboardPayload? {
+        let board = NSPasteboard.general
+        let changeCount = board.changeCount
+        if changeCount == cachedMarkupPasteboardChangeCount {
+            return cachedMarkupPasteboardPayload
+        }
+        cachedMarkupPasteboardChangeCount = changeCount
+        guard let raw = board.data(forType: markupClipboardPasteboardType),
+              let payload = try? PropertyListDecoder().decode(MarkupClipboardPayload.self, from: raw),
+              !payload.records.isEmpty else {
+            cachedMarkupPasteboardPayload = nil
+            return nil
+        }
+        cachedMarkupPasteboardPayload = payload
+        return payload
+    }
+
     func pasteCopiedMarkupsFromPasteboard() {
         guard let document = pdfView.document else { beep(); return }
         guard ensureWorkingCopyBeforeFirstMarkup() else { return }
-        guard let raw = NSPasteboard.general.data(forType: markupClipboardPasteboardType),
-              let payload = try? PropertyListDecoder().decode(MarkupClipboardPayload.self, from: raw),
-              !payload.records.isEmpty else {
+        guard let payload = decodeMarkupClipboardPayloadFromPasteboard() else {
             beep()
             return
         }
@@ -3214,14 +3327,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             destinationPage.addAnnotation(annotation)
             pdfView.rebindRectangleHatchIdentityAndSync(for: annotation, preferredLineWidth: record.lineWidth)
             registerAnnotationPresenceUndo(page: destinationPage, annotation: annotation, shouldExist: false, actionName: "Paste Markup")
-            markPageMarkupCacheDirty(destinationPage)
             pasted.append(annotation)
         }
 
         guard guardOrBeep(!pasted.isEmpty) else { return }
+        markPageMarkupCacheDirty(destinationPage)
         pdfView.restorePolygonHatchOverlays(on: destinationPage, for: pasted)
         commitMarkupMutation(selecting: pasted.first, forceImmediateRefresh: true)
-        selectMarkupsFromFence(page: destinationPage, annotations: pasted, enablesGroupedDrag: true)
+        selectMarkupsFromFence(page: destinationPage, annotations: pasted, enablesGroupedDrag: true, refreshBeforeSelecting: false)
     }
 
     func startSaveProgressTracking(phase: String) {
@@ -3528,6 +3641,24 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let pageIndex = document.index(for: page)
         guard pageIndex >= 0 else { return }
         dirtyMarkupPageIndexes.insert(pageIndex)
+        invalidateVisibleMarkupRendering(on: page)
+    }
+
+    private func invalidateVisibleMarkupRendering(on page: PDFPage) {
+        guard pdfView.currentPage === page else { return }
+        let pageBounds = page.bounds(for: pdfView.displayBox)
+        let rectInView = pdfView.convert(pageBounds, from: page)
+        let hasFiniteComponents =
+            rectInView.origin.x.isFinite &&
+            rectInView.origin.y.isFinite &&
+            rectInView.size.width.isFinite &&
+            rectInView.size.height.isFinite
+        if rectInView.isNull || !hasFiniteComponents || rectInView.isEmpty {
+            pdfView.needsDisplay = true
+            return
+        }
+        let expanded = rectInView.insetBy(dx: -4, dy: -4)
+        pdfView.setNeedsDisplay(expanded)
     }
 
     func totalCachedAnnotationCount() -> Int {
@@ -3866,7 +3997,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         hasPromptedForInitialMarkupSaveCopy = didCreateWorkingCopy
     }
 
-    private func ensureWorkingCopyBeforeFirstMarkup() -> Bool {
+    func ensureWorkingCopyBeforeFirstMarkup() -> Bool {
         guard !hasPromptedForInitialMarkupSaveCopy,
               !isPresentingInitialMarkupSaveCopyPrompt,
               !persistenceCoordinator.isManualSaveInFlight,
@@ -5024,7 +5155,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return (first, last)
     }
 
-    private func selectMarkupsFromFence(page: PDFPage, annotations: [PDFAnnotation], enablesGroupedDrag: Bool = false) {
+    private func selectMarkupsFromFence(
+        page: PDFPage,
+        annotations: [PDFAnnotation],
+        enablesGroupedDrag: Bool = false,
+        refreshBeforeSelecting: Bool = true
+    ) {
         guard let document = pdfView.document else { return }
         let pageIndex = document.index(for: page)
         guard pageIndex >= 0 else { return }
@@ -5035,7 +5171,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 selected.insert(ObjectIdentifier(sibling))
             }
         }
-        performRefreshMarkups(selecting: nil)
+        if refreshBeforeSelecting {
+            performRefreshMarkups(selecting: nil)
+        }
         let rows = IndexSet(markupItems.enumerated().compactMap { idx, item in
             guard item.pageIndex == pageIndex else { return nil }
             return selected.contains(ObjectIdentifier(item.annotation)) ? idx : nil

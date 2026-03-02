@@ -165,7 +165,25 @@ extension MainViewController {
     }
 
     func updateShortcutHintLabel() {
-        statusToolsHintLabel.stringValue = "Shortcuts customizable in Drawbridge > Keyboard Shortcuts…"
+        statusToolsHintLabel.stringValue = "Esc cancels current action. Shortcuts customizable in Drawbridge > Keyboard Shortcuts…"
+        refreshToolbarShortcutTooltips()
+    }
+
+    func currentShortcutBinding(for action: ShortcutAction) -> ShortcutBinding {
+        shortcutBindings[action] ?? defaultShortcutBindings()[action] ?? action.defaultBinding
+    }
+
+    func shortcutDisplayString(for action: ShortcutAction) -> String {
+        let binding = currentShortcutBinding(for: action)
+        let key = binding.key.uppercased()
+        switch binding.modifier {
+        case .plain:
+            return key
+        case .shift:
+            return "Shift+\(key)"
+        case .commandShift:
+            return "Cmd+Shift+\(key)"
+        }
     }
 
     func shortcutAction(for event: NSEvent) -> ShortcutAction? {

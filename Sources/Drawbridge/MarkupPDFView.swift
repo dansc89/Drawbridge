@@ -176,7 +176,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var onCalibrationDistanceMeasured: ((CGFloat) -> Void)?
     var onAnnotationAdded: ((PDFPage, PDFAnnotation, String) -> Void)?
     var onAnnotationTextEdited: ((PDFPage, PDFAnnotation, String) -> Void)?
-    var onAnnotationClicked: ((PDFPage, PDFAnnotation) -> Void)?
+    var onAnnotationClicked: ((PDFPage, PDFAnnotation, Bool) -> Void)?
     var onAnnotationsBoxSelected: ((PDFPage, [PDFAnnotation]) -> Void)?
     var onAnnotationMoved: ((PDFPage, PDFAnnotation, NSRect) -> Void)?
     var onResolveDragSelection: ((PDFPage, PDFAnnotation) -> [PDFAnnotation])?
@@ -191,6 +191,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var onRegionCaptured: ((PDFPage, NSRect) -> Void)?
     var onReorderActionRequested: ((ReorderAction) -> Void)?
     var onAssignLayerRequested: (() -> Void)?
+    var onApplyToPagesRequested: (() -> Void)?
     var shouldBeginMarkupInteraction: (() -> Bool)?
     var polygonVertexEditModeEnabled = false
 
@@ -939,7 +940,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return super.menu(for: event)
         }
         pendingContextMenuHitAnnotation = hit
-        onAnnotationClicked?(page, hit)
+        onAnnotationClicked?(page, hit, false)
 
         let menu = NSMenu(title: "Markup")
         let sendToBack = NSMenuItem(title: "Move To Back", action: #selector(contextMenuSendToBack(_:)), keyEquivalent: "")
@@ -955,6 +956,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         menu.addItem(bringForward)
         menu.addItem(sendBackward)
         menu.addItem(bringToFront)
+        menu.addItem(NSMenuItem.separator())
+        let applyToPages = NSMenuItem(title: "Apply to Pages…", action: #selector(contextMenuApplyToPages(_:)), keyEquivalent: "")
+        applyToPages.target = self
+        menu.addItem(applyToPages)
         if hit is PDFSnapshotAnnotation {
             menu.addItem(NSMenuItem.separator())
             let assignLayer = NSMenuItem(title: "Assign Layer…", action: #selector(contextMenuAssignLayer(_:)), keyEquivalent: "")
@@ -997,6 +1002,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         guard pendingContextMenuHitAnnotation is PDFSnapshotAnnotation else { return }
         pendingContextMenuHitAnnotation = nil
         onAssignLayerRequested?()
+    }
+
+    @objc private func contextMenuApplyToPages(_ sender: Any?) {
+        _ = sender
+        guard pendingContextMenuHitAnnotation != nil else { return }
+        pendingContextMenuHitAnnotation = nil
+        onApplyToPagesRequested?()
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -1073,54 +1085,76 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 if isPolygonMarkup(hit),
                    let nearest = nearestPolygonVertexIndex(for: hit, on: page, at: locationInView),
                    nearest.distance <= polygonVertexCaptureThresholdInView() {
+                    var activeHit = hit
+                    var activeNearest = nearest
                     if !hitIsSelected {
-                        onAnnotationClicked?(page, hit)
+                        onAnnotationClicked?(page, hit, event.modifierFlags.contains(.shift))
+                        if let refreshed = nearestAnnotation(
+                            to: pointInPage,
+                            on: page,
+                            maxDistance: selectionHitDistanceInPage()
+                        ),
+                           isPolygonMarkup(refreshed),
+                           let refreshedNearest = nearestPolygonVertexIndex(for: refreshed, on: page, at: locationInView),
+                           refreshedNearest.distance <= polygonVertexCaptureThresholdInView() {
+                            activeHit = refreshed
+                            activeNearest = refreshedNearest
+                        }
                     }
-                    movingAnnotation = hit
+                    movingAnnotation = activeHit
                     movingAnnotationPage = page
-                    movingAnnotationStartBounds = hit.bounds
+                    movingAnnotationStartBounds = activeHit.bounds
                     movingStartPointInPage = pointInPage
                     movingLineEndpointHandle = nil
                     movingResizeCorner = nil
-                    movingPolygonVertexIndex = nearest.index
-                    movingPolygonPointsAtDragStart = polygonVerticesInPage(for: hit) ?? []
+                    movingPolygonVertexIndex = activeNearest.index
+                    movingPolygonPointsAtDragStart = polygonVerticesInPage(for: activeHit) ?? []
                     movingLineSegmentAtDragStart = nil
-                    movingAnnotations = [hit]
-                    movingAnnotationStartBoundsByID = [ObjectIdentifier(hit): hit.bounds]
+                    movingAnnotations = [activeHit]
+                    movingAnnotationStartBoundsByID = [ObjectIdentifier(activeHit): activeHit.bounds]
                     captureMovingPolygonOriginalPoints()
                     didMoveAnnotation = false
                     return
                 }
-                let dragCandidates = onResolveDragSelection?(page, hit) ?? [hit]
+                var activeHit = hit
+                var dragCandidates = onResolveDragSelection?(page, activeHit) ?? [activeHit]
                 let shouldPreserveSelectionForDrag = dragCandidates.count > 1
                 if !shouldPreserveSelectionForDrag {
-                    onAnnotationClicked?(page, hit)
+                    onAnnotationClicked?(page, activeHit, event.modifierFlags.contains(.shift))
+                    if let refreshed = nearestAnnotation(
+                        to: pointInPage,
+                        on: page,
+                        maxDistance: selectionHitDistanceInPage()
+                    ) {
+                        activeHit = refreshed
+                    }
+                    dragCandidates = onResolveDragSelection?(page, activeHit) ?? [activeHit]
                 }
-                if event.clickCount >= 2, isEditableTextAnnotation(hit) {
-                    beginInlineTextEditing(for: hit, on: page)
+                if event.clickCount >= 2, isEditableTextAnnotation(activeHit) {
+                    beginInlineTextEditing(for: activeHit, on: page)
                     return
                 }
-                if let calloutState = initialCalloutDragState(from: hit, on: page, pointerInView: locationInView, pointerInPage: pointInPage) {
+                if let calloutState = initialCalloutDragState(from: activeHit, on: page, pointerInView: locationInView, pointerInPage: pointInPage) {
                     movingCalloutState = calloutState
                     didMoveAnnotation = false
                     return
                 }
-                movingAnnotation = hit
+                movingAnnotation = activeHit
                 movingAnnotationPage = page
-                movingAnnotationStartBounds = hit.bounds
+                movingAnnotationStartBounds = activeHit.bounds
                 movingStartPointInPage = pointInPage
-                movingLineEndpointHandle = lineEndpointHit(for: hit, on: page, at: locationInView)
-                movingPolygonVertexIndex = polygonVertexHit(for: hit, on: page, at: locationInView)
+                movingLineEndpointHandle = lineEndpointHit(for: activeHit, on: page, at: locationInView)
+                movingPolygonVertexIndex = polygonVertexHit(for: activeHit, on: page, at: locationInView)
                 if movingPolygonVertexIndex != nil {
-                    movingPolygonPointsAtDragStart = polygonVerticesInPage(for: hit) ?? []
+                    movingPolygonPointsAtDragStart = polygonVerticesInPage(for: activeHit) ?? []
                 } else {
                     movingPolygonPointsAtDragStart = []
                 }
-                movingLineSegmentAtDragStart = lineSegmentInPage(for: hit)
-                movingResizeCorner = resizeCornerHit(for: hit, on: page, at: locationInView)
+                movingLineSegmentAtDragStart = lineSegmentInPage(for: activeHit)
+                movingResizeCorner = resizeCornerHit(for: activeHit, on: page, at: locationInView)
                 let requested = dragCandidates
                 if movingResizeCorner != nil || movingLineEndpointHandle != nil || movingPolygonVertexIndex != nil {
-                    movingAnnotations = [hit]
+                    movingAnnotations = [activeHit]
                 } else {
                     var seen = Set<ObjectIdentifier>()
                     movingAnnotations = requested.filter { candidate in
@@ -1130,7 +1164,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                         return candidate.page === page
                     }
                     if movingAnnotations.isEmpty {
-                        movingAnnotations = [hit]
+                        movingAnnotations = [activeHit]
                     }
                 }
                 movingAnnotationStartBoundsByID = Dictionary(uniqueKeysWithValues: movingAnnotations.map { (ObjectIdentifier($0), $0.bounds) })
@@ -2148,12 +2182,42 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         context.beginPDFPage(nil)
         context.saveGState()
+        context.clip(to: CGRect(origin: .zero, size: clippedRect.size))
         context.translateBy(x: -clippedRect.minX, y: -clippedRect.minY)
-        page.draw(with: displayBox, to: context)
+        if let pageRef = page.pageRef {
+            let cgBox = cgPDFBox(for: displayBox)
+            let boxRect = pageRef.getBoxRect(cgBox)
+            if boxRect.width > 0.1, boxRect.height > 0.1 {
+                let transform = pageRef.getDrawingTransform(cgBox, rect: boxRect, rotate: 0, preserveAspectRatio: true)
+                context.concatenate(transform)
+                context.drawPDFPage(pageRef)
+            } else {
+                page.draw(with: displayBox, to: context)
+            }
+        } else {
+            page.draw(with: displayBox, to: context)
+        }
         context.restoreGState()
         context.endPDFPage()
         context.closePDF()
         return buffer as Data
+    }
+
+    private func cgPDFBox(for displayBox: PDFDisplayBox) -> CGPDFBox {
+        switch displayBox {
+        case .mediaBox:
+            return .mediaBox
+        case .cropBox:
+            return .cropBox
+        case .bleedBox:
+            return .bleedBox
+        case .trimBox:
+            return .trimBox
+        case .artBox:
+            return .artBox
+        @unknown default:
+            return .cropBox
+        }
     }
 
     private func clearPendingPolyline() {
@@ -4199,7 +4263,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             }
         }
         if selectCommittedAnnotation {
-            onAnnotationClicked?(page, annotation)
+            onAnnotationClicked?(page, annotation, false)
         } else {
             onAnnotationsBoxSelected?(page, [])
         }
