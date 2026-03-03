@@ -4378,15 +4378,20 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
     }
 
-    @objc func exportPagesAsJPEG() {
-        guard let document = pdfView.document else { beep(); return }
-        guard let preset = jpegExportPresetSelection() else { return }
+    private struct JPEGExportRunResult {
+        let successCount: Int
+        let failedPages: [Int]
+        let canceled: Bool
+    }
 
-        let baseName = sanitizedFilename((openDocumentURL?.deletingPathExtension().lastPathComponent) ?? "Drawbridge Export")
-        guard let exportDirectory = promptJPEGExportDestination(defaultFolderName: "\(baseName) - JPG Pages") else { return }
-
+    private func runJPEGExport(
+        document: PDFDocument,
+        preset: JPEGExportPreset,
+        exportDirectory: URL,
+        progressTitle: String
+    ) -> JPEGExportRunResult {
         isJPEGExportCancellationRequested = false
-        beginBusyIndicator("Exporting JPEG Pages…", detail: "Preparing export…", lockInteraction: false)
+        beginBusyIndicator(progressTitle, detail: "Preparing export…", lockInteraction: false)
         setBusyCancelAction({ [weak self] in
             guard let self else { return }
             self.isJPEGExportCancellationRequested = true
@@ -4410,7 +4415,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             let completedBefore = pageIndex
             let percentBefore = Int((Double(completedBefore) / Double(max(1, document.pageCount)) * 100.0).rounded())
             let pageLabel = displayPageLabel(forPageIndex: pageIndex)
-            updateBusyIndicatorStatus("Exporting JPEG Pages… \(percentBefore)%")
+            updateBusyIndicatorStatus("\(progressTitle) \(percentBefore)%")
             updateBusyIndicatorDetail("Rendering \(pageIndex + 1)/\(document.pageCount) • \(pageLabel)")
             updateBusyIndicatorSubdetail("ETA calculating…")
             updateBusyIndicatorProgress(current: completedBefore, total: document.pageCount)
@@ -4436,7 +4441,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 let avg = elapsed / Double(max(1, completed))
                 let remaining = avg * Double(max(0, document.pageCount - completed))
                 let percent = Int((Double(completed) / Double(max(1, document.pageCount)) * 100.0).rounded())
-                updateBusyIndicatorStatus("Exporting JPEG Pages… \(percent)%")
+                updateBusyIndicatorStatus("\(progressTitle) \(percent)%")
                 updateBusyIndicatorDetail("\(completed)/\(document.pageCount) • \(preset.title), \(Int(preset.dpi)) DPI")
                 updateBusyIndicatorSubdetail("ETA \(shortDuration(remaining))")
                 updateBusyIndicatorProgress(current: completed, total: document.pageCount)
@@ -4451,35 +4456,199 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             let avg = elapsed / Double(max(1, completed))
             let remaining = avg * Double(max(0, document.pageCount - completed))
             let percent = Int((Double(completed) / Double(max(1, document.pageCount)) * 100.0).rounded())
-            updateBusyIndicatorStatus("Exporting JPEG Pages… \(percent)%")
+            updateBusyIndicatorStatus("\(progressTitle) \(percent)%")
             updateBusyIndicatorDetail("\(completed)/\(document.pageCount) • \(filename)")
             updateBusyIndicatorSubdetail("ETA \(shortDuration(remaining))")
             updateBusyIndicatorProgress(current: completed, total: document.pageCount)
             _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
         }
 
-        if isJPEGExportCancellationRequested {
+        return JPEGExportRunResult(
+            successCount: successCount,
+            failedPages: failedPages,
+            canceled: isJPEGExportCancellationRequested
+        )
+    }
+
+    @objc func exportPagesAsJPEGAndRebuildPDF() {
+        guard let document = pdfView.document else { beep(); return }
+        guard let preset = jpegExportPresetSelection() else { return }
+
+        let baseName = sanitizedFilename((openDocumentURL?.deletingPathExtension().lastPathComponent) ?? "Drawbridge Export")
+        guard let exportDirectory = promptJPEGExportDestination(defaultFolderName: "\(baseName) - JPG Pages") else { return }
+
+        let exportResult = runJPEGExport(
+            document: document,
+            preset: preset,
+            exportDirectory: exportDirectory,
+            progressTitle: "Exporting JPEG Pages…"
+        )
+        if exportResult.canceled {
             runAlert(
                 title: "JPEG Export Canceled",
-                informativeText: "Exported \(successCount) of \(document.pageCount) page(s) to:\n\(exportDirectory.path)"
+                informativeText: "Exported \(exportResult.successCount) of \(document.pageCount) page(s) to:\n\(exportDirectory.path)"
+            )
+            return
+        }
+        guard exportResult.successCount > 0 else {
+            runAlert(
+                title: "No Pages Exported",
+                informativeText: "No JPEG pages were exported, so a combined PDF could not be created.",
+                style: .warning
             )
             return
         }
 
-        if failedPages.isEmpty {
+        let imageURLs = jpegImageURLs(in: exportDirectory)
+        guard !imageURLs.isEmpty else {
+            runAlert(
+                title: "No JPG Files Found",
+                informativeText: "The export completed, but no .jpg files were found in:\n\(exportDirectory.path)",
+                style: .warning
+            )
+            return
+        }
+
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.pdf]
+        savePanel.directoryURL = exportDirectory.deletingLastPathComponent()
+        savePanel.nameFieldStringValue = "\(baseName) - JPG Rebuild.pdf"
+        savePanel.prompt = "Save"
+        guard savePanel.runModal() == .OK, let outputURL = savePanel.url else { return }
+
+        beginBusyIndicator("Rebuilding PDF from JPEG Pages…", detail: "0/\(imageURLs.count)")
+        updateBusyIndicatorSubdetail("Building pages…")
+        updateBusyIndicatorProgress(current: 0, total: imageURLs.count)
+        defer { endBusyIndicator() }
+
+        let rebuiltPDF = PDFDocument()
+        var failedImageFiles: [String] = []
+        for (index, imageURL) in imageURLs.enumerated() {
+            autoreleasepool {
+                if let image = NSImage(contentsOf: imageURL),
+                   let page = PDFPage(image: image) {
+                    rebuiltPDF.insert(page, at: rebuiltPDF.pageCount)
+                } else {
+                    failedImageFiles.append(imageURL.lastPathComponent)
+                }
+            }
+            let done = index + 1
+            updateBusyIndicatorDetail("\(done)/\(imageURLs.count) • \(imageURL.lastPathComponent)")
+            updateBusyIndicatorSubdetail("Output: \(outputURL.lastPathComponent)")
+            updateBusyIndicatorProgress(current: done, total: imageURLs.count)
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
+        }
+
+        guard rebuiltPDF.pageCount > 0 else {
+            runAlert(
+                title: "Rebuild Failed",
+                informativeText: "No JPG files could be converted into PDF pages.",
+                style: .warning
+            )
+            return
+        }
+
+        applyImageFilenameBookmarks(to: rebuiltPDF, imageURLs: imageURLs)
+        guard Self.writePDFDocument(rebuiltPDF, to: outputURL, pageLabels: [:]) else {
+            runAlert(
+                title: "Failed to Save PDF",
+                informativeText: "Could not write the rebuilt PDF to:\n\(outputURL.path)",
+                style: .warning
+            )
+            return
+        }
+
+        openDocument(at: outputURL)
+        let canStartAutoLinkTool = (pdfView.document != nil)
+        let scheduleAutoLinkStart: () -> Void = { [weak self] in
+            guard canStartAutoLinkTool else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self, self.pdfView.document != nil else { return }
+                NSApp.activate(ignoringOtherApps: true)
+                self.view.window?.makeFirstResponder(self.pdfView)
+                self.startAutoLinkSheetNumbersFlow()
+            }
+        }
+        let exportIssueCount = exportResult.failedPages.count
+        let rebuildIssueCount = failedImageFiles.count
+        let hasIssues = exportIssueCount > 0 || rebuildIssueCount > 0
+        let linkSummary = canStartAutoLinkTool
+            ? "Opened PDF. After this message, Drawbridge will start Batch Link Sheet Numbers."
+            : "Saved PDF, but could not open it to start hyperlinking."
+
+        if !hasIssues {
+            runAlert(
+                title: "Export to iPad Complete",
+                informativeText: """
+                Exported \(exportResult.successCount) JPG page(s).
+                Created \(outputURL.lastPathComponent) with \(rebuiltPDF.pageCount) pages.
+
+                \(linkSummary)
+                """
+            )
+            scheduleAutoLinkStart()
+            return
+        }
+
+        let pageFailurePreview = exportResult.failedPages.prefix(10).map(String.init).joined(separator: ", ")
+        let pageFailureSuffix = exportResult.failedPages.count > 10 ? ", …" : ""
+        let imageFailurePreview = failedImageFiles.prefix(8).joined(separator: ", ")
+        let imageFailureSuffix = failedImageFiles.count > 8 ? ", …" : ""
+        var issues: [String] = []
+        if !exportResult.failedPages.isEmpty {
+            issues.append("Export failed page(s): \(pageFailurePreview)\(pageFailureSuffix)")
+        }
+        if !failedImageFiles.isEmpty {
+            issues.append("Rebuild skipped image(s): \(imageFailurePreview)\(imageFailureSuffix)")
+        }
+        runAlert(
+            title: "Export to iPad Complete with Issues",
+            informativeText: """
+            Created \(outputURL.lastPathComponent) with \(rebuiltPDF.pageCount) pages.
+            \(linkSummary)
+
+            \(issues.joined(separator: "\n"))
+            """,
+            style: .warning
+        )
+        scheduleAutoLinkStart()
+    }
+
+    @objc func exportPagesAsJPEG() {
+        guard let document = pdfView.document else { beep(); return }
+        guard let preset = jpegExportPresetSelection() else { return }
+
+        let baseName = sanitizedFilename((openDocumentURL?.deletingPathExtension().lastPathComponent) ?? "Drawbridge Export")
+        guard let exportDirectory = promptJPEGExportDestination(defaultFolderName: "\(baseName) - JPG Pages") else { return }
+
+        let result = runJPEGExport(
+            document: document,
+            preset: preset,
+            exportDirectory: exportDirectory,
+            progressTitle: "Exporting JPEG Pages…"
+        )
+        if result.canceled {
+            runAlert(
+                title: "JPEG Export Canceled",
+                informativeText: "Exported \(result.successCount) of \(document.pageCount) page(s) to:\n\(exportDirectory.path)"
+            )
+            return
+        }
+
+        if result.failedPages.isEmpty {
             runAlert(
                 title: "JPEG Export Complete",
-                informativeText: "Exported \(successCount) page(s) to:\n\(exportDirectory.path)"
+                informativeText: "Exported \(result.successCount) page(s) to:\n\(exportDirectory.path)"
             )
             return
         }
 
-        let failurePreview = failedPages.prefix(12).map(String.init).joined(separator: ", ")
-        let suffix = failedPages.count > 12 ? ", …" : ""
+        let failurePreview = result.failedPages.prefix(12).map(String.init).joined(separator: ", ")
+        let suffix = result.failedPages.count > 12 ? ", …" : ""
         runAlert(
             title: "JPEG Export Completed with Issues",
             informativeText: """
-            Exported \(successCount) page(s) to:
+            Exported \(result.successCount) page(s) to:
             \(exportDirectory.path)
 
             Failed page(s): \(failurePreview)\(suffix)
