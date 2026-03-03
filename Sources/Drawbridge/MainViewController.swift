@@ -388,6 +388,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var autoNamePreviousToolMode: ToolMode?
     private var autoLinkCaptureReferencePageIndex: Int?
     private var autoLinkPreviousToolMode: ToolMode?
+    private var shouldChainAutoNameAfterBatchLink = false
+    private var shouldFinalizeExportToIPadSaveAfterAutoName = false
+    private var pendingExportToIPadTemporaryURL: URL?
+    private var pendingExportToIPadSuggestedFilename: String?
     private let autoSheetLinkAnnotationMarker = "DrawbridgeAutoSheetLink"
     var pageScaleLocks: [Int: PageScaleLock] = [:]
     var lastScaleLockAppliedPageIndex: Int = -1
@@ -4142,7 +4146,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let dpi: CGFloat
     }
 
-    private func jpegExportPresetSelection() -> JPEGExportPreset? {
+    private func jpegExportPresetSelection(defaultIndex: Int = 2) -> JPEGExportPreset? {
         let presets: [JPEGExportPreset] = [
             .init(title: "Low (60%)", compressionQuality: 0.60, dpi: 120),
             .init(title: "Medium (75%)", compressionQuality: 0.75, dpi: 150),
@@ -4152,7 +4156,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 260, height: 28), pullsDown: false)
         popup.addItems(withTitles: presets.map(\.title))
-        popup.selectItem(at: 2)
+        let clampedDefaultIndex = max(0, min(defaultIndex, presets.count - 1))
+        popup.selectItem(at: clampedDefaultIndex)
 
         let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 42))
         popup.translatesAutoresizingMaskIntoConstraints = false
@@ -4472,7 +4477,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     @objc func exportPagesAsJPEGAndRebuildPDF() {
         guard let document = pdfView.document else { beep(); return }
-        guard let preset = jpegExportPresetSelection() else { return }
+        guard let preset = jpegExportPresetSelection(defaultIndex: 0) else { return }
 
         let baseName = sanitizedFilename((openDocumentURL?.deletingPathExtension().lastPathComponent) ?? "Drawbridge Export")
         guard let exportDirectory = promptJPEGExportDestination(defaultFolderName: "\(baseName) - JPG Pages") else { return }
@@ -4509,12 +4514,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
 
-        let savePanel = NSSavePanel()
-        savePanel.allowedContentTypes = [.pdf]
-        savePanel.directoryURL = exportDirectory.deletingLastPathComponent()
-        savePanel.nameFieldStringValue = "\(baseName) - JPG Rebuild.pdf"
-        savePanel.prompt = "Save"
-        guard savePanel.runModal() == .OK, let outputURL = savePanel.url else { return }
+        let temporaryOutputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("drawbridge-export-ipad-\(UUID().uuidString)")
+            .appendingPathExtension("pdf")
 
         beginBusyIndicator("Rebuilding PDF from JPEG Pages…", detail: "0/\(imageURLs.count)")
         updateBusyIndicatorSubdetail("Building pages…")
@@ -4534,7 +4536,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             }
             let done = index + 1
             updateBusyIndicatorDetail("\(done)/\(imageURLs.count) • \(imageURL.lastPathComponent)")
-            updateBusyIndicatorSubdetail("Output: \(outputURL.lastPathComponent)")
+            updateBusyIndicatorSubdetail("Preparing combined PDF…")
             updateBusyIndicatorProgress(current: done, total: imageURLs.count)
             _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
         }
@@ -4549,16 +4551,24 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
 
         applyImageFilenameBookmarks(to: rebuiltPDF, imageURLs: imageURLs)
-        guard Self.writePDFDocument(rebuiltPDF, to: outputURL, pageLabels: [:]) else {
+        guard Self.writePDFDocument(rebuiltPDF, to: temporaryOutputURL, pageLabels: [:]) else {
             runAlert(
                 title: "Failed to Save PDF",
-                informativeText: "Could not write the rebuilt PDF to:\n\(outputURL.path)",
+                informativeText: "Could not create the temporary combined PDF.",
                 style: .warning
             )
             return
         }
+        try? FileManager.default.removeItem(at: exportDirectory)
 
-        openDocument(at: outputURL)
+        openDocument(at: temporaryOutputURL)
+        // Export-to-iPad works on a temporary document and should only prompt for Save once at the end.
+        hasPromptedForInitialMarkupSaveCopy = true
+        isPresentingInitialMarkupSaveCopyPrompt = false
+        shouldChainAutoNameAfterBatchLink = false
+        shouldFinalizeExportToIPadSaveAfterAutoName = false
+        pendingExportToIPadTemporaryURL = nil
+        pendingExportToIPadSuggestedFilename = nil
         let canStartAutoLinkTool = (pdfView.document != nil)
         let scheduleAutoLinkStart: () -> Void = { [weak self] in
             guard canStartAutoLinkTool else { return }
@@ -4566,6 +4576,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 guard let self, self.pdfView.document != nil else { return }
                 NSApp.activate(ignoringOtherApps: true)
                 self.view.window?.makeFirstResponder(self.pdfView)
+                self.shouldChainAutoNameAfterBatchLink = true
+                self.shouldFinalizeExportToIPadSaveAfterAutoName = true
+                self.pendingExportToIPadTemporaryURL = temporaryOutputURL
+                self.pendingExportToIPadSuggestedFilename = "\(baseName) - iPad.pdf"
                 self.startAutoLinkSheetNumbersFlow()
             }
         }
@@ -4581,7 +4595,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 title: "Export to iPad Complete",
                 informativeText: """
                 Exported \(exportResult.successCount) JPG page(s).
-                Created \(outputURL.lastPathComponent) with \(rebuiltPDF.pageCount) pages.
+                Built a combined PDF with \(rebuiltPDF.pageCount) pages.
 
                 \(linkSummary)
                 """
@@ -4604,7 +4618,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         runAlert(
             title: "Export to iPad Complete with Issues",
             informativeText: """
-            Created \(outputURL.lastPathComponent) with \(rebuiltPDF.pageCount) pages.
+            Built a combined PDF with \(rebuiltPDF.pageCount) pages.
             \(linkSummary)
 
             \(issues.joined(separator: "\n"))
@@ -5883,6 +5897,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             setTool(previous)
         }
         autoNamePreviousToolMode = nil
+        shouldFinalizeExportToIPadSaveAfterAutoName = false
+        pendingExportToIPadTemporaryURL = nil
+        pendingExportToIPadSuggestedFilename = nil
     }
 
     private func handleAutoNameRegionCaptured(on page: PDFPage, rectInPage: NSRect) {
@@ -6061,6 +6078,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             setTool(previous)
         }
         autoLinkPreviousToolMode = nil
+        shouldChainAutoNameAfterBatchLink = false
+        shouldFinalizeExportToIPadSaveAfterAutoName = false
+        pendingExportToIPadTemporaryURL = nil
+        pendingExportToIPadSuggestedFilename = nil
     }
 
     private func handleAutoLinkRegionCaptured(on page: PDFPage, rectInPage: NSRect) {
@@ -6090,6 +6111,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             cancelAutoLinkCapture()
             return
         }
+        var completedBatchLink = false
         guard let referenceIndex = autoLinkCaptureReferencePageIndex,
               referenceIndex >= 0,
               referenceIndex < document.pageCount else {
@@ -6105,6 +6127,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             }
             autoLinkPreviousToolMode = nil
             autoLinkCaptureReferencePageIndex = nil
+            if !completedBatchLink {
+                shouldChainAutoNameAfterBatchLink = false
+                shouldFinalizeExportToIPadSaveAfterAutoName = false
+            }
         }
 
         var sheetTokenToPageIndex: [String: Int] = [:]
@@ -6441,6 +6467,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             title: "Batch Link Complete",
             informativeText: "Detected \(sheetTokenToPageIndex.count) sheet numbers and created \(addedLinks) hyperlink(s) across \(document.pageCount) page(s)."
         )
+        completedBatchLink = true
+
+        let shouldChainAutoName = shouldChainAutoNameAfterBatchLink
+        shouldChainAutoNameAfterBatchLink = false
+        if shouldChainAutoName {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self, self.pdfView.document != nil else { return }
+                NSApp.activate(ignoringOtherApps: true)
+                self.view.window?.makeFirstResponder(self.pdfView)
+                self.startAutoGenerateSheetNamesFlow()
+            }
+        }
     }
 
     private func pageIndex(for page: PDFPage, in document: PDFDocument) -> Int? {
@@ -6811,6 +6849,46 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             informativeText = "Applied bookmarks for \(sheets.count) pages."
         }
         runAlert(title: "Sheet Names Updated", informativeText: informativeText)
+
+        if shouldFinalizeExportToIPadSaveAfterAutoName {
+            shouldFinalizeExportToIPadSaveAfterAutoName = false
+            promptFinalizeExportToIPadSave(document: document)
+        }
+    }
+
+    private func promptFinalizeExportToIPadSave(document: PDFDocument) {
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.pdf]
+        savePanel.prompt = "Save"
+        if let suggested = pendingExportToIPadSuggestedFilename, !suggested.isEmpty {
+            savePanel.nameFieldStringValue = suggested
+        } else {
+            savePanel.nameFieldStringValue = "Drawbridge-iPad.pdf"
+        }
+        guard savePanel.runModal() == .OK, let finalURL = savePanel.url else {
+            pendingExportToIPadTemporaryURL = nil
+            pendingExportToIPadSuggestedFilename = nil
+            return
+        }
+
+        let temporaryURL = pendingExportToIPadTemporaryURL
+        pendingExportToIPadTemporaryURL = nil
+        pendingExportToIPadSuggestedFilename = nil
+
+        persistDocument(
+            to: finalURL,
+            adoptAsPrimaryDocument: true,
+            busyMessage: "Saving PDF…",
+            document: document,
+            showBusyOverlay: true,
+            deferEmbeddedWrite: false
+        )
+
+        if let temporaryURL,
+           temporaryURL.standardizedFileURL != finalURL.standardizedFileURL,
+           FileManager.default.fileExists(atPath: temporaryURL.path) {
+            try? FileManager.default.removeItem(at: temporaryURL)
+        }
     }
 
     private func clearAllBookmarks(in document: PDFDocument) {
