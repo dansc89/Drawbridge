@@ -207,6 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         fileMenu.addItem(withTitle: "Batch Combine PDFs…", action: #selector(MainViewController.commandBatchCombinePDFs(_:)), keyEquivalent: "").target = controller
         let convertRoot = NSMenuItem(title: "Convert...", action: nil, keyEquivalent: "")
         let convertMenu = NSMenu(title: "Convert")
+        convertMenu.addItem(withTitle: "Export to iPad…", action: #selector(MainViewController.commandExportPagesAsJPEGAndRebuildPDF(_:)), keyEquivalent: "").target = controller
         convertMenu.addItem(withTitle: "JPG Folder to PDF…", action: #selector(MainViewController.commandConvertImagesToPDF(_:)), keyEquivalent: "").target = controller
         convertMenu.addItem(withTitle: "Batch Export PDFs as JPEGs…", action: #selector(MainViewController.commandBatchExportPDFsAsJPEG(_:)), keyEquivalent: "").target = controller
         convertRoot.submenu = convertMenu

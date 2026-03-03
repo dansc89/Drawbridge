@@ -161,6 +161,7 @@ extension MainViewController {
     @objc func commandSaveCopy(_ sender: Any?) { saveCopy() }
     @objc func commandExportCSV(_ sender: Any?) { exportMarkupsCSV() }
     @objc func commandExportPagesAsJPEG(_ sender: Any?) { exportPagesAsJPEG() }
+    @objc func commandExportPagesAsJPEGAndRebuildPDF(_ sender: Any?) { exportPagesAsJPEGAndRebuildPDF() }
     @objc func commandBatchExportPDFsAsJPEG(_ sender: Any?) { batchExportPDFsAsJPEG() }
     @objc func commandConvertImagesToPDF(_ sender: Any?) { convertImageFolderToPDF() }
     @objc func commandBatchCombinePDFs(_ sender: Any?) { batchCombinePDFs() }
@@ -668,6 +669,7 @@ extension MainViewController {
              #selector(commandNew(_:)),
              #selector(commandKeyboardShortcuts(_:)),
              #selector(commandPerformanceSettings(_:)),
+             #selector(commandExportPagesAsJPEGAndRebuildPDF(_:)),
              #selector(commandConvertImagesToPDF(_:)),
              #selector(commandBatchCombinePDFs(_:)),
              #selector(commandBatchExportPDFsAsJPEG(_:)):
