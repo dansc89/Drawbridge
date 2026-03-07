@@ -45,17 +45,7 @@ echo "Generating app icon..."
 mkdir -p "$ICONSET_DIR"
 if [[ -f "$ICON_SOURCE_PNG" ]]; then
   echo "Using icon source: $ICON_SOURCE_PNG"
-  width="$(sips -g pixelWidth "$ICON_SOURCE_PNG" | awk '/pixelWidth/ {print $2}')"
-  height="$(sips -g pixelHeight "$ICON_SOURCE_PNG" | awk '/pixelHeight/ {print $2}')"
-  side="$width"
-  if [[ "$height" -lt "$side" ]]; then
-    side="$height"
-  fi
-  crop_side="$(awk -v side="$side" -v scale="$ICON_FILL_SCALE" 'BEGIN { s = side / scale; if (s < 1) s = 1; if (s > side) s = side; printf "%d", s }')"
-  tmp_square="$ICONSET_DIR/icon_source_square.png"
-  sips -c "$crop_side" "$crop_side" "$ICON_SOURCE_PNG" --out "$tmp_square" >/dev/null
-  sips -z 1024 1024 "$tmp_square" --out "$ICONSET_DIR/icon_1024x1024.png" >/dev/null
-  rm -f "$tmp_square"
+  swift Scripts/prepare-icon.swift "$ICON_SOURCE_PNG" "$ICONSET_DIR/icon_1024x1024.png" "$ICON_FILL_SCALE"
 elif [[ ! -f "$ICONSET_DIR/icon_1024x1024.png" ]]; then
   swift Scripts/generate-icon.swift
 fi
