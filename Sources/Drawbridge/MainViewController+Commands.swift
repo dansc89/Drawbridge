@@ -779,10 +779,9 @@ extension MainViewController {
     private func zoom(by factor: CGFloat) {
         guard pdfView.document != nil else { return }
         lastUserInteractionAt = Date()
-        pdfView.autoScales = false
-        let target = min(max(pdfView.minScaleFactor, pdfView.scaleFactor * factor), pdfView.maxScaleFactor)
-        pdfView.scaleFactor = target
-        updateStatusBar()
+        if pdfView.zoom(by: factor) {
+            updateStatusBar()
+        }
     }
 
     @objc func jumpToPageFromField() {

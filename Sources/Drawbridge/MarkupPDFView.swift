@@ -6315,6 +6315,79 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         handleWheelZoom(event)
     }
 
+    @discardableResult
+    func zoom(by factor: CGFloat, anchoredAtWindowPoint windowPoint: NSPoint? = nil) -> Bool {
+        guard document != nil, factor > 0 else { return false }
+
+        autoScales = false
+        let targetScale = min(max(minScaleFactor, scaleFactor * factor), maxScaleFactor)
+        guard targetScale != scaleFactor else { return false }
+
+        let locationInView = clampPointToBounds(resolvedZoomAnchorPoint(fromWindowPoint: windowPoint))
+
+        if let scrollView = internalScrollView(),
+           let documentView = scrollView.contentView.documentView {
+            let anchorBefore = documentView.convert(locationInView, from: self)
+            scaleFactor = targetScale
+            layoutSubtreeIfNeeded()
+
+            let anchorAfter = documentView.convert(locationInView, from: self)
+            var newOrigin = scrollView.contentView.bounds.origin
+            newOrigin.x += anchorAfter.x - anchorBefore.x
+            newOrigin.y += anchorAfter.y - anchorBefore.y
+
+            let clipSize = scrollView.contentView.bounds.size
+            let maxOriginX = max(0, documentView.bounds.width - clipSize.width)
+            let maxOriginY = max(0, documentView.bounds.height - clipSize.height)
+            newOrigin.x = min(max(0, newOrigin.x), maxOriginX)
+            newOrigin.y = min(max(0, newOrigin.y), maxOriginY)
+            scrollView.contentView.scroll(to: newOrigin)
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        } else if let page = page(for: locationInView, nearest: true) {
+            let anchorPagePoint = convert(locationInView, to: page)
+            scaleFactor = targetScale
+            go(to: PDFDestination(page: page, at: anchorPagePoint))
+        } else {
+            scaleFactor = targetScale
+        }
+        updateGridOverlayIfNeeded()
+        onViewportChanged?()
+        return true
+    }
+
+    private func internalScrollView() -> NSScrollView? {
+        if let direct = subviews.first(where: { $0 is NSScrollView }) as? NSScrollView {
+            return direct
+        }
+        var stack = subviews
+        while let view = stack.popLast() {
+            if let scrollView = view as? NSScrollView {
+                return scrollView
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return nil
+    }
+
+    private func resolvedZoomAnchorPoint(fromWindowPoint windowPoint: NSPoint?) -> NSPoint {
+        if let windowPoint {
+            return convert(windowPoint, from: nil)
+        }
+        if let window {
+            let mouseInWindow = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+            return convert(mouseInWindow, from: nil)
+        }
+        return NSPoint(x: bounds.midX, y: bounds.midY)
+    }
+
+    private func clampPointToBounds(_ point: NSPoint) -> NSPoint {
+        guard !bounds.isEmpty else { return point }
+        return NSPoint(
+            x: min(max(bounds.minX, point.x), bounds.maxX),
+            y: min(max(bounds.minY, point.y), bounds.maxY)
+        )
+    }
+
     func handleWheelZoom(_ event: NSEvent) {
         guard document != nil else {
             super.scrollWheel(with: event)
@@ -6337,30 +6410,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let step = isTrackpadLike ? (1.0 + min(0.035, normalizedDelta * 0.0045))
                                    : (1.0 + min(0.16, normalizedDelta * 0.03))
         let factor = zoomIn ? step : (1.0 / step)
-
-        autoScales = false
-        let targetScale = min(max(minScaleFactor, scaleFactor * factor), maxScaleFactor)
-        guard targetScale != scaleFactor else { return }
-
-        let locationInView = convert(event.locationInWindow, from: nil)
-        if let page = page(for: locationInView, nearest: true) {
-            let anchorPagePoint = convert(locationInView, to: page)
-            scaleFactor = targetScale
-
-            // Keep the exact PDF point under cursor fixed while zooming.
-            let pageUnderCursorAfterZoom = convert(locationInView, to: page)
-            let deltaX = anchorPagePoint.x - pageUnderCursorAfterZoom.x
-            let deltaY = anchorPagePoint.y - pageUnderCursorAfterZoom.y
-            let base = currentDestination?.point ?? convert(NSPoint(x: bounds.midX, y: bounds.midY), to: page)
-            let destination = NSPoint(x: base.x + deltaX, y: base.y + deltaY)
-            go(to: PDFDestination(page: page, at: destination))
-            updateGridOverlayIfNeeded()
-            onViewportChanged?()
-        } else {
-            scaleFactor = targetScale
-            updateGridOverlayIfNeeded()
-            onViewportChanged?()
-        }
+        _ = zoom(by: factor, anchoredAtWindowPoint: event.locationInWindow)
     }
 
     override func otherMouseDown(with event: NSEvent) {
