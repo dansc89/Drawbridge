@@ -16,6 +16,7 @@ RESOURCES_DIR="$CONTENTS_DIR/Resources"
 PLIST_PATH="$CONTENTS_DIR/Info.plist"
 ICONSET_DIR="Assets/AppIcon.iconset"
 ICON_SOURCE_PNG="Assets/db.png"
+ICON_FILL_SCALE="${ICON_FILL_SCALE:-1.08}"
 ICON_FILE_NAME="Drawbridge"
 ICON_ICNS_PATH="$RESOURCES_DIR/$ICON_FILE_NAME.icns"
 VERSION_TAG="${DRAWBRIDGE_VERSION_TAG:-$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")}"
@@ -50,8 +51,9 @@ if [[ -f "$ICON_SOURCE_PNG" ]]; then
   if [[ "$height" -lt "$side" ]]; then
     side="$height"
   fi
+  crop_side="$(awk -v side="$side" -v scale="$ICON_FILL_SCALE" 'BEGIN { s = side / scale; if (s < 1) s = 1; if (s > side) s = side; printf "%d", s }')"
   tmp_square="$ICONSET_DIR/icon_source_square.png"
-  sips -c "$side" "$side" "$ICON_SOURCE_PNG" --out "$tmp_square" >/dev/null
+  sips -c "$crop_side" "$crop_side" "$ICON_SOURCE_PNG" --out "$tmp_square" >/dev/null
   sips -z 1024 1024 "$tmp_square" --out "$ICONSET_DIR/icon_1024x1024.png" >/dev/null
   rm -f "$tmp_square"
 elif [[ ! -f "$ICONSET_DIR/icon_1024x1024.png" ]]; then
