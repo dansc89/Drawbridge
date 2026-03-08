@@ -6325,48 +6325,22 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         let locationInView = clampPointToBounds(resolvedZoomAnchorPoint(fromWindowPoint: windowPoint))
 
-        if let scrollView = internalScrollView(),
-           let documentView = scrollView.contentView.documentView {
-            let anchorBefore = documentView.convert(locationInView, from: self)
-            scaleFactor = targetScale
-            layoutSubtreeIfNeeded()
-
-            let anchorAfter = documentView.convert(locationInView, from: self)
-            var newOrigin = scrollView.contentView.bounds.origin
-            newOrigin.x += anchorAfter.x - anchorBefore.x
-            newOrigin.y += anchorAfter.y - anchorBefore.y
-
-            let clipSize = scrollView.contentView.bounds.size
-            let maxOriginX = max(0, documentView.bounds.width - clipSize.width)
-            let maxOriginY = max(0, documentView.bounds.height - clipSize.height)
-            newOrigin.x = min(max(0, newOrigin.x), maxOriginX)
-            newOrigin.y = min(max(0, newOrigin.y), maxOriginY)
-            scrollView.contentView.scroll(to: newOrigin)
-            scrollView.reflectScrolledClipView(scrollView.contentView)
-        } else if let page = page(for: locationInView, nearest: true) {
+        if let page = page(for: locationInView, nearest: true) {
             let anchorPagePoint = convert(locationInView, to: page)
             scaleFactor = targetScale
-            go(to: PDFDestination(page: page, at: anchorPagePoint))
+            let pagePointAfterZoom = convert(locationInView, to: page)
+            let deltaX = anchorPagePoint.x - pagePointAfterZoom.x
+            let deltaY = anchorPagePoint.y - pagePointAfterZoom.y
+            let fallbackCenter = NSPoint(x: bounds.midX, y: bounds.midY)
+            let base = currentDestination?.point ?? convert(fallbackCenter, to: page)
+            let destination = NSPoint(x: base.x + deltaX, y: base.y + deltaY)
+            go(to: PDFDestination(page: page, at: destination))
         } else {
             scaleFactor = targetScale
         }
         updateGridOverlayIfNeeded()
         onViewportChanged?()
         return true
-    }
-
-    private func internalScrollView() -> NSScrollView? {
-        if let direct = subviews.first(where: { $0 is NSScrollView }) as? NSScrollView {
-            return direct
-        }
-        var stack = subviews
-        while let view = stack.popLast() {
-            if let scrollView = view as? NSScrollView {
-                return scrollView
-            }
-            stack.append(contentsOf: view.subviews)
-        }
-        return nil
     }
 
     private func resolvedZoomAnchorPoint(fromWindowPoint windowPoint: NSPoint?) -> NSPoint {
@@ -6400,16 +6374,24 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return
         }
 
-        let zoomIn = delta > 0
         let isTrackpadLike = event.hasPreciseScrollingDeltas
-        let normalizedDelta = abs(delta)
+        if isTrackpadLike, event.momentumPhase != [] {
+            return
+        }
 
-        // Tune zoom feel by input device:
-        // - Mouse wheel: more aggressive per notch.
-        // - Trackpad: finer increments with smooth acceleration.
-        let step = isTrackpadLike ? (1.0 + min(0.035, normalizedDelta * 0.0045))
-                                   : (1.0 + min(0.16, normalizedDelta * 0.03))
-        let factor = zoomIn ? step : (1.0 / step)
+        let magnitude = abs(delta)
+        let stepMagnitude: CGFloat
+        if isTrackpadLike {
+            // Trackpad: smooth and fine-grained, with gentle acceleration.
+            let capped = min(24.0, magnitude)
+            stepMagnitude = pow(1.006, capped)
+        } else {
+            // Mouse wheel: stronger per notch, closer to CAD/PDF editor feel.
+            let notches = max(1.0, min(6.0, magnitude))
+            stepMagnitude = pow(1.12, notches)
+        }
+
+        let factor = delta > 0 ? stepMagnitude : (1.0 / stepMagnitude)
         _ = zoom(by: factor, anchoredAtWindowPoint: event.locationInWindow)
     }
 
