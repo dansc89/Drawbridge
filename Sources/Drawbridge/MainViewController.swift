@@ -390,8 +390,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var autoLinkPreviousToolMode: ToolMode?
     private var shouldChainAutoNameAfterBatchLink = false
     private var shouldFinalizeExportToIPadSaveAfterAutoName = false
+    private var shouldFinalizeExportToBluebeamSaveAfterAutoName = false
     private var pendingExportToIPadTemporaryURL: URL?
     private var pendingExportToIPadSuggestedFilename: String?
+    private var pendingExportToBluebeamTemporaryURL: URL?
+    private var pendingExportToBluebeamSuggestedFilename: String?
     private let autoSheetLinkAnnotationMarker = "DrawbridgeAutoSheetLink"
     var pageScaleLocks: [Int: PageScaleLock] = [:]
     var lastScaleLockAppliedPageIndex: Int = -1
@@ -4628,6 +4631,60 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         scheduleAutoLinkStart()
     }
 
+    @objc func commandExportToBluebeam(_ sender: Any?) {
+        guard let document = pdfView.document else { beep(); return }
+        let baseName = sanitizedFilename((openDocumentURL?.deletingPathExtension().lastPathComponent) ?? "Drawbridge Export")
+        let temporaryOutputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("drawbridge-export-bluebeam-\(UUID().uuidString)")
+            .appendingPathExtension("pdf")
+
+        guard Self.writePDFDocument(document, to: temporaryOutputURL, pageLabels: pageLabelOverrides) else {
+            runAlert(
+                title: "Failed to Prepare Export",
+                informativeText: "Could not create the temporary Bluebeam export copy.",
+                style: .warning
+            )
+            return
+        }
+
+        openDocument(at: temporaryOutputURL)
+        hasPromptedForInitialMarkupSaveCopy = true
+        isPresentingInitialMarkupSaveCopyPrompt = false
+        shouldChainAutoNameAfterBatchLink = false
+        shouldFinalizeExportToIPadSaveAfterAutoName = false
+        shouldFinalizeExportToBluebeamSaveAfterAutoName = false
+        pendingExportToIPadTemporaryURL = nil
+        pendingExportToIPadSuggestedFilename = nil
+        pendingExportToBluebeamTemporaryURL = nil
+        pendingExportToBluebeamSuggestedFilename = nil
+
+        let canStartAutoLinkTool = (pdfView.document != nil)
+        let scheduleAutoLinkStart: () -> Void = { [weak self] in
+            guard canStartAutoLinkTool else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self, self.pdfView.document != nil else { return }
+                NSApp.activate(ignoringOtherApps: true)
+                self.view.window?.makeFirstResponder(self.pdfView)
+                self.shouldChainAutoNameAfterBatchLink = true
+                self.shouldFinalizeExportToBluebeamSaveAfterAutoName = true
+                self.pendingExportToBluebeamTemporaryURL = temporaryOutputURL
+                self.pendingExportToBluebeamSuggestedFilename = "\(baseName) - Bluebeam.pdf"
+                self.startAutoLinkSheetNumbersFlow()
+            }
+        }
+
+        if canStartAutoLinkTool {
+            scheduleAutoLinkStart()
+            return
+        }
+
+        runAlert(
+            title: "Export to Bluebeam Failed",
+            informativeText: "Created a temporary PDF copy, but could not open it to start hyperlinking.",
+            style: .warning
+        )
+    }
+
     @objc func exportPagesAsJPEG() {
         guard let document = pdfView.document else { beep(); return }
         guard let preset = jpegExportPresetSelection() else { return }
@@ -5898,8 +5955,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         autoNamePreviousToolMode = nil
         shouldFinalizeExportToIPadSaveAfterAutoName = false
+        shouldFinalizeExportToBluebeamSaveAfterAutoName = false
         pendingExportToIPadTemporaryURL = nil
         pendingExportToIPadSuggestedFilename = nil
+        pendingExportToBluebeamTemporaryURL = nil
+        pendingExportToBluebeamSuggestedFilename = nil
     }
 
     private func handleAutoNameRegionCaptured(on page: PDFPage, rectInPage: NSRect) {
@@ -6080,8 +6140,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         autoLinkPreviousToolMode = nil
         shouldChainAutoNameAfterBatchLink = false
         shouldFinalizeExportToIPadSaveAfterAutoName = false
+        shouldFinalizeExportToBluebeamSaveAfterAutoName = false
         pendingExportToIPadTemporaryURL = nil
         pendingExportToIPadSuggestedFilename = nil
+        pendingExportToBluebeamTemporaryURL = nil
+        pendingExportToBluebeamSuggestedFilename = nil
     }
 
     private func handleAutoLinkRegionCaptured(on page: PDFPage, rectInPage: NSRect) {
@@ -6854,6 +6917,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             shouldFinalizeExportToIPadSaveAfterAutoName = false
             promptFinalizeExportToIPadSave(document: document)
         }
+        if shouldFinalizeExportToBluebeamSaveAfterAutoName {
+            shouldFinalizeExportToBluebeamSaveAfterAutoName = false
+            promptFinalizeExportToBluebeamSave(document: document)
+        }
     }
 
     private func promptFinalizeExportToIPadSave(document: PDFDocument) {
@@ -6878,6 +6945,40 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         persistDocument(
             to: finalURL,
             adoptAsPrimaryDocument: true,
+            busyMessage: "Saving PDF…",
+            document: document,
+            showBusyOverlay: true,
+            deferEmbeddedWrite: false
+        )
+
+        if let temporaryURL,
+           temporaryURL.standardizedFileURL != finalURL.standardizedFileURL,
+           FileManager.default.fileExists(atPath: temporaryURL.path) {
+            try? FileManager.default.removeItem(at: temporaryURL)
+        }
+    }
+
+    private func promptFinalizeExportToBluebeamSave(document: PDFDocument) {
+        let savePanel = NSSavePanel()
+        savePanel.allowedContentTypes = [.pdf]
+        savePanel.prompt = "Save"
+        if let suggested = pendingExportToBluebeamSuggestedFilename, !suggested.isEmpty {
+            savePanel.nameFieldStringValue = suggested
+        } else {
+            savePanel.nameFieldStringValue = "Drawbridge-Bluebeam.pdf"
+        }
+        guard savePanel.runModal() == .OK, let finalURL = savePanel.url else {
+            pendingExportToBluebeamTemporaryURL = nil
+            pendingExportToBluebeamSuggestedFilename = nil
+            return
+        }
+
+        let temporaryURL = pendingExportToBluebeamTemporaryURL
+        pendingExportToBluebeamTemporaryURL = nil
+        pendingExportToBluebeamSuggestedFilename = nil
+        persistDocument(
+            to: finalURL,
+            adoptAsPrimaryDocument: false,
             busyMessage: "Saving PDF…",
             document: document,
             showBusyOverlay: true,
