@@ -49,6 +49,12 @@ security find-identity -v -p codesigning
 
 You need a `Developer ID Application:` identity in the output.
 
+Quick local diagnostic:
+
+```bash
+./Scripts/check-signing-setup.sh
+```
+
 ### 2) Build with Developer ID signing
 
 ```bash
