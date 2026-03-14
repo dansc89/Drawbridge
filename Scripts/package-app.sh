@@ -59,6 +59,15 @@ cp "$ICONSET_DIR/icon_512x512.png" "$ICONSET_DIR/icon_256x256@2x.png"
 cp "$ICONSET_DIR/icon_1024x1024.png" "$ICONSET_DIR/icon_512x512@2x.png"
 iconutil -c icns "$ICONSET_DIR" -o "$ICON_ICNS_PATH"
 
+if [[ -n "$SIGN_IDENTITY" ]]; then
+  if ! security find-identity -v -p codesigning | grep -Fq "$SIGN_IDENTITY"; then
+    echo "Requested signing identity not available in keychain:"
+    echo "  $SIGN_IDENTITY"
+    echo "Run ./Scripts/check-signing-setup.sh for diagnostics."
+    exit 1
+  fi
+fi
+
 cat > "$PLIST_PATH" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
