@@ -10,6 +10,7 @@ APP_PATH="$1"
 OUTPUT_DMG="$2"
 VOLUME_NAME="${3:-Drawbridge}"
 APP_BASENAME="$(basename "$APP_PATH")"
+SIGN_IDENTITY="${DRAWBRIDGE_CODESIGN_IDENTITY:-}"
 
 if [[ ! -d "$APP_PATH" ]]; then
   echo "App bundle not found: $APP_PATH"
@@ -59,5 +60,13 @@ create-dmg \
   --add-file "Applications" "$APPS_ALIAS_PATH" 650 285 \
   "$OUTPUT_DMG" \
   "$STAGING_DIR"
+
+if [[ -n "$SIGN_IDENTITY" ]]; then
+  echo "Signing DMG with Developer ID identity: $SIGN_IDENTITY"
+  codesign --force --sign "$SIGN_IDENTITY" --timestamp "$OUTPUT_DMG"
+
+  echo "Verifying DMG signature..."
+  codesign --verify --verbose=2 "$OUTPUT_DMG"
+fi
 
 echo "Created DMG: $OUTPUT_DMG"
