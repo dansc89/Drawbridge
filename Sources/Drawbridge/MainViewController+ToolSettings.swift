@@ -361,6 +361,7 @@ extension MainViewController {
     }
 
     func updateToolSettingsUIForCurrentTool() {
+        defer { syncToolbarQuickControlsFromToolSettings() }
         let selectedItems = currentSelectedMarkupItems()
         if pdfView.toolMode == .select, let primary = selectedItems.first?.annotation {
             let inferredTool = inferredToolMode(for: primary)

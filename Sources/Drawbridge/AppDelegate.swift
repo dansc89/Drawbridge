@@ -272,14 +272,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainMenu.addItem(toolsItem)
         let toolsMenu = NSMenu(title: "Tools")
         toolsMenu.addItem(withTitle: "Selection Tool", action: #selector(MainViewController.selectSelectionTool(_:)), keyEquivalent: "0").target = controller
-        toolsMenu.addItem(withTitle: "Pen Tool", action: #selector(MainViewController.selectPenTool(_:)), keyEquivalent: "1").target = controller
-        toolsMenu.addItem(withTitle: "Highlighter Tool", action: #selector(MainViewController.selectHighlighterTool(_:)), keyEquivalent: "2").target = controller
-        toolsMenu.addItem(withTitle: "Cloud Tool", action: #selector(MainViewController.selectCloudTool(_:)), keyEquivalent: "3").target = controller
-        toolsMenu.addItem(withTitle: "Rectangle Tool", action: #selector(MainViewController.selectRectangleTool(_:)), keyEquivalent: "4").target = controller
-        toolsMenu.addItem(withTitle: "Text Tool", action: #selector(MainViewController.selectTextTool(_:)), keyEquivalent: "5").target = controller
-        toolsMenu.addItem(withTitle: "Callout Tool", action: #selector(MainViewController.selectCalloutTool(_:)), keyEquivalent: "6").target = controller
-        toolsMenu.addItem(withTitle: "Measure Tool", action: #selector(MainViewController.selectMeasureTool(_:)), keyEquivalent: "7").target = controller
-        toolsMenu.addItem(withTitle: "Calibrate Tool", action: #selector(MainViewController.selectCalibrateTool(_:)), keyEquivalent: "8").target = controller
         for item in toolsMenu.items { item.keyEquivalentModifierMask = [.command] }
         toolsItem.submenu = toolsMenu
 

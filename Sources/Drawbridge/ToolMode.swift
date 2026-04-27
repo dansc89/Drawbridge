@@ -20,13 +20,27 @@ enum ToolMode {
 }
 
 extension ToolMode {
-    static let primaryToolbarModes: [ToolMode] = [
-        .select, .grab, .pen, .arrow, .line, .polyline, .polygon, .highlighter, .cloud, .rectangle, .circle, .text, .callout
+    static let enabledModesInScratchReset: Set<ToolMode> = [
+        .select
     ]
 
-    static let takeoffToolbarModes: [ToolMode] = [
-        .area, .measure
+    var isEnabledInScratchReset: Bool {
+        Self.enabledModesInScratchReset.contains(self)
+    }
+
+    static let navigationToolbarModes: [ToolMode] = [
+        .select
     ]
+
+    static let drawingToolbarModes: [ToolMode] = []
+
+    static let geometryToolbarModes: [ToolMode] = []
+
+    static let primaryToolbarModes: [ToolMode] = [
+        .select
+    ]
+
+    static let takeoffToolbarModes: [ToolMode] = []
 
     static func fromPrimaryToolbarSegment(_ segment: Int) -> ToolMode? {
         guard segment >= 0, segment < primaryToolbarModes.count else { return nil }
@@ -103,6 +117,27 @@ extension ToolMode {
             return "Ellipse"
         default:
             return statusDisplayName
+        }
+    }
+
+    var toolbarIdentifier: String {
+        switch self {
+        case .select: return "select"
+        case .grab: return "grab"
+        case .pen: return "pen"
+        case .arrow: return "arrow"
+        case .line: return "line"
+        case .polyline: return "polyline"
+        case .polygon: return "polygon"
+        case .area: return "area"
+        case .highlighter: return "highlighter"
+        case .cloud: return "cloud"
+        case .rectangle: return "rectangle"
+        case .circle: return "circle"
+        case .text: return "text"
+        case .callout: return "callout"
+        case .measure: return "measure"
+        case .calibrate: return "calibrate"
         }
     }
 }

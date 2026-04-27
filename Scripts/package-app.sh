@@ -10,6 +10,7 @@ BUILD_DIR=".build/arm64-apple-macosx/release"
 BIN_PATH="$BUILD_DIR/$APP_NAME"
 DIST_DIR="dist"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
+INSTALL_APP_PATH="${DRAWBRIDGE_INSTALL_APP_PATH:-$HOME/Applications/$APP_NAME.app}"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -131,6 +132,11 @@ fi
 echo "Verifying app signature..."
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
+echo "Installing app bundle to: $INSTALL_APP_PATH"
+mkdir -p "$(dirname "$INSTALL_APP_PATH")"
+rm -rf "$INSTALL_APP_PATH"
+cp -R "$APP_DIR" "$INSTALL_APP_PATH"
+
 # Automatically create a checkpoint for quick rollback.
 CHECKPOINT_LABEL="${CHECKPOINT_LABEL:-}"
 if [[ -n "$CHECKPOINT_LABEL" ]]; then
@@ -140,4 +146,5 @@ else
 fi
 
 echo "Done: $APP_DIR"
+echo "Installed: $INSTALL_APP_PATH"
 echo "Launch with: open \"$APP_DIR\""

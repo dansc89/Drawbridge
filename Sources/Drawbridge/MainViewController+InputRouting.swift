@@ -3,15 +3,6 @@ import AppKit
 @MainActor
 extension MainViewController {
     func hasEditablePolygonSelection() -> Bool {
-        guard pdfView.toolMode == .select,
-              let document = pdfView.document else { return false }
-        for item in currentSelectedMarkupItems() {
-            guard let page = document.page(at: item.pageIndex) else { continue }
-            if pdfView.polygonVerticesInPage(for: item.annotation)?.count ?? 0 >= 3,
-               item.annotation.page === page {
-                return true
-            }
-        }
         return false
     }
 
@@ -23,36 +14,18 @@ extension MainViewController {
 
     @discardableResult
     private func togglePolygonVertexEditModeShortcut() -> Bool {
-        guard hasEditablePolygonSelection() else { return false }
-        setPolygonVertexEditMode(!isPolygonVertexEditModeEnabled)
-        return true
+        false
     }
 
     func cancelPendingMarkupInteractions(except preservedMode: ToolMode? = nil) {
-        if preservedMode != .measure {
-            pdfView.cancelPendingMeasurement()
-        }
-        if preservedMode != .callout {
-            pdfView.cancelPendingCallout()
-        }
-        if preservedMode != .polyline {
-            pdfView.cancelPendingPolyline()
-        }
-        if preservedMode != .polygon {
-            pdfView.cancelPendingPolygon()
-        }
-        if preservedMode != .arrow {
-            pdfView.cancelPendingArrow()
-        }
-        if preservedMode != .line {
-            pdfView.cancelPendingLine()
-        }
-        if preservedMode != .area {
-            pdfView.cancelPendingArea()
-        }
-        if preservedMode != .circle {
-            pdfView.cancelPendingCircle()
-        }
+        pdfView.cancelPendingMeasurement()
+        pdfView.cancelPendingCallout()
+        pdfView.cancelPendingPolyline()
+        pdfView.cancelPendingPolygon()
+        pdfView.cancelPendingArrow()
+        pdfView.cancelPendingLine()
+        pdfView.cancelPendingArea()
+        pdfView.cancelPendingCircle()
     }
 
     func installScrollMonitorIfNeeded() {
@@ -104,13 +77,6 @@ extension MainViewController {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let optionNowDown = modifiers.contains(.option)
         defer { isOrthoModifierKeyDown = optionNowDown }
-        guard pdfView.toolMode == .line || pdfView.toolMode == .polyline || pdfView.toolMode == .polygon else {
-            return event
-        }
-        if optionNowDown && !isOrthoModifierKeyDown && modifiers.isDisjoint(with: [.command, .shift, .control]) {
-            setOrthoSnapEnabled(!isOrthoSnapEnabled)
-            lastUserInteractionAt = Date()
-        }
         return event
     }
 
@@ -196,12 +162,6 @@ extension MainViewController {
         }
 
         if modifiers.isDisjoint(with: [.command, .option, .control]) {
-            if (view.window?.firstResponder is NSTextView) == false,
-               (view.window?.firstResponder is NSTextField) == false,
-               pdfView.handleTypedDistanceKey(event) {
-                lastUserInteractionAt = Date()
-                return nil
-            }
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField {
                 return event
             }
