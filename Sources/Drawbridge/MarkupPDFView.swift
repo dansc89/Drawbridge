@@ -2,6 +2,55 @@ import AppKit
 import PDFKit
 import UniformTypeIdentifiers
 
+private final class PDFOverscrollClipView: NSClipView {
+    private let overscrollFactor: CGFloat = 0.35
+    private let minimumOverscroll: CGFloat = 160
+
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        guard let documentView else {
+            return super.constrainBoundsRect(proposedBounds)
+        }
+
+        let documentFrame = documentView.frame.standardized
+        guard !documentFrame.isEmpty else {
+            return super.constrainBoundsRect(proposedBounds)
+        }
+
+        let paddedBounds = documentFrame.insetBy(
+            dx: -max(minimumOverscroll, proposedBounds.width * overscrollFactor),
+            dy: -max(minimumOverscroll, proposedBounds.height * overscrollFactor)
+        )
+
+        var constrained = proposedBounds
+        constrained.origin.x = constrainedOrigin(
+            proposedOrigin: proposedBounds.origin.x,
+            visibleLength: proposedBounds.width,
+            minimumOrigin: paddedBounds.minX,
+            maximumOrigin: paddedBounds.maxX
+        )
+        constrained.origin.y = constrainedOrigin(
+            proposedOrigin: proposedBounds.origin.y,
+            visibleLength: proposedBounds.height,
+            minimumOrigin: paddedBounds.minY,
+            maximumOrigin: paddedBounds.maxY
+        )
+        return constrained
+    }
+
+    private func constrainedOrigin(
+        proposedOrigin: CGFloat,
+        visibleLength: CGFloat,
+        minimumOrigin: CGFloat,
+        maximumOrigin: CGFloat
+    ) -> CGFloat {
+        let maxOrigin = maximumOrigin - visibleLength
+        guard maxOrigin >= minimumOrigin else {
+            return (minimumOrigin + maximumOrigin - visibleLength) * 0.5
+        }
+        return min(max(proposedOrigin, minimumOrigin), maxOrigin)
+    }
+}
+
 final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     enum ReorderAction {
         case sendToBack
@@ -144,7 +193,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
     }
 
-    var toolMode: ToolMode = .pen
+    var toolMode: ToolMode = .select {
+        didSet {
+            guard oldValue != toolMode else { return }
+            window?.invalidateCursorRects(for: self)
+            if toolMode != .text {
+                hideTextPreview()
+            }
+        }
+    }
     var penColor: NSColor = .systemRed
     var penLineWidth: CGFloat = 15.0
     var arrowStrokeColor: NSColor = .systemRed
@@ -373,8 +430,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var pendingContextMenuHitAnnotation: PDFAnnotation?
     private var textEditCaretTimer: Timer?
     private weak var observedClipView: NSClipView?
+    private weak var overscrollScrollView: NSScrollView?
     private var isGridVisible = false
     private var areHyperlinkHighlightsVisible = false
+    private var pendingInteractiveViewportFeedbackWorkItem: DispatchWorkItem?
+    private var lastInteractiveViewportFeedbackAt: CFAbsoluteTime = 0
     private var didInstallViewportObservers = false
     private var isOrthoSnapEnabled = true
     private var isEndpointSnapEnabled = true
@@ -455,6 +515,47 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         backgroundColor = NSColor(calibratedWhite: 0.07, alpha: 1.0)
     }
 
+    private func installOverscrollClipViewIfNeeded() {
+        guard let scrollView = descendantScrollView(of: self) else { return }
+        overscrollScrollView = scrollView
+        guard !(scrollView.contentView is PDFOverscrollClipView) else { return }
+
+        let originalClipView = scrollView.contentView
+        let overscrollClipView = PDFOverscrollClipView(frame: originalClipView.frame)
+        overscrollClipView.autoresizingMask = originalClipView.autoresizingMask
+        overscrollClipView.drawsBackground = originalClipView.drawsBackground
+        overscrollClipView.backgroundColor = originalClipView.backgroundColor
+        overscrollClipView.documentCursor = originalClipView.documentCursor
+        overscrollClipView.documentView = originalClipView.documentView
+        scrollView.contentView = overscrollClipView
+        scrollView.reflectScrolledClipView(overscrollClipView)
+    }
+
+    private func descendantScrollView(of view: NSView) -> NSScrollView? {
+        for subview in view.subviews {
+            if let scrollView = subview as? NSScrollView {
+                return scrollView
+            }
+            if let scrollView = descendantScrollView(of: subview) {
+                return scrollView
+            }
+        }
+        return nil
+    }
+
+    private var contentClipView: NSClipView? {
+        if let contentView = overscrollScrollView?.contentView {
+            return contentView
+        }
+        return descendantScrollView(of: self)?.contentView
+    }
+
+    private func scrollContentClipView(to origin: NSPoint) {
+        guard let clipView = contentClipView else { return }
+        clipView.scroll(to: origin)
+        clipView.enclosingScrollView?.reflectScrolledClipView(clipView)
+    }
+
     @discardableResult
     private func guardOrBeep(_ condition: @autoclosure () -> Bool) -> Bool {
         guard condition() else {
@@ -470,6 +571,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     override func layout() {
         super.layout()
+        installOverscrollClipViewIfNeeded()
         let insetBounds = bounds.insetBy(dx: 24, dy: 24)
         dropHighlightLayer.path = CGPath(roundedRect: insetBounds, cornerWidth: 14, cornerHeight: 14, transform: nil)
         installClipViewObserverIfNeeded()
@@ -864,7 +966,14 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         mouseTrackingArea = tracking
     }
 
+    private func sanitizeToolModeForScratchReset() {
+        if !toolMode.isEnabledInScratchReset {
+            toolMode = .select
+        }
+    }
+
     override func mouseMoved(with event: NSEvent) {
+        sanitizeToolModeForScratchReset()
         lastPointerInView = convert(event.locationInWindow, from: nil)
         updateTypedDistanceHUD()
         if toolMode == .line {
@@ -907,15 +1016,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         if toolMode == .area {
             let locationInView = convert(event.locationInWindow, from: nil)
             updateAreaPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
-            return
-        }
-        if toolMode == .text {
-            let locationInView = convert(event.locationInWindow, from: nil)
-            if let page = page(for: locationInView, nearest: true) {
-                updateTextPreview(at: snapPointInViewIfNeeded(locationInView, on: page))
-            } else {
-                updateTextPreview(at: locationInView)
-            }
             return
         }
         guard toolMode == .callout else {
@@ -1012,6 +1112,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        sanitizeToolModeForScratchReset()
         delegatedLinkMouseDownToSuper = false
         let locationInView = convert(event.locationInWindow, from: nil)
         lastPointerInView = locationInView
@@ -1044,7 +1145,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         let createsMarkupTool: Bool
         switch toolMode {
-        case .pen, .arrow, .highlighter, .line, .polyline, .polygon, .area, .cloud, .rectangle, .circle, .text, .callout, .measure, .calibrate:
+        case .pen, .arrow, .highlighter, .line, .polyline, .polygon, .area, .cloud, .rectangle, .circle, .callout, .measure, .calibrate:
             createsMarkupTool = true
         default:
             createsMarkupTool = false
@@ -1060,6 +1161,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         if toolMode == .select, let page = page(for: locationInView, nearest: true) {
             let pointInPage = convert(locationInView, to: page)
             if let handleTarget = selectedHandleDragTarget(on: page, at: locationInView, pointInPage: pointInPage) {
+                unlockAnnotationForEditing(handleTarget.annotation)
                 movingAnnotation = handleTarget.annotation
                 movingAnnotationPage = page
                 movingAnnotationStartBounds = handleTarget.annotation.bounds
@@ -1130,10 +1232,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                     }
                     dragCandidates = onResolveDragSelection?(page, activeHit) ?? [activeHit]
                 }
-                if event.clickCount >= 2, isEditableTextAnnotation(activeHit) {
-                    beginInlineTextEditing(for: activeHit, on: page)
-                    return
-                }
+                unlockAnnotationForEditing(activeHit)
                 if let calloutState = initialCalloutDragState(from: activeHit, on: page, pointerInView: locationInView, pointerInPage: pointInPage) {
                     movingCalloutState = calloutState
                     didMoveAnnotation = false
@@ -1167,6 +1266,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                         movingAnnotations = [activeHit]
                     }
                 }
+                for candidate in movingAnnotations {
+                    unlockAnnotationForEditing(candidate)
+                }
                 movingAnnotationStartBoundsByID = Dictionary(uniqueKeysWithValues: movingAnnotations.map { (ObjectIdentifier($0), $0.bounds) })
                 captureMovingPolygonOriginalPoints()
                 didMoveAnnotation = false
@@ -1185,6 +1287,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
         switch toolMode {
         case .select:
+            return
+        case .text:
             return
         case .grab:
             guard let page = page(for: locationInView, nearest: true) else {
@@ -1411,13 +1515,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             dragPage = page
             dragPreviewLayer.isHidden = false
             dragPreviewLayer.path = CGPath(rect: NSRect(origin: snappedLocationInView, size: .zero), transform: nil)
-        case .text:
-            hideTextPreview()
-            if let page = page(for: locationInView, nearest: true) {
-                beginInlineTextEditing(at: snapPointInViewIfNeeded(locationInView, on: page))
-            } else {
-                beginInlineTextEditing(at: locationInView)
-            }
         case .callout:
             return
         case .measure, .calibrate:
@@ -1465,6 +1562,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        sanitizeToolModeForScratchReset()
         lastPointerInView = convert(event.locationInWindow, from: nil)
         updateTypedDistanceHUD()
         if isRegionCaptureModeEnabled {
@@ -1826,6 +1924,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        sanitizeToolModeForScratchReset()
         if delegatedLinkMouseDownToSuper {
             delegatedLinkMouseDownToSuper = false
             super.mouseUp(with: event)
@@ -4256,11 +4355,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             }
         } else {
             onAnnotationAdded?(page, annotation, "Add Text")
-            // After placing a textbox note, return to Select (V) to avoid accidental extra text boxes.
-            if toolMode == .text {
-                toolMode = .select
-                onToolShortcut?(.select)
-            }
         }
         if selectCommittedAnnotation {
             onAnnotationClicked?(page, annotation, false)
@@ -4289,7 +4383,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) ||
+            commandSelector == #selector(NSResponder.insertLineBreak(_:)) ||
+            commandSelector == #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)) {
             let committed = commitInlineTextEditor(cancel: false)
             finalizeCommittedCalloutTextIfNeeded(committed)
             return true
@@ -5430,6 +5526,24 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return false
     }
 
+    private func unlockAnnotationForEditing(_ annotation: PDFAnnotation) {
+        if annotation.isReadOnly {
+            annotation.isReadOnly = false
+        }
+
+        let readOnlyFlag = 1 << 6
+        let lockedFlag = 1 << 7
+        let lockedContentsFlag = 1 << 9
+        let lockMask = readOnlyFlag | lockedFlag | lockedContentsFlag
+        if let rawFlags = annotation.value(forAnnotationKey: .flags) as? NSNumber {
+            let current = rawFlags.intValue
+            let unlocked = current & ~lockMask
+            if unlocked != current {
+                annotation.setValue(NSNumber(value: unlocked), forAnnotationKey: .flags)
+            }
+        }
+    }
+
     private func linkAnnotation(at pointInPage: NSPoint, on page: PDFPage) -> PDFAnnotation? {
         if let direct = page.annotation(at: pointInPage), isLinkAnnotation(direct) {
             return direct
@@ -6271,6 +6385,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func keyDown(with event: NSEvent) {
+        sanitizeToolModeForScratchReset()
         if handleTypedDistanceKey(event) {
             return
         }
@@ -6315,6 +6430,33 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         handleWheelZoom(event)
     }
 
+    private func emitInteractiveViewportFeedback(force: Bool = false) {
+        let minInterval: CFAbsoluteTime = 1.0 / 45.0
+        let now = CFAbsoluteTimeGetCurrent()
+
+        let fireImmediately = force || (now - lastInteractiveViewportFeedbackAt) >= minInterval
+        if fireImmediately {
+            pendingInteractiveViewportFeedbackWorkItem?.cancel()
+            pendingInteractiveViewportFeedbackWorkItem = nil
+            lastInteractiveViewportFeedbackAt = now
+            updateGridOverlayIfNeeded()
+            onViewportChanged?()
+            return
+        }
+
+        let delay = max(0.001, minInterval - (now - lastInteractiveViewportFeedbackAt))
+        guard pendingInteractiveViewportFeedbackWorkItem == nil else { return }
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingInteractiveViewportFeedbackWorkItem = nil
+            self.lastInteractiveViewportFeedbackAt = CFAbsoluteTimeGetCurrent()
+            self.updateGridOverlayIfNeeded()
+            self.onViewportChanged?()
+        }
+        pendingInteractiveViewportFeedbackWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
     @discardableResult
     func zoom(by factor: CGFloat, anchoredAtWindowPoint windowPoint: NSPoint? = nil) -> Bool {
         guard document != nil, factor > 0 else { return false }
@@ -6323,23 +6465,28 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let targetScale = min(max(minScaleFactor, scaleFactor * factor), maxScaleFactor)
         guard targetScale != scaleFactor else { return false }
 
-        let locationInView = clampPointToBounds(resolvedZoomAnchorPoint(fromWindowPoint: windowPoint))
-
-        if let page = page(for: locationInView, nearest: true) {
-            let anchorPagePoint = convert(locationInView, to: page)
+        let anchorPointInView = clampPointToBounds(resolvedZoomAnchorPoint(fromWindowPoint: windowPoint))
+        guard let clipView = contentClipView else {
             scaleFactor = targetScale
-            let pagePointAfterZoom = convert(locationInView, to: page)
-            let deltaX = anchorPagePoint.x - pagePointAfterZoom.x
-            let deltaY = anchorPagePoint.y - pagePointAfterZoom.y
-            let fallbackCenter = NSPoint(x: bounds.midX, y: bounds.midY)
-            let base = currentDestination?.point ?? convert(fallbackCenter, to: page)
-            let destination = NSPoint(x: base.x + deltaX, y: base.y + deltaY)
-            go(to: PDFDestination(page: page, at: destination))
-        } else {
-            scaleFactor = targetScale
+            emitInteractiveViewportFeedback()
+            return true
         }
-        updateGridOverlayIfNeeded()
-        onViewportChanged?()
+
+        let desiredAnchorPointInClip = clipView.convert(anchorPointInView, from: self)
+        let anchorPage = page(for: anchorPointInView, nearest: true)
+        let anchorPagePoint = anchorPage.map { convert(anchorPointInView, to: $0) }
+
+        scaleFactor = targetScale
+
+        if let anchorPage, let anchorPagePoint {
+            let anchoredPointInViewAfterZoom = convert(anchorPagePoint, from: anchorPage)
+            let anchoredPointInClipAfterZoom = clipView.convert(anchoredPointInViewAfterZoom, from: self)
+            let deltaX = anchoredPointInClipAfterZoom.x - desiredAnchorPointInClip.x
+            let deltaY = anchoredPointInClipAfterZoom.y - desiredAnchorPointInClip.y
+            let origin = clipView.bounds.origin
+            scrollContentClipView(to: NSPoint(x: origin.x + deltaX, y: origin.y + deltaY))
+        }
+        emitInteractiveViewportFeedback()
         return true
     }
 
@@ -6382,13 +6529,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let magnitude = abs(delta)
         let stepMagnitude: CGFloat
         if isTrackpadLike {
-            // Trackpad: smooth and fine-grained, with gentle acceleration.
-            let capped = min(24.0, magnitude)
-            stepMagnitude = pow(1.006, capped)
+            // Trackpad: smoother and less jumpy under rapid tiny deltas.
+            let capped = min(20.0, magnitude)
+            stepMagnitude = pow(1.0045, capped)
         } else {
-            // Mouse wheel: stronger per notch, closer to CAD/PDF editor feel.
+            // Mouse wheel: still decisive, but less abrupt between steps.
             let notches = max(1.0, min(6.0, magnitude))
-            stepMagnitude = pow(1.12, notches)
+            stepMagnitude = pow(1.09, notches)
         }
 
         let factor = delta > 0 ? stepMagnitude : (1.0 / stepMagnitude)
@@ -6406,22 +6553,21 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     override func otherMouseDragged(with event: NSEvent) {
         guard event.buttonNumber == 2,
-              let lastWindowPoint = middlePanLastWindowPoint,
-              let page = currentPage else {
+              let lastWindowPoint = middlePanLastWindowPoint else {
             super.otherMouseDragged(with: event)
             return
         }
 
         let lastView = convert(lastWindowPoint, from: nil)
         let currentView = convert(event.locationInWindow, from: nil)
-        let lastPagePoint = convert(lastView, to: page)
-        let currentPagePoint = convert(currentView, to: page)
-        let dx = currentPagePoint.x - lastPagePoint.x
-        let dy = currentPagePoint.y - lastPagePoint.y
-
-        let anchor = currentDestination?.point ?? convert(NSPoint(x: bounds.midX, y: bounds.midY), to: page)
-        let destination = PDFDestination(page: page, at: NSPoint(x: anchor.x - dx, y: anchor.y - dy))
-        go(to: destination)
+        if let clipView = contentClipView {
+            let lastClipPoint = clipView.convert(lastView, from: self)
+            let currentClipPoint = clipView.convert(currentView, from: self)
+            let dx = currentClipPoint.x - lastClipPoint.x
+            let dy = currentClipPoint.y - lastClipPoint.y
+            let origin = clipView.bounds.origin
+            scrollContentClipView(to: NSPoint(x: origin.x - dx, y: origin.y - dy))
+        }
         middlePanLastWindowPoint = event.locationInWindow
         updateGridOverlayIfNeeded()
         onViewportChanged?()

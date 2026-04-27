@@ -17,42 +17,12 @@ enum ShortcutModifier: String, CaseIterable {
 
 enum ShortcutAction: String, CaseIterable {
     case selectTool
-    case grabTool
-    case penTool
-    case arrowTool
-    case areaTool
-    case lineTool
-    case polylineTool
-    case polygonTool
-    case highlighterTool
-    case cloudTool
-    case rectangleTool
-    case ellipseTool
-    case textTool
-    case calloutTool
-    case measureTool
-    case calibrateTool
     case toggleGrid
     case toggleOrtho
 
     var toolMode: ToolMode? {
         switch self {
         case .selectTool: return .select
-        case .grabTool: return .grab
-        case .penTool: return .pen
-        case .arrowTool: return .arrow
-        case .areaTool: return .area
-        case .lineTool: return .line
-        case .polylineTool: return .polyline
-        case .polygonTool: return .polygon
-        case .highlighterTool: return .highlighter
-        case .cloudTool: return .cloud
-        case .rectangleTool: return .rectangle
-        case .ellipseTool: return .circle
-        case .textTool: return .text
-        case .calloutTool: return .callout
-        case .measureTool: return .measure
-        case .calibrateTool: return .calibrate
         case .toggleGrid, .toggleOrtho: return nil
         }
     }
@@ -60,21 +30,6 @@ enum ShortcutAction: String, CaseIterable {
     var defaultBinding: ShortcutBinding {
         switch self {
         case .selectTool: return ShortcutBinding(key: "v", modifier: .plain)
-        case .grabTool: return ShortcutBinding(key: "g", modifier: .plain)
-        case .penTool: return ShortcutBinding(key: "d", modifier: .plain)
-        case .arrowTool: return ShortcutBinding(key: "a", modifier: .plain)
-        case .areaTool: return ShortcutBinding(key: "a", modifier: .shift)
-        case .lineTool: return ShortcutBinding(key: "l", modifier: .plain)
-        case .polylineTool: return ShortcutBinding(key: "p", modifier: .plain)
-        case .polygonTool: return ShortcutBinding(key: "p", modifier: .commandShift)
-        case .highlighterTool: return ShortcutBinding(key: "h", modifier: .plain)
-        case .cloudTool: return ShortcutBinding(key: "c", modifier: .plain)
-        case .rectangleTool: return ShortcutBinding(key: "r", modifier: .plain)
-        case .ellipseTool: return ShortcutBinding(key: "e", modifier: .plain)
-        case .textTool: return ShortcutBinding(key: "t", modifier: .plain)
-        case .calloutTool: return ShortcutBinding(key: "q", modifier: .plain)
-        case .measureTool: return ShortcutBinding(key: "m", modifier: .plain)
-        case .calibrateTool: return ShortcutBinding(key: "k", modifier: .plain)
         case .toggleGrid: return ShortcutBinding(key: "x", modifier: .plain)
         case .toggleOrtho: return ShortcutBinding(key: "o", modifier: .plain)
         }
@@ -138,14 +93,6 @@ extension MainViewController {
             guard let action = ShortcutAction(rawValue: rawAction),
                   let binding = ShortcutBinding.decode(rawBinding) else { continue }
             loaded[action] = binding
-        }
-        // Migrate legacy Shift+P binding to Cmd+Shift+P.
-        if loaded[.polygonTool] == ShortcutBinding(key: "p", modifier: .shift) {
-            loaded[.polygonTool] = ShortcutBinding(key: "p", modifier: .commandShift)
-        }
-        // Keep Cmd+Shift+A reserved for sheet-name/bookmark auto-generation.
-        if loaded[.areaTool] == ShortcutBinding(key: "a", modifier: .commandShift) {
-            loaded[.areaTool] = ShortcutBinding(key: "a", modifier: .shift)
         }
         shortcutBindings = loaded
     }
