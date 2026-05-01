@@ -6121,13 +6121,24 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         var generated: [AutoNamedSheet] = []
         generated.reserveCapacity(document.pageCount)
+        var detectedSheetNumberCount = 0
         for pageIndex in 0..<document.pageCount {
             guard let page = document.page(at: pageIndex) else { continue }
-            let numberRect = denormalize(rect: numberZone, for: page)
             let titleRect = denormalize(rect: titleZone, for: page)
-            let detectedNumber = extractText(from: page, rectInPage: numberRect)
-            let number = detectedNumber.isEmpty ? "Page \(pageIndex + 1)" : detectedNumber
-            let title = extractText(from: page, rectInPage: titleRect)
+            let expandedTitleRect = titleRect.insetBy(dx: -titleRect.width * 0.05, dy: -titleRect.height * 0.1).intersection(page.bounds(for: pdfView.displayBox))
+
+            let labelCanonicalTokens = Set(extractSheetTokens(from: page.label ?? "").map(canonicalizeSheetToken))
+            let detectedNumber = detectSheetTokensInCapturedZone(on: page, normalizedZone: numberZone)
+            let number: String
+            if let detectedResult = detectedNumber.result,
+               let token = preferredSheetToken(from: detectedResult.tokens, labelCanonicalTokens: labelCanonicalTokens) {
+                number = token
+                detectedSheetNumberCount += 1
+            } else {
+                let labelTokens = extractSheetTokens(from: page.label ?? "")
+                number = preferredSheetToken(from: labelTokens, labelCanonicalTokens: labelCanonicalTokens) ?? "Page \(pageIndex + 1)"
+            }
+            let title = extractText(from: page, rectInPage: expandedTitleRect, allowOCR: true, preferOCR: true, usesLanguageCorrection: true)
             generated.append(
                 AutoNamedSheet(
                     pageIndex: pageIndex,
@@ -6135,6 +6146,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                     sheetTitle: title
                 )
             )
+        }
+
+        guard detectedSheetNumberCount > 0 else {
+            runAlert(
+                title: "No Sheet Numbers Detected",
+                informativeText: "Drawbridge could not detect valid sheet-number tokens from the captured SHEET NUMBER zone. Try recapturing a tighter box around the visible sheet number.",
+                style: .warning
+            )
+            return
         }
 
         guard !generated.isEmpty else {
@@ -6285,50 +6305,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return "\(prefix) • \(done)/\(safeTotal) (\(percent)%) • ETA \(shortDuration(remaining)) • elapsed \(elapsed)"
         }
 
-        func preferredZoneToken(from candidates: [String], labelCanonicalTokens: Set<String>) -> String? {
-            func score(_ token: String) -> Int {
-                let canonical = canonicalizeSheetToken(token)
-                var value = 0
-                if !canonical.isEmpty, labelCanonicalTokens.contains(canonical) {
-                    value += 100
-                }
-                if !canonical.isEmpty, tokenConfidenceByCanonical[canonical] != nil {
-                    value += 30
-                }
-                if token.range(of: #"[A-Z]{1,4}\d{1,3}[._\-]\d{1,3}"#, options: .regularExpression) != nil {
-                    value += 40
-                }
-                if token.contains(".") || token.contains("-") {
-                    value += 15
-                }
-                if canonical.count >= 3, canonical.count <= 10 {
-                    value += 10
-                }
-                if token.range(of: #"\d"#, options: .regularExpression) != nil {
-                    value += 8
-                }
-                if token.range(of: #"[A-Z]"#, options: .regularExpression) != nil {
-                    value += 8
-                }
-                if canonical.count > 14 {
-                    value -= 10
-                }
-                return value
-            }
-
-            return candidates.sorted { lhs, rhs in
-                let lhsScore = score(lhs)
-                let rhsScore = score(rhs)
-                if lhsScore != rhsScore {
-                    return lhsScore > rhsScore
-                }
-                if lhs.count != rhs.count {
-                    return lhs.count < rhs.count
-                }
-                return lhs < rhs
-            }.first
-        }
-
         updateBusyIndicatorStatus("Batch Linking Sheet Numbers…")
         updateBusyIndicatorDetail("Step 1/3: Reading sheet numbers…")
         updateBusyIndicatorSubdetail(contextualSubdetail(prefix: "0 found", current: 0, total: document.pageCount))
@@ -6361,7 +6337,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 continue
             }
             let uniqueTokens = Array(Set(detectedResult.tokens))
-            guard let token = preferredZoneToken(from: uniqueTokens, labelCanonicalTokens: labelCanonicalTokens) else {
+            guard let token = preferredSheetToken(
+                from: uniqueTokens,
+                labelCanonicalTokens: labelCanonicalTokens,
+                knownCanonicalTokens: Set(tokenConfidenceByCanonical.keys)
+            ) else {
                 zonePageDiagnostics.append(
                     BatchLinkZonePageDiagnostic(
                         pageIndex: pageIndex,
@@ -6845,7 +6825,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         if matches.isEmpty {
             for token in candidates {
-                if token.range(of: #"\d"#, options: .regularExpression) != nil,
+                if token.range(of: #"\d"#, options: .regularExpression) != nil ||
                    token.range(of: #"[A-Z]"#, options: .regularExpression) != nil {
                     matches.append(token)
                 }
@@ -6872,6 +6852,67 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         canonical = canonical.replacingOccurrences(of: "I", with: "1")
         canonical = canonical.replacingOccurrences(of: "L", with: "1")
         return canonical
+    }
+
+    private func scoreSheetToken(
+        _ token: String,
+        labelCanonicalTokens: Set<String> = [],
+        knownCanonicalTokens: Set<String> = []
+    ) -> Int {
+        let canonical = canonicalizeSheetToken(token)
+        var value = 0
+        if !canonical.isEmpty, labelCanonicalTokens.contains(canonical) {
+            value += 100
+        }
+        if !canonical.isEmpty, knownCanonicalTokens.contains(canonical) {
+            value += 30
+        }
+        if token.range(of: #"[A-Z]{1,4}\d{1,3}[._\-]\d{1,3}"#, options: .regularExpression) != nil {
+            value += 40
+        }
+        if token.contains(".") || token.contains("-") {
+            value += 15
+        }
+        if canonical.count >= 3, canonical.count <= 10 {
+            value += 10
+        }
+        if token.range(of: #"\d"#, options: .regularExpression) != nil {
+            value += 10
+        }
+        if token.range(of: #"[A-Z]"#, options: .regularExpression) != nil {
+            value += 10
+        }
+        if canonical.count > 14 {
+            value -= 30
+        }
+        // If it's just numbers or just letters, it's still potentially a sheet token,
+        // just not as "canonical" as a mix like A101.
+        if token.range(of: #"[A-Z]"#, options: .regularExpression) != nil &&
+            token.range(of: #"\d"#, options: .regularExpression) != nil {
+            value += 20
+        }
+        return value
+    }
+
+    private func preferredSheetToken(
+        from candidates: [String],
+        labelCanonicalTokens: Set<String> = [],
+        knownCanonicalTokens: Set<String> = []
+    ) -> String? {
+        candidates
+            .filter { scoreSheetToken($0, labelCanonicalTokens: labelCanonicalTokens, knownCanonicalTokens: knownCanonicalTokens) > 0 }
+            .sorted { lhs, rhs in
+                let lhsScore = scoreSheetToken(lhs, labelCanonicalTokens: labelCanonicalTokens, knownCanonicalTokens: knownCanonicalTokens)
+                let rhsScore = scoreSheetToken(rhs, labelCanonicalTokens: labelCanonicalTokens, knownCanonicalTokens: knownCanonicalTokens)
+                if lhsScore != rhsScore {
+                    return lhsScore > rhsScore
+                }
+                if lhs.count != rhs.count {
+                    return lhs.count < rhs.count
+                }
+                return lhs < rhs
+            }
+            .first
     }
 
     private func supplementSheetTokenMapFromExistingLabelsAndBookmarks(
@@ -6963,8 +7004,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let words = Array(Set(customWords.filter { !$0.isEmpty }))
         let primary = recognizeTextLines(
             in: page,
-            scale: 2.0,
-            minimumTextHeight: 0.005,
+            scale: 3.0,
+            minimumTextHeight: 0.004,
             recognitionLevel: .accurate,
             customWords: words
         )
@@ -6973,8 +7014,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         return recognizeTextLines(
             in: page,
-            scale: 3.0,
-            minimumTextHeight: 0.0035,
+            scale: 4.0,
+            minimumTextHeight: 0.003,
             recognitionLevel: .accurate,
             customWords: words
         )
@@ -7266,7 +7307,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         var firstNonEmptyRawText: String?
         var firstNonEmptyStrategy: String?
         for candidate in candidates {
-            let raw = extractText(from: page, rectInPage: candidate.rectInPage, allowOCR: candidate.allowOCR)
+            let raw = extractText(
+                from: page,
+                rectInPage: candidate.rectInPage,
+                allowOCR: candidate.allowOCR,
+                preferOCR: candidate.allowOCR
+            )
             guard !raw.isEmpty else { continue }
             if firstNonEmptyRawText == nil {
                 firstNonEmptyRawText = raw
@@ -7304,9 +7350,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return "\(cleaned[..<endIndex])..."
     }
 
-    private func extractText(from page: PDFPage, rectInPage: NSRect, allowOCR: Bool = true) -> String {
+    private func extractText(from page: PDFPage, rectInPage: NSRect, allowOCR: Bool = true, preferOCR: Bool = false, usesLanguageCorrection: Bool = false) -> String {
         let bounded = rectInPage.intersection(zoneCaptureBounds(for: page))
         guard !bounded.isEmpty else { return "" }
+
+        if preferOCR,
+           allowOCR,
+           let image = renderCroppedImage(from: page, rectInPage: bounded) {
+            let recognized = recognizeText(in: image, usesLanguageCorrection: usesLanguageCorrection)
+            if !recognized.isEmpty {
+                return recognized
+            }
+        }
 
         if let selected = page.selection(for: bounded)?.string {
             let cleaned = cleanDetectedSheetText(selected)
@@ -7320,14 +7375,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guard let image = renderCroppedImage(from: page, rectInPage: bounded) else {
             return ""
         }
-        return recognizeText(in: image)
+        return recognizeText(in: image, usesLanguageCorrection: usesLanguageCorrection)
     }
 
     private func renderCroppedImage(from page: PDFPage, rectInPage: NSRect) -> CGImage? {
         let crop = rectInPage.intersection(zoneCaptureBounds(for: page))
         guard crop.width > 1, crop.height > 1 else { return nil }
 
-        let scale: CGFloat = 2.0
+        let scale: CGFloat = 4.0
         let width = Int((crop.width * scale).rounded(.up))
         let height = Int((crop.height * scale).rounded(.up))
         guard width > 0, height > 0 else { return nil }
@@ -7352,13 +7407,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return context.makeImage()
     }
 
-    private func recognizeText(in image: CGImage) -> String {
+    private func recognizeText(in image: CGImage, usesLanguageCorrection: Bool = false) -> String {
         let orientations: [CGImagePropertyOrientation] = [.up, .right, .left, .down]
         var bestText = ""
         var bestScore: Float = -.greatestFiniteMagnitude
 
         for orientation in orientations {
-            guard let result = recognizeText(in: image, orientation: orientation) else { continue }
+            guard let result = recognizeText(in: image, orientation: orientation, usesLanguageCorrection: usesLanguageCorrection) else { continue }
             if result.score > bestScore {
                 bestScore = result.score
                 bestText = result.text
@@ -7367,10 +7422,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return bestText
     }
 
-    private func recognizeText(in image: CGImage, orientation: CGImagePropertyOrientation) -> (text: String, score: Float)? {
+    private func recognizeText(in image: CGImage, orientation: CGImagePropertyOrientation, usesLanguageCorrection: Bool) -> (text: String, score: Float)? {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
-        request.usesLanguageCorrection = true
+        request.usesLanguageCorrection = usesLanguageCorrection
 
         let handler = VNImageRequestHandler(cgImage: image, orientation: orientation, options: [:])
         do {
