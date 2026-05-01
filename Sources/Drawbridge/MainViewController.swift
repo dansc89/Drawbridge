@@ -6125,7 +6125,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         for pageIndex in 0..<document.pageCount {
             guard let page = document.page(at: pageIndex) else { continue }
             let titleRect = denormalize(rect: titleZone, for: page)
-            let expandedTitleRect = titleRect.insetBy(dx: -titleRect.width * 0.05, dy: -titleRect.height * 0.1).intersection(page.bounds(for: pdfView.displayBox))
+            // Expand by 10% + fixed 8pt buffer to prevent clipping at the start/end of the line.
+            let horizontalBuffer = max(titleRect.width * 0.10, 8.0)
+            let verticalBuffer = max(titleRect.height * 0.15, 4.0)
+            let expandedTitleRect = titleRect.insetBy(dx: -horizontalBuffer, dy: -verticalBuffer).intersection(page.bounds(for: .mediaBox))
 
             let labelCanonicalTokens = Set(extractSheetTokens(from: page.label ?? "").map(canonicalizeSheetToken))
             let detectedNumber = detectSheetTokensInCapturedZone(on: page, normalizedZone: numberZone)
@@ -6135,8 +6138,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 number = token
                 detectedSheetNumberCount += 1
             } else {
-                let labelTokens = extractSheetTokens(from: page.label ?? "")
-                number = preferredSheetToken(from: labelTokens, labelCanonicalTokens: labelCanonicalTokens) ?? "Page \(pageIndex + 1)"
+                // Try an expanded number zone if primary fails
+                let numRect = denormalize(rect: numberZone, for: page)
+                let expandedNumRect = numRect.insetBy(dx: -max(numRect.width * 0.15, 6.0), dy: -4.0).intersection(page.bounds(for: .mediaBox))
+                let expandedText = extractText(from: page, rectInPage: expandedNumRect, allowOCR: true, preferOCR: true)
+                let expandedTokens = extractSheetTokens(from: expandedText)
+                if let token = preferredSheetToken(from: expandedTokens, labelCanonicalTokens: labelCanonicalTokens) {
+                    number = token
+                    detectedSheetNumberCount += 1
+                } else {
+                    let labelTokens = extractSheetTokens(from: page.label ?? "")
+                    number = preferredSheetToken(from: labelTokens, labelCanonicalTokens: labelCanonicalTokens) ?? "Page \(pageIndex + 1)"
+                }
             }
             let title = extractText(from: page, rectInPage: expandedTitleRect, allowOCR: true, preferOCR: true, usesLanguageCorrection: true)
             generated.append(
@@ -7216,15 +7229,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func zoneCaptureBounds(for page: PDFPage) -> NSRect {
-        let preferred = page.bounds(for: pdfView.displayBox).standardized
-        if preferred.width > 1, preferred.height > 1 {
-            return preferred
-        }
-        let crop = page.bounds(for: .cropBox).standardized
-        if crop.width > 1, crop.height > 1 {
-            return crop
-        }
-        return page.bounds(for: .mediaBox).standardized
+        page.bounds(for: .mediaBox).standardized
     }
 
     private func normalize(rectInPage: NSRect, for page: PDFPage) -> NormalizedPageRect {
@@ -7379,8 +7384,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func renderCroppedImage(from page: PDFPage, rectInPage: NSRect) -> CGImage? {
-        let crop = rectInPage.intersection(zoneCaptureBounds(for: page))
-        guard crop.width > 1, crop.height > 1 else { return nil }
+        let pageBounds = page.bounds(for: .mediaBox)
+        let crop = rectInPage.intersection(pageBounds)
+        guard crop.width > 0.5, crop.height > 0.5 else { return nil }
 
         let scale: CGFloat = 4.0
         let width = Int((crop.width * scale).rounded(.up))
@@ -7403,8 +7409,28 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         context.scaleBy(x: scale, y: scale)
         context.translateBy(x: -crop.minX, y: -crop.minY)
-        page.draw(with: pdfView.displayBox, to: context)
-        return context.makeImage()
+        page.draw(with: .mediaBox, to: context)
+        
+        guard let rawImage = context.makeImage() else { return nil }
+        
+        // Enhance image for OCR
+        let ciImage = CIImage(cgImage: rawImage)
+        let filter = CIFilter(name: "CIColorControls")
+        filter?.setValue(ciImage, forKey: kCIInputImageKey)
+        filter?.setValue(1.15, forKey: kCIInputContrastKey) // Boost contrast
+        filter?.setValue(0.0, forKey: kCIInputSaturationKey) // Grayscale
+        
+        let sharpen = CIFilter(name: "CISharpenLuminance")
+        sharpen?.setValue(filter?.outputImage, forKey: kCIInputImageKey)
+        sharpen?.setValue(0.8, forKey: kCIInputSharpnessKey)
+        
+        let ciContext = CIContext()
+        if let enhanced = sharpen?.outputImage,
+           let cgImage = ciContext.createCGImage(enhanced, from: enhanced.extent) {
+            return cgImage
+        }
+        
+        return rawImage
     }
 
     private func recognizeText(in image: CGImage, usesLanguageCorrection: Bool = false) -> String {
