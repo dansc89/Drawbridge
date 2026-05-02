@@ -4975,6 +4975,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             )
             return
         }
+        let normalizedRotatedLandscapePages = Self.normalizeRotatedLandscapePageBoxes(in: document)
 
         pdfView.document = document
         clearMarkupCache()
@@ -5017,7 +5018,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 "rehydrated_images": "\(annotationOptimization.rehydratedImages)",
                 "rehydrated_snapshots": "\(annotationOptimization.rehydratedSnapshots)",
                 "normalized_fonts": "\(annotationOptimization.normalizedFonts)",
-                "repaired_ink_paths": "\(annotationOptimization.repairedInkPaths)"
+                "repaired_ink_paths": "\(annotationOptimization.repairedInkPaths)",
+                "normalized_rotated_landscape_pages": "\(normalizedRotatedLandscapePages)"
             ]
         )
     }
@@ -6123,42 +6125,37 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         generated.reserveCapacity(document.pageCount)
         var detectedSheetNumberCount = 0
         for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex) else { continue }
-            let titleRect = denormalize(rect: titleZone, for: page)
-            // Expand by 10% + fixed 8pt buffer to prevent clipping at the start/end of the line.
-            let horizontalBuffer = max(titleRect.width * 0.10, 8.0)
-            let verticalBuffer = max(titleRect.height * 0.15, 4.0)
-            let expandedTitleRect = titleRect.insetBy(dx: -horizontalBuffer, dy: -verticalBuffer).intersection(page.bounds(for: .mediaBox))
+            autoreleasepool {
+                guard let page = document.page(at: pageIndex) else { return }
+                let titleRect = denormalize(rect: titleZone, for: page)
+                // Reduced padding: 8% horizontal, 4% vertical
+                let hPadding = max(titleRect.width * 0.08, 6.0)
+                let vPadding = max(titleRect.height * 0.04, 3.0)
+                let expandedTitleRect = titleRect.insetBy(dx: -hPadding, dy: -vPadding).intersection(page.bounds(for: pdfView.displayBox))
 
-            let labelCanonicalTokens = Set(extractSheetTokens(from: page.label ?? "").map(canonicalizeSheetToken))
-            let detectedNumber = detectSheetTokensInCapturedZone(on: page, normalizedZone: numberZone)
-            let number: String
-            if let detectedResult = detectedNumber.result,
-               let token = preferredSheetToken(from: detectedResult.tokens, labelCanonicalTokens: labelCanonicalTokens) {
-                number = token
-                detectedSheetNumberCount += 1
-            } else {
-                // Try an expanded number zone if primary fails
-                let numRect = denormalize(rect: numberZone, for: page)
-                let expandedNumRect = numRect.insetBy(dx: -max(numRect.width * 0.15, 6.0), dy: -4.0).intersection(page.bounds(for: .mediaBox))
-                let expandedText = extractText(from: page, rectInPage: expandedNumRect, allowOCR: true, preferOCR: true)
-                let expandedTokens = extractSheetTokens(from: expandedText)
-                if let token = preferredSheetToken(from: expandedTokens, labelCanonicalTokens: labelCanonicalTokens) {
+                let labelCanonicalTokens = Set(extractSheetTokens(from: page.label ?? "").map(canonicalizeSheetToken))
+                let labelSheetInfo = sheetInfoFromPageLabel(page.label ?? "")
+                let number: String
+                if let labelNumber = labelSheetInfo.number {
+                    number = labelNumber
+                    detectedSheetNumberCount += 1
+                } else if let token = detectAutoNameSheetNumber(on: page, normalizedZone: numberZone, labelCanonicalTokens: labelCanonicalTokens) {
                     number = token
                     detectedSheetNumberCount += 1
                 } else {
                     let labelTokens = extractSheetTokens(from: page.label ?? "")
                     number = preferredSheetToken(from: labelTokens, labelCanonicalTokens: labelCanonicalTokens) ?? "Page \(pageIndex + 1)"
                 }
-            }
-            let title = extractText(from: page, rectInPage: expandedTitleRect, allowOCR: true, preferOCR: true, usesLanguageCorrection: true)
-            generated.append(
-                AutoNamedSheet(
-                    pageIndex: pageIndex,
-                    sheetNumber: number,
-                    sheetTitle: title
+                let detectedTitle = detectAutoNameSheetTitle(on: page, primaryRect: expandedTitleRect)
+                let title = labelSheetInfo.title ?? detectedTitle
+                generated.append(
+                    AutoNamedSheet(
+                        pageIndex: pageIndex,
+                        sheetNumber: number,
+                        sheetTitle: title
+                    )
                 )
-            )
+            }
         }
 
         guard detectedSheetNumberCount > 0 else {
@@ -6275,6 +6272,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             cancelAutoLinkCapture()
             return
         }
+        let preservedPageRotations = Self.pageRotations(in: document)
         var completedBatchLink = false
         guard let referenceIndex = autoLinkCaptureReferencePageIndex,
               referenceIndex >= 0,
@@ -6285,6 +6283,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         beginBusyIndicator("Batch Linking Sheet Numbers…", detail: "Reading sheet numbers…")
         defer {
+            Self.restorePageRotations(preservedPageRotations, to: document)
             endBusyIndicator()
             if let previous = autoLinkPreviousToolMode {
                 setTool(previous)
@@ -6304,6 +6303,22 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         var zonePageDiagnostics: [BatchLinkZonePageDiagnostic] = []
         let batchStartedAt = Date()
         var stageStartedAt = Date()
+
+        func recordSheetToken(_ token: String, pageIndex: Int, confidence: Int) {
+            let existingTokenConfidence = tokenConfidenceByToken[token] ?? 0
+            if existingTokenConfidence <= confidence {
+                sheetTokenToPageIndex[token] = pageIndex
+                tokenConfidenceByToken[token] = confidence
+            }
+            let canonical = canonicalizeSheetToken(token)
+            if !canonical.isEmpty {
+                let existingCanonicalConfidence = tokenConfidenceByCanonical[canonical] ?? 0
+                if existingCanonicalConfidence <= confidence {
+                    canonicalSheetTokenToPageIndex[canonical] = pageIndex
+                    tokenConfidenceByCanonical[canonical] = confidence
+                }
+            }
+        }
 
         func contextualSubdetail(prefix: String, current: Int, total: Int) -> String {
             let safeTotal = max(1, total)
@@ -6327,17 +6342,17 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             updateBusyIndicatorProgress(current: pageIndex + 1, total: document.pageCount)
             updateBusyIndicatorDetail("Step 1/3: Reading sheet numbers… \(pageIndex + 1)/\(document.pageCount)")
             let labelCanonicalTokens = Set(extractSheetTokens(from: page.label ?? "").map(canonicalizeSheetToken))
-            let detected = detectSheetTokensInCapturedZone(on: page, normalizedZone: normalizedZone)
-            guard let detectedResult = detected.result else {
+            if let labelToken = sheetInfoFromPageLabel(page.label ?? "").number {
+                recordSheetToken(labelToken, pageIndex: pageIndex, confidence: 5)
                 zonePageDiagnostics.append(
                     BatchLinkZonePageDiagnostic(
                         pageIndex: pageIndex,
                         pageLabel: page.label ?? "",
-                        detectedToken: nil,
-                        strategy: "none",
-                        rawTextPreview: detected.rawTextPreview,
-                        failureReason: detected.failureReason ?? "No sheet token detected from captured zone.",
-                        usedFallback: false
+                        detectedToken: labelToken,
+                        strategy: "page label",
+                        rawTextPreview: truncatedZoneDiagnosticText(page.label ?? ""),
+                        failureReason: nil,
+                        usedFallback: true
                     )
                 )
                 updateBusyIndicatorSubdetail(
@@ -6349,21 +6364,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 )
                 continue
             }
-            let uniqueTokens = Array(Set(detectedResult.tokens))
-            guard let token = preferredSheetToken(
-                from: uniqueTokens,
-                labelCanonicalTokens: labelCanonicalTokens,
-                knownCanonicalTokens: Set(tokenConfidenceByCanonical.keys)
-            ) else {
+
+            let detected = detectSheetTokenForBatchLink(on: page, normalizedZone: normalizedZone, labelCanonicalTokens: labelCanonicalTokens)
+            guard let token = detected.token else {
                 zonePageDiagnostics.append(
                     BatchLinkZonePageDiagnostic(
                         pageIndex: pageIndex,
                         pageLabel: page.label ?? "",
                         detectedToken: nil,
-                        strategy: detectedResult.strategy,
-                        rawTextPreview: truncatedZoneDiagnosticText(detectedResult.rawText),
-                        failureReason: "Text was read, but no token candidate could be selected.",
-                        usedFallback: detectedResult.usedFallback
+                        strategy: detected.strategy,
+                        rawTextPreview: detected.rawTextPreview,
+                        failureReason: detected.failureReason,
+                        usedFallback: false
                     )
                 )
                 updateBusyIndicatorSubdetail(
@@ -6381,27 +6393,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                     pageIndex: pageIndex,
                     pageLabel: page.label ?? "",
                     detectedToken: token,
-                    strategy: detectedResult.strategy,
-                    rawTextPreview: truncatedZoneDiagnosticText(detectedResult.rawText),
+                    strategy: detected.strategy,
+                    rawTextPreview: detected.rawTextPreview,
                     failureReason: nil,
-                    usedFallback: detectedResult.usedFallback
+                    usedFallback: detected.usedFallback
                 )
             )
 
             let canonical = canonicalizeSheetToken(token)
-            let zoneConfidence = (!canonical.isEmpty && labelCanonicalTokens.contains(canonical)) ? 2 : 1
-            let existingTokenConfidence = tokenConfidenceByToken[token] ?? 0
-            if existingTokenConfidence <= zoneConfidence {
-                sheetTokenToPageIndex[token] = pageIndex
-                tokenConfidenceByToken[token] = zoneConfidence
-            }
-            if !canonical.isEmpty {
-                let existingCanonicalConfidence = tokenConfidenceByCanonical[canonical] ?? 0
-                if existingCanonicalConfidence <= zoneConfidence {
-                    canonicalSheetTokenToPageIndex[canonical] = pageIndex
-                    tokenConfidenceByCanonical[canonical] = zoneConfidence
-                }
-            }
+            let zoneConfidence = (!canonical.isEmpty && labelCanonicalTokens.contains(canonical)) ? 3 : 2
+            recordSheetToken(token, pageIndex: pageIndex, confidence: zoneConfidence)
             updateBusyIndicatorSubdetail(
                 contextualSubdetail(
                     prefix: "\(sheetTokenToPageIndex.count) found",
@@ -6794,6 +6795,264 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         extractSheetTokens(from: raw).first
     }
 
+    private func sheetInfoFromPageLabel(_ label: String) -> (number: String?, title: String?) {
+        let cleaned = cleanDetectedSheetText(label)
+        guard !cleaned.isEmpty else { return (nil, nil) }
+        let tokens = extractSheetTokens(from: cleaned)
+        guard let number = preferredSheetToken(from: tokens) else { return (nil, nil) }
+
+        var title = cleaned
+        let escapedNumber = NSRegularExpression.escapedPattern(for: number)
+        if let regex = try? NSRegularExpression(pattern: #"(?i)(^|\b)"# + escapedNumber + #"(\b|$)"#) {
+            title = regex.stringByReplacingMatches(
+                in: title,
+                range: NSRange(title.startIndex..., in: title),
+                withTemplate: " "
+            )
+        }
+        title = title
+            .replacingOccurrences(of: #"^[\s\-–—_:|/\\.]+"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"[\s\-–—_:|/\\.]+$"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (number, isUsableSheetTitle(title) ? title : nil)
+    }
+
+    private func detectAutoNameSheetNumber(
+        on page: PDFPage,
+        normalizedZone: NormalizedPageRect,
+        labelCanonicalTokens: Set<String>
+    ) -> String? {
+        let detectedNumber = detectSheetTokensInCapturedZone(on: page, normalizedZone: normalizedZone)
+        if let detectedResult = detectedNumber.result,
+           let token = preferredSheetToken(from: detectedResult.tokens, labelCanonicalTokens: labelCanonicalTokens) {
+            return token
+        }
+
+        let numRect = denormalize(rect: normalizedZone, for: page)
+        let expandedNumRect = numRect
+            .insetBy(dx: -max(numRect.width * 0.20, 10.0), dy: -max(numRect.height * 0.50, 8.0))
+            .intersection(page.bounds(for: pdfView.displayBox))
+        let expandedText = extractText(from: page, rectInPage: expandedNumRect, allowOCR: true, preferOCR: true)
+        let expandedTokens = extractSheetTokens(from: expandedText)
+        if let token = preferredSheetToken(from: expandedTokens, labelCanonicalTokens: labelCanonicalTokens) {
+            return token
+        }
+
+        return detectAnchoredSheetNumber(on: page, expectedRect: numRect, labelCanonicalTokens: labelCanonicalTokens)
+    }
+
+    private func detectSheetTokenForBatchLink(
+        on page: PDFPage,
+        normalizedZone: NormalizedPageRect,
+        labelCanonicalTokens: Set<String>
+    ) -> (token: String?, strategy: String, rawTextPreview: String, failureReason: String?, usedFallback: Bool) {
+        let detected = detectSheetTokensInCapturedZone(on: page, normalizedZone: normalizedZone)
+        if let detectedResult = detected.result {
+            let token = preferredSheetToken(
+                from: Array(Set(detectedResult.tokens)),
+                labelCanonicalTokens: labelCanonicalTokens
+            )
+            if let token {
+                return (
+                    token,
+                    detectedResult.strategy,
+                    truncatedZoneDiagnosticText(detectedResult.rawText),
+                    nil,
+                    detectedResult.usedFallback
+                )
+            }
+        }
+
+        let numRect = denormalize(rect: normalizedZone, for: page)
+        let expandedNumRect = numRect
+            .insetBy(dx: -max(numRect.width * 0.20, 10.0), dy: -max(numRect.height * 0.50, 8.0))
+            .intersection(page.bounds(for: pdfView.displayBox))
+        let expandedText = extractText(from: page, rectInPage: expandedNumRect, allowOCR: true, preferOCR: true)
+        let expandedTokens = extractSheetTokens(from: expandedText)
+        if let token = preferredSheetToken(from: expandedTokens, labelCanonicalTokens: labelCanonicalTokens) {
+            return (
+                token,
+                "expanded zone + OCR",
+                truncatedZoneDiagnosticText(expandedText),
+                nil,
+                true
+            )
+        }
+
+        if let anchored = detectAnchoredSheetNumber(on: page, expectedRect: numRect, labelCanonicalTokens: labelCanonicalTokens) {
+            return (
+                anchored,
+                "anchored SHEET NO OCR",
+                "",
+                nil,
+                true
+            )
+        }
+
+        return (
+            nil,
+            detected.result?.strategy ?? "none",
+            detected.rawTextPreview.isEmpty ? truncatedZoneDiagnosticText(expandedText) : detected.rawTextPreview,
+            detected.failureReason ?? "No valid sheet token detected from page label, captured zone, or anchored OCR.",
+            true
+        )
+    }
+
+    private func detectAutoNameSheetTitle(on page: PDFPage, primaryRect: NSRect) -> String {
+        let primary = extractText(from: page, rectInPage: primaryRect, allowOCR: true, preferOCR: true, usesLanguageCorrection: true)
+        if isUsableSheetTitle(primary) {
+            return primary
+        }
+        return detectAnchoredSheetTitle(on: page, expectedRect: primaryRect) ?? primary
+    }
+
+    private func detectAnchoredSheetNumber(
+        on page: PDFPage,
+        expectedRect: NSRect,
+        labelCanonicalTokens: Set<String>
+    ) -> String? {
+        let hits = recognizeTextLines(in: page)
+        guard !hits.isEmpty else { return nil }
+        let pageBounds = zoneCaptureBounds(for: page)
+        let labels = hits.filter { isSheetNumberLabel($0.text) }
+
+        var scored: [(token: String, score: CGFloat)] = []
+        func appendCandidates(from hit: OCRLineHit, baseScore: CGFloat) {
+            for token in extractSheetTokens(from: hit.text) {
+                guard preferredSheetToken(from: [token], labelCanonicalTokens: labelCanonicalTokens) != nil else { continue }
+                let tokenScore = CGFloat(scoreSheetToken(token, labelCanonicalTokens: labelCanonicalTokens))
+                let sizeScore = min(hit.rectInPage.height / max(pageBounds.height, 1) * 500, 40)
+                scored.append((token, baseScore + tokenScore + sizeScore))
+            }
+        }
+
+        for label in labels {
+            let labelCenterX = label.rectInPage.midX
+            let labelY = label.rectInPage.midY
+            for hit in hits where hit.rectInPage != label.rectInPage {
+                let center = NSPoint(x: hit.rectInPage.midX, y: hit.rectInPage.midY)
+                let verticalBelow = labelY - center.y
+                let isBelowLabel = verticalBelow >= -pageBounds.height * 0.03 && verticalBelow <= pageBounds.height * 0.35
+                let isRightOfLabel = center.x >= label.rectInPage.minX - pageBounds.width * 0.05 && center.x <= pageBounds.maxX
+                let isNearLabelColumn = abs(center.x - labelCenterX) <= pageBounds.width * 0.30
+                guard isBelowLabel && (isRightOfLabel || isNearLabelColumn) else { continue }
+                let distancePenalty = (abs(center.x - labelCenterX) / max(pageBounds.width, 1) * 35) +
+                    (max(0, verticalBelow) / max(pageBounds.height, 1) * 20)
+                appendCandidates(from: hit, baseScore: 120 - distancePenalty)
+            }
+        }
+
+        let expectedSearchRect = expectedRect
+            .insetBy(dx: -max(expectedRect.width * 0.75, pageBounds.width * 0.05), dy: -max(expectedRect.height * 2.0, pageBounds.height * 0.06))
+            .intersection(pageBounds)
+        for hit in hits where hit.rectInPage.intersects(expectedSearchRect) {
+            let distance = hypot(hit.rectInPage.midX - expectedRect.midX, hit.rectInPage.midY - expectedRect.midY)
+            let normalizedDistance = distance / max(hypot(pageBounds.width, pageBounds.height), 1)
+            appendCandidates(from: hit, baseScore: 80 - normalizedDistance * 100)
+        }
+
+        return scored.sorted { lhs, rhs in
+            if lhs.score != rhs.score {
+                return lhs.score > rhs.score
+            }
+            return lhs.token.count < rhs.token.count
+        }.first?.token
+    }
+
+    private func detectAnchoredSheetTitle(on page: PDFPage, expectedRect: NSRect) -> String? {
+        let hits = recognizeTextLines(in: page)
+        guard !hits.isEmpty else { return nil }
+        let pageBounds = zoneCaptureBounds(for: page)
+        let titleLabels = hits.filter { isSheetTitleLabel($0.text) }
+        let numberLabels = hits.filter { isSheetNumberLabel($0.text) }
+
+        var scored: [(title: String, score: CGFloat)] = []
+        func assembledTitle(from candidates: [OCRLineHit]) -> String? {
+            let usable = candidates
+                .filter { isUsableSheetTitle($0.text) }
+                .filter { preferredSheetToken(from: extractSheetTokens(from: $0.text)) == nil }
+                .sorted { lhs, rhs in
+                    if abs(lhs.rectInPage.midY - rhs.rectInPage.midY) > pageBounds.height * 0.01 {
+                        return lhs.rectInPage.midY > rhs.rectInPage.midY
+                    }
+                    return lhs.rectInPage.minX < rhs.rectInPage.minX
+                }
+            guard !usable.isEmpty else { return nil }
+
+            let maxHeight = usable.map(\.rectInPage.height).max() ?? 0
+            let titleLike = usable.filter { $0.rectInPage.height >= maxHeight * 0.55 }
+            let lines = (titleLike.isEmpty ? usable : titleLike)
+                .map { cleanDetectedSheetText($0.text) }
+                .filter { isUsableSheetTitle($0) }
+            let title = lines.joined(separator: " ")
+            return isUsableSheetTitle(title) ? title : nil
+        }
+
+        func appendTitleCandidate(_ hit: OCRLineHit, baseScore: CGFloat) {
+            let cleaned = cleanDetectedSheetText(hit.text)
+            guard isUsableSheetTitle(cleaned) else { return }
+            let sizeScore = min(hit.rectInPage.height / max(pageBounds.height, 1) * 400, 45)
+            scored.append((cleaned, baseScore + sizeScore))
+        }
+
+        for label in titleLabels {
+            let labelY = label.rectInPage.midY
+            let nearestNumberLabel = numberLabels
+                .sorted { abs($0.rectInPage.midY - labelY) < abs($1.rectInPage.midY - labelY) }
+                .first
+            let titleBlockCandidates: [OCRLineHit]
+            if let nearestNumberLabel {
+                let lowerY = min(labelY, nearestNumberLabel.rectInPage.midY)
+                let upperY = max(labelY, nearestNumberLabel.rectInPage.midY)
+                let minX = min(label.rectInPage.minX, nearestNumberLabel.rectInPage.minX) - pageBounds.width * 0.08
+                titleBlockCandidates = hits.filter { hit in
+                    guard hit.rectInPage != label.rectInPage,
+                          hit.rectInPage != nearestNumberLabel.rectInPage else { return false }
+                    let centerY = hit.rectInPage.midY
+                    return centerY > lowerY + pageBounds.height * 0.01 &&
+                        centerY < upperY - pageBounds.height * 0.01 &&
+                        hit.rectInPage.maxX >= minX
+                }
+            } else {
+                titleBlockCandidates = hits.filter { hit in
+                    guard hit.rectInPage != label.rectInPage else { return false }
+                    let verticalDistance = abs(hit.rectInPage.midY - labelY)
+                    return verticalDistance <= pageBounds.height * 0.30 &&
+                        hit.rectInPage.maxX >= label.rectInPage.minX - pageBounds.width * 0.08
+                }
+            }
+            if let title = assembledTitle(from: titleBlockCandidates) {
+                scored.append((title, 170))
+            }
+
+            for hit in titleBlockCandidates {
+                let centerY = hit.rectInPage.midY
+                let distancePenalty = abs(centerY - labelY) / max(pageBounds.height, 1) * 40
+                appendTitleCandidate(hit, baseScore: 110 - distancePenalty)
+            }
+        }
+
+        let expectedSearchRect = expectedRect
+            .insetBy(dx: -max(expectedRect.width * 0.35, pageBounds.width * 0.04), dy: -max(expectedRect.height * 1.25, pageBounds.height * 0.04))
+            .intersection(pageBounds)
+        let expectedHits = hits.filter { $0.rectInPage.intersects(expectedSearchRect) }
+        if let title = assembledTitle(from: expectedHits) {
+            scored.append((title, 120))
+        }
+        for hit in expectedHits {
+            let distance = hypot(hit.rectInPage.midX - expectedRect.midX, hit.rectInPage.midY - expectedRect.midY)
+            let normalizedDistance = distance / max(hypot(pageBounds.width, pageBounds.height), 1)
+            appendTitleCandidate(hit, baseScore: 70 - normalizedDistance * 80)
+        }
+
+        return scored.sorted { lhs, rhs in
+            if lhs.score != rhs.score {
+                return lhs.score > rhs.score
+            }
+            return lhs.title.count > rhs.title.count
+        }.first?.title
+    }
+
     private func hyperlinkActivationBounds(for rawBounds: NSRect, token: String) -> NSRect {
         _ = token
         // Keep link hitboxes tight to detected text to avoid vertical drift from OCR marker biasing.
@@ -6872,7 +7131,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         labelCanonicalTokens: Set<String> = [],
         knownCanonicalTokens: Set<String> = []
     ) -> Int {
+        if isOrdinalFloorToken(token) || isCommonTitleWordToken(token) {
+            return -100
+        }
         let canonical = canonicalizeSheetToken(token)
+        let hasLetter = token.range(of: #"[A-Z]"#, options: .regularExpression) != nil
+        let hasDigit = token.range(of: #"\d"#, options: .regularExpression) != nil
+        if hasLetter && !hasDigit && !labelCanonicalTokens.contains(canonical) && !knownCanonicalTokens.contains(canonical) {
+            return -80
+        }
         var value = 0
         if !canonical.isEmpty, labelCanonicalTokens.contains(canonical) {
             value += 100
@@ -6889,10 +7156,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if canonical.count >= 3, canonical.count <= 10 {
             value += 10
         }
-        if token.range(of: #"\d"#, options: .regularExpression) != nil {
+        if hasDigit {
             value += 10
         }
-        if token.range(of: #"[A-Z]"#, options: .regularExpression) != nil {
+        if hasLetter {
             value += 10
         }
         if canonical.count > 14 {
@@ -6900,11 +7167,56 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         // If it's just numbers or just letters, it's still potentially a sheet token,
         // just not as "canonical" as a mix like A101.
-        if token.range(of: #"[A-Z]"#, options: .regularExpression) != nil &&
-            token.range(of: #"\d"#, options: .regularExpression) != nil {
+        if hasLetter && hasDigit {
             value += 20
         }
         return value
+    }
+
+    private func isOrdinalFloorToken(_ token: String) -> Bool {
+        token.uppercased().range(of: #"^\d{1,2}(ST|ND|RD|TH)$"#, options: .regularExpression) != nil
+    }
+
+    private func isCommonTitleWordToken(_ token: String) -> Bool {
+        let normalized = normalizedOCRLabelText(token)
+        let rejected: Set<String> = [
+            "PLAN", "FLOOR", "FOUNDATION", "FRAMING", "LONGITUDINAL", "REINFORCING",
+            "LAYOUT", "DETAILS", "DETAIL", "GENERAL", "NOTES", "INFO", "CONCRETE",
+            "WOOD", "TYP", "TITLE", "SHEET"
+        ]
+        return rejected.contains(normalized)
+    }
+
+    private func normalizedOCRLabelText(_ text: String) -> String {
+        text.uppercased()
+            .replacingOccurrences(of: "0", with: "O")
+            .replacingOccurrences(of: #"[^A-Z]"#, with: "", options: .regularExpression)
+    }
+
+    private func isSheetNumberLabel(_ text: String) -> Bool {
+        let normalized = normalizedOCRLabelText(text)
+        return normalized.contains("SHEETNO") ||
+            normalized.contains("SHEETNUMBER") ||
+            normalized.contains("SHEETNUM") ||
+            normalized.contains("SHEETN")
+    }
+
+    private func isSheetTitleLabel(_ text: String) -> Bool {
+        let normalized = normalizedOCRLabelText(text)
+        return normalized.contains("SHEETTITLE") ||
+            normalized.contains("SHEETNAME")
+    }
+
+    private func isUsableSheetTitle(_ text: String) -> Bool {
+        let cleaned = cleanDetectedSheetText(text)
+        guard cleaned.count >= 3 else { return false }
+        let normalized = normalizedOCRLabelText(cleaned)
+        guard !normalized.isEmpty else { return false }
+        if isSheetTitleLabel(cleaned) || isSheetNumberLabel(cleaned) { return false }
+        let rejected = ["PLOTDATE", "SCALE", "PROJECT", "REVISIONS", "DRAWNBY", "CHECKEDBY"]
+        if rejected.contains(where: { normalized.contains($0) }) { return false }
+        if preferredSheetToken(from: extractSheetTokens(from: cleaned)) == cleaned.uppercased() { return false }
+        return true
     }
 
     private func preferredSheetToken(
@@ -6935,47 +7247,45 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         tokenConfidenceByToken: inout [String: Int],
         tokenConfidenceByCanonical: inout [String: Int]
     ) {
-        for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex) else { continue }
-            let pageLabelTokens = extractSheetTokens(from: page.label ?? "")
-            for token in pageLabelTokens {
-                let labelConfidence = 4
-                let existingTokenConfidence = tokenConfidenceByToken[token] ?? 0
-                if existingTokenConfidence <= labelConfidence {
-                    sheetTokenToPageIndex[token] = pageIndex
-                    tokenConfidenceByToken[token] = labelConfidence
-                }
-                let canonical = canonicalizeSheetToken(token)
-                if !canonical.isEmpty {
-                    let existingCanonicalConfidence = tokenConfidenceByCanonical[canonical] ?? 0
-                    if existingCanonicalConfidence <= labelConfidence {
-                        canonicalSheetTokenToPageIndex[canonical] = pageIndex
-                        tokenConfidenceByCanonical[canonical] = labelConfidence
-                    }
-                }
+        func preferredSupplementToken(from label: String) -> String? {
+            let cleaned = cleanDetectedSheetText(label)
+            guard !cleaned.isEmpty else { return nil }
+            if let pageLabelNumber = sheetInfoFromPageLabel(cleaned).number {
+                return pageLabelNumber
             }
+            return preferredSheetToken(from: extractSheetTokens(from: cleaned))
+        }
+
+        func recordSupplementToken(_ token: String, pageIndex: Int, confidence: Int) {
+            let existingTokenConfidence = tokenConfidenceByToken[token] ?? 0
+            if existingTokenConfidence <= confidence {
+                sheetTokenToPageIndex[token] = pageIndex
+                tokenConfidenceByToken[token] = confidence
+            }
+
+            let canonical = canonicalizeSheetToken(token)
+            guard !canonical.isEmpty else { return }
+            let existingCanonicalConfidence = tokenConfidenceByCanonical[canonical] ?? 0
+            if existingCanonicalConfidence <= confidence {
+                canonicalSheetTokenToPageIndex[canonical] = pageIndex
+                tokenConfidenceByCanonical[canonical] = confidence
+            }
+        }
+
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex),
+                  let token = preferredSupplementToken(from: page.label ?? "")
+            else { continue }
+            recordSupplementToken(token, pageIndex: pageIndex, confidence: 4)
         }
 
         func walkOutline(_ outline: PDFOutline?) {
             guard let outline else { return }
-            let titleTokens = extractSheetTokens(from: outline.label ?? "")
-            if let pageIndex = destinationPageIndex(for: outline), pageIndex >= 0, pageIndex < document.pageCount {
-                for token in titleTokens {
-                    let bookmarkConfidence = 3
-                    let existingTokenConfidence = tokenConfidenceByToken[token] ?? 0
-                    if existingTokenConfidence <= bookmarkConfidence {
-                        sheetTokenToPageIndex[token] = pageIndex
-                        tokenConfidenceByToken[token] = bookmarkConfidence
-                    }
-                    let canonical = canonicalizeSheetToken(token)
-                    if !canonical.isEmpty {
-                        let existingCanonicalConfidence = tokenConfidenceByCanonical[canonical] ?? 0
-                        if existingCanonicalConfidence <= bookmarkConfidence {
-                            canonicalSheetTokenToPageIndex[canonical] = pageIndex
-                            tokenConfidenceByCanonical[canonical] = bookmarkConfidence
-                        }
-                    }
-                }
+            if let pageIndex = destinationPageIndex(for: outline),
+               pageIndex >= 0,
+               pageIndex < document.pageCount,
+               let token = preferredSupplementToken(from: outline.label ?? "") {
+                recordSupplementToken(token, pageIndex: pageIndex, confidence: 3)
             }
             guard outline.numberOfChildren > 0 else { return }
             for childIndex in 0..<outline.numberOfChildren {
@@ -7229,7 +7539,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func zoneCaptureBounds(for page: PDFPage) -> NSRect {
-        page.bounds(for: .mediaBox).standardized
+        page.bounds(for: pdfView.displayBox).standardized
     }
 
     private func normalize(rectInPage: NSRect, for page: PDFPage) -> NormalizedPageRect {
@@ -7240,8 +7550,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         let safeWidth = max(bounds.width, 1)
         let safeHeight = max(bounds.height, 1)
+
+        // Anchor to Bottom-Right for architectural stability.
+        // x is distance from RIGHT edge, y is distance from BOTTOM edge.
         return NormalizedPageRect(
-            x: (bounded.minX - bounds.minX) / safeWidth,
+            x: (bounds.maxX - bounded.maxX) / safeWidth,
             y: (bounded.minY - bounds.minY) / safeHeight,
             width: bounded.width / safeWidth,
             height: bounded.height / safeHeight
@@ -7250,11 +7563,19 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     private func denormalize(rect: NormalizedPageRect, for page: PDFPage) -> NSRect {
         let bounds = zoneCaptureBounds(for: page)
+        let width = rect.width * bounds.width
+        let height = rect.height * bounds.height
+
+        // Re-calculate based on distance from right and bottom.
+        let maxX = bounds.maxX - (rect.x * bounds.width)
+        let minX = maxX - width
+        let minY = bounds.minY + (rect.y * bounds.height)
+
         return NSRect(
-            x: bounds.minX + rect.x * bounds.width,
-            y: bounds.minY + rect.y * bounds.height,
-            width: rect.width * bounds.width,
-            height: rect.height * bounds.height
+            x: minX,
+            y: minY,
+            width: width,
+            height: height
         )
     }
 
@@ -7356,7 +7677,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func extractText(from page: PDFPage, rectInPage: NSRect, allowOCR: Bool = true, preferOCR: Bool = false, usesLanguageCorrection: Bool = false) -> String {
-        let bounded = rectInPage.intersection(zoneCaptureBounds(for: page))
+        let displayBox = pdfView.displayBox
+        let pageBounds = page.bounds(for: displayBox)
+        let bounded = rectInPage.intersection(pageBounds)
         guard !bounded.isEmpty else { return "" }
 
         if preferOCR,
@@ -7364,6 +7687,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
            let image = renderCroppedImage(from: page, rectInPage: bounded) {
             let recognized = recognizeText(in: image, usesLanguageCorrection: usesLanguageCorrection)
             if !recognized.isEmpty {
+                // Heuristic for titles: if we get a huge block of text, try to find a shorter "title-like" line.
+                if usesLanguageCorrection && recognized.count > 120 && recognized.contains("\n") {
+                    let lines = recognized.components(separatedBy: .newlines)
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                    // Prefer the first line if it looks like a title (shorter, uppercase)
+                    if let first = lines.first, first.count < 80 {
+                        return first
+                    }
+                }
                 return recognized
             }
         }
@@ -7384,53 +7717,65 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func renderCroppedImage(from page: PDFPage, rectInPage: NSRect) -> CGImage? {
-        let pageBounds = page.bounds(for: .mediaBox)
-        let crop = rectInPage.intersection(pageBounds)
-        guard crop.width > 0.5, crop.height > 0.5 else { return nil }
-
+        let displayBox = pdfView.displayBox
         let scale: CGFloat = 4.0
-        let width = Int((crop.width * scale).rounded(.up))
-        let height = Int((crop.height * scale).rounded(.up))
-        guard width > 0, height > 0 else { return nil }
 
-        guard let context = CGContext(
+        // 1. Get the oriented box dimensions
+        let transform = page.transform(for: displayBox)
+        let orientedFullBox = page.bounds(for: displayBox).applying(transform).standardized
+
+        let widthPx = Int((orientedFullBox.width * scale).rounded(.up))
+        let heightPx = Int((orientedFullBox.height * scale).rounded(.up))
+
+        // Safety cap for massive scans
+        guard widthPx > 0, heightPx > 0, widthPx < 12000, heightPx < 12000 else { return nil }
+
+        // 2. Render the ENTIRE oriented page box. This is the only way to guarantee alignment.
+        guard let fullContext = CGContext(
             data: nil,
-            width: width,
-            height: height,
+            width: widthPx,
+            height: heightPx,
             bitsPerComponent: 8,
             bytesPerRow: 0,
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            return nil
+        ) else { return nil }
+
+        fullContext.interpolationQuality = .high
+        fullContext.setFillColor(NSColor.white.cgColor)
+        fullContext.fill(CGRect(x: 0, y: 0, width: widthPx, height: heightPx))
+        fullContext.scaleBy(x: scale, y: scale)
+
+        // PDFPage.draw handles orientation into the target context box perfectly.
+        page.draw(with: displayBox, to: fullContext)
+
+        guard let fullImage = fullContext.makeImage() else { return nil }
+
+        // 3. Crop at the pixel level using CIImage (top-down coordinates matched to our render)
+        let orientedCrop = rectInPage.applying(transform).standardized
+        let ciImage = CIImage(cgImage: fullImage)
+        let cropRectPx = CGRect(
+            x: orientedCrop.minX * scale,
+            y: orientedCrop.minY * scale,
+            width: orientedCrop.width * scale,
+            height: orientedCrop.height * scale
+        )
+
+        let croppedCI = ciImage.cropped(to: cropRectPx)
+
+        // 4. Enhance
+        let colorControls = CIFilter(name: "CIColorControls")
+        colorControls?.setValue(croppedCI, forKey: kCIInputImageKey)
+        colorControls?.setValue(1.15, forKey: kCIInputContrastKey)
+        colorControls?.setValue(0.0, forKey: kCIInputSaturationKey)
+
+        let ciContext = CIContext()
+        if let enhanced = colorControls?.outputImage,
+           let finalCG = ciContext.createCGImage(enhanced, from: enhanced.extent) {
+            return finalCG
         }
 
-        context.setFillColor(NSColor.white.cgColor)
-        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        context.scaleBy(x: scale, y: scale)
-        context.translateBy(x: -crop.minX, y: -crop.minY)
-        page.draw(with: .mediaBox, to: context)
-        
-        guard let rawImage = context.makeImage() else { return nil }
-        
-        // Enhance image for OCR
-        let ciImage = CIImage(cgImage: rawImage)
-        let filter = CIFilter(name: "CIColorControls")
-        filter?.setValue(ciImage, forKey: kCIInputImageKey)
-        filter?.setValue(1.15, forKey: kCIInputContrastKey) // Boost contrast
-        filter?.setValue(0.0, forKey: kCIInputSaturationKey) // Grayscale
-        
-        let sharpen = CIFilter(name: "CISharpenLuminance")
-        sharpen?.setValue(filter?.outputImage, forKey: kCIInputImageKey)
-        sharpen?.setValue(0.8, forKey: kCIInputSharpnessKey)
-        
-        let ciContext = CIContext()
-        if let enhanced = sharpen?.outputImage,
-           let cgImage = ciContext.createCGImage(enhanced, from: enhanced.extent) {
-            return cgImage
-        }
-        
-        return rawImage
+        return ciContext.createCGImage(croppedCI, from: croppedCI.extent)
     }
 
     private func recognizeText(in image: CGImage, usesLanguageCorrection: Bool = false) -> String {
@@ -7457,11 +7802,21 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         do {
             try handler.perform([request])
             guard let observations = request.results, !observations.isEmpty else { return nil }
+
+            // --- Title Isolation Heuristic ---
+            // Architectural labels (SHEET TITLE:, etc) are usually smaller than the actual title.
+            // We find the max height and filter out noise.
+            let maxHeight = observations.map { $0.boundingBox.height }.max() ?? 0
+            let heightThreshold = maxHeight * 0.75
+
             var pieces: [String] = []
             pieces.reserveCapacity(observations.count)
             var confidenceSum: Float = 0
             var recognizedCount: Float = 0
             for observation in observations {
+                // Skip if this looks like a smaller label rather than the main content
+                if observation.boundingBox.height < heightThreshold { continue }
+
                 guard let top = observation.topCandidates(1).first else { continue }
                 let cleaned = cleanDetectedSheetText(top.string)
                 guard !cleaned.isEmpty else { continue }
@@ -7484,14 +7839,63 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
     }
 
-    private func cleanDetectedSheetText(_ raw: String) -> String {
+    private func scrubArchitecturalBoilerplate(_ raw: String) -> String {
         var text = raw
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\t", with: " ")
+
+        // 1. Remove sequences of dots, underscores, or dashes (lines), even with spaces
+        let linePatterns = ["([\\.\\s]{2,})", "([_\\s]{2,})", "([-]{3,})"]
+        for pattern in linePatterns {
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                text = regex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+            }
+        }
+
+        // 2. Remove common title block phrases (case-insensitive)
+        let phrases = [
+            "SHEET TITLE", "SHEET NAME", "SHEET NO", "SHEET NUMBER",
+            "PROJECT NAME", "PROJECT NO", "PROJECT NUMBER",
+            "DRAWN BY", "CHECKED BY"
+        ]
+
+        for phrase in phrases {
+            let pattern = "(?i)\\b\(phrase)\\b[:\\s]*"
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                text = regex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+            }
+        }
+
+        // 3. Remove standalone labels ONLY if followed by a colon or significant space
+        let labels = [
+            "SHEET", "TITLE", "PROJECT", "DATE", "SCALE", "REVISIONS",
+            "CONSULTANT", "OWNER", "CLIENT", "COPYRIGHT", "NOTES",
+            "CHILE", "HILE", "TIILE", "TILE", "OnL", "OnCE", "SREET"
+        ]
+        for label in labels {
+            // Only remove if it has a colon or is followed by significant space/dots
+            let pattern = "(?i)\\b\(label)\\b[:\\s]{2,}|(?i)\\b\(label)\\b:"
+            if let regex = try? NSRegularExpression(pattern: pattern) {
+                text = regex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+            }
+        }
+
+        // 4. Final cleanup
+        text = text.replacingOccurrences(of: "\n", with: " ")
+        text = text.replacingOccurrences(of: "\t", with: " ")
+
         while text.contains("  ") {
             text = text.replacingOccurrences(of: "  ", with: " ")
         }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let punctuation = CharacterSet(charactersIn: ":;.,-_ ")
+        text = text.trimmingCharacters(in: punctuation)
+
+        return text
+    }
+
+    private func cleanDetectedSheetText(_ raw: String) -> String {
+        scrubArchitecturalBoilerplate(raw)
     }
 
 
