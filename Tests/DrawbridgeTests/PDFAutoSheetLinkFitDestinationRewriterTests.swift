@@ -142,4 +142,66 @@ final class PDFAutoSheetLinkFitDestinationRewriterTests: XCTestCase {
         XCTAssertTrue(fitRText.contains("/D [") && fitRText.contains("/FitR"))
         XCTAssertTrue(xyzText.contains("/D [") && xyzText.contains("/XYZ 0 0 0"))
     }
+
+    func testDrawbridgeWritePreservesMixedPageRotations() throws {
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("drawbridge-rotation-preserve-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
+        let pageImage = NSImage(size: NSSize(width: 320, height: 240))
+        pageImage.lockFocus()
+        NSColor.white.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 320, height: 240)).fill()
+        pageImage.unlockFocus()
+
+        let document = PDFDocument()
+        guard let page1 = PDFPage(image: pageImage),
+              let page2 = PDFPage(image: pageImage),
+              let page3 = PDFPage(image: pageImage) else {
+            XCTFail("Failed to create test pages")
+            return
+        }
+        page1.rotation = 0
+        page2.rotation = 270
+        page3.rotation = 90
+        document.insert(page1, at: 0)
+        document.insert(page2, at: 1)
+        document.insert(page3, at: 2)
+
+        let destination = PDFDestination(page: page2, at: NSPoint(x: 0, y: page2.bounds(for: .cropBox).maxY))
+        let link = PDFAnnotation(bounds: NSRect(x: 20, y: 20, width: 120, height: 40), forType: .link, withProperties: nil)
+        link.contents = "DrawbridgeAutoSheetLink:1"
+        link.userName = "DrawbridgeAutoSheetLink:1"
+        link.action = PDFActionGoTo(destination: destination)
+        page1.addAnnotation(link)
+
+        XCTAssertTrue(MainViewController.writePDFDocument(document, to: tempURL, pageLabels: [:]))
+        let reloaded = try XCTUnwrap(PDFDocument(url: tempURL))
+        XCTAssertEqual(reloaded.page(at: 0)?.rotation, 0)
+        XCTAssertEqual(reloaded.page(at: 1)?.rotation, 270)
+        XCTAssertEqual(reloaded.page(at: 2)?.rotation, 90)
+    }
+
+    func testNormalizeRotatedLandscapePageBoxesConvertsPortraitRotatedDrawingPage() throws {
+        let pageImage = NSImage(size: NSSize(width: 320, height: 240))
+        pageImage.lockFocus()
+        NSColor.white.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 320, height: 240)).fill()
+        pageImage.unlockFocus()
+
+        let document = PDFDocument()
+        guard let page = PDFPage(image: pageImage) else {
+            XCTFail("Failed to create test page")
+            return
+        }
+        page.setBounds(NSRect(x: 0, y: 0, width: 240, height: 320), for: .mediaBox)
+        page.setBounds(NSRect(x: 0, y: 0, width: 240, height: 320), for: .cropBox)
+        page.rotation = 270
+        document.insert(page, at: 0)
+
+        XCTAssertEqual(MainViewController.normalizeRotatedLandscapePageBoxes(in: document), 1)
+        XCTAssertEqual(page.rotation, 0)
+        XCTAssertEqual(page.bounds(for: .mediaBox).width, 320)
+        XCTAssertEqual(page.bounds(for: .mediaBox).height, 240)
+    }
 }

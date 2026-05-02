@@ -388,11 +388,87 @@ extension MainViewController {
         }
     }
 
+    nonisolated static func pageRotations(in document: PDFDocument) -> [Int: Int] {
+        var rotations: [Int: Int] = [:]
+        rotations.reserveCapacity(document.pageCount)
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            rotations[pageIndex] = page.rotation
+        }
+        return rotations
+    }
+
+    nonisolated static func restorePageRotations(_ rotations: [Int: Int], to document: PDFDocument) {
+        guard !rotations.isEmpty else { return }
+        for (pageIndex, rotation) in rotations {
+            guard pageIndex >= 0,
+                  pageIndex < document.pageCount,
+                  let page = document.page(at: pageIndex),
+                  page.rotation != rotation else { continue }
+            page.rotation = rotation
+        }
+    }
+
+    nonisolated static func writtenPageRotationsMatch(_ rotations: [Int: Int], at url: URL) -> Bool {
+        guard !rotations.isEmpty,
+              let writtenDocument = PDFDocument(url: url),
+              writtenDocument.pageCount >= rotations.count else {
+            return rotations.isEmpty
+        }
+        for (pageIndex, rotation) in rotations {
+            guard pageIndex >= 0,
+                  pageIndex < writtenDocument.pageCount,
+                  let page = writtenDocument.page(at: pageIndex),
+                  page.rotation == rotation else {
+                return false
+            }
+        }
+        return true
+    }
+
+    @discardableResult
+    nonisolated static func normalizeRotatedLandscapePageBoxes(in document: PDFDocument) -> Int {
+        var normalizedCount = 0
+        let boxes: [PDFDisplayBox] = [.mediaBox, .cropBox, .bleedBox, .trimBox, .artBox]
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            let rotation = ((page.rotation % 360) + 360) % 360
+            guard rotation == 90 || rotation == 270 else { continue }
+            let mediaBox = page.bounds(for: .mediaBox).standardized
+            guard mediaBox.width > 0.5,
+                  mediaBox.height > 0.5,
+                  mediaBox.width < mediaBox.height else { continue }
+
+            for box in boxes {
+                let bounds = page.bounds(for: box).standardized
+                guard bounds.width > 0.5,
+                      bounds.height > 0.5,
+                      bounds.width < bounds.height else { continue }
+                page.setBounds(
+                    NSRect(
+                        x: bounds.minX,
+                        y: bounds.minY,
+                        width: bounds.height,
+                        height: bounds.width
+                    ),
+                    for: box
+                )
+            }
+            page.rotation = 0
+            normalizedCount += 1
+        }
+        return normalizedCount
+    }
+
     nonisolated static func writePDFDocument(_ document: PDFDocument, to url: URL, pageLabels: [Int: String]) -> Bool {
+        normalizeRotatedLandscapePageBoxes(in: document)
+        let preservedPageRotations = pageRotations(in: document)
+        restorePageRotations(preservedPageRotations, to: document)
         // `write(to:withOptions:)` is materially faster than `write(to:)` on large drawing sets.
         guard document.write(to: url, withOptions: nil) else {
             return false
         }
+        restorePageRotations(preservedPageRotations, to: document)
         if !pageLabels.isEmpty {
             do {
                 try PDFPageLabelsEmbedder.embedPageLabels(pageLabels, in: url)
@@ -402,6 +478,9 @@ extension MainViewController {
         }
         do {
             try PDFAutoSheetLinkFitDestinationRewriter.rewriteAutoSheetLinksToFit(in: url)
+            guard writtenPageRotationsMatch(preservedPageRotations, at: url) else {
+                return false
+            }
             return true
         } catch {
             return false
