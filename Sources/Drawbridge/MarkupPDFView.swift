@@ -371,9 +371,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }()
     private let hyperlinkOverlayLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
-        layer.strokeColor = NSColor.systemBlue.withAlphaComponent(0.85).cgColor
-        layer.fillColor = NSColor.systemBlue.withAlphaComponent(0.10).cgColor
-        layer.lineWidth = 1.35
+        layer.strokeColor = NSColor.clear.cgColor
+        layer.fillColor = NSColor.clear.cgColor
+        layer.lineWidth = 0
         layer.lineJoin = .round
         layer.zPosition = 6
         layer.isHidden = true
@@ -6479,15 +6479,22 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         scaleFactor = targetScale
 
         if let anchorPage, let anchorPagePoint {
-            let anchoredPointInViewAfterZoom = convert(anchorPagePoint, from: anchorPage)
-            let anchoredPointInClipAfterZoom = clipView.convert(anchoredPointInViewAfterZoom, from: self)
-            let deltaX = anchoredPointInClipAfterZoom.x - desiredAnchorPointInClip.x
-            let deltaY = anchoredPointInClipAfterZoom.y - desiredAnchorPointInClip.y
-            let origin = clipView.bounds.origin
-            scrollContentClipView(to: NSPoint(x: origin.x + deltaX, y: origin.y + deltaY))
+            correctZoomAnchor(page: anchorPage, pagePoint: anchorPagePoint, desiredClipPoint: desiredAnchorPointInClip)
         }
         emitInteractiveViewportFeedback()
         return true
+    }
+
+    private func correctZoomAnchor(page: PDFPage, pagePoint: NSPoint, desiredClipPoint: NSPoint) {
+        guard let clipView = contentClipView else { return }
+        let anchoredPointInView = convert(pagePoint, from: page)
+        let anchoredPointInClip = clipView.convert(anchoredPointInView, from: self)
+        let deltaX = anchoredPointInClip.x - desiredClipPoint.x
+        let deltaY = anchoredPointInClip.y - desiredClipPoint.y
+        guard abs(deltaX) > 0.01 || abs(deltaY) > 0.01 else { return }
+
+        let origin = clipView.bounds.origin
+        scrollContentClipView(to: NSPoint(x: origin.x + deltaX, y: origin.y + deltaY))
     }
 
     private func resolvedZoomAnchorPoint(fromWindowPoint windowPoint: NSPoint?) -> NSPoint {

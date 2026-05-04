@@ -28,7 +28,15 @@ extension MainViewController: NSTableViewDataSource, NSTableViewDelegate {
         if columnId == "page" {
             text = displayPageLabel(forPageIndex: item.pageIndex)
         } else if columnId == "type" {
-            text = item.annotation.type ?? "Unknown"
+            if isExtraneousEmbeddedPDFAnnotation(item.annotation),
+               let author = item.annotation.userName,
+               !author.isEmpty {
+                text = author
+            } else {
+                text = item.annotation.type ?? "Unknown"
+            }
+        } else if columnId == "author" {
+            text = item.annotation.userName?.isEmpty == false ? item.annotation.userName! : "(No author)"
         } else {
             text = item.annotation.contents?.isEmpty == false ? item.annotation.contents! : "(No text)"
         }

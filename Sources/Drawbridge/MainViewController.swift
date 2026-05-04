@@ -30,6 +30,33 @@ private final class NavigationResizeHandleView: NSView {
 
 @MainActor
 final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemValidation, NSSplitViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate {
+    struct PDFPageStoredGeometry {
+        let rotation: Int
+        let mediaBox: NSRect
+        let cropBox: NSRect
+        let bleedBox: NSRect
+        let trimBox: NSRect
+        let artBox: NSRect
+
+        init(page: PDFPage) {
+            rotation = page.rotation
+            mediaBox = page.bounds(for: .mediaBox)
+            cropBox = page.bounds(for: .cropBox)
+            bleedBox = page.bounds(for: .bleedBox)
+            trimBox = page.bounds(for: .trimBox)
+            artBox = page.bounds(for: .artBox)
+        }
+
+        func apply(to page: PDFPage) {
+            page.rotation = rotation
+            page.setBounds(mediaBox, for: .mediaBox)
+            page.setBounds(cropBox, for: .cropBox)
+            page.setBounds(bleedBox, for: .bleedBox)
+            page.setBounds(trimBox, for: .trimBox)
+            page.setBounds(artBox, for: .artBox)
+        }
+    }
+
     struct PDFDocumentBox: @unchecked Sendable {
         let document: PDFDocument
     }
@@ -164,6 +191,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let bookmarksScrollView = NSScrollView(frame: .zero)
     private let bookmarksOutlineView = NSOutlineView(frame: .zero)
     private let bookmarksEmptyLabel = NSTextField(labelWithString: "No Bookmarks")
+    private let pdfContentsTitleLabel = NSTextField(labelWithString: "PDF Contents")
+    private let pdfContentsSummaryLabel = NSTextField(labelWithString: "No PDF loaded")
     private let horizontalRuler = PDFRulerView(orientation: .horizontal)
     private let verticalRuler = PDFRulerView(orientation: .vertical)
     private let rulerCornerView = NSView(frame: .zero)
@@ -173,6 +202,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let emptyStateOpenButton = NSButton(title: "Open PDF", target: nil, action: nil)
     private let emptyStateRecentButton = NSButton(title: "Open Recent", target: nil, action: nil)
     private let emptyStateSampleButton = NSButton(title: "Create New", target: nil, action: nil)
+    private let emptyStateBatchMobileButton = NSButton(title: "Batch Export to iPhone / iPad", target: nil, action: nil)
     let markupsTable = NSTableView(frame: .zero)
     private let markupsCountLabel = NSTextField(labelWithString: "0 items")
     private let markupFilterField = NSSearchField(frame: .zero)
@@ -183,6 +213,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let openButton = NSButton(title: "Open", target: nil, action: nil)
     private let autoNameSheetsButton = NSButton(title: "", target: nil, action: nil)
     private let batchLinkSheetsButton = NSButton(title: "", target: nil, action: nil)
+    private let flattenPDFButton = NSButton(title: "", target: nil, action: nil)
+    private let reduceFileSizeButton = NSButton(title: "", target: nil, action: nil)
     private let highlightButton = NSButton(title: "Highlight Selection", target: nil, action: nil)
     private let exportButton = NSButton(title: "Save As PDF", target: nil, action: nil)
     private let gridToggleButton = NSButton(title: "", target: nil, action: nil)
@@ -330,6 +362,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return layer
     }()
     var markupItems: [MarkupItem] = []
+    var flattenedPDFItems: [(page: PDFPage, annotation: PDFAnnotation)] = []
     private var markupsTimer: Timer?
     var scrollEventMonitor: Any?
     var keyEventMonitor: Any?
@@ -412,13 +445,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var autoLinkCaptureReferencePageIndex: Int?
     private var autoLinkPreviousToolMode: ToolMode?
     private var shouldChainAutoNameAfterBatchLink = false
-    private var shouldFinalizeExportToIPadSaveAfterAutoName = false
-    private var shouldFinalizeExportToBluebeamSaveAfterAutoName = false
     private var pendingExportToIPadTemporaryURL: URL?
     private var pendingExportToIPadSuggestedFilename: String?
-    private var pendingExportToBluebeamTemporaryURL: URL?
-    private var pendingExportToBluebeamSuggestedFilename: String?
     private let autoSheetLinkAnnotationMarker = "DrawbridgeAutoSheetLink"
+    var displayPageGeometryOverrides: [Int: PDFPageStoredGeometry] = [:]
     var pageScaleLocks: [Int: PageScaleLock] = [:]
     var lastScaleLockAppliedPageIndex: Int = -1
     var lastExplicitScaleSetDocumentID: ObjectIdentifier?
@@ -619,6 +649,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         autoNameSheetsButton.action = #selector(commandAutoGenerateSheetNames(_:))
         batchLinkSheetsButton.target = self
         batchLinkSheetsButton.action = #selector(commandBatchLinkSheetNumbers(_:))
+        flattenPDFButton.target = self
+        flattenPDFButton.action = #selector(commandFlattenPDF(_:))
+        reduceFileSizeButton.target = self
+        reduceFileSizeButton.action = #selector(commandReduceFileSize(_:))
         emptyStateOpenButton.title = "Open Existing PDF"
         emptyStateOpenButton.target = self
         emptyStateOpenButton.action = #selector(openPDF)
@@ -626,6 +660,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         emptyStateRecentButton.action = #selector(showOpenRecentMenuFromEmptyState(_:))
         emptyStateSampleButton.target = self
         emptyStateSampleButton.action = #selector(createNewPDFAction)
+        emptyStateBatchMobileButton.target = self
+        emptyStateBatchMobileButton.action = #selector(commandBatchExportToMobile(_:))
         highlightButton.target = self
         highlightButton.action = #selector(highlightSelection)
         exportButton.target = self
@@ -1129,6 +1165,26 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         bookmarksEmptyLabel.textColor = .secondaryLabelColor
         bookmarksEmptyLabel.alignment = .center
         bookmarksEmptyLabel.isHidden = true
+        pdfContentsTitleLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        pdfContentsTitleLabel.textColor = .secondaryLabelColor
+        pdfContentsTitleLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        pdfContentsSummaryLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        pdfContentsSummaryLabel.textColor = .tertiaryLabelColor
+        pdfContentsSummaryLabel.maximumNumberOfLines = 0
+        pdfContentsSummaryLabel.lineBreakMode = .byWordWrapping
+        pdfContentsSummaryLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        let contentsSeparator = NSBox()
+        contentsSeparator.boxType = .separator
+        contentsSeparator.translatesAutoresizingMaskIntoConstraints = false
+
+        let pdfContentsStack = NSStackView(views: [
+            contentsSeparator,
+            pdfContentsTitleLabel,
+            pdfContentsSummaryLabel
+        ])
+        pdfContentsStack.orientation = .vertical
+        pdfContentsStack.spacing = 5
 
         let stack = NSStackView(views: [
             navigationTitleLabel,
@@ -1136,7 +1192,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             thumbnailScrollView,
             thumbnailsEmptyLabel,
             bookmarksScrollView,
-            bookmarksEmptyLabel
+            bookmarksEmptyLabel,
+            pdfContentsStack
         ])
         stack.orientation = .vertical
         stack.spacing = 8
@@ -1260,6 +1317,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     private func reloadBookmarks() {
         pagesTableView.reloadData()
+        updatePDFContentsSummary()
         if navigationModeControl.selectedSegment < 0 {
             navigationModeControl.selectedSegment = 1
         }
@@ -1285,6 +1343,71 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             }
         }
         changeNavigationMode()
+    }
+
+    func updatePDFContentsSummary() {
+        guard let document = pdfView.document else {
+            pdfContentsSummaryLabel.stringValue = "No PDF loaded"
+            return
+        }
+
+        var totalAnnotations = 0
+        var extraneousAnnotations = 0
+        var nonPrintAnnotations = 0
+        var hiddenAnnotations = 0
+        var linkAnnotations = 0
+        var typeCounts: [String: Int] = [:]
+        var shxSamples: [String] = []
+
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            for annotation in page.annotations {
+                totalAnnotations += 1
+                let type = (annotation.type ?? "Unknown").trimmingCharacters(in: .whitespacesAndNewlines)
+                typeCounts[type.isEmpty ? "Unknown" : type, default: 0] += 1
+                if isExtraneousEmbeddedPDFAnnotation(annotation) {
+                    extraneousAnnotations += 1
+                    if shxSamples.count < 3,
+                       let contents = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines),
+                       !contents.isEmpty {
+                        shxSamples.append(contents)
+                    }
+                }
+                if !annotation.shouldPrint {
+                    nonPrintAnnotations += 1
+                }
+                if !annotation.shouldDisplay {
+                    hiddenAnnotations += 1
+                }
+                if (annotation.type ?? "").localizedCaseInsensitiveContains("link") {
+                    linkAnnotations += 1
+                }
+            }
+        }
+
+        let topTypes = typeCounts
+            .sorted { lhs, rhs in
+                lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
+            }
+            .prefix(3)
+            .map { "\($0.key): \($0.value)" }
+            .joined(separator: "\n")
+
+        var lines: [String] = [
+            "Pages: \(document.pageCount)",
+            "Annotations: \(totalAnnotations)",
+            "Extraneous CAD boxes: \(extraneousAnnotations)",
+            "Non-print items: \(nonPrintAnnotations)",
+            "Hidden items: \(hiddenAnnotations)",
+            "Links: \(linkAnnotations)"
+        ]
+        if !topTypes.isEmpty {
+            lines.append("Top types:\n\(topTypes)")
+        }
+        if !shxSamples.isEmpty {
+            lines.append("Samples:\n\(shxSamples.joined(separator: "\n"))")
+        }
+        pdfContentsSummaryLabel.stringValue = lines.joined(separator: "\n")
     }
 
     @objc private func selectPageFromSidebar() {
@@ -1498,9 +1621,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         typeColumn.width = 100
         markupsTable.addTableColumn(typeColumn)
 
+        let authorColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("author"))
+        authorColumn.title = "Author"
+        authorColumn.width = 130
+        markupsTable.addTableColumn(authorColumn)
+
         let textColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("text"))
         textColumn.title = "Text"
-        textColumn.width = 280
+        textColumn.width = 240
         markupsTable.addTableColumn(textColumn)
 
         markupsTable.usesAlternatingRowBackgroundColors = true
@@ -1590,7 +1718,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         menu.item(at: menu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(withTitle: exportButton.title, action: exportButton.action, keyEquivalent: "S")
         menu.item(at: menu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command, .shift]
-        menu.addItem(withTitle: "Export Markups CSV", action: #selector(exportMarkupsCSV), keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: refreshMarkupsButton.title, action: refreshMarkupsButton.action, keyEquivalent: "r")
         menu.item(at: menu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command]
@@ -1834,13 +1961,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         emptyStateOpenButton.bezelStyle = .texturedRounded
         emptyStateRecentButton.bezelStyle = .texturedRounded
         emptyStateSampleButton.bezelStyle = .texturedRounded
+        emptyStateBatchMobileButton.bezelStyle = .texturedRounded
 
         let actions = NSStackView(views: [emptyStateOpenButton, emptyStateRecentButton, emptyStateSampleButton])
         actions.orientation = .horizontal
         actions.spacing = 8
         actions.alignment = .centerY
 
-        let stack = NSStackView(views: [emptyStateTitle, actions])
+        let stack = NSStackView(views: [emptyStateTitle, actions, emptyStateBatchMobileButton])
         stack.orientation = .vertical
         stack.spacing = 10
         stack.alignment = .centerX
@@ -1902,6 +2030,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         batchLinkSheetsButton.imagePosition = .imageOnly
         batchLinkSheetsButton.bezelStyle = .texturedRounded
         batchLinkSheetsButton.toolTip = "Batch Link Sheet Numbers (Cmd+Shift+H)"
+        flattenPDFButton.image = NSImage(systemSymbolName: "square.stack.3d.down.forward", accessibilityDescription: "Flatten PDF")
+            ?? NSImage(systemSymbolName: "square.stack.3d.forward.dottedline", accessibilityDescription: "Flatten PDF")
+        flattenPDFButton.imagePosition = .imageOnly
+        flattenPDFButton.bezelStyle = .texturedRounded
+        flattenPDFButton.toolTip = "Flatten PDF"
+        reduceFileSizeButton.image = NSImage(systemSymbolName: "arrow.down.doc", accessibilityDescription: "Reduce File Size")
+            ?? NSImage(systemSymbolName: "doc", accessibilityDescription: "Reduce File Size")
+        reduceFileSizeButton.imagePosition = .imageOnly
+        reduceFileSizeButton.bezelStyle = .texturedRounded
+        reduceFileSizeButton.toolTip = "Reduce File Size"
 
         actionsPopup.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "Actions")
         actionsPopup.imagePosition = .imageOnly
@@ -1958,6 +2096,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             toolbarControlsStack.addArrangedSubview(openButton)
             toolbarControlsStack.addArrangedSubview(autoNameSheetsButton)
             toolbarControlsStack.addArrangedSubview(batchLinkSheetsButton)
+            toolbarControlsStack.addArrangedSubview(flattenPDFButton)
+            toolbarControlsStack.addArrangedSubview(reduceFileSizeButton)
             toolbarControlsStack.addArrangedSubview(toolbarModeGroupsStack)
         }
 
@@ -2641,6 +2781,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         scrollView.borderType = .bezelBorder
         scrollView.hasVerticalScroller = true
         scrollView.documentView = markupsTable
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
         markupsTable.translatesAutoresizingMaskIntoConstraints = false
         markupsTable.widthAnchor.constraint(equalTo: scrollView.widthAnchor).isActive = true
 
@@ -2754,6 +2896,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let sidebar = NSStackView(views: [
             toolSettingsHeaderRow,
             toolSettingsSectionContent,
+            markupsSectionButton,
+            markupsSectionContent,
+            summarySectionButton,
+            summarySectionContent,
             sidebarSpacer,
             snapSectionButton,
             snapSectionContent,
@@ -3770,7 +3916,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private func annotationSearchText(for annotation: PDFAnnotation) -> String {
         let type = annotation.type ?? ""
         let contents = annotation.contents ?? ""
-        return "\(type)\n\(contents)".lowercased()
+        let author = annotation.userName ?? ""
+        return "\(type)\n\(author)\n\(contents)".lowercased()
     }
 
     private func measurementSummary(for annotations: [PDFAnnotation]) -> (count: Int, totalPoints: CGFloat) {
@@ -4073,6 +4220,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         )
         markMarkupChanged()
         performRefreshMarkups(selecting: selectedAnnotation, forceImmediate: forceImmediateRefresh)
+        updatePDFContentsSummary()
         if shouldScheduleAutosave {
             scheduleAutosave()
         }
@@ -4217,6 +4365,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let dpi: CGFloat
     }
 
+    private var mobileJPEGExportPreset: JPEGExportPreset {
+        JPEGExportPreset(title: "Low (60%)", compressionQuality: 0.60, dpi: 120)
+    }
+
     private func jpegExportPresetSelection(defaultIndex: Int = 2) -> JPEGExportPreset? {
         let presets: [JPEGExportPreset] = [
             .init(title: "Low (60%)", compressionQuality: 0.60, dpi: 120),
@@ -4283,6 +4435,34 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             counter += 1
         }
         return candidate
+    }
+
+    private func uniqueFileURL(baseName: String, extension fileExtension: String, in folder: URL) -> URL {
+        let sanitizedBase = sanitizedFilename(baseName)
+        var candidate = folder.appendingPathComponent(sanitizedBase).appendingPathExtension(fileExtension)
+        var counter = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = folder.appendingPathComponent("\(sanitizedBase) \(counter)").appendingPathExtension(fileExtension)
+            counter += 1
+        }
+        return candidate
+    }
+
+    private func pdfURLs(in folderURL: URL) -> [URL] {
+        guard let urls = try? FileManager.default.contentsOfDirectory(
+            at: folderURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        return urls.filter { url in
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]),
+                  values.isRegularFile == true else { return false }
+            return url.pathExtension.lowercased() == "pdf"
+        }.sorted {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        }
     }
 
     private func pageJPEGImage(page: PDFPage, dpi: CGFloat) -> CGImage? {
@@ -4621,7 +4801,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
 
-        applyImageFilenameBookmarks(to: rebuiltPDF, imageURLs: imageURLs)
         guard Self.writePDFDocument(rebuiltPDF, to: temporaryOutputURL, pageLabels: [:]) else {
             runAlert(
                 title: "Failed to Save PDF",
@@ -4633,45 +4812,29 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         try? FileManager.default.removeItem(at: exportDirectory)
 
         openDocument(at: temporaryOutputURL)
-        // Export-to-iPad works on a temporary document and should only prompt for Save once at the end.
         hasPromptedForInitialMarkupSaveCopy = true
         isPresentingInitialMarkupSaveCopyPrompt = false
         shouldChainAutoNameAfterBatchLink = false
-        shouldFinalizeExportToIPadSaveAfterAutoName = false
         pendingExportToIPadTemporaryURL = nil
         pendingExportToIPadSuggestedFilename = nil
-        let canStartAutoLinkTool = (pdfView.document != nil)
-        let scheduleAutoLinkStart: () -> Void = { [weak self] in
-            guard canStartAutoLinkTool else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                guard let self, self.pdfView.document != nil else { return }
-                NSApp.activate(ignoringOtherApps: true)
-                self.view.window?.makeFirstResponder(self.pdfView)
-                self.shouldChainAutoNameAfterBatchLink = true
-                self.shouldFinalizeExportToIPadSaveAfterAutoName = true
-                self.pendingExportToIPadTemporaryURL = temporaryOutputURL
-                self.pendingExportToIPadSuggestedFilename = "\(baseName) - iPad.pdf"
-                self.startAutoLinkSheetNumbersFlow()
-            }
-        }
         let exportIssueCount = exportResult.failedPages.count
         let rebuildIssueCount = failedImageFiles.count
         let hasIssues = exportIssueCount > 0 || rebuildIssueCount > 0
-        let linkSummary = canStartAutoLinkTool
-            ? "Opened PDF. After this message, Drawbridge will start Batch Link Sheet Numbers."
-            : "Saved PDF, but could not open it to start hyperlinking."
+        let exportSummary = "Opened the iPad PDF. Run Batch Link Sheet Numbers and Auto-Generate Sheet Names/Bookmarks manually if you want hyperlinks/bookmarks."
+        pendingExportToIPadTemporaryURL = temporaryOutputURL
+        pendingExportToIPadSuggestedFilename = "\(baseName) - iPhone-iPad.pdf"
 
         if !hasIssues {
+            promptFinalizeExportToIPadSave(document: rebuiltPDF)
             runAlert(
-                title: "Export to iPad Complete",
+                title: "Export to iPhone / iPad Complete",
                 informativeText: """
                 Exported \(exportResult.successCount) JPG page(s).
                 Built a combined PDF with \(rebuiltPDF.pageCount) pages.
 
-                \(linkSummary)
+                \(exportSummary)
                 """
             )
-            scheduleAutoLinkStart()
             return
         }
 
@@ -4687,70 +4850,223 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             issues.append("Rebuild skipped image(s): \(imageFailurePreview)\(imageFailureSuffix)")
         }
         runAlert(
-            title: "Export to iPad Complete with Issues",
+            title: "Export to iPhone / iPad Complete with Issues",
             informativeText: """
             Built a combined PDF with \(rebuiltPDF.pageCount) pages.
-            \(linkSummary)
+            \(exportSummary)
 
             \(issues.joined(separator: "\n"))
             """,
             style: .warning
         )
-        scheduleAutoLinkStart()
+        promptFinalizeExportToIPadSave(document: rebuiltPDF)
     }
 
-    @objc func commandExportToBluebeam(_ sender: Any?) {
-        guard let document = pdfView.document else { beep(); return }
-        let baseName = sanitizedFilename((openDocumentURL?.deletingPathExtension().lastPathComponent) ?? "Drawbridge Export")
-        let temporaryOutputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("drawbridge-export-bluebeam-\(UUID().uuidString)")
-            .appendingPathExtension("pdf")
+    @objc func batchExportToMobilePDFs() {
+        let sourcePanel = NSOpenPanel()
+        sourcePanel.canChooseFiles = false
+        sourcePanel.canChooseDirectories = true
+        sourcePanel.canCreateDirectories = false
+        sourcePanel.allowsMultipleSelection = false
+        sourcePanel.prompt = "Choose Folder"
+        sourcePanel.message = "Select the folder of PDFs to batch convert for iPhone / iPad."
+        guard sourcePanel.runModal() == .OK, let sourceFolder = sourcePanel.url else { return }
 
-        guard Self.writePDFDocument(document, to: temporaryOutputURL, pageLabels: pageLabelOverrides) else {
+        let pdfFiles = pdfURLs(in: sourceFolder)
+        guard !pdfFiles.isEmpty else {
             runAlert(
-                title: "Failed to Prepare Export",
-                informativeText: "Could not create the temporary Bluebeam export copy.",
+                title: "No PDFs Found",
+                informativeText: "No PDF files were found in:\n\(sourceFolder.path)",
                 style: .warning
             )
             return
         }
 
-        openDocument(at: temporaryOutputURL)
-        hasPromptedForInitialMarkupSaveCopy = true
-        isPresentingInitialMarkupSaveCopyPrompt = false
-        shouldChainAutoNameAfterBatchLink = false
-        shouldFinalizeExportToIPadSaveAfterAutoName = false
-        shouldFinalizeExportToBluebeamSaveAfterAutoName = false
-        pendingExportToIPadTemporaryURL = nil
-        pendingExportToIPadSuggestedFilename = nil
-        pendingExportToBluebeamTemporaryURL = nil
-        pendingExportToBluebeamSuggestedFilename = nil
+        let destinationPanel = NSOpenPanel()
+        destinationPanel.canChooseFiles = false
+        destinationPanel.canChooseDirectories = true
+        destinationPanel.canCreateDirectories = true
+        destinationPanel.allowsMultipleSelection = false
+        destinationPanel.prompt = "Choose Folder"
+        destinationPanel.message = "Select where the iPhone / iPad PDFs should be saved."
+        guard destinationPanel.runModal() == .OK, let destinationRoot = destinationPanel.url else { return }
 
-        let canStartAutoLinkTool = (pdfView.document != nil)
-        let scheduleAutoLinkStart: () -> Void = { [weak self] in
-            guard canStartAutoLinkTool else { return }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                guard let self, self.pdfView.document != nil else { return }
-                NSApp.activate(ignoringOtherApps: true)
-                self.view.window?.makeFirstResponder(self.pdfView)
-                self.shouldChainAutoNameAfterBatchLink = true
-                self.shouldFinalizeExportToBluebeamSaveAfterAutoName = true
-                self.pendingExportToBluebeamTemporaryURL = temporaryOutputURL
-                self.pendingExportToBluebeamSuggestedFilename = "\(baseName) - Bluebeam.pdf"
-                self.startAutoLinkSheetNumbersFlow()
-            }
-        }
-
-        if canStartAutoLinkTool {
-            scheduleAutoLinkStart()
+        let outputFolder = uniqueSubdirectoryURL(
+            baseName: "\(sourceFolder.lastPathComponent) - iPhone iPad PDFs",
+            in: destinationRoot
+        )
+        do {
+            try FileManager.default.createDirectory(at: outputFolder, withIntermediateDirectories: true)
+        } catch {
+            runAlert(
+                title: "Could Not Create Output Folder",
+                informativeText: error.localizedDescription,
+                style: .warning
+            )
             return
         }
 
-        runAlert(
-            title: "Export to Bluebeam Failed",
-            informativeText: "Created a temporary PDF copy, but could not open it to start hyperlinking.",
-            style: .warning
+        let preset = mobileJPEGExportPreset
+        var readableFiles: [(url: URL, document: PDFDocument, pageCount: Int)] = []
+        var issues: [String] = []
+        for url in pdfFiles {
+            guard let document = PDFDocument(url: url), document.pageCount > 0 else {
+                issues.append("\(url.lastPathComponent): could not open PDF")
+                continue
+            }
+            readableFiles.append((url, document, document.pageCount))
+        }
+
+        guard !readableFiles.isEmpty else {
+            runAlert(
+                title: "Batch Export Failed",
+                informativeText: "None of the PDFs in the selected folder could be opened.",
+                style: .warning
+            )
+            return
+        }
+
+        let totalPages = readableFiles.reduce(0) { $0 + $1.pageCount }
+        isBatchJPEGExportCancellationRequested = false
+        beginBusyIndicator("Batch Exporting to iPhone / iPad…", detail: "Preparing files…", lockInteraction: false)
+        setBusyCancelAction({ [weak self] in
+            guard let self else { return }
+            self.isBatchJPEGExportCancellationRequested = true
+            self.setBusyCancelAction(self.busyCancelHandler, title: "Canceling…", enabled: false)
+            self.updateBusyIndicatorDetail("Stopping after current PDF…")
+            self.updateBusyIndicatorSubdetail("")
+        }, title: "Cancel Export")
+        updateBusyIndicatorProgress(current: 0, total: max(1, totalPages))
+        defer { endBusyIndicator() }
+
+        let tempRoot = FileManager.default.temporaryDirectory.appendingPathComponent("drawbridge-batch-mobile-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let start = Date()
+        var processedPages = 0
+        var exportedFiles = 0
+
+        for (fileIndex, fileInfo) in readableFiles.enumerated() {
+            if isBatchJPEGExportCancellationRequested { break }
+            let baseName = sanitizedFilename(fileInfo.url.deletingPathExtension().lastPathComponent)
+            let tempImageFolder = tempRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: tempImageFolder, withIntermediateDirectories: true)
+            } catch {
+                issues.append("\(fileInfo.url.lastPathComponent): could not create temporary folder")
+                continue
+            }
+
+            var failedPages: [Int] = []
+            var imageURLs: [URL] = []
+            for pageIndex in 0..<fileInfo.document.pageCount {
+                _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
+                if isBatchJPEGExportCancellationRequested { break }
+
+                let elapsed = Date().timeIntervalSince(start)
+                let average = elapsed / Double(max(1, processedPages))
+                let remaining = average * Double(max(0, totalPages - processedPages))
+                updateBusyIndicatorStatus("Batch Exporting to iPhone / iPad…")
+                updateBusyIndicatorDetail("File \(fileIndex + 1)/\(readableFiles.count): \(fileInfo.url.lastPathComponent)")
+                updateBusyIndicatorSubdetail("Page \(pageIndex + 1)/\(fileInfo.document.pageCount) • \(processedPages)/\(totalPages) done • ETA \(shortDuration(remaining))")
+                updateBusyIndicatorProgress(current: processedPages, total: max(1, totalPages))
+
+                var exportSucceeded = false
+                if let page = fileInfo.document.page(at: pageIndex) {
+                    autoreleasepool {
+                        guard let image = pageJPEGImage(page: page, dpi: preset.dpi) else { return }
+                        let destination = tempImageFolder.appendingPathComponent(String(format: "Page-%04d.jpg", pageIndex + 1))
+                        guard let destinationRef = CGImageDestinationCreateWithURL(destination as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return }
+                        let options = [kCGImageDestinationLossyCompressionQuality: preset.compressionQuality] as CFDictionary
+                        CGImageDestinationAddImage(destinationRef, image, options)
+                        exportSucceeded = CGImageDestinationFinalize(destinationRef)
+                        if exportSucceeded {
+                            imageURLs.append(destination)
+                        }
+                    }
+                }
+
+                if !exportSucceeded {
+                    failedPages.append(pageIndex + 1)
+                }
+                processedPages += 1
+                updateBusyIndicatorProgress(current: processedPages, total: max(1, totalPages))
+            }
+
+            guard !isBatchJPEGExportCancellationRequested else { break }
+            guard !imageURLs.isEmpty else {
+                issues.append("\(fileInfo.url.lastPathComponent): no pages could be exported")
+                continue
+            }
+
+            let rebuiltPDF = PDFDocument()
+            var skippedImages = 0
+            for imageURL in imageURLs.sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }) {
+                autoreleasepool {
+                    if let image = NSImage(contentsOf: imageURL),
+                       let page = PDFPage(image: image) {
+                        rebuiltPDF.insert(page, at: rebuiltPDF.pageCount)
+                    } else {
+                        skippedImages += 1
+                    }
+                }
+            }
+
+            guard rebuiltPDF.pageCount > 0 else {
+                issues.append("\(fileInfo.url.lastPathComponent): could not rebuild PDF")
+                continue
+            }
+
+            let outputURL = uniqueFileURL(baseName: "\(baseName) - iPhone-iPad", extension: "pdf", in: outputFolder)
+            if Self.writePDFDocument(rebuiltPDF, to: outputURL, pageLabels: [:]) {
+                exportedFiles += 1
+            } else {
+                issues.append("\(fileInfo.url.lastPathComponent): could not write output PDF")
+                continue
+            }
+
+            if !failedPages.isEmpty {
+                let preview = failedPages.prefix(8).map(String.init).joined(separator: ", ")
+                let suffix = failedPages.count > 8 ? ", …" : ""
+                issues.append("\(fileInfo.url.lastPathComponent): failed page(s) \(preview)\(suffix)")
+            }
+            if skippedImages > 0 {
+                issues.append("\(fileInfo.url.lastPathComponent): skipped \(skippedImages) exported image(s)")
+            }
+        }
+
+        if isBatchJPEGExportCancellationRequested {
+            let response = runAlert(
+                title: "Batch Export Canceled",
+                informativeText: "Created \(exportedFiles) PDF(s) in:\n\(outputFolder.path)",
+                buttons: ["Reveal in Finder", "OK"],
+                activateApp: true
+            )
+            if response == .alertFirstButtonReturn {
+                NSWorkspace.shared.activateFileViewerSelecting([outputFolder])
+            }
+            return
+        }
+
+        let issueText: String
+        if issues.isEmpty {
+            issueText = ""
+        } else {
+            let preview = issues.prefix(10).joined(separator: "\n")
+            let suffix = issues.count > 10 ? "\n…" : ""
+            issueText = "\n\nIssues:\n\(preview)\(suffix)"
+        }
+        let response = runAlert(
+            title: issues.isEmpty ? "Batch Export Complete" : "Batch Export Complete with Issues",
+            informativeText: "Created \(exportedFiles) iPhone / iPad PDF(s) in:\n\(outputFolder.path)\(issueText)",
+            style: issues.isEmpty ? .informational : .warning,
+            buttons: ["Reveal in Finder", "OK"],
+            activateApp: true
         )
+        if response == .alertFirstButtonReturn {
+            NSWorkspace.shared.activateFileViewerSelecting([outputFolder])
+        }
     }
 
     @objc func exportPagesAsJPEG() {
@@ -4957,6 +5273,86 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
 
+    func restoreSourcePageGeometryIfNeeded(to document: PDFDocument) {
+        guard !displayPageGeometryOverrides.isEmpty else { return }
+        for (pageIndex, geometry) in displayPageGeometryOverrides {
+            guard pageIndex >= 0,
+                  pageIndex < document.pageCount,
+                  let page = document.page(at: pageIndex) else { continue }
+            geometry.apply(to: page)
+        }
+    }
+
+    func reapplyDisplayPageGeometryOverridesIfNeeded(to document: PDFDocument? = nil) {
+        guard !displayPageGeometryOverrides.isEmpty else { return }
+        let targetDocument = document ?? pdfView.document
+        guard let targetDocument else { return }
+        for pageIndex in displayPageGeometryOverrides.keys {
+            guard pageIndex >= 0,
+                  pageIndex < targetDocument.pageCount,
+                  let page = targetDocument.page(at: pageIndex),
+                  shouldDisplayPageWithNativeGeometry(page) else { continue }
+            applyNativeLandscapeDisplayGeometry(to: page)
+        }
+    }
+
+    private func applyReadablePageDisplayGeometryIfNeeded(to document: PDFDocument) {
+        displayPageGeometryOverrides.removeAll(keepingCapacity: false)
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex),
+                  shouldDisplayPageWithNativeGeometry(page) else { continue }
+            displayPageGeometryOverrides[pageIndex] = PDFPageStoredGeometry(page: page)
+            applyNativeLandscapeDisplayGeometry(to: page)
+        }
+    }
+
+    private func shouldDisplayPageWithNativeGeometry(_ page: PDFPage) -> Bool {
+        let rotation = ((page.rotation % 360) + 360) % 360
+        guard rotation == 90 || rotation == 270 else { return false }
+        let bounds = page.bounds(for: .cropBox).standardized
+        guard bounds.height > bounds.width * 1.1 else { return false }
+        return pageHasMostlyHorizontalNativeText(page, in: bounds)
+    }
+
+    private func pageHasMostlyHorizontalNativeText(_ page: PDFPage, in bounds: NSRect) -> Bool {
+        guard let selection = page.selection(for: bounds) else { return false }
+        var horizontalLines = 0
+        var verticalLines = 0
+        var sampledLines = 0
+        for line in selection.selectionsByLine().prefix(120) {
+            let text = (line.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard text.count >= 3 else { continue }
+            let lineBounds = line.bounds(for: page).standardized
+            guard lineBounds.width > 2, lineBounds.height > 2 else { continue }
+            sampledLines += 1
+            if lineBounds.width > lineBounds.height * 2.2 {
+                horizontalLines += 1
+            } else if lineBounds.height > lineBounds.width * 2.2 {
+                verticalLines += 1
+            }
+        }
+        guard sampledLines >= 3 else { return false }
+        let minimumHorizontalLines = sampledLines < 8 ? 3 : 8
+        return horizontalLines >= minimumHorizontalLines && horizontalLines > verticalLines * 2
+    }
+
+    private func applyNativeLandscapeDisplayGeometry(to page: PDFPage) {
+        func swapped(_ rect: NSRect) -> NSRect {
+            NSRect(x: rect.origin.x, y: rect.origin.y, width: rect.height, height: rect.width)
+        }
+        let mediaBox = page.bounds(for: .mediaBox)
+        let cropBox = page.bounds(for: .cropBox)
+        let bleedBox = page.bounds(for: .bleedBox)
+        let trimBox = page.bounds(for: .trimBox)
+        let artBox = page.bounds(for: .artBox)
+        page.rotation = 0
+        page.setBounds(swapped(mediaBox), for: .mediaBox)
+        page.setBounds(swapped(cropBox), for: .cropBox)
+        page.setBounds(swapped(bleedBox), for: .bleedBox)
+        page.setBounds(swapped(trimBox), for: .trimBox)
+        page.setBounds(swapped(artBox), for: .artBox)
+    }
+
     func openDocument(at url: URL) {
         let openSpan = PerformanceMetrics.begin(
             "open_document",
@@ -4975,8 +5371,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             )
             return
         }
-        let normalizedRotatedLandscapePages = Self.normalizeRotatedLandscapePageBoxes(in: document)
-
+        applyReadablePageDisplayGeometryIfNeeded(to: document)
         pdfView.document = document
         clearMarkupCache()
         pageScaleLocks.removeAll(keepingCapacity: false)
@@ -5018,8 +5413,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 "rehydrated_images": "\(annotationOptimization.rehydratedImages)",
                 "rehydrated_snapshots": "\(annotationOptimization.rehydratedSnapshots)",
                 "normalized_fonts": "\(annotationOptimization.normalizedFonts)",
-                "repaired_ink_paths": "\(annotationOptimization.repairedInkPaths)",
-                "normalized_rotated_landscape_pages": "\(normalizedRotatedLandscapePages)"
+                "repaired_ink_paths": "\(annotationOptimization.repairedInkPaths)"
             ]
         )
     }
@@ -5073,6 +5467,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 }
 
                 let type = (annotation.type ?? "").lowercased()
+                if isExtraneousEmbeddedPDFAnnotation(annotation) {
+                    annotation.shouldDisplay = false
+                    annotation.shouldPrint = false
+                }
+                if type.contains("link") || annotation.destination != nil || annotation.action != nil {
+                    if let border = annotation.border, border.lineWidth > 0 {
+                        border.lineWidth = 0
+                        annotation.border = border
+                    }
+                }
                 if type.contains("freetext") {
                     let size = max(6.0, annotation.font?.pointSize ?? 15.0)
                     let currentName = annotation.font?.fontName ?? ""
@@ -5190,6 +5594,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         refreshDocumentTabs()
     }
 
+    func unregisterSessionDocument(_ url: URL) {
+        let normalized = canonicalDocumentURL(url)
+        sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == normalized }
+        refreshDocumentTabs()
+    }
+
     func canonicalDocumentURL(_ url: URL) -> URL {
         url.standardizedFileURL.resolvingSymlinksInPath()
     }
@@ -5208,6 +5618,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pendingScaleReminderSuppressionPageIndex = -1
         pendingScaleReminderSuppressionOneShot = false
         pageLabelOverrides.removeAll()
+        flattenedPDFItems.removeAll(keepingCapacity: false)
         openDocumentURL = nil
         hasPromptedForInitialMarkupSaveCopy = true
         isPresentingInitialMarkupSaveCopyPrompt = false
@@ -6024,12 +6435,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             setTool(previous)
         }
         autoNamePreviousToolMode = nil
-        shouldFinalizeExportToIPadSaveAfterAutoName = false
-        shouldFinalizeExportToBluebeamSaveAfterAutoName = false
-        pendingExportToIPadTemporaryURL = nil
-        pendingExportToIPadSuggestedFilename = nil
-        pendingExportToBluebeamTemporaryURL = nil
-        pendingExportToBluebeamSuggestedFilename = nil
     }
 
     private func handleAutoNameRegionCaptured(on page: PDFPage, rectInPage: NSRect) {
@@ -6237,12 +6642,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         autoLinkPreviousToolMode = nil
         shouldChainAutoNameAfterBatchLink = false
-        shouldFinalizeExportToIPadSaveAfterAutoName = false
-        shouldFinalizeExportToBluebeamSaveAfterAutoName = false
-        pendingExportToIPadTemporaryURL = nil
-        pendingExportToIPadSuggestedFilename = nil
-        pendingExportToBluebeamTemporaryURL = nil
-        pendingExportToBluebeamSuggestedFilename = nil
     }
 
     private func handleAutoLinkRegionCaptured(on page: PDFPage, rectInPage: NSRect) {
@@ -6292,7 +6691,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             autoLinkCaptureReferencePageIndex = nil
             if !completedBatchLink {
                 shouldChainAutoNameAfterBatchLink = false
-                shouldFinalizeExportToIPadSaveAfterAutoName = false
             }
         }
 
@@ -7351,10 +7749,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         recognitionLevel: VNRequestTextRecognitionLevel,
         customWords: [String]
     ) -> [OCRLineHit] {
-        let pageBounds = page.bounds(for: .mediaBox)
+        let displayBox: PDFDisplayBox = .mediaBox
+        let pageBounds = page.bounds(for: displayBox)
         guard pageBounds.width > 1, pageBounds.height > 1 else { return [] }
-        let width = Int((pageBounds.width * scale).rounded(.up))
-        let height = Int((pageBounds.height * scale).rounded(.up))
+        let pageTransform = page.transform(for: displayBox)
+        let orientedFullBox = pageBounds.applying(pageTransform).standardized
+        guard orientedFullBox.width > 1, orientedFullBox.height > 1 else { return [] }
+        let width = Int((orientedFullBox.width * scale).rounded(.up))
+        let height = Int((orientedFullBox.height * scale).rounded(.up))
         guard width > 0, height > 0 else { return [] }
 
         guard let context = CGContext(
@@ -7371,8 +7773,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         context.setFillColor(NSColor.white.cgColor)
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         context.scaleBy(x: scale, y: scale)
-        context.translateBy(x: -pageBounds.minX, y: -pageBounds.minY)
-        page.draw(with: .mediaBox, to: context)
+        context.translateBy(x: -orientedFullBox.minX, y: -orientedFullBox.minY)
+        page.draw(with: displayBox, to: context)
         guard let image = context.makeImage() else { return [] }
 
         let request = VNRecognizeTextRequest()
@@ -7394,6 +7796,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         hits.reserveCapacity(observations.count)
         let imageWidth = CGFloat(width)
         let imageHeight = CGFloat(height)
+        let inversePageTransform = pageTransform.inverted()
         for observation in observations {
             let box = observation.boundingBox
             let rectPx = NSRect(
@@ -7402,12 +7805,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 width: box.width * imageWidth,
                 height: box.height * imageHeight
             )
-            let rectInPage = NSRect(
-                x: pageBounds.minX + rectPx.minX / scale,
-                y: pageBounds.minY + rectPx.minY / scale,
+            let rectInOrientedPage = NSRect(
+                x: orientedFullBox.minX + rectPx.minX / scale,
+                y: orientedFullBox.minY + rectPx.minY / scale,
                 width: rectPx.width / scale,
                 height: rectPx.height / scale
             )
+            let rectInPage = rectInOrientedPage.applying(inversePageTransform).standardized
             guard rectInPage.width > 1, rectInPage.height > 1 else { continue }
             guard let top = observation.topCandidates(1).first else { continue }
             let text = cleanDetectedSheetText(top.string)
@@ -7450,14 +7854,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         runAlert(title: "Sheet Names Updated", informativeText: informativeText)
 
-        if shouldFinalizeExportToIPadSaveAfterAutoName {
-            shouldFinalizeExportToIPadSaveAfterAutoName = false
-            promptFinalizeExportToIPadSave(document: document)
-        }
-        if shouldFinalizeExportToBluebeamSaveAfterAutoName {
-            shouldFinalizeExportToBluebeamSaveAfterAutoName = false
-            promptFinalizeExportToBluebeamSave(document: document)
-        }
     }
 
     private func promptFinalizeExportToIPadSave(document: PDFDocument) {
@@ -7467,7 +7863,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if let suggested = pendingExportToIPadSuggestedFilename, !suggested.isEmpty {
             savePanel.nameFieldStringValue = suggested
         } else {
-            savePanel.nameFieldStringValue = "Drawbridge-iPad.pdf"
+            savePanel.nameFieldStringValue = "Drawbridge-iPhone-iPad.pdf"
         }
         guard savePanel.runModal() == .OK, let finalURL = savePanel.url else {
             pendingExportToIPadTemporaryURL = nil
@@ -7486,46 +7882,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             document: document,
             showBusyOverlay: true,
             deferEmbeddedWrite: false
-        )
-
-        if let temporaryURL,
-           temporaryURL.standardizedFileURL != finalURL.standardizedFileURL,
-           FileManager.default.fileExists(atPath: temporaryURL.path) {
-            try? FileManager.default.removeItem(at: temporaryURL)
-        }
-    }
-
-    private func promptFinalizeExportToBluebeamSave(document: PDFDocument) {
-        let savePanel = NSSavePanel()
-        savePanel.allowedContentTypes = [.pdf]
-        savePanel.prompt = "Save"
-        if let suggested = pendingExportToBluebeamSuggestedFilename, !suggested.isEmpty {
-            savePanel.nameFieldStringValue = suggested
-        } else {
-            savePanel.nameFieldStringValue = "Drawbridge-Bluebeam.pdf"
-        }
-        guard savePanel.runModal() == .OK, let finalURL = savePanel.url else {
-            pendingExportToBluebeamTemporaryURL = nil
-            pendingExportToBluebeamSuggestedFilename = nil
-            return
-        }
-
-        let temporaryURL = pendingExportToBluebeamTemporaryURL
-        pendingExportToBluebeamTemporaryURL = nil
-        pendingExportToBluebeamSuggestedFilename = nil
-        persistDocument(
-            to: finalURL,
-            adoptAsPrimaryDocument: false,
-            busyMessage: "Saving PDF…",
-            document: document,
-            showBusyOverlay: true,
-            deferEmbeddedWrite: false
-        )
-
-        if let temporaryURL,
-           temporaryURL.standardizedFileURL != finalURL.standardizedFileURL,
-           FileManager.default.fileExists(atPath: temporaryURL.path) {
-            try? FileManager.default.removeItem(at: temporaryURL)
+        ) { [weak self] success in
+            guard success, let self, let temporaryURL else { return }
+            self.unregisterSessionDocument(temporaryURL)
+            if temporaryURL.standardizedFileURL != finalURL.standardizedFileURL,
+               FileManager.default.fileExists(atPath: temporaryURL.path) {
+                try? FileManager.default.removeItem(at: temporaryURL)
+            }
         }
     }
 
@@ -7745,6 +8108,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         fullContext.setFillColor(NSColor.white.cgColor)
         fullContext.fill(CGRect(x: 0, y: 0, width: widthPx, height: heightPx))
         fullContext.scaleBy(x: scale, y: scale)
+        fullContext.translateBy(x: -orientedFullBox.minX, y: -orientedFullBox.minY)
 
         // PDFPage.draw handles orientation into the target context box perfectly.
         page.draw(with: displayBox, to: fullContext)
@@ -7755,11 +8119,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let orientedCrop = rectInPage.applying(transform).standardized
         let ciImage = CIImage(cgImage: fullImage)
         let cropRectPx = CGRect(
-            x: orientedCrop.minX * scale,
-            y: orientedCrop.minY * scale,
+            x: (orientedCrop.minX - orientedFullBox.minX) * scale,
+            y: (orientedCrop.minY - orientedFullBox.minY) * scale,
             width: orientedCrop.width * scale,
             height: orientedCrop.height * scale
-        )
+        ).intersection(ciImage.extent)
+        guard !cropRectPx.isEmpty else { return nil }
 
         let croppedCI = ciImage.cropped(to: cropRectPx)
 

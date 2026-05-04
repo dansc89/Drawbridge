@@ -109,12 +109,18 @@ extension MainViewController {
         document: PDFDocument? = nil,
         showBusyOverlay: Bool = true,
         deferEmbeddedWrite: Bool = true,
-        embeddedSaveToken: Int = 0
+        embeddedSaveToken: Int = 0,
+        completion: (@MainActor @Sendable (Bool) -> Void)? = nil
     ) {
-        guard let document = document ?? pdfView.document else { beep(); return }
+        guard let document = document ?? pdfView.document else {
+            beep()
+            completion?(false)
+            return
+        }
         applyPageLabelOverridesToDocumentIfNeeded(document)
         if deferEmbeddedWrite && !adoptAsPrimaryDocument && !showBusyOverlay {
             persistFastSnapshotThenDeferredEmbeddedSave(to: url, document: document)
+            completion?(true)
             return
         }
         if persistenceCoordinator.isManualSaveInFlight {
@@ -122,6 +128,7 @@ extension MainViewController {
             if !adoptAsPrimaryDocument {
                 queuedFastEmbeddedSave = true
             }
+            completion?(false)
             return
         }
         let startedMarkupVersion = markupChangeVersion
@@ -142,6 +149,7 @@ extension MainViewController {
         let startedAt = CFAbsoluteTimeGetCurrent()
         let documentBox = PDFDocumentBox(document: document)
         let pageLabelsForEmbeddedSave = embeddedPageLabelsForSave(in: document)
+        let sourcePageGeometryForEmbeddedSave = (document === pdfView.document) ? displayPageGeometryOverrides : [:]
         let destinationAlreadyExists = FileManager.default.fileExists(atPath: targetURL.path)
         let destinationIsFileProvider = Self.isLikelyFileProviderURL(targetURL)
         let fallbackStagingURL = destinationAlreadyExists ? saveStagingFileURL(for: targetURL) : targetURL
@@ -158,7 +166,12 @@ extension MainViewController {
                 // Render locally first, then do a single commit to the destination path.
                 let localStagingURL = Self.temporaryLocalSaveURL(for: targetURL)
                 let stagedWriteStartedAt = CFAbsoluteTimeGetCurrent()
-                success = Self.writePDFDocument(documentBox.document, to: localStagingURL, pageLabels: pageLabelsForEmbeddedSave)
+                success = Self.writePDFDocument(
+                    documentBox.document,
+                    to: localStagingURL,
+                    pageLabels: pageLabelsForEmbeddedSave,
+                    sourcePageGeometry: sourcePageGeometryForEmbeddedSave
+                )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
 
                 if success {
@@ -185,7 +198,12 @@ extension MainViewController {
             } else if destinationAlreadyExists {
                 // Fast path: overwrite directly to avoid expensive replace/copy on file-provider volumes.
                 let directWriteStartedAt = CFAbsoluteTimeGetCurrent()
-                success = Self.writePDFDocument(documentBox.document, to: targetURL, pageLabels: pageLabelsForEmbeddedSave)
+                success = Self.writePDFDocument(
+                    documentBox.document,
+                    to: targetURL,
+                    pageLabels: pageLabelsForEmbeddedSave,
+                    sourcePageGeometry: sourcePageGeometryForEmbeddedSave
+                )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - directWriteStartedAt
 
                 if !success {
@@ -197,7 +215,12 @@ extension MainViewController {
                     }
                     let stagingURL = fallbackStagingURL
                     let stagedWriteStartedAt = CFAbsoluteTimeGetCurrent()
-                    success = Self.writePDFDocument(documentBox.document, to: stagingURL, pageLabels: pageLabelsForEmbeddedSave)
+                    success = Self.writePDFDocument(
+                        documentBox.document,
+                        to: stagingURL,
+                        pageLabels: pageLabelsForEmbeddedSave,
+                        sourcePageGeometry: sourcePageGeometryForEmbeddedSave
+                    )
                     writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
                     if success {
                         if showBusyOverlay {
@@ -222,13 +245,19 @@ extension MainViewController {
                 }
             } else {
                 let writeStartedAt = CFAbsoluteTimeGetCurrent()
-                success = Self.writePDFDocument(documentBox.document, to: targetURL, pageLabels: pageLabelsForEmbeddedSave)
+                success = Self.writePDFDocument(
+                    documentBox.document,
+                    to: targetURL,
+                    pageLabels: pageLabelsForEmbeddedSave,
+                    sourcePageGeometry: sourcePageGeometryForEmbeddedSave
+                )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - writeStartedAt
             }
             let elapsed = CFAbsoluteTimeGetCurrent() - startedAt
 
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.reapplyDisplayPageGeometryOverridesIfNeeded(to: documentBox.document)
                 let currentDocumentID = self.pdfView.document.map(ObjectIdentifier.init)
                 let currentURL = self.openDocumentURL.map { self.canonicalDocumentURL($0) }
                 let saveContextStillActive = (currentDocumentID == savingDocumentID) && (currentURL == canonicalTargetURL)
@@ -266,6 +295,7 @@ extension MainViewController {
                         informativeText: informativeText,
                         style: .warning
                     )
+                    completion?(false)
                     return
                 }
 
@@ -311,6 +341,7 @@ extension MainViewController {
                     }
                     self.updateStatusBar()
                 }
+                completion?(true)
             }
         }
     }
@@ -409,6 +440,19 @@ extension MainViewController {
         }
     }
 
+    nonisolated static func restorePageGeometry(
+        _ geometryByPage: [Int: PDFPageStoredGeometry],
+        to document: PDFDocument
+    ) {
+        guard !geometryByPage.isEmpty else { return }
+        for (pageIndex, geometry) in geometryByPage {
+            guard pageIndex >= 0,
+                  pageIndex < document.pageCount,
+                  let page = document.page(at: pageIndex) else { continue }
+            geometry.apply(to: page)
+        }
+    }
+
     nonisolated static func writtenPageRotationsMatch(_ rotations: [Int: Int], at url: URL) -> Bool {
         guard !rotations.isEmpty,
               let writtenDocument = PDFDocument(url: url),
@@ -426,49 +470,29 @@ extension MainViewController {
         return true
     }
 
-    @discardableResult
-    nonisolated static func normalizeRotatedLandscapePageBoxes(in document: PDFDocument) -> Int {
-        var normalizedCount = 0
-        let boxes: [PDFDisplayBox] = [.mediaBox, .cropBox, .bleedBox, .trimBox, .artBox]
-        for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex) else { continue }
-            let rotation = ((page.rotation % 360) + 360) % 360
-            guard rotation == 90 || rotation == 270 else { continue }
-            let mediaBox = page.bounds(for: .mediaBox).standardized
-            guard mediaBox.width > 0.5,
-                  mediaBox.height > 0.5,
-                  mediaBox.width < mediaBox.height else { continue }
-
-            for box in boxes {
-                let bounds = page.bounds(for: box).standardized
-                guard bounds.width > 0.5,
-                      bounds.height > 0.5,
-                      bounds.width < bounds.height else { continue }
-                page.setBounds(
-                    NSRect(
-                        x: bounds.minX,
-                        y: bounds.minY,
-                        width: bounds.height,
-                        height: bounds.width
-                    ),
-                    for: box
-                )
-            }
-            page.rotation = 0
-            normalizedCount += 1
+    nonisolated static func writePDFDocument(
+        _ document: PDFDocument,
+        to url: URL,
+        pageLabels: [Int: String],
+        options: [PDFDocumentWriteOption: Any]? = nil,
+        sourcePageGeometry: [Int: PDFPageStoredGeometry] = [:]
+    ) -> Bool {
+        if !sourcePageGeometry.isEmpty {
+            restorePageGeometry(sourcePageGeometry, to: document)
         }
-        return normalizedCount
-    }
-
-    nonisolated static func writePDFDocument(_ document: PDFDocument, to url: URL, pageLabels: [Int: String]) -> Bool {
-        normalizeRotatedLandscapePageBoxes(in: document)
-        let preservedPageRotations = pageRotations(in: document)
+        let preservedPageRotations = sourcePageGeometry.isEmpty
+            ? pageRotations(in: document)
+            : sourcePageGeometry.mapValues(\.rotation)
         restorePageRotations(preservedPageRotations, to: document)
         // `write(to:withOptions:)` is materially faster than `write(to:)` on large drawing sets.
-        guard document.write(to: url, withOptions: nil) else {
+        guard document.write(to: url, withOptions: options) else {
             return false
         }
-        restorePageRotations(preservedPageRotations, to: document)
+        if !sourcePageGeometry.isEmpty {
+            restorePageGeometry(sourcePageGeometry, to: document)
+        } else {
+            restorePageRotations(preservedPageRotations, to: document)
+        }
         if !pageLabels.isEmpty {
             do {
                 try PDFPageLabelsEmbedder.embedPageLabels(pageLabels, in: url)

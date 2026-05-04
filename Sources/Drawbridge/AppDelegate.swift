@@ -205,16 +205,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         saveCopyItem.target = controller
         fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: "Batch Combine PDFs…", action: #selector(MainViewController.commandBatchCombinePDFs(_:)), keyEquivalent: "").target = controller
+        fileMenu.addItem(withTitle: "Flatten PDF…", action: #selector(MainViewController.commandFlattenPDF(_:)), keyEquivalent: "").target = controller
+        fileMenu.addItem(withTitle: "Reduce File Size…", action: #selector(MainViewController.commandReduceFileSize(_:)), keyEquivalent: "").target = controller
         let convertRoot = NSMenuItem(title: "Convert...", action: nil, keyEquivalent: "")
         let convertMenu = NSMenu(title: "Convert")
-        convertMenu.addItem(withTitle: "Export to iPad…", action: #selector(MainViewController.commandExportPagesAsJPEGAndRebuildPDF(_:)), keyEquivalent: "").target = controller
-        convertMenu.addItem(withTitle: "Export to Bluebeam…", action: #selector(MainViewController.commandExportToBluebeam(_:)), keyEquivalent: "").target = controller
+        convertMenu.addItem(withTitle: "Export to iPhone / iPad…", action: #selector(MainViewController.commandExportPagesAsJPEGAndRebuildPDF(_:)), keyEquivalent: "").target = controller
+        convertMenu.addItem(withTitle: "Batch Export to iPhone / iPad…", action: #selector(MainViewController.commandBatchExportToMobile(_:)), keyEquivalent: "").target = controller
         convertMenu.addItem(withTitle: "JPG Folder to PDF…", action: #selector(MainViewController.commandConvertImagesToPDF(_:)), keyEquivalent: "").target = controller
         convertMenu.addItem(withTitle: "Batch Export PDFs as JPEGs…", action: #selector(MainViewController.commandBatchExportPDFsAsJPEG(_:)), keyEquivalent: "").target = controller
         convertRoot.submenu = convertMenu
         fileMenu.addItem(convertRoot)
-        let exportCSVItem = fileMenu.addItem(withTitle: "Export Markups CSV...", action: #selector(MainViewController.commandExportCSV(_:)), keyEquivalent: "e")
-        exportCSVItem.keyEquivalentModifierMask = [.command, .shift]
         let exportJPGItem = fileMenu.addItem(withTitle: "Export Pages as JPEG...", action: #selector(MainViewController.commandExportPagesAsJPEG(_:)), keyEquivalent: "j")
         exportJPGItem.keyEquivalentModifierMask = [.command, .shift]
         exportJPGItem.target = controller
