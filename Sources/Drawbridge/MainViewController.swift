@@ -5490,10 +5490,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 }
 
                 let type = (annotation.type ?? "").lowercased()
-                if isExtraneousEmbeddedPDFAnnotation(annotation) {
-                    annotation.shouldDisplay = false
-                    annotation.shouldPrint = false
-                }
                 if type.contains("link") || annotation.destination != nil || annotation.action != nil {
                     if let border = annotation.border, border.lineWidth > 0 {
                         border.lineWidth = 0
