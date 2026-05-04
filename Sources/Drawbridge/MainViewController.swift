@@ -5402,7 +5402,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             )
             return
         }
-        applyReadablePageDisplayGeometryIfNeeded(to: document)
+        displayPageGeometryOverrides.removeAll(keepingCapacity: false)
         pdfView.document = document
         clearMarkupCache()
         pageScaleLocks.removeAll(keepingCapacity: false)
