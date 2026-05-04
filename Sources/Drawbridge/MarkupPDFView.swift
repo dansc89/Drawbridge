@@ -220,6 +220,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var textOutlineWidth: CGFloat = MarkupStyleDefaults.textOutlineWidth
     var textFontName: String = ".SFNS-Regular"
     var textFontSize: CGFloat = 15.0
+    var noteColor: NSColor = .systemYellow
     var calloutStrokeColor: NSColor = .systemRed
     var calloutLineWidth: CGFloat = 2.0
     var calloutArrowStyle: ArrowEndStyle = .solidArrow
@@ -1145,7 +1146,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         let createsMarkupTool: Bool
         switch toolMode {
-        case .pen, .arrow, .highlighter, .line, .polyline, .polygon, .area, .cloud, .rectangle, .circle, .callout, .measure, .calibrate:
+        case .pen, .arrow, .highlighter, .line, .polyline, .polygon, .area, .cloud, .rectangle, .circle, .note, .callout, .measure, .calibrate:
             createsMarkupTool = true
         default:
             createsMarkupTool = false
@@ -1289,6 +1290,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         case .select:
             return
         case .text:
+            return
+        case .note:
+            guard let page = page(for: locationInView, nearest: true) else {
+                super.mouseDown(with: event)
+                return
+            }
+            addNoteAnnotation(at: convert(locationInView, to: page), on: page)
             return
         case .grab:
             guard let page = page(for: locationInView, nearest: true) else {
@@ -4193,24 +4201,67 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     func addHighlightForCurrentSelection() {
+        addTextMarkupForCurrentSelection(
+            type: .highlight,
+            color: NSColor.systemYellow.withAlphaComponent(0.45),
+            actionName: "Add Highlight"
+        )
+    }
+
+    func addUnderlineForCurrentSelection() {
+        addTextMarkupForCurrentSelection(
+            type: .underline,
+            color: NSColor.systemRed.withAlphaComponent(0.85),
+            actionName: "Add Underline"
+        )
+    }
+
+    func addStrikethroughForCurrentSelection() {
+        addTextMarkupForCurrentSelection(
+            type: .strikeOut,
+            color: NSColor.systemRed.withAlphaComponent(0.85),
+            actionName: "Add Strikethrough"
+        )
+    }
+
+    private func addTextMarkupForCurrentSelection(
+        type: PDFAnnotationSubtype,
+        color: NSColor,
+        actionName: String
+    ) {
         guard let selection = currentSelection else {
             beep()
             return
         }
 
-        let pages = selection.pages
-        for page in pages {
-            let pageSelections = selection.selectionsByLine()
-            for lineSelection in pageSelections {
-                let bounds = lineSelection.bounds(for: page)
-                let annotation = PDFAnnotation(bounds: bounds, forType: .highlight, withProperties: nil)
-                annotation.color = NSColor.systemYellow.withAlphaComponent(0.45)
+        for lineSelection in selection.selectionsByLine() {
+            for page in lineSelection.pages {
+                let bounds = lineSelection.bounds(for: page).standardized
+                guard bounds.width > 0.5, bounds.height > 0.5 else { continue }
+                let annotation = PDFAnnotation(bounds: bounds, forType: type, withProperties: nil)
+                annotation.color = color
                 page.addAnnotation(annotation)
-                onAnnotationAdded?(page, annotation, "Add Highlight")
+                onAnnotationAdded?(page, annotation, actionName)
             }
         }
 
         self.setCurrentSelection(nil, animate: false)
+    }
+
+    private func addNoteAnnotation(at point: NSPoint, on page: PDFPage) {
+        let iconSize: CGFloat = 28
+        let bounds = NSRect(
+            x: point.x - iconSize * 0.5,
+            y: point.y - iconSize * 0.5,
+            width: iconSize,
+            height: iconSize
+        )
+        let annotation = PDFAnnotation(bounds: bounds, forType: .text, withProperties: nil)
+        annotation.color = noteColor
+        annotation.contents = "Note"
+        annotation.userName = "DrawbridgeNote:\(UUID().uuidString)"
+        page.addAnnotation(annotation)
+        onAnnotationAdded?(page, annotation, "Add Note")
     }
 
     private func beginInlineTextEditing(at locationInView: NSPoint) {

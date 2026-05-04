@@ -2964,6 +2964,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         setTool(.select)
     }
 
+    @objc func selectPenTool(_ sender: Any?) { setTool(.pen) }
+    @objc func selectHighlighterTool(_ sender: Any?) { setTool(.highlighter) }
+    @objc func selectTextTool(_ sender: Any?) { setTool(.text) }
+    @objc func selectNoteTool(_ sender: Any?) { setTool(.note) }
+    @objc func selectLineTool(_ sender: Any?) { setTool(.line) }
+    @objc func selectArrowTool(_ sender: Any?) { setTool(.arrow) }
+    @objc func selectRectangleTool(_ sender: Any?) { setTool(.rectangle) }
+    @objc func selectEllipseTool(_ sender: Any?) { setTool(.circle) }
+
     func setTool(_ mode: ToolMode) {
         let mode = mode.isEnabledInScratchReset ? mode : .select
         if let primary = mode.primaryToolbarSegmentIndex {
@@ -3438,6 +3447,20 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     @objc func highlightSelection() {
         guard ensureWorkingCopyBeforeFirstMarkup() else { return }
         pdfView.addHighlightForCurrentSelection()
+        refreshMarkups()
+        scheduleAutosave()
+    }
+
+    @objc func underlineSelection() {
+        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
+        pdfView.addUnderlineForCurrentSelection()
+        refreshMarkups()
+        scheduleAutosave()
+    }
+
+    @objc func strikethroughSelection() {
+        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
+        pdfView.addStrikethroughForCurrentSelection()
         refreshMarkups()
         scheduleAutosave()
     }

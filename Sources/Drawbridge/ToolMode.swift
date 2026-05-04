@@ -14,6 +14,7 @@ enum ToolMode {
     case rectangle
     case circle
     case text
+    case note
     case callout
     case measure
     case calibrate
@@ -21,7 +22,23 @@ enum ToolMode {
 
 extension ToolMode {
     static let enabledModesInScratchReset: Set<ToolMode> = [
-        .select
+        .select,
+        .grab,
+        .pen,
+        .arrow,
+        .line,
+        .polyline,
+        .polygon,
+        .area,
+        .highlighter,
+        .cloud,
+        .rectangle,
+        .circle,
+        .text,
+        .note,
+        .callout,
+        .measure,
+        .calibrate
     ]
 
     var isEnabledInScratchReset: Bool {
@@ -32,15 +49,29 @@ extension ToolMode {
         .select
     ]
 
-    static let drawingToolbarModes: [ToolMode] = []
+    static let drawingToolbarModes: [ToolMode] = [
+        .pen,
+        .highlighter,
+        .text,
+        .note,
+        .callout
+    ]
 
-    static let geometryToolbarModes: [ToolMode] = []
+    static let geometryToolbarModes: [ToolMode] = [
+        .line,
+        .arrow,
+        .rectangle,
+        .circle
+    ]
 
     static let primaryToolbarModes: [ToolMode] = [
         .select
     ]
 
-    static let takeoffToolbarModes: [ToolMode] = []
+    static let takeoffToolbarModes: [ToolMode] = [
+        .measure,
+        .calibrate
+    ]
 
     static func fromPrimaryToolbarSegment(_ segment: Int) -> ToolMode? {
         guard segment >= 0, segment < primaryToolbarModes.count else { return nil }
@@ -75,6 +106,7 @@ extension ToolMode {
         case .rectangle: return "Rectangle"
         case .circle: return "Ellipse"
         case .text: return "Text"
+        case .note: return "Note"
         case .callout: return "Callout"
         case .measure: return "Measure"
         case .calibrate: return "Calibrate"
@@ -102,6 +134,7 @@ extension ToolMode {
         case .rectangle: return ["square"]
         case .circle: return ["circle"]
         case .text: return ["textformat"]
+        case .note: return ["note.text", "text.bubble"]
         case .callout: return ["text.bubble", "text.bubble.fill"]
         case .area: return ["polygon", "square.dashed", "square.on.square"]
         case .measure: return ["ruler"]
@@ -135,6 +168,7 @@ extension ToolMode {
         case .rectangle: return "rectangle"
         case .circle: return "circle"
         case .text: return "text"
+        case .note: return "note"
         case .callout: return "callout"
         case .measure: return "measure"
         case .calibrate: return "calibrate"

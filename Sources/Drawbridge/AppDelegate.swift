@@ -244,6 +244,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let markupsMenu = NSMenu(title: "Markups")
         let highlightItem = markupsMenu.addItem(withTitle: "Highlight Selection", action: #selector(MainViewController.commandHighlight(_:)), keyEquivalent: "h")
         highlightItem.keyEquivalentModifierMask = [.command, .option]
+        let underlineItem = markupsMenu.addItem(withTitle: "Underline Selection", action: #selector(MainViewController.commandUnderline(_:)), keyEquivalent: "u")
+        underlineItem.keyEquivalentModifierMask = [.command, .option]
+        let strikeItem = markupsMenu.addItem(withTitle: "Strikethrough Selection", action: #selector(MainViewController.commandStrikethrough(_:)), keyEquivalent: "s")
+        strikeItem.keyEquivalentModifierMask = [.command, .option]
+        markupsMenu.addItem(NSMenuItem.separator())
         let autoNamesItem = markupsMenu.addItem(withTitle: "Auto-Generate Sheet Names/Bookmarks…", action: #selector(MainViewController.commandAutoGenerateSheetNames(_:)), keyEquivalent: "a")
         autoNamesItem.keyEquivalentModifierMask = [.command, .shift]
         autoNamesItem.target = controller
@@ -272,6 +277,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainMenu.addItem(toolsItem)
         let toolsMenu = NSMenu(title: "Tools")
         toolsMenu.addItem(withTitle: "Selection Tool", action: #selector(MainViewController.selectSelectionTool(_:)), keyEquivalent: "0").target = controller
+        toolsMenu.addItem(withTitle: "Pen Tool", action: #selector(MainViewController.selectPenTool(_:)), keyEquivalent: "1").target = controller
+        toolsMenu.addItem(withTitle: "Highlighter Tool", action: #selector(MainViewController.selectHighlighterTool(_:)), keyEquivalent: "2").target = controller
+        toolsMenu.addItem(withTitle: "Text Tool", action: #selector(MainViewController.selectTextTool(_:)), keyEquivalent: "3").target = controller
+        toolsMenu.addItem(withTitle: "Note Tool", action: #selector(MainViewController.selectNoteTool(_:)), keyEquivalent: "4").target = controller
+        toolsMenu.addItem(NSMenuItem.separator())
+        toolsMenu.addItem(withTitle: "Line Tool", action: #selector(MainViewController.selectLineTool(_:)), keyEquivalent: "5").target = controller
+        toolsMenu.addItem(withTitle: "Arrow Tool", action: #selector(MainViewController.selectArrowTool(_:)), keyEquivalent: "6").target = controller
+        toolsMenu.addItem(withTitle: "Rectangle Tool", action: #selector(MainViewController.selectRectangleTool(_:)), keyEquivalent: "7").target = controller
+        toolsMenu.addItem(withTitle: "Ellipse Tool", action: #selector(MainViewController.selectEllipseTool(_:)), keyEquivalent: "8").target = controller
         for item in toolsMenu.items { item.keyEquivalentModifierMask = [.command] }
         toolsItem.submenu = toolsMenu
 
