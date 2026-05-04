@@ -73,6 +73,13 @@ extension ToolMode {
         .calibrate
     ]
 
+    static let allToolbarModes: [ToolMode] = (
+        navigationToolbarModes
+        + drawingToolbarModes
+        + geometryToolbarModes
+        + takeoffToolbarModes
+    )
+
     static func fromPrimaryToolbarSegment(_ segment: Int) -> ToolMode? {
         guard segment >= 0, segment < primaryToolbarModes.count else { return nil }
         return primaryToolbarModes[segment]
