@@ -30,33 +30,6 @@ private final class NavigationResizeHandleView: NSView {
 
 @MainActor
 final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemValidation, NSSplitViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate {
-    struct PDFPageStoredGeometry {
-        let rotation: Int
-        let mediaBox: NSRect
-        let cropBox: NSRect
-        let bleedBox: NSRect
-        let trimBox: NSRect
-        let artBox: NSRect
-
-        init(page: PDFPage) {
-            rotation = page.rotation
-            mediaBox = page.bounds(for: .mediaBox)
-            cropBox = page.bounds(for: .cropBox)
-            bleedBox = page.bounds(for: .bleedBox)
-            trimBox = page.bounds(for: .trimBox)
-            artBox = page.bounds(for: .artBox)
-        }
-
-        func apply(to page: PDFPage) {
-            page.rotation = rotation
-            page.setBounds(mediaBox, for: .mediaBox)
-            page.setBounds(cropBox, for: .cropBox)
-            page.setBounds(bleedBox, for: .bleedBox)
-            page.setBounds(trimBox, for: .trimBox)
-            page.setBounds(artBox, for: .artBox)
-        }
-    }
-
     struct PDFDocumentBox: @unchecked Sendable {
         let document: PDFDocument
     }
@@ -448,7 +421,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var pendingExportToIPadTemporaryURL: URL?
     private var pendingExportToIPadSuggestedFilename: String?
     private let autoSheetLinkAnnotationMarker = "DrawbridgeAutoSheetLink"
-    var displayPageGeometryOverrides: [Int: PDFPageStoredGeometry] = [:]
+    private var dominantDocumentPageSizeInInches: (height: CGFloat, width: CGFloat)?
     var pageScaleLocks: [Int: PageScaleLock] = [:]
     var lastScaleLockAppliedPageIndex: Int = -1
     var lastExplicitScaleSetDocumentID: ObjectIdentifier?
@@ -3440,6 +3413,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pendingScaleReminderSuppressionPageIndex = -1
         pendingScaleReminderSuppressionOneShot = false
         openDocumentURL = nil
+        dominantDocumentPageSizeInInches = dominantPageSizeInInches(for: document)
         hasPromptedForInitialMarkupSaveCopy = true
         isPresentingInitialMarkupSaveCopyPrompt = false
         configureAutosaveURL(for: nil)
@@ -5304,86 +5278,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
 
-    func restoreSourcePageGeometryIfNeeded(to document: PDFDocument) {
-        guard !displayPageGeometryOverrides.isEmpty else { return }
-        for (pageIndex, geometry) in displayPageGeometryOverrides {
-            guard pageIndex >= 0,
-                  pageIndex < document.pageCount,
-                  let page = document.page(at: pageIndex) else { continue }
-            geometry.apply(to: page)
-        }
-    }
-
-    func reapplyDisplayPageGeometryOverridesIfNeeded(to document: PDFDocument? = nil) {
-        guard !displayPageGeometryOverrides.isEmpty else { return }
-        let targetDocument = document ?? pdfView.document
-        guard let targetDocument else { return }
-        for pageIndex in displayPageGeometryOverrides.keys {
-            guard pageIndex >= 0,
-                  pageIndex < targetDocument.pageCount,
-                  let page = targetDocument.page(at: pageIndex),
-                  shouldDisplayPageWithNativeGeometry(page) else { continue }
-            applyNativeLandscapeDisplayGeometry(to: page)
-        }
-    }
-
-    private func applyReadablePageDisplayGeometryIfNeeded(to document: PDFDocument) {
-        displayPageGeometryOverrides.removeAll(keepingCapacity: false)
-        for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex),
-                  shouldDisplayPageWithNativeGeometry(page) else { continue }
-            displayPageGeometryOverrides[pageIndex] = PDFPageStoredGeometry(page: page)
-            applyNativeLandscapeDisplayGeometry(to: page)
-        }
-    }
-
-    private func shouldDisplayPageWithNativeGeometry(_ page: PDFPage) -> Bool {
-        let rotation = ((page.rotation % 360) + 360) % 360
-        guard rotation == 90 || rotation == 270 else { return false }
-        let bounds = page.bounds(for: .cropBox).standardized
-        guard bounds.height > bounds.width * 1.1 else { return false }
-        return pageHasMostlyHorizontalNativeText(page, in: bounds)
-    }
-
-    private func pageHasMostlyHorizontalNativeText(_ page: PDFPage, in bounds: NSRect) -> Bool {
-        guard let selection = page.selection(for: bounds) else { return false }
-        var horizontalLines = 0
-        var verticalLines = 0
-        var sampledLines = 0
-        for line in selection.selectionsByLine().prefix(120) {
-            let text = (line.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            guard text.count >= 3 else { continue }
-            let lineBounds = line.bounds(for: page).standardized
-            guard lineBounds.width > 2, lineBounds.height > 2 else { continue }
-            sampledLines += 1
-            if lineBounds.width > lineBounds.height * 2.2 {
-                horizontalLines += 1
-            } else if lineBounds.height > lineBounds.width * 2.2 {
-                verticalLines += 1
-            }
-        }
-        guard sampledLines >= 3 else { return false }
-        let minimumHorizontalLines = sampledLines < 8 ? 3 : 8
-        return horizontalLines >= minimumHorizontalLines && horizontalLines > verticalLines * 2
-    }
-
-    private func applyNativeLandscapeDisplayGeometry(to page: PDFPage) {
-        func swapped(_ rect: NSRect) -> NSRect {
-            NSRect(x: rect.origin.x, y: rect.origin.y, width: rect.height, height: rect.width)
-        }
-        let mediaBox = page.bounds(for: .mediaBox)
-        let cropBox = page.bounds(for: .cropBox)
-        let bleedBox = page.bounds(for: .bleedBox)
-        let trimBox = page.bounds(for: .trimBox)
-        let artBox = page.bounds(for: .artBox)
-        page.rotation = 0
-        page.setBounds(swapped(mediaBox), for: .mediaBox)
-        page.setBounds(swapped(cropBox), for: .cropBox)
-        page.setBounds(swapped(bleedBox), for: .bleedBox)
-        page.setBounds(swapped(trimBox), for: .trimBox)
-        page.setBounds(swapped(artBox), for: .artBox)
-    }
-
     func openDocument(at url: URL) {
         let openSpan = PerformanceMetrics.begin(
             "open_document",
@@ -5402,7 +5296,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             )
             return
         }
-        displayPageGeometryOverrides.removeAll(keepingCapacity: false)
+        dominantDocumentPageSizeInInches = dominantPageSizeInInches(for: document)
         pdfView.document = document
         clearMarkupCache()
         pageScaleLocks.removeAll(keepingCapacity: false)
@@ -5647,6 +5541,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pageLabelOverrides.removeAll()
         flattenedPDFItems.removeAll(keepingCapacity: false)
         openDocumentURL = nil
+        dominantDocumentPageSizeInInches = nil
         hasPromptedForInitialMarkupSaveCopy = true
         isPresentingInitialMarkupSaveCopyPrompt = false
         pendingCalibrationDistanceInPoints = nil
@@ -6187,10 +6082,42 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func formattedPageSize(for page: PDFPage) -> String {
+        if let dominant = dominantDocumentPageSizeInInches {
+            return "\(formatInches(dominant.height)) H x \(formatInches(dominant.width)) W"
+        }
         let bounds = page.bounds(for: .mediaBox)
-        let widthInches = max(0, bounds.width) / 72.0
-        let heightInches = max(0, bounds.height) / 72.0
+        let rawWidthInches = max(0, bounds.width) / 72.0
+        let rawHeightInches = max(0, bounds.height) / 72.0
+        let widthInches = max(rawWidthInches, rawHeightInches)
+        let heightInches = min(rawWidthInches, rawHeightInches)
         return "\(formatInches(heightInches)) H x \(formatInches(widthInches)) W"
+    }
+
+    private func dominantPageSizeInInches(for document: PDFDocument) -> (height: CGFloat, width: CGFloat)? {
+        var counts: [String: (count: Int, height: CGFloat, width: CGFloat)] = [:]
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            let bounds = page.bounds(for: .mediaBox).standardized
+            let rawWidth = max(0, bounds.width) / 72.0
+            let rawHeight = max(0, bounds.height) / 72.0
+            guard rawWidth > 0, rawHeight > 0 else { continue }
+            let height = min(rawWidth, rawHeight)
+            let width = max(rawWidth, rawHeight)
+            let roundedHeight = (height * 10).rounded() / 10
+            let roundedWidth = (width * 10).rounded() / 10
+            let key = "\(roundedHeight)x\(roundedWidth)"
+            let existing = counts[key]
+            counts[key] = (
+                count: (existing?.count ?? 0) + 1,
+                height: roundedHeight,
+                width: roundedWidth
+            )
+        }
+        guard let dominant = counts.values.max(by: { $0.count < $1.count }),
+              dominant.count > document.pageCount / 2 else {
+            return nil
+        }
+        return (dominant.height, dominant.width)
     }
 
     private func formatInches(_ value: CGFloat) -> String {

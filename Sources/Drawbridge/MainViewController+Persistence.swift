@@ -149,7 +149,6 @@ extension MainViewController {
         let startedAt = CFAbsoluteTimeGetCurrent()
         let documentBox = PDFDocumentBox(document: document)
         let pageLabelsForEmbeddedSave = embeddedPageLabelsForSave(in: document)
-        let sourcePageGeometryForEmbeddedSave = (document === pdfView.document) ? displayPageGeometryOverrides : [:]
         let destinationAlreadyExists = FileManager.default.fileExists(atPath: targetURL.path)
         let destinationIsFileProvider = Self.isLikelyFileProviderURL(targetURL)
         let fallbackStagingURL = destinationAlreadyExists ? saveStagingFileURL(for: targetURL) : targetURL
@@ -169,8 +168,7 @@ extension MainViewController {
                 success = Self.writePDFDocument(
                     documentBox.document,
                     to: localStagingURL,
-                    pageLabels: pageLabelsForEmbeddedSave,
-                    sourcePageGeometry: sourcePageGeometryForEmbeddedSave
+                    pageLabels: pageLabelsForEmbeddedSave
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
 
@@ -201,8 +199,7 @@ extension MainViewController {
                 success = Self.writePDFDocument(
                     documentBox.document,
                     to: targetURL,
-                    pageLabels: pageLabelsForEmbeddedSave,
-                    sourcePageGeometry: sourcePageGeometryForEmbeddedSave
+                    pageLabels: pageLabelsForEmbeddedSave
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - directWriteStartedAt
 
@@ -218,8 +215,7 @@ extension MainViewController {
                     success = Self.writePDFDocument(
                         documentBox.document,
                         to: stagingURL,
-                        pageLabels: pageLabelsForEmbeddedSave,
-                        sourcePageGeometry: sourcePageGeometryForEmbeddedSave
+                        pageLabels: pageLabelsForEmbeddedSave
                     )
                     writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
                     if success {
@@ -248,8 +244,7 @@ extension MainViewController {
                 success = Self.writePDFDocument(
                     documentBox.document,
                     to: targetURL,
-                    pageLabels: pageLabelsForEmbeddedSave,
-                    sourcePageGeometry: sourcePageGeometryForEmbeddedSave
+                    pageLabels: pageLabelsForEmbeddedSave
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - writeStartedAt
             }
@@ -257,7 +252,6 @@ extension MainViewController {
 
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.reapplyDisplayPageGeometryOverridesIfNeeded(to: documentBox.document)
                 let currentDocumentID = self.pdfView.document.map(ObjectIdentifier.init)
                 let currentURL = self.openDocumentURL.map { self.canonicalDocumentURL($0) }
                 let saveContextStillActive = (currentDocumentID == savingDocumentID) && (currentURL == canonicalTargetURL)
@@ -440,19 +434,6 @@ extension MainViewController {
         }
     }
 
-    nonisolated static func restorePageGeometry(
-        _ geometryByPage: [Int: PDFPageStoredGeometry],
-        to document: PDFDocument
-    ) {
-        guard !geometryByPage.isEmpty else { return }
-        for (pageIndex, geometry) in geometryByPage {
-            guard pageIndex >= 0,
-                  pageIndex < document.pageCount,
-                  let page = document.page(at: pageIndex) else { continue }
-            geometry.apply(to: page)
-        }
-    }
-
     nonisolated static func writtenPageRotationsMatch(_ rotations: [Int: Int], at url: URL) -> Bool {
         guard !rotations.isEmpty,
               let writtenDocument = PDFDocument(url: url),
@@ -474,25 +455,14 @@ extension MainViewController {
         _ document: PDFDocument,
         to url: URL,
         pageLabels: [Int: String],
-        options: [PDFDocumentWriteOption: Any]? = nil,
-        sourcePageGeometry: [Int: PDFPageStoredGeometry] = [:]
+        options: [PDFDocumentWriteOption: Any]? = nil
     ) -> Bool {
-        if !sourcePageGeometry.isEmpty {
-            restorePageGeometry(sourcePageGeometry, to: document)
-        }
-        let preservedPageRotations = sourcePageGeometry.isEmpty
-            ? pageRotations(in: document)
-            : sourcePageGeometry.mapValues(\.rotation)
-        restorePageRotations(preservedPageRotations, to: document)
+        let preservedPageRotations = pageRotations(in: document)
         // `write(to:withOptions:)` is materially faster than `write(to:)` on large drawing sets.
         guard document.write(to: url, withOptions: options) else {
             return false
         }
-        if !sourcePageGeometry.isEmpty {
-            restorePageGeometry(sourcePageGeometry, to: document)
-        } else {
-            restorePageRotations(preservedPageRotations, to: document)
-        }
+        restorePageRotations(preservedPageRotations, to: document)
         if !pageLabels.isEmpty {
             do {
                 try PDFPageLabelsEmbedder.embedPageLabels(pageLabels, in: url)
