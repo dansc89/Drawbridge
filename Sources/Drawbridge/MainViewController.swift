@@ -2545,11 +2545,19 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         for (segment, title, action) in primaryTooltips where segment < toolSelector.segmentCount {
             toolSelector.setToolTip("\(title) (\(shortcutDisplayString(for: action)))", forSegment: segment)
         }
-        let primaryButtonActions: [(ToolMode, String, ShortcutAction)] = [
-            (.select, "Select", .selectTool)
+        let primaryButtonActions: [(ToolMode, String, String)] = [
+            (.select, "Select", shortcutDisplayString(for: .selectTool)),
+            (.pen, "Pen", "Cmd+1"),
+            (.highlighter, "Highlighter", "Cmd+2"),
+            (.text, "Text", "Cmd+3"),
+            (.note, "Note", "Cmd+4"),
+            (.line, "Line", "Cmd+5"),
+            (.arrow, "Arrow", "Cmd+6"),
+            (.rectangle, "Rectangle", "Cmd+7"),
+            (.circle, "Ellipse", "Cmd+8")
         ]
-        for (mode, title, action) in primaryButtonActions {
-            toolbarToolButtons[mode]?.toolTip = "\(title) (\(shortcutDisplayString(for: action)))"
+        for (mode, title, shortcut) in primaryButtonActions {
+            toolbarToolButtons[mode]?.toolTip = "\(title) (\(shortcut))"
         }
 
         gridToggleButton.toolTip = "Show/Hide Grid (\(shortcutDisplayString(for: .toggleGrid)))"
@@ -2687,7 +2695,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     @objc private func toolbarToolButtonPressed(_ sender: NSButton) {
         guard let raw = sender.identifier?.rawValue else { return }
-        let targetMode = (ToolMode.primaryToolbarModes + ToolMode.takeoffToolbarModes)
+        let targetMode = ToolMode.allToolbarModes
             .first(where: { "toolbar.\($0.toolbarIdentifier)" == raw })
         guard let targetMode else { return }
         setTool(targetMode)
