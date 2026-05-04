@@ -180,8 +180,7 @@ extension MainViewController {
         guard Self.writePDFDocument(
             cleanedCopy.document,
             to: outputURL,
-            pageLabels: pageLabels,
-            sourcePageGeometry: displayPageGeometryOverrides
+            pageLabels: pageLabels
         ) else {
             throw NSError(
                 domain: "DrawbridgePDFProcessing",
@@ -224,8 +223,7 @@ extension MainViewController {
             cleanedCopy.document,
             to: outputURL,
             pageLabels: pageLabels,
-            options: options,
-            sourcePageGeometry: displayPageGeometryOverrides
+            options: options
         ) else {
             throw NSError(
                 domain: "DrawbridgePDFProcessing",
