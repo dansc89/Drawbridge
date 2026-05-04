@@ -182,7 +182,11 @@ final class PDFAutoSheetLinkFitDestinationRewriterTests: XCTestCase {
         XCTAssertEqual(reloaded.page(at: 2)?.rotation, 90)
     }
 
-    func testNormalizeRotatedLandscapePageBoxesConvertsPortraitRotatedDrawingPage() throws {
+    func testDrawbridgeWriteDoesNotRewritePortraitRotatedPageBoxes() throws {
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("drawbridge-portrait-rotated-box-preserve-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+
         let pageImage = NSImage(size: NSSize(width: 320, height: 240))
         pageImage.lockFocus()
         NSColor.white.setFill()
@@ -199,9 +203,14 @@ final class PDFAutoSheetLinkFitDestinationRewriterTests: XCTestCase {
         page.rotation = 270
         document.insert(page, at: 0)
 
-        XCTAssertEqual(MainViewController.normalizeRotatedLandscapePageBoxes(in: document), 1)
-        XCTAssertEqual(page.rotation, 0)
-        XCTAssertEqual(page.bounds(for: .mediaBox).width, 320)
-        XCTAssertEqual(page.bounds(for: .mediaBox).height, 240)
+        XCTAssertTrue(MainViewController.writePDFDocument(document, to: tempURL, pageLabels: [:]))
+        let reloaded = try XCTUnwrap(PDFDocument(url: tempURL))
+        let reloadedPage = try XCTUnwrap(reloaded.page(at: 0))
+        XCTAssertEqual(reloadedPage.rotation, 270)
+        XCTAssertEqual(reloadedPage.bounds(for: .mediaBox).width, 240)
+        XCTAssertEqual(reloadedPage.bounds(for: .mediaBox).height, 320)
+        XCTAssertEqual(reloadedPage.bounds(for: .cropBox).width, 240)
+        XCTAssertEqual(reloadedPage.bounds(for: .cropBox).height, 320)
     }
+
 }

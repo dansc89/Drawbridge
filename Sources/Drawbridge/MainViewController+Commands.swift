@@ -159,14 +159,16 @@ extension MainViewController {
     @objc func commandNew(_ sender: Any?) { createNewPDFAction() }
     @objc func commandSave(_ sender: Any?) { saveDocument() }
     @objc func commandSaveCopy(_ sender: Any?) { saveCopy() }
-    @objc func commandExportCSV(_ sender: Any?) { exportMarkupsCSV() }
     @objc func commandExportPagesAsJPEG(_ sender: Any?) { exportPagesAsJPEG() }
     @objc func commandExportPagesAsJPEGAndRebuildPDF(_ sender: Any?) { exportPagesAsJPEGAndRebuildPDF() }
+    @objc func commandBatchExportToMobile(_ sender: Any?) { batchExportToMobilePDFs() }
     @objc func commandBatchExportPDFsAsJPEG(_ sender: Any?) { batchExportPDFsAsJPEG() }
     @objc func commandConvertImagesToPDF(_ sender: Any?) { convertImageFolderToPDF() }
     @objc func commandBatchCombinePDFs(_ sender: Any?) { batchCombinePDFs() }
     @objc func commandBatchLinkSheetNumbers(_ sender: Any?) { startAutoLinkSheetNumbersFlow() }
     @objc func commandAutoGenerateSheetNames(_ sender: Any?) { startAutoGenerateSheetNamesFlow() }
+    @objc func commandFlattenPDF(_ sender: Any?) { flattenPDF() }
+    @objc func commandReduceFileSize(_ sender: Any?) { reduceFileSize() }
     @objc func commandSetScale(_ sender: Any?) { commandSetDrawingScale(sender) }
     @objc func commandLockScalePages(_ sender: Any?) { commandLockScaleToPages(sender) }
     @objc func commandClearScalePages(_ sender: Any?) { commandClearScaleLocks(sender) }
@@ -670,6 +672,7 @@ extension MainViewController {
              #selector(commandKeyboardShortcuts(_:)),
              #selector(commandPerformanceSettings(_:)),
              #selector(commandExportPagesAsJPEGAndRebuildPDF(_:)),
+             #selector(commandBatchExportToMobile(_:)),
              #selector(commandConvertImagesToPDF(_:)),
              #selector(commandBatchCombinePDFs(_:)),
              #selector(commandBatchExportPDFsAsJPEG(_:)):
@@ -681,8 +684,9 @@ extension MainViewController {
             return hasDocument || !sessionDocumentURLs.isEmpty
         case #selector(commandSave(_:)),
              #selector(commandSaveCopy(_:)),
-             #selector(commandExportCSV(_:)),
              #selector(commandExportPagesAsJPEG(_:)),
+             #selector(commandFlattenPDF(_:)),
+             #selector(commandReduceFileSize(_:)),
              #selector(commandAutoGenerateSheetNames(_:)),
              #selector(commandBatchLinkSheetNumbers(_:)),
              #selector(commandSetScale(_:)),
