@@ -432,6 +432,8 @@ extension MainViewController {
         openDocument(at: nextURL)
     }
     @objc func commandHighlight(_ sender: Any?) { highlightSelection() }
+    @objc func commandUnderline(_ sender: Any?) { underlineSelection() }
+    @objc func commandStrikethrough(_ sender: Any?) { strikethroughSelection() }
     @objc func commandRefreshMarkups(_ sender: Any?) { refreshMarkups() }
     @objc func commandCopy(_ sender: Any?) {
         if let firstResponder = view.window?.firstResponder,
@@ -703,7 +705,15 @@ extension MainViewController {
              #selector(commandNextPage(_:)),
              #selector(commandActualSize(_:)),
              #selector(commandFitWidth(_:)),
-             #selector(selectSelectionTool(_:)):
+             #selector(selectSelectionTool(_:)),
+             #selector(selectPenTool(_:)),
+             #selector(selectHighlighterTool(_:)),
+             #selector(selectTextTool(_:)),
+             #selector(selectNoteTool(_:)),
+             #selector(selectLineTool(_:)),
+             #selector(selectArrowTool(_:)),
+             #selector(selectRectangleTool(_:)),
+             #selector(selectEllipseTool(_:)):
             if action == #selector(commandToggleOrthoSnap(_:)) {
                 menuItem.state = isOrthoSnapEnabled ? .on : .off
             }
@@ -711,7 +721,9 @@ extension MainViewController {
                 menuItem.state = isHyperlinkHighlightsVisible ? .on : .off
             }
             return hasDocument
-        case #selector(commandHighlight(_:)):
+        case #selector(commandHighlight(_:)),
+             #selector(commandUnderline(_:)),
+             #selector(commandStrikethrough(_:)):
             return hasTextSelection
         case #selector(commandCopy(_:)):
             if let firstResponder = view.window?.firstResponder,

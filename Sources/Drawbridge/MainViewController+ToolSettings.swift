@@ -243,6 +243,8 @@ extension MainViewController {
                 outlineWidth: outlineWidth,
                 font: textFont
             )
+        case .note:
+            pdfView.noteColor = stroke
         case .callout:
             pdfView.calloutStrokeColor = stroke
             pdfView.calloutLineWidth = currentWidth
@@ -718,6 +720,23 @@ extension MainViewController {
             toolSettingsFontPopup.isEnabled = false
             toolSettingsFontSizePopup.isEnabled = true
             toolSettingsLineWidthPopup.isEnabled = false
+        case .note:
+            toolSettingsStrokeColorWell.color = pdfView.noteColor.withAlphaComponent(1.0)
+            toolSettingsOpacitySlider.doubleValue = Double(pdfView.noteColor.alphaComponent)
+            toolSettingsOpacityValueLabel.stringValue = "\(Int(round(toolSettingsOpacitySlider.doubleValue * 100)))%"
+            toolSettingsStrokeTitleLabel.stringValue = "Color:"
+            toolSettingsFillTitleLabel.stringValue = "Fill:"
+            toolSettingsFontTitleLabel.stringValue = "Text Size:"
+            toolSettingsFillRow.isHidden = true
+            toolSettingsFontRow.isHidden = true
+            toolSettingsWidthRow.isHidden = true
+            toolSettingsOpacitySlider.isEnabled = true
+            toolSettingsStrokeColorWell.isEnabled = true
+            toolSettingsFillColorWell.isEnabled = false
+            toolSettingsFontPopup.isEnabled = false
+            toolSettingsFontSizePopup.isEnabled = false
+            toolSettingsLineWidthPopup.isEnabled = false
+            toolSettingsOutlineRow.isHidden = true
         case .callout:
             let state = toolSettingsByTool[.callout] ?? defaultToolSettings(for: .callout)
             toolSettingsStrokeColorWell.color = state.strokeColor.withAlphaComponent(1.0)
@@ -800,7 +819,7 @@ extension MainViewController {
             return interpolateLevel(level, lowAt1: 1, midAt5: 2, highAt10: 4)
         case .callout, .measure, .calibrate:
             return interpolateLevel(level, lowAt1: 1, midAt5: 2, highAt10: 4)
-        case .select, .text:
+        case .select, .text, .note:
             return 1
         }
     }
@@ -849,6 +868,8 @@ extension MainViewController {
             return makeToolSettingsState(strokeColor: pdfView.rectangleStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.rectangleFillColor.withAlphaComponent(1.0), hatchBackgroundColor: pdfView.rectangleHatchBackgroundColor.withAlphaComponent(1.0), opacity: pdfView.rectangleStrokeColor.alphaComponent, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize, rectangleHatchStyleRawValue: pdfView.rectangleHatchStyle.rawValue)
         case .text:
             return makeToolSettingsState(strokeColor: pdfView.textBackgroundColor.withAlphaComponent(1.0), fillColor: pdfView.textForegroundColor.withAlphaComponent(1.0), opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize, outlineColor: defaultTextOutlineColor, outlineWidth: defaultTextOutlineWidth)
+        case .note:
+            return makeToolSettingsState(strokeColor: pdfView.noteColor.withAlphaComponent(1.0), fillColor: .clear, opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: defaultArrowRaw, arrowHeadSize: defaultArrowHeadSize)
         case .callout:
             return makeToolSettingsState(strokeColor: pdfView.calloutStrokeColor.withAlphaComponent(1.0), fillColor: pdfView.textForegroundColor.withAlphaComponent(1.0), opacity: 1.0, lineWeightLevel: 5, fontName: defaultFontName, fontSize: defaultFontSize, calloutArrowStyleRawValue: pdfView.calloutArrowStyle.rawValue, arrowHeadSize: max(1.0, pdfView.calloutArrowHeadSize), outlineColor: defaultTextOutlineColor, outlineWidth: defaultTextOutlineWidth)
         case .area:
@@ -863,7 +884,7 @@ extension MainViewController {
     }
 
     func initializePerToolSettings() {
-        let tools: [ToolMode] = [.pen, .arrow, .line, .polyline, .polygon, .highlighter, .cloud, .rectangle, .circle, .text, .callout, .area, .measure, .calibrate]
+        let tools: [ToolMode] = [.pen, .arrow, .line, .polyline, .polygon, .highlighter, .cloud, .rectangle, .circle, .text, .note, .callout, .area, .measure, .calibrate]
         for tool in tools {
             toolSettingsByTool[tool] = defaultToolSettings(for: tool)
         }
@@ -945,6 +966,8 @@ extension MainViewController {
                 outlineWidth: state.outlineWidth,
                 font: resolveFont(family: state.fontName, size: state.fontSize)
             )
+        case .note:
+            pdfView.noteColor = stroke
         case .callout:
             pdfView.calloutStrokeColor = state.strokeColor.withAlphaComponent(1.0)
             pdfView.calloutLineWidth = widthValue(for: state.lineWeightLevel, tool: .callout)
