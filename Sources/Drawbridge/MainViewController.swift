@@ -7268,6 +7268,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 withTemplate: " "
             )
         }
+        title = PDFBookmarkExtractor.removingPageLabelOrdinalPrefix(title)
         title = title
             .replacingOccurrences(of: #"^[\s\-–—_:|/\\.]+"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"[\s\-–—_:|/\\.]+$"#, with: "", options: .regularExpression)

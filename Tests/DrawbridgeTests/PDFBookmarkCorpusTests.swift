@@ -73,6 +73,28 @@ final class PDFBookmarkCorpusTests: XCTestCase {
         landscapeResults = PDFBookmarkExtractor.resolveNumbers(
             landscapeResults, labelHints: landscapeHints)
         XCTAssertEqual(landscapeResults[5].text, "L1.22", "Visible title block wins over a stale page label")
+
+        let expoLandscape = try XCTUnwrap(PDFDocument(url: expo.appendingPathComponent(
+            "260925 - 12222 EXPOSITION - BID SET 2 - LAND.pdf")))
+        let expectedExpoLandscape = ["L1.11", "L1.12", "L1.21", "L1.22", "L1.31", "L2.11", "L2.12", "L2.21"]
+        let expoNumberRegion = CGRect(x: 0.918, y: 0.024, width: 0.070, height: 0.043)
+        let expoTitleRegion = CGRect(x: 0.918, y: 0.080, width: 0.064, height: 0.045)
+        var expoNumbers: [String] = []
+        var expoTitles: [String] = []
+        for index in 0..<expoLandscape.pageCount {
+            let page = try XCTUnwrap(expoLandscape.page(at: index))
+            let geometry = PDFBookmarkExtractor.Geometry(page: page, box: .cropBox)
+            expoNumbers.append(PDFBookmarkExtractor.extractAdaptiveNumber(
+                page: page, normalizedRect: expoNumberRegion, box: .cropBox).result.text)
+            expoTitles.append(PDFBookmarkExtractor.extract(
+                page: page,
+                rect: geometry.pageRect(expoTitleRegion),
+                box: .cropBox,
+                field: .title
+            ).text)
+        }
+        XCTAssertEqual(expoNumbers, expectedExpoLandscape)
+        XCTAssertEqual(expoTitles[7], "PLANTING DETAILS")
     }
 
     func testFourLocalDrawingPDFs() throws {
