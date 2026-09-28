@@ -821,13 +821,7 @@ extension MainViewController {
 
     private func currentPageNavigationAnchor() -> (x: CGFloat, y: CGFloat)? {
         guard let page = pdfView.currentPage else { return nil }
-        let bounds = page.bounds(for: pdfView.displayBox)
-        guard bounds.width > 0.01, bounds.height > 0.01 else { return nil }
-        let viewCenter = NSPoint(x: pdfView.bounds.midX, y: pdfView.bounds.midY)
-        let point = pdfView.currentDestination?.point ?? pdfView.convert(viewCenter, to: page)
-        let x = min(max((point.x - bounds.minX) / bounds.width, 0), 1)
-        let y = min(max((point.y - bounds.minY) / bounds.height, 0), 1)
-        return (x: x, y: y)
+        return pdfView.normalizedVisibleCenter(on: page)
     }
 
     private func goToPageIndex(_ index: Int, anchor: (x: CGFloat, y: CGFloat)? = nil) {
@@ -844,8 +838,12 @@ extension MainViewController {
         } else {
             destinationPoint = NSPoint(x: pageBounds.midX, y: pageBounds.midY)
         }
-        let destination = PDFDestination(page: page, at: destinationPoint)
-        pdfView.navigateToDestinationWithHistory(destination)
+        if let anchor {
+            pdfView.navigateToPageWithHistory(page, preservingNormalizedViewportCenter: anchor)
+        } else {
+            let destination = PDFDestination(page: page, at: destinationPoint)
+            pdfView.navigateToDestinationWithHistory(destination)
+        }
         updateStatusBar()
     }
 

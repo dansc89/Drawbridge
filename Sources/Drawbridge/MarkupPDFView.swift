@@ -436,6 +436,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var areHyperlinkHighlightsVisible = false
     private var pendingInteractiveViewportFeedbackWorkItem: DispatchWorkItem?
     private var lastInteractiveViewportFeedbackAt: CFAbsoluteTime = 0
+    private var zoomAnchorGeneration: UInt = 0
     private var didInstallViewportObservers = false
     private var isOrthoSnapEnabled = true
     private var isEndpointSnapEnabled = true
@@ -5755,6 +5756,46 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         onViewportChanged?()
     }
 
+    func navigateToPageWithHistory(
+        _ page: PDFPage,
+        preservingNormalizedViewportCenter anchor: (x: CGFloat, y: CGFloat)
+    ) {
+        if !applyingHistoryNavigation {
+            pushBackHistoryCurrentLocation()
+            navigationForwardStack.removeAll(keepingCapacity: true)
+        }
+
+        let pageBounds = page.bounds(for: displayBox)
+        let targetPagePoint = NSPoint(
+            x: pageBounds.minX + pageBounds.width * min(max(anchor.x, 0), 1),
+            y: pageBounds.minY + pageBounds.height * min(max(anchor.y, 0), 1)
+        )
+        let desiredWindowPoint: NSPoint
+        if let clipView = contentClipView {
+            desiredWindowPoint = clipView.convert(
+                NSPoint(x: clipView.bounds.midX, y: clipView.bounds.midY),
+                to: nil
+            )
+        } else {
+            desiredWindowPoint = convert(NSPoint(x: bounds.midX, y: bounds.midY), to: nil)
+        }
+
+        go(to: page)
+        forceZoomLayout()
+        zoomAnchorGeneration &+= 1
+        let generation = zoomAnchorGeneration
+        correctZoomAnchor(page: page, pagePoint: targetPagePoint, desiredWindowPoint: desiredWindowPoint)
+        scheduleZoomAnchorCorrection(
+            page: page,
+            pagePoint: targetPagePoint,
+            desiredWindowPoint: desiredWindowPoint,
+            targetScale: scaleFactor,
+            generation: generation,
+            remainingPasses: 3
+        )
+        onViewportChanged?()
+    }
+
     func navigateToSelectionWithHistory(_ selection: PDFSelection) {
         if !applyingHistoryNavigation {
             pushBackHistoryCurrentLocation()
@@ -6517,31 +6558,92 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         guard targetScale != scaleFactor else { return false }
 
         let anchorPointInView = clampPointToBounds(resolvedZoomAnchorPoint(fromWindowPoint: windowPoint))
-        guard let clipView = contentClipView else {
+        guard contentClipView != nil else {
             scaleFactor = targetScale
             emitInteractiveViewportFeedback()
             return true
         }
 
-        let desiredAnchorPointInClip = clipView.convert(anchorPointInView, from: self)
-        let anchorPage = page(for: anchorPointInView, nearest: true)
+        // Keep the pointer's position in the viewport, rather than its position in
+        // PDFView's document coordinates. The latter changes while PDFKit lays out
+        // the newly scaled page.
+        let desiredAnchorPointInWindow = windowPoint ?? convert(anchorPointInView, to: nil)
+        let anchorPage = page(for: anchorPointInView, nearest: false)
+            ?? page(for: anchorPointInView, nearest: true)
         let anchorPagePoint = anchorPage.map { convert(anchorPointInView, to: $0) }
+        zoomAnchorGeneration &+= 1
+        let generation = zoomAnchorGeneration
 
         scaleFactor = targetScale
+        forceZoomLayout()
 
         if let anchorPage, let anchorPagePoint {
-            correctZoomAnchor(page: anchorPage, pagePoint: anchorPagePoint, desiredClipPoint: desiredAnchorPointInClip)
+            correctZoomAnchor(page: anchorPage, pagePoint: anchorPagePoint, desiredWindowPoint: desiredAnchorPointInWindow)
+            scheduleZoomAnchorCorrection(
+                page: anchorPage,
+                pagePoint: anchorPagePoint,
+                desiredWindowPoint: desiredAnchorPointInWindow,
+                targetScale: targetScale,
+                generation: generation,
+                remainingPasses: 3
+            )
         }
         emitInteractiveViewportFeedback()
         return true
     }
 
-    private func correctZoomAnchor(page: PDFPage, pagePoint: NSPoint, desiredClipPoint: NSPoint) {
+    private func forceZoomLayout() {
+        layoutSubtreeIfNeeded()
+        contentClipView?.enclosingScrollView?.layoutSubtreeIfNeeded()
+        documentView?.layoutSubtreeIfNeeded()
+    }
+
+    private func scheduleZoomAnchorCorrection(
+        page: PDFPage,
+        pagePoint: NSPoint,
+        desiredWindowPoint: NSPoint,
+        targetScale: CGFloat,
+        generation: UInt,
+        remainingPasses: Int
+    ) {
+        guard remainingPasses > 0 else { return }
+        // PDFKit may relayout its document view over several main-loop turns.
+        // Reassert the anchor after each pass; a newer wheel event invalidates
+        // this chain through zoomAnchorGeneration.
+        DispatchQueue.main.async { [weak self, weak page] in
+            guard let self,
+                  let page,
+                  self.zoomAnchorGeneration == generation,
+                  abs(self.scaleFactor - targetScale) < 0.000_001 else { return }
+            self.forceZoomLayout()
+            self.correctZoomAnchor(
+                page: page,
+                pagePoint: pagePoint,
+                desiredWindowPoint: desiredWindowPoint
+            )
+            self.scheduleZoomAnchorCorrection(
+                page: page,
+                pagePoint: pagePoint,
+                desiredWindowPoint: desiredWindowPoint,
+                targetScale: targetScale,
+                generation: generation,
+                remainingPasses: remainingPasses - 1
+            )
+            self.emitInteractiveViewportFeedback()
+        }
+    }
+
+    private func correctZoomAnchor(page: PDFPage, pagePoint: NSPoint, desiredWindowPoint: NSPoint) {
         guard let clipView = contentClipView else { return }
         let anchoredPointInView = convert(pagePoint, from: page)
-        let anchoredPointInClip = clipView.convert(anchoredPointInView, from: self)
-        let deltaX = anchoredPointInClip.x - desiredClipPoint.x
-        let deltaY = anchoredPointInClip.y - desiredClipPoint.y
+        let anchoredPointInWindow = convert(anchoredPointInView, to: nil)
+        // NSClipView's coordinate scale changes with PDFView.scaleFactor. Convert
+        // the screen-space error after scaling so the scroll delta uses the clip
+        // view's current coordinate system.
+        let anchoredPointInClip = clipView.convert(anchoredPointInWindow, from: nil)
+        let desiredPointInClip = clipView.convert(desiredWindowPoint, from: nil)
+        let deltaX = anchoredPointInClip.x - desiredPointInClip.x
+        let deltaY = anchoredPointInClip.y - desiredPointInClip.y
         guard abs(deltaX) > 0.01 || abs(deltaY) > 0.01 else { return }
 
         let origin = clipView.bounds.origin
@@ -6564,6 +6666,24 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return NSPoint(
             x: min(max(bounds.minX, point.x), bounds.maxX),
             y: min(max(bounds.minY, point.y), bounds.maxY)
+        )
+    }
+
+    func normalizedVisibleCenter(on page: PDFPage) -> (x: CGFloat, y: CGFloat)? {
+        let pageBounds = page.bounds(for: displayBox)
+        guard pageBounds.width > 0.01, pageBounds.height > 0.01 else { return nil }
+
+        let centerInView: NSPoint
+        if let clipView = contentClipView {
+            let centerInClip = NSPoint(x: clipView.bounds.midX, y: clipView.bounds.midY)
+            centerInView = convert(centerInClip, from: clipView)
+        } else {
+            centerInView = NSPoint(x: bounds.midX, y: bounds.midY)
+        }
+        let pagePoint = convert(centerInView, to: page)
+        return (
+            x: min(max((pagePoint.x - pageBounds.minX) / pageBounds.width, 0), 1),
+            y: min(max((pagePoint.y - pageBounds.minY) / pageBounds.height, 0), 1)
         )
     }
 
