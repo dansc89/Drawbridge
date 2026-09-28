@@ -398,7 +398,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var cachedMarkupPasteboardPayload: MarkupClipboardPayload?
     private var sidebarCurrentPageIndex: Int = -1
     private var bookmarkLabelOverrides: [String: String] = [:]
-    private var pageLabelOverrides: [Int: String] = [:]
+    var pageLabelOverrides: [Int: String] = [:]
     var hasPromptedForInitialMarkupSaveCopy = false
     var isPresentingInitialMarkupSaveCopyPrompt = false
     var isGridVisible = false
@@ -8269,19 +8269,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func confirmDiscardUnsavedChangesIfNeeded() -> Bool {
-        // If Save is currently writing, wait before allowing close/quit so users cannot
-        // close into an out-of-date on-disk PDF state.
-        if isSavingDocumentOperation || persistenceCoordinator.isManualSaveInFlight {
-            guard waitForInFlightSaveToSettle() else {
-                runAlert(
-                    title: "Save Still In Progress",
-                    informativeText: "Drawbridge is still writing your PDF. Please wait a moment and try again.",
-                    style: .warning
-                )
-                return false
-            }
-        }
-
         guard hasUnsavedChanges() else {
             return true
         }
