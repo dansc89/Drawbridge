@@ -3460,8 +3460,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 adoptAsPrimaryDocument: false,
                 busyMessage: "Saving PDF…",
                 document: document,
-                showBusyOverlay: false,
-                deferEmbeddedWrite: false
+                showBusyOverlay: false
             )
         } else {
             saveDocumentAsProject(document: document)

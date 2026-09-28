@@ -32,6 +32,11 @@ enum PDFAutoSheetLinkFitDestinationRewriter {
         destinationMode: DestinationMode
     ) throws {
         var data = try Data(contentsOf: fileURL)
+        let markerData = Data(marker.utf8)
+        let legacyXYZData = Data("/XYZ null null null".utf8)
+        guard data.range(of: markerData) != nil || data.range(of: legacyXYZData) != nil else {
+            return
+        }
         guard let pdf = String(data: data, encoding: .isoLatin1) else {
             throw RewriteError.unreadableDocument
         }
