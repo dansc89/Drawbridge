@@ -646,8 +646,15 @@ extension MainViewController {
         deferredEmbeddedSaveWorkItem = nil
         // Closing must be immediate. The durable snapshot now includes markups, page labels,
         // and the full bookmark tree, so Drawbridge can restore every edit without rebuilding
-        // a large PDF while the user waits.
-        return persistFastSnapshot(to: sourceURL, document: document, scheduleEmbeddedWrite: false)
+        // a large PDF while the window remains open. The app delegate keeps the process alive
+        // until the atomic background PDF replacement completes.
+        return persistFastSnapshot(to: sourceURL, document: document, scheduleEmbeddedWrite: true)
+    }
+
+    func hasPendingPDFWriteForTermination() -> Bool {
+        deferredEmbeddedSaveWorkItem != nil
+            || isSavingDocumentOperation
+            || persistenceCoordinator.isManualSaveInFlight
     }
 
     private func runQueuedFastEmbeddedSaveIfNeeded() {
