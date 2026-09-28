@@ -59,6 +59,14 @@ enum PDFBookmarkExtractor {
             .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
     }
 
+    static func removingPageLabelOrdinalPrefix(_ raw: String) -> String {
+        raw.replacingOccurrences(
+            of: #"^\s*\[\s*\d+\s*\]\s*[\-–—_:|/\\.]*\s*"#,
+            with: "",
+            options: .regularExpression
+        )
+    }
+
     static func value(_ raw: String, field: Field) -> String? {
         let lines = raw.components(separatedBy: .newlines).map(clean).filter { !$0.isEmpty }
             .filter { !["SHEET TITLE", "SHEET NAME", "SHEET NO", "SHEET NUMBER"].contains($0.uppercased().trimmingCharacters(in: CharacterSet(charactersIn: ":. "))) }
@@ -213,6 +221,9 @@ enum PDFBookmarkExtractor {
             guard result.source != "PDF text", !result.alternatives.isEmpty else { return result }
             if index < labelHints.count, let hint = labelHints[index], !hint.isEmpty {
                 let left = normalized(result.text), right = normalized(hint)
+                // A page-label hint with the same words adds no information. Preserve the
+                // capitalization actually read from the title block instead of replacing it.
+                if left == right { return result }
                 let denominator = max(left.count, right.count, 1)
                 let resultWords = Set(result.text.uppercased().split { !$0.isLetter && !$0.isNumber }.map(String.init))
                 let hintWords = Set(hint.uppercased().split { !$0.isLetter && !$0.isNumber }.map(String.init))

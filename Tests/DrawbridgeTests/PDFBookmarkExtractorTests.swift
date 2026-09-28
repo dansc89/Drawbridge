@@ -5,6 +5,30 @@ import XCTest
 @testable import Drawbridge
 
 final class PDFBookmarkExtractorTests: XCTestCase {
+    func testPageLabelOrdinalPrefixIsNotTreatedAsSheetTitle() {
+        XCTAssertEqual(
+            PDFBookmarkExtractor.removingPageLabelOrdinalPrefix("[3] -Planting Details"),
+            "Planting Details"
+        )
+        XCTAssertEqual(
+            PDFBookmarkExtractor.removingPageLabelOrdinalPrefix("[ 12 ] — FLOOR PLAN"),
+            "FLOOR PLAN"
+        )
+    }
+
+    func testEquivalentPageLabelHintPreservesRecognizedTitleCapitalization() {
+        let original = PDFBookmarkExtractor.Result(
+            text: "PLANTING DETAILS",
+            source: "OCR disagreement",
+            alternatives: ["PLANTING DETAIL"]
+        )
+        let resolved = PDFBookmarkExtractor.resolveTitles(
+            [original],
+            labelHints: ["Planting Details"]
+        )
+        XCTAssertEqual(resolved[0].text, "PLANTING DETAILS")
+        XCTAssertEqual(resolved[0].source, "OCR disagreement")
+    }
     private func document() throws -> PDFDocument {
         let data = NSMutableData()
         let consumer = try XCTUnwrap(CGDataConsumer(data: data))
