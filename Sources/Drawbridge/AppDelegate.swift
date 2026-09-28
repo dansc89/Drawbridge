@@ -12,6 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let restoreLastDocumentDefaultsKey = "DrawbridgeRestoreLastDocument"
     private let maxRecentFiles = 10
     private let minimumSupportedMacOSVersion = "13.0"
+    private var isWaitingForPDFWriteBeforeTermination = false
+    private var terminationWaitStartedAt: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let visibleFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1600, height: 1000)
@@ -76,7 +78,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let controller = mainViewController else { return .terminateNow }
-        return controller.confirmDiscardUnsavedChangesIfNeeded() ? .terminateNow : .terminateCancel
+        guard controller.confirmDiscardUnsavedChangesIfNeeded() else { return .terminateCancel }
+        guard controller.hasPendingPDFWriteForTermination() else { return .terminateNow }
+        beginWaitingForPDFWriteBeforeTermination(controller: controller)
+        return .terminateLater
+    }
+
+    private func beginWaitingForPDFWriteBeforeTermination(controller: MainViewController) {
+        guard !isWaitingForPDFWriteBeforeTermination else { return }
+        isWaitingForPDFWriteBeforeTermination = true
+        terminationWaitStartedAt = Date()
+        pollPDFWriteBeforeTermination(controller: controller)
+    }
+
+    private func pollPDFWriteBeforeTermination(controller: MainViewController) {
+        let timedOut = terminationWaitStartedAt.map { Date().timeIntervalSince($0) >= 120 } ?? false
+        guard controller.hasPendingPDFWriteForTermination(), !timedOut else {
+            isWaitingForPDFWriteBeforeTermination = false
+            terminationWaitStartedAt = nil
+            NSApp.reply(toApplicationShouldTerminate: true)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self, weak controller] in
+            guard let self, let controller else {
+                NSApp.reply(toApplicationShouldTerminate: true)
+                return
+            }
+            self.pollPDFWriteBeforeTermination(controller: controller)
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
