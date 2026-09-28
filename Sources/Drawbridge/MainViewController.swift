@@ -162,7 +162,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let thumbnailScrollView = NSScrollView(frame: .zero)
     private let thumbnailsEmptyLabel = NSTextField(labelWithString: "No Pages")
     private let bookmarksScrollView = NSScrollView(frame: .zero)
-    private let bookmarksOutlineView = NSOutlineView(frame: .zero)
+    let bookmarksOutlineView = NSOutlineView(frame: .zero)
     private let bookmarksEmptyLabel = NSTextField(labelWithString: "No Bookmarks")
     private let pdfContentsTitleLabel = NSTextField(labelWithString: "PDF Contents")
     private let pdfContentsSummaryLabel = NSTextField(labelWithString: "No PDF loaded")
@@ -1118,6 +1118,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let renameBookmarkItem = NSMenuItem(title: "Rename Bookmark…", action: #selector(renameBookmarkFromSidebar), keyEquivalent: "")
         renameBookmarkItem.target = self
         bookmarksContextMenu.addItem(renameBookmarkItem)
+        bookmarksContextMenu.addItem(NSMenuItem.separator())
+        let deleteBookmarkItem = NSMenuItem(title: "Delete Bookmark…", action: #selector(deleteBookmarkFromSidebar), keyEquivalent: "")
+        deleteBookmarkItem.target = self
+        bookmarksContextMenu.addItem(deleteBookmarkItem)
         bookmarksOutlineView.menu = bookmarksContextMenu
 
         bookmarksScrollView.borderType = .noBorder
@@ -1444,6 +1448,81 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         bookmarksOutlineView.reloadData()
         markMarkupChangedAndScheduleAutosave()
+    }
+
+    @objc func deleteBookmarkFromSidebar() {
+        let row = bookmarksOutlineView.clickedRow >= 0 ? bookmarksOutlineView.clickedRow : bookmarksOutlineView.selectedRow
+        guard row >= 0,
+              let outline = bookmarksOutlineView.item(atRow: row) as? PDFOutline,
+              let parent = outline.parent else {
+            beep()
+            return
+        }
+
+        let title = displayBookmarkTitle(for: outline)
+        let descendantCount = bookmarkDescendantCount(outline)
+        let alert = NSAlert()
+        alert.messageText = descendantCount > 0 ? "Delete Bookmark Group?" : "Delete Bookmark?"
+        if descendantCount > 0 {
+            alert.informativeText = "“\(title)” contains \(descendantCount) nested bookmark\(descendantCount == 1 ? "" : "s"). The group and its contents will be removed. PDF pages are unaffected."
+        } else {
+            alert.informativeText = "Remove “\(title)”? The PDF page is unaffected."
+        }
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let index = outline.index
+        outline.removeFromParent()
+        bookmarkLabelOverrides.removeAll()
+        registerBookmarkPresenceUndo(
+            outline: outline,
+            parent: parent,
+            index: index,
+            shouldExist: true,
+            actionName: "Delete Bookmark"
+        )
+        reloadBookmarks()
+        markMarkupChangedAndScheduleAutosave()
+    }
+
+    private func bookmarkDescendantCount(_ outline: PDFOutline) -> Int {
+        var total = outline.numberOfChildren
+        for index in 0..<outline.numberOfChildren {
+            if let child = outline.child(at: index) {
+                total += bookmarkDescendantCount(child)
+            }
+        }
+        return total
+    }
+
+    private func registerBookmarkPresenceUndo(
+        outline: PDFOutline,
+        parent: PDFOutline,
+        index: Int,
+        shouldExist: Bool,
+        actionName: String
+    ) {
+        guard let undo = view.window?.undoManager ?? undoManager else { return }
+        undo.registerUndo(withTarget: self) { target in
+            if shouldExist {
+                parent.insertChild(outline, at: min(index, parent.numberOfChildren))
+            } else {
+                outline.removeFromParent()
+            }
+            target.bookmarkLabelOverrides.removeAll()
+            target.reloadBookmarks()
+            target.markMarkupChangedAndScheduleAutosave()
+            target.registerBookmarkPresenceUndo(
+                outline: outline,
+                parent: parent,
+                index: index,
+                shouldExist: !shouldExist,
+                actionName: actionName
+            )
+        }
+        undo.setActionName(actionName)
     }
 
     @objc private func renamePageLabelFromSidebar() {
