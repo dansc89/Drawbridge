@@ -6480,41 +6480,57 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             pendingSheetTitleZone = nil
         }
 
-        var generated: [AutoNamedSheet] = []
-        generated.reserveCapacity(document.pageCount)
-        var detectedSheetNumberCount = 0
+        guard let referenceIndex = autoNameReferencePageIndex,
+              let referencePage = document.page(at: referenceIndex) else { return }
+        let box = pdfView.displayBox
+        let geometry = PDFBookmarkExtractor.Geometry(page: referencePage, box: box)
+        let numberRegion = geometry.normalized(denormalize(rect: numberZone, for: referencePage))
+        let titleRegion = geometry.normalized(denormalize(rect: titleZone, for: referencePage))
+        var numbers: [PDFBookmarkExtractor.Result] = []
+        var titles: [PDFBookmarkExtractor.Result] = []
+        var labelHints: [String?] = []
+        var titleLabelHints: [String?] = []
         for pageIndex in 0..<document.pageCount {
             autoreleasepool {
-                guard let page = document.page(at: pageIndex) else { return }
-                let titleRect = denormalize(rect: titleZone, for: page)
-                // Reduced padding: 8% horizontal, 4% vertical
-                let hPadding = max(titleRect.width * 0.08, 6.0)
-                let vPadding = max(titleRect.height * 0.04, 3.0)
-                let expandedTitleRect = titleRect.insetBy(dx: -hPadding, dy: -vPadding).intersection(page.bounds(for: pdfView.displayBox))
-
-                let labelCanonicalTokens = Set(extractSheetTokens(from: page.label ?? "").map(canonicalizeSheetToken))
-                let labelSheetInfo = sheetInfoFromPageLabel(page.label ?? "")
-                let number: String
-                if let labelNumber = labelSheetInfo.number {
-                    number = labelNumber
-                    detectedSheetNumberCount += 1
-                } else if let token = detectAutoNameSheetNumber(on: page, normalizedZone: numberZone, labelCanonicalTokens: labelCanonicalTokens) {
-                    number = token
-                    detectedSheetNumberCount += 1
-                } else {
-                    let labelTokens = extractSheetTokens(from: page.label ?? "")
-                    number = preferredSheetToken(from: labelTokens, labelCanonicalTokens: labelCanonicalTokens) ?? "Page \(pageIndex + 1)"
+                guard let page = document.page(at: pageIndex) else {
+                    numbers.append(.init(text: "", source: "missing page"))
+                    titles.append(.init(text: "", source: "missing page"))
+                    labelHints.append(nil)
+                    titleLabelHints.append(nil)
+                    return
                 }
-                let detectedTitle = detectAutoNameSheetTitle(on: page, primaryRect: expandedTitleRect)
-                let title = labelSheetInfo.title ?? detectedTitle
-                generated.append(
-                    AutoNamedSheet(
-                        pageIndex: pageIndex,
-                        sheetNumber: number,
-                        sheetTitle: title
-                    )
-                )
+                let target = PDFBookmarkExtractor.Geometry(page: page, box: box)
+                let locatedNumber = PDFBookmarkExtractor.extractAdaptiveNumber(
+                    page: page, normalizedRect: numberRegion, box: box)
+                numbers.append(locatedNumber.result)
+                let adjustedTitleRegion = titleRegion.offsetBy(
+                    dx: locatedNumber.normalizedXOffset, dy: locatedNumber.normalizedYOffset)
+                titles.append(PDFBookmarkExtractor.extract(
+                    page: page, rect: target.pageRect(adjustedTitleRegion), box: box, field: .title))
+                let labelInfo = sheetInfoFromPageLabel(page.label ?? "")
+                labelHints.append(labelInfo.number)
+                titleLabelHints.append(labelInfo.title)
             }
+        }
+        numbers = PDFBookmarkExtractor.resolveNumbers(numbers, labelHints: labelHints)
+        titles = PDFBookmarkExtractor.resolveTitles(titles, labelHints: titleLabelHints)
+        var generated: [AutoNamedSheet] = []
+        var reviewPages: [Int] = []
+        var extractionNotes: [String] = []
+        var detectedSheetNumberCount = 0
+        for pageIndex in 0..<document.pageCount {
+            let number = numbers[pageIndex], title = titles[pageIndex]
+            if !number.text.isEmpty { detectedSheetNumberCount += 1 }
+            let labelNumber = sheetInfoFromPageLabel(document.page(at: pageIndex)?.label ?? "").number
+            let labelConflict = labelNumber != nil && labelNumber != number.text
+            let needsReview = number.source != "PDF text" || title.source != "PDF text" || labelConflict
+            if needsReview { reviewPages.append(pageIndex + 1) }
+            let alternatives = (number.alternatives.isEmpty ? "" : "; other number reading: " + number.alternatives.joined(separator: ", "))
+                + (title.alternatives.isEmpty ? "" : "; other title reading: " + title.alternatives.joined(separator: " / "))
+            extractionNotes.append("\(number.source); \(title.source)" + alternatives + (labelConflict ? "; differs from page label" : ""))
+            generated.append(AutoNamedSheet(pageIndex: pageIndex,
+                sheetNumber: number.text.isEmpty ? "Page \(pageIndex + 1)" : number.text,
+                sheetTitle: title.text))
         }
 
         guard detectedSheetNumberCount > 0 else {
@@ -6535,18 +6551,30 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
 
-        let previewLines = generated.prefix(20).map { sheet in
-            let title = sheet.sheetTitle.isEmpty ? "(untitled)" : sheet.sheetTitle
-            return "\(sheet.pageIndex + 1). \(sheet.sheetNumber) - \(title)"
-        }
-        let overflowNote = generated.count > 20 ? "\n…and \(generated.count - 20) more pages." : ""
         let confirmation = NSAlert()
         confirmation.messageText = "Apply Auto-Generated Sheet Names?"
-        confirmation.informativeText = previewLines.joined(separator: "\n") + overflowNote
+        let duplicates = Dictionary(grouping: generated, by: \.sheetNumber)
+            .filter { $0.value.count > 1 }.keys.sorted()
+        let reviewNote = reviewPages.isEmpty ? "" : "\nReview OCR, missing fields, or label conflicts on pages: " + reviewPages.map(String.init).joined(separator: ", ")
+        let duplicateNote = duplicates.isEmpty ? "" : "\nRepeated sheet numbers (all pages retained): " + duplicates.joined(separator: ", ")
+        confirmation.informativeText = "Double-click a sheet number or title to correct it. Applying replaces the existing bookmark tree in document page order."
+            + reviewNote + duplicateNote
+        let preview = BookmarkReviewView(rows: generated.enumerated().map { index, sheet in
+            .init(number: sheet.sheetNumber, title: sheet.sheetTitle, note: extractionNotes[index])
+        })
+        confirmation.accessoryView = preview
         confirmation.alertStyle = .informational
         confirmation.addButton(withTitle: "Continue")
         confirmation.addButton(withTitle: "Cancel")
         guard confirmation.runModal() == .alertFirstButtonReturn else { return }
+        preview.finishEditing()
+        generated = generated.enumerated().map { index, sheet in
+            let row = preview.rows[index]
+            return AutoNamedSheet(pageIndex: sheet.pageIndex,
+                sheetNumber: row.number.isEmpty ? "Page \(sheet.pageIndex + 1)" : row.number,
+                sheetTitle: row.title)
+        }
+
 
         let applyPagesPrompt = NSAlert()
         applyPagesPrompt.messageText = "Apply to Pages too?"
@@ -7785,15 +7813,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             applyPageLabelOverridesToDocumentIfNeeded(document)
         }
 
-        let root = PDFOutline()
-        for sheet in sheets {
-            guard let page = document.page(at: sheet.pageIndex) else { continue }
-            let item = PDFOutline()
-            let cleanedTitle = sheet.sheetTitle.isEmpty ? "Untitled" : sheet.sheetTitle
-            item.label = "\(sheet.sheetNumber) - \(cleanedTitle)"
-            item.destination = bookmarkStyleDestination(for: page)
-            root.insertChild(item, at: root.numberOfChildren)
-        }
+        let root = PDFBookmarkExtractor.outline(document: document,
+            sheets: sheets.map { (pageIndex: $0.pageIndex, number: $0.sheetNumber, title: $0.sheetTitle) },
+            destination: { bookmarkStyleDestination(for: $0) })
+        bookmarkLabelOverrides.removeAll()
         document.outlineRoot = root
 
         markMarkupChangedAndScheduleAutosave()
