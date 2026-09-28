@@ -32,21 +32,31 @@ struct MarkupIndexSnapshot: Codable {
     let generatedAt: Date
 }
 
-struct SidecarAnnotationRecord: Codable {
+struct SidecarAnnotationRecord: Codable, Sendable {
     let pageIndex: Int
     let archivedAnnotation: Data
     let lineWidth: CGFloat?
 }
 
-struct PageScaleLock: Codable, Equatable {
+struct PageScaleLock: Codable, Equatable, Sendable {
     let unit: String
     let scale: Double
 }
 
-struct SidecarSnapshot: Codable {
+struct SidecarBookmarkRecord: Codable, Equatable, Sendable {
+    let label: String?
+    let pageIndex: Int?
+    let destinationX: Double?
+    let destinationY: Double?
+    let children: [SidecarBookmarkRecord]
+}
+
+struct SidecarSnapshot: Codable, Sendable {
     let sourcePDFPath: String
     let pageCount: Int
     let annotations: [SidecarAnnotationRecord]
     let pageScaleLocks: [Int: PageScaleLock]?
+    let pageLabels: [Int: String]?
+    let bookmarks: [SidecarBookmarkRecord]?
     let savedAt: Date
 }

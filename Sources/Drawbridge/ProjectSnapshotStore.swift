@@ -42,6 +42,7 @@ final class ProjectSnapshotStore: @unchecked Sendable {
         sourcePDFURL: URL,
         initialCapacity: Int,
         pageScaleLocks: [Int: PageScaleLock],
+        pageLabels: [Int: String] = [:],
         resolvedLineWidth: (PDFAnnotation) -> CGFloat
     ) -> SidecarSnapshot {
         var records: [SidecarAnnotationRecord] = []
@@ -66,6 +67,8 @@ final class ProjectSnapshotStore: @unchecked Sendable {
             pageCount: document.pageCount,
             annotations: records,
             pageScaleLocks: pageScaleLocks,
+            pageLabels: pageLabels,
+            bookmarks: snapshotBookmarks(in: document),
             savedAt: Date()
         )
     }
@@ -95,6 +98,7 @@ final class ProjectSnapshotStore: @unchecked Sendable {
         for sourcePDFURL: URL,
         document: PDFDocument,
         applyPageScaleLocks: ([Int: PageScaleLock]) -> Void,
+        applyPageLabels: ([Int: String]) -> Void = { _ in },
         assignLineWidth: (CGFloat, PDFAnnotation) -> Void
     ) {
         let url = sidecarURL(for: sourcePDFURL)
@@ -116,7 +120,66 @@ final class ProjectSnapshotStore: @unchecked Sendable {
         guard snapshot.sourcePDFPath == sourcePDFURL.standardizedFileURL.path else { return }
 
         applyPageScaleLocks(snapshot.pageScaleLocks ?? [:])
+        applyPageLabels(snapshot.pageLabels ?? [:])
         applySnapshot(snapshot, to: document, assignLineWidth: assignLineWidth)
+        applyBookmarks(snapshot.bookmarks, to: document)
+    }
+
+    private func snapshotBookmarks(in document: PDFDocument) -> [SidecarBookmarkRecord]? {
+        guard let root = document.outlineRoot else { return [] }
+        var records: [SidecarBookmarkRecord] = []
+        for index in 0..<root.numberOfChildren {
+            guard let child = root.child(at: index),
+                  let record = snapshotBookmark(child, document: document) else { return nil }
+            records.append(record)
+        }
+        return records
+    }
+
+    private func snapshotBookmark(_ outline: PDFOutline, document: PDFDocument) -> SidecarBookmarkRecord? {
+        let destination = outline.destination
+        // Do not replace an existing outline when it contains an external, named, or remote
+        // action that this compact recovery format cannot reproduce without changing behavior.
+        guard destination != nil || outline.action == nil else { return nil }
+        let pageIndex = destination?.page.map { document.index(for: $0) }
+        let point = destination?.point
+        var children: [SidecarBookmarkRecord] = []
+        for index in 0..<outline.numberOfChildren {
+            guard let child = outline.child(at: index),
+                  let record = snapshotBookmark(child, document: document) else { return nil }
+            children.append(record)
+        }
+        return SidecarBookmarkRecord(
+            label: outline.label,
+            pageIndex: pageIndex.flatMap { $0 >= 0 ? $0 : nil },
+            destinationX: point.map { Double($0.x) },
+            destinationY: point.map { Double($0.y) },
+            children: children
+        )
+    }
+
+    private func applyBookmarks(_ records: [SidecarBookmarkRecord]?, to document: PDFDocument) {
+        guard let records else { return }
+        let root = PDFOutline()
+        for record in records {
+            root.insertChild(restoredBookmark(record, document: document), at: root.numberOfChildren)
+        }
+        document.outlineRoot = root
+    }
+
+    private func restoredBookmark(_ record: SidecarBookmarkRecord, document: PDFDocument) -> PDFOutline {
+        let outline = PDFOutline()
+        outline.label = record.label
+        if let pageIndex = record.pageIndex,
+           pageIndex >= 0, pageIndex < document.pageCount,
+           let page = document.page(at: pageIndex) {
+            let point = NSPoint(x: record.destinationX ?? 0, y: record.destinationY ?? 0)
+            outline.destination = PDFDestination(page: page, at: point)
+        }
+        for child in record.children {
+            outline.insertChild(restoredBookmark(child, document: document), at: outline.numberOfChildren)
+        }
+        return outline
     }
 
     private func applySnapshot(

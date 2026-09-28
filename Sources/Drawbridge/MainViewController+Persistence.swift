@@ -28,6 +28,7 @@ extension MainViewController {
             sourcePDFURL: sourcePDFURL,
             initialCapacity: totalCachedAnnotationCount(),
             pageScaleLocks: pageScaleLocks,
+            pageLabels: embeddedPageLabelsForSave(in: document),
             resolvedLineWidth: { annotation in
                 self.resolvedLineWidth(for: annotation)
             }
@@ -41,6 +42,9 @@ extension MainViewController {
             applyPageScaleLocks: { locks in
                 self.pageScaleLocks = locks
                 self.lastScaleLockAppliedPageIndex = -1
+            },
+            applyPageLabels: { labels in
+                self.pageLabelOverrides = labels
             },
             assignLineWidth: { lineWidth, annotation in
                 self.assignLineWidth(lineWidth, to: annotation)
@@ -152,6 +156,7 @@ extension MainViewController {
         let destinationAlreadyExists = FileManager.default.fileExists(atPath: targetURL.path)
         let destinationIsFileProvider = Self.isLikelyFileProviderURL(targetURL)
         let fallbackStagingURL = destinationAlreadyExists ? saveStagingFileURL(for: targetURL) : targetURL
+        let sidecarForTarget = sidecarURL(for: canonicalTargetURL)
         let saveQoS: DispatchQoS.QoSClass = showBusyOverlay ? .userInitiated : .utility
 
         DispatchQueue.global(qos: saveQoS).async { [weak self] in
@@ -193,7 +198,7 @@ extension MainViewController {
                 if FileManager.default.fileExists(atPath: localStagingURL.path) {
                     try? FileManager.default.removeItem(at: localStagingURL)
                 }
-            } else if destinationAlreadyExists {
+            } else if destinationAlreadyExists && showBusyOverlay {
                 // Fast path: overwrite directly to avoid expensive replace/copy on file-provider volumes.
                 let directWriteStartedAt = CFAbsoluteTimeGetCurrent()
                 success = Self.writePDFDocument(
@@ -239,6 +244,30 @@ extension MainViewController {
                         try? FileManager.default.removeItem(at: stagingURL)
                     }
                 }
+            } else if destinationAlreadyExists {
+                // Background saves must never leave the user's PDF half-written if the app closes.
+                // Generate beside the original, then atomically replace it when complete.
+                let stagingURL = fallbackStagingURL
+                let stagedWriteStartedAt = CFAbsoluteTimeGetCurrent()
+                success = Self.writePDFDocument(
+                    documentBox.document,
+                    to: stagingURL,
+                    pageLabels: pageLabelsForEmbeddedSave
+                )
+                writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
+                if success {
+                    let commitStartedAt = CFAbsoluteTimeGetCurrent()
+                    do {
+                        try Self.commitStagedSave(from: stagingURL, to: targetURL)
+                    } catch {
+                        success = false
+                        errorDescription = error.localizedDescription
+                    }
+                    commitElapsed = CFAbsoluteTimeGetCurrent() - commitStartedAt
+                }
+                if FileManager.default.fileExists(atPath: stagingURL.path) {
+                    try? FileManager.default.removeItem(at: stagingURL)
+                }
             } else {
                 let writeStartedAt = CFAbsoluteTimeGetCurrent()
                 success = Self.writePDFDocument(
@@ -249,6 +278,14 @@ extension MainViewController {
                 writeElapsed = CFAbsoluteTimeGetCurrent() - writeStartedAt
             }
             let elapsed = CFAbsoluteTimeGetCurrent() - startedAt
+
+            // The sidecar may contain edits made after this background PDF generation began.
+            // Keep it authoritative on the next open even though the PDF was modified later.
+            if success {
+                if FileManager.default.fileExists(atPath: sidecarForTarget.path) {
+                    try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: sidecarForTarget.path)
+                }
+            }
 
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -341,6 +378,14 @@ extension MainViewController {
     }
 
     private func persistFastSnapshotThenDeferredEmbeddedSave(to url: URL, document: PDFDocument) -> Bool {
+        persistFastSnapshot(to: url, document: document, scheduleEmbeddedWrite: true)
+    }
+
+    private func persistFastSnapshot(
+        to url: URL,
+        document: PDFDocument,
+        scheduleEmbeddedWrite: Bool
+    ) -> Bool {
         let sourceURL = canonicalDocumentURL(url)
         let currentDocumentID = ObjectIdentifier(document)
         let snapshotVersion = markupChangeVersion
@@ -365,7 +410,9 @@ extension MainViewController {
                 markDocumentClean(updateStatusBarValue: true)
             }
         }
-        scheduleDeferredEmbeddedSave(to: sourceURL, documentID: currentDocumentID, requestedVersion: saveToken)
+        if scheduleEmbeddedWrite {
+            scheduleDeferredEmbeddedSave(to: sourceURL, documentID: currentDocumentID, requestedVersion: saveToken)
+        }
         return true
     }
 
@@ -597,33 +644,10 @@ extension MainViewController {
     private func flushEmbeddedSaveBeforeClose(to sourceURL: URL, document: PDFDocument) -> Bool {
         deferredEmbeddedSaveWorkItem?.cancel()
         deferredEmbeddedSaveWorkItem = nil
-
-        // If a prior save is running, wait for it to settle before issuing the final blocking flush.
-        if !waitForInFlightSaveToSettle(timeout: 60) {
-            return false
-        }
-
-        deferredEmbeddedSaveRequestedVersion += 1
-        let flushToken = deferredEmbeddedSaveRequestedVersion
-        persistDocument(
-            to: sourceURL,
-            adoptAsPrimaryDocument: false,
-            busyMessage: "Saving PDF…",
-            document: document,
-            showBusyOverlay: true,
-            deferEmbeddedWrite: false,
-            embeddedSaveToken: flushToken
-        )
-
-        let flushDeadline = Date().addingTimeInterval(90)
-        while Date() < flushDeadline {
-            let completed = lastEmbeddedSaveCompletedVersion >= flushToken
-            if completed && !isSavingDocumentOperation {
-                return true
-            }
-            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
-        }
-        return lastEmbeddedSaveCompletedVersion >= flushToken
+        // Closing must be immediate. The durable snapshot now includes markups, page labels,
+        // and the full bookmark tree, so Drawbridge can restore every edit without rebuilding
+        // a large PDF while the user waits.
+        return persistFastSnapshot(to: sourceURL, document: document, scheduleEmbeddedWrite: false)
     }
 
     private func runQueuedFastEmbeddedSaveIfNeeded() {
