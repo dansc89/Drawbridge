@@ -189,6 +189,10 @@ extension MainViewController {
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField {
                 return event
             }
+            if view.window?.firstResponder === bookmarksOutlineView {
+                deleteBookmarkFromSidebar()
+                return nil
+            }
             deleteSelectedMarkup()
             return nil
         }
