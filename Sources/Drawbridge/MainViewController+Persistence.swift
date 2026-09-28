@@ -119,8 +119,8 @@ extension MainViewController {
         }
         applyPageLabelOverridesToDocumentIfNeeded(document)
         if deferEmbeddedWrite && !adoptAsPrimaryDocument && !showBusyOverlay {
-            persistFastSnapshotThenDeferredEmbeddedSave(to: url, document: document)
-            completion?(true)
+            let saved = persistFastSnapshotThenDeferredEmbeddedSave(to: url, document: document)
+            completion?(saved)
             return
         }
         if persistenceCoordinator.isManualSaveInFlight {
@@ -340,18 +340,33 @@ extension MainViewController {
         }
     }
 
-    private func persistFastSnapshotThenDeferredEmbeddedSave(to url: URL, document: PDFDocument) {
+    private func persistFastSnapshotThenDeferredEmbeddedSave(to url: URL, document: PDFDocument) -> Bool {
         let sourceURL = canonicalDocumentURL(url)
         let currentDocumentID = ObjectIdentifier(document)
+        let snapshotVersion = markupChangeVersion
         deferredEmbeddedSaveRequestedVersion += 1
         let saveToken = deferredEmbeddedSaveRequestedVersion
+        let snapshot = buildSidecarSnapshot(document: document, sourcePDFURL: sourceURL)
+        let snapshotSaved = snapshotStore.writeSnapshot(snapshot, to: sidecarURL(for: sourceURL))
+        guard snapshotSaved else {
+            runAlert(
+                title: "Failed to save PDF",
+                informativeText: "Could not save the recovery data for \(sourceURL.lastPathComponent).",
+                style: .warning
+            )
+            return false
+        }
         let activeDocumentID = pdfView.document.map(ObjectIdentifier.init)
         let activeURL = openDocumentURL.map { canonicalDocumentURL($0) }
         let saveContextStillActive = (activeDocumentID == currentDocumentID) && (activeURL == sourceURL)
         if saveContextStillActive {
-            markDocumentClean(updateStatusBarValue: true)
+            lastAutosavedChangeVersion = max(lastAutosavedChangeVersion, snapshotVersion)
+            if markupChangeVersion <= snapshotVersion {
+                markDocumentClean(updateStatusBarValue: true)
+            }
         }
         scheduleDeferredEmbeddedSave(to: sourceURL, documentID: currentDocumentID, requestedVersion: saveToken)
+        return true
     }
 
     private func scheduleDeferredEmbeddedSave(to url: URL, documentID: ObjectIdentifier, requestedVersion: Int) {
@@ -379,7 +394,8 @@ extension MainViewController {
             }
         }
         deferredEmbeddedSaveWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: workItem)
+        // Coalesce rapid saves/edits before PDFKit starts its unavoidable full-document rewrite.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
     }
 
     nonisolated static func temporaryLocalSaveURL(for destinationURL: URL) -> URL {

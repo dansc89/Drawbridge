@@ -4,6 +4,25 @@ import XCTest
 @testable import Drawbridge
 
 final class PDFAutoSheetLinkFitDestinationRewriterTests: XCTestCase {
+    func testUnmarkedPDFRewriteIsAByteForByteNoOp() throws {
+        let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("drawbridge-link-noop-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        let document = PDFDocument()
+        let image = NSImage(size: NSSize(width: 200, height: 200))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 200, height: 200)).fill()
+        image.unlockFocus()
+        document.insert(try XCTUnwrap(PDFPage(image: image)), at: 0)
+        XCTAssertTrue(document.write(to: tempURL, withOptions: nil))
+        let before = try Data(contentsOf: tempURL)
+
+        try PDFAutoSheetLinkFitDestinationRewriter.rewriteAutoSheetLinksToFit(in: tempURL)
+
+        XCTAssertEqual(try Data(contentsOf: tempURL), before)
+    }
+
     func testRewriteAutoSheetLinksToFitRewritesXYZDestinations() throws {
         let tempURL = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("drawbridge-link-fit-test-\(UUID().uuidString).pdf")
