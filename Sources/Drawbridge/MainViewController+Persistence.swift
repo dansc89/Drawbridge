@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import PDFKit
 
 @MainActor
@@ -112,7 +113,7 @@ extension MainViewController {
         busyMessage: String,
         document: PDFDocument? = nil,
         showBusyOverlay: Bool = true,
-        deferEmbeddedWrite: Bool = true,
+        deferEmbeddedWrite _: Bool = false,
         embeddedSaveToken: Int = 0,
         completion: (@MainActor @Sendable (Bool) -> Void)? = nil
     ) {
@@ -122,11 +123,6 @@ extension MainViewController {
             return
         }
         applyPageLabelOverridesToDocumentIfNeeded(document)
-        if deferEmbeddedWrite && !adoptAsPrimaryDocument && !showBusyOverlay {
-            let saved = persistFastSnapshotThenDeferredEmbeddedSave(to: url, document: document)
-            completion?(saved)
-            return
-        }
         if persistenceCoordinator.isManualSaveInFlight {
             // Keep Save instant: coalesce repeated Cmd+S requests while a save is in flight.
             if !adoptAsPrimaryDocument {
@@ -466,13 +462,37 @@ extension MainViewController {
         let fm = FileManager.default
         if fm.fileExists(atPath: destinationURL.path) {
             _ = try fm.replaceItemAt(destinationURL, withItemAt: stagingURL, backupItemName: nil, options: [])
-            return
+        } else {
+            do {
+                try fm.moveItem(at: stagingURL, to: destinationURL)
+            } catch {
+                try fm.copyItem(at: stagingURL, to: destinationURL)
+                try? fm.removeItem(at: stagingURL)
+            }
         }
-        do {
-            try fm.moveItem(at: stagingURL, to: destinationURL)
-        } catch {
-            try fm.copyItem(at: stagingURL, to: destinationURL)
-            try? fm.removeItem(at: stagingURL)
+        try synchronizePersistedFile(at: destinationURL)
+        try synchronizeDirectory(containing: destinationURL)
+    }
+
+    nonisolated private static func synchronizePersistedFile(at url: URL) throws {
+        let descriptor = open(url.path, O_RDONLY)
+        guard descriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { close(descriptor) }
+        guard fsync(descriptor) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+    }
+
+    nonisolated private static func synchronizeDirectory(containing url: URL) throws {
+        let descriptor = open(url.deletingLastPathComponent().path, O_RDONLY)
+        guard descriptor >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { close(descriptor) }
+        guard fsync(descriptor) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
 
@@ -538,6 +558,7 @@ extension MainViewController {
             guard writtenPageRotationsMatch(preservedPageRotations, at: url) else {
                 return false
             }
+            try synchronizePersistedFile(at: url)
             return true
         } catch {
             return false
@@ -644,11 +665,22 @@ extension MainViewController {
     private func flushEmbeddedSaveBeforeClose(to sourceURL: URL, document: PDFDocument) -> Bool {
         deferredEmbeddedSaveWorkItem?.cancel()
         deferredEmbeddedSaveWorkItem = nil
-        // Closing must be immediate. The durable snapshot now includes markups, page labels,
-        // and the full bookmark tree, so Drawbridge can restore every edit without rebuilding
-        // a large PDF while the window remains open. The app delegate keeps the process alive
-        // until the atomic background PDF replacement completes.
-        return persistFastSnapshot(to: sourceURL, document: document, scheduleEmbeddedWrite: true)
+        var completed: Bool?
+        persistDocument(
+            to: sourceURL,
+            adoptAsPrimaryDocument: false,
+            busyMessage: "Saving PDF…",
+            document: document,
+            showBusyOverlay: true,
+            deferEmbeddedWrite: false
+        ) { success in
+            completed = success
+        }
+        let deadline = Date().addingTimeInterval(120)
+        while completed == nil, Date() < deadline {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+        return completed ?? false
     }
 
     func hasPendingPDFWriteForTermination() -> Bool {
