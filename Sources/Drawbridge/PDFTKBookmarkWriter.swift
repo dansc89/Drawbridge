@@ -61,7 +61,10 @@ enum PDFTKBookmarkWriter {
         do {
             try process.run()
             process.waitUntilExit()
-            return process.terminationStatus == 0
+            // qpdf uses exit status 3 for recoverable input warnings. Architectural
+            // exports often contain benign dangling xref entries; qpdf still produces
+            // a valid JSON/PDF, and the caller independently verifies the output.
+            return process.terminationStatus == 0 || process.terminationStatus == 3
         } catch {
             return false
         }
