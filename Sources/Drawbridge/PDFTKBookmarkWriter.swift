@@ -1,19 +1,30 @@
 import Foundation
 import PDFKit
 
-/// Updates navigation objects with qpdf instead of asking PDFKit to re-encode every page.
-/// qpdf keeps page streams intact; PDFKit remains the fallback if link annotations changed.
+/// Updates navigation objects and Drawbridge-generated links with qpdf instead of asking
+/// PDFKit to re-encode every page. qpdf keeps page streams, fonts, and images intact.
 enum PDFTKBookmarkWriter {
     private static let generatedLinkMarker = "DrawbridgeAutoSheetLink"
+    private static let maximumNavigationGrowthRatio = 1.15
+    private static let maximumNavigationGrowthBytes: Int64 = 5 * 1024 * 1024
 
-    static func writeNavigation(in document: PDFDocument, to destinationURL: URL, pageLabels: [Int: String]) -> Bool {
-        let sourceURL = document.documentURL ?? destinationURL
+    enum WriteResult: Equatable {
+        case saved
+        case unavailable
+        case rejectedSizeGrowth
+    }
+
+    static func writeNavigation(
+        in document: PDFDocument,
+        sourceURL explicitSourceURL: URL? = nil,
+        to destinationURL: URL,
+        pageLabels: [Int: String]
+    ) -> WriteResult {
+        let sourceURL = explicitSourceURL ?? document.documentURL ?? destinationURL
         guard sourceURL.isFileURL,
               FileManager.default.fileExists(atPath: sourceURL.path),
-              let executable = executableURL(),
-              let sourceDocument = PDFDocument(url: sourceURL),
-              generatedLinkCount(in: sourceDocument) == generatedLinkCount(in: document) else {
-            return false
+              let executable = executableURL() else {
+            return .unavailable
         }
 
         let temporaryDirectory = FileManager.default.temporaryDirectory
@@ -28,18 +39,32 @@ enum PDFTKBookmarkWriter {
                   var json = try JSONSerialization.jsonObject(with: Data(contentsOf: jsonURL)) as? [String: Any],
                   updateNavigationJSON(&json, from: document, pageLabels: pageLabels),
                   JSONSerialization.isValidJSONObject(json) else {
-                return false
+                return .unavailable
             }
             try JSONSerialization.data(withJSONObject: json).write(to: jsonURL, options: .atomic)
             guard run(executable, arguments: [sourceURL.path, "--update-from-json=\(jsonURL.path)", outputURL.path]),
                   FileManager.default.fileExists(atPath: outputURL.path) else {
-                return false
+                return .unavailable
+            }
+            let sourceSize = try fileSize(at: sourceURL)
+            let outputSize = try fileSize(at: outputURL)
+            let allowedSize = max(
+                sourceSize + maximumNavigationGrowthBytes,
+                Int64(Double(sourceSize) * maximumNavigationGrowthRatio)
+            )
+            guard outputSize <= allowedSize else {
+                return .rejectedSizeGrowth
             }
             try MainViewController.commitStagedSave(from: outputURL, to: destinationURL)
-            return outlineMatches(document, writtenURL: destinationURL)
+            return outlineMatches(document, writtenURL: destinationURL) ? .saved : .unavailable
         } catch {
-            return false
+            return .unavailable
         }
+    }
+
+    private static func fileSize(at url: URL) throws -> Int64 {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes[.size] as? NSNumber)?.int64Value ?? 0
     }
 
     private static func executableURL() -> URL? {
@@ -76,7 +101,7 @@ enum PDFTKBookmarkWriter {
         pageLabels: [Int: String]
     ) -> Bool {
         guard var qpdf = json["qpdf"] as? [[String: Any]], qpdf.count >= 2,
-              let maxObjectID = qpdf[0]["maxobjectid"] as? Int else {
+              var maxObjectID = qpdf[0]["maxobjectid"] as? Int else {
             return false
         }
         var objects = qpdf[1]
@@ -91,6 +116,15 @@ enum PDFTKBookmarkWriter {
         }
         let pageReferences = pages.compactMap { $0["object"] as? String }
         guard pageReferences.count == document.pageCount else { return false }
+
+        guard updateGeneratedSheetLinks(
+            in: &objects,
+            pageReferences: pageReferences,
+            document: document,
+            nextObjectID: &maxObjectID
+        ) else {
+            return false
+        }
 
         var nextObjectID = maxObjectID + 1
         let outlineRootID = nextObjectID
@@ -184,14 +218,117 @@ enum PDFTKBookmarkWriter {
             && written.outlineRoot?.numberOfChildren == expected.outlineRoot?.numberOfChildren
     }
 
-    private static func generatedLinkCount(in document: PDFDocument) -> Int {
-        (0..<document.pageCount).reduce(0) { count, index in
-            guard let page = document.page(at: index) else { return count }
-            return count + page.annotations.reduce(into: 0) { total, annotation in
-                if (annotation.userName?.contains(generatedLinkMarker) ?? false) || (annotation.contents?.contains(generatedLinkMarker) ?? false) {
-                    total += 1
-                }
+    private struct GeneratedLink {
+        let marker: String
+        let bounds: NSRect
+        let destinationPageIndex: Int
+    }
+
+    /// qpdf can replace just the /Annots entries created by Drawbridge. This keeps
+    /// drawing streams, fonts, and images byte-for-byte out of the save path.
+    private static func updateGeneratedSheetLinks(
+        in objects: inout [String: Any],
+        pageReferences: [String],
+        document: PDFDocument,
+        nextObjectID: inout Int
+    ) -> Bool {
+        let linksByPage = generatedLinksByPage(in: document)
+        for (pageIndex, pageReference) in pageReferences.enumerated() {
+            guard var pageObject = objects["obj:\(pageReference)"] as? [String: Any],
+                  var pageValue = pageObject["value"] as? [String: Any] else {
+                return false
             }
+            let desiredLinks = linksByPage[pageIndex] ?? []
+            var annotations = annotationReferences(from: pageValue["/Annots"], objects: objects)
+            let reusableRefs = annotations.filter { isGeneratedLinkReference($0, objects: objects) }
+            annotations.removeAll { isGeneratedLinkReference($0, objects: objects) }
+
+            for (index, link) in desiredLinks.enumerated() {
+                let reference: String
+                if index < reusableRefs.count {
+                    reference = reusableRefs[index]
+                } else {
+                    reference = "\(nextObjectID) 0 R"
+                    nextObjectID += 1
+                }
+                objects["obj:\(reference)"] = [
+                    "value": generatedLinkObject(link, pageReferences: pageReferences)
+                ]
+                annotations.append(reference)
+            }
+
+            if annotations.isEmpty {
+                pageValue.removeValue(forKey: "/Annots")
+            } else if let annotsReference = pageValue["/Annots"] as? String,
+                      var annotsObject = objects["obj:\(annotsReference)"] as? [String: Any],
+                      annotsObject["value"] is [Any] {
+                annotsObject["value"] = annotations
+                objects["obj:\(annotsReference)"] = annotsObject
+            } else {
+                pageValue["/Annots"] = annotations
+            }
+            pageObject["value"] = pageValue
+            objects["obj:\(pageReference)"] = pageObject
+        }
+        return true
+    }
+
+    private static func generatedLinksByPage(in document: PDFDocument) -> [Int: [GeneratedLink]] {
+        var result: [Int: [GeneratedLink]] = [:]
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            let links = page.annotations.compactMap { annotation -> GeneratedLink? in
+                guard let marker = generatedLinkMarker(in: annotation),
+                      let destinationPage = (annotation.action as? PDFActionGoTo)?.destination.page else {
+                    return nil
+                }
+                let destinationIndex = document.index(for: destinationPage)
+                guard destinationIndex >= 0, destinationIndex < document.pageCount,
+                      annotation.bounds.width > 0, annotation.bounds.height > 0 else {
+                    return nil
+                }
+                return GeneratedLink(marker: marker, bounds: annotation.bounds, destinationPageIndex: destinationIndex)
+            }
+            if !links.isEmpty { result[pageIndex] = links }
+        }
+        return result
+    }
+
+    private static func generatedLinkMarker(in annotation: PDFAnnotation) -> String? {
+        [annotation.contents, annotation.userName].compactMap { $0 }.first {
+            $0.contains(generatedLinkMarker)
+        }
+    }
+
+    private static func generatedLinkObject(_ link: GeneratedLink, pageReferences: [String]) -> [String: Any] {
+        let rect = link.bounds.standardized
+        return [
+            "/Type": "/Annot",
+            "/Subtype": "/Link",
+            "/Rect": [rect.minX, rect.minY, rect.maxX, rect.maxY],
+            "/Border": [0, 0, 0],
+            "/Contents": "u:\(link.marker)",
+            "/F": 4,
+            "/A": ["/S": "/GoTo", "/D": [pageReferences[link.destinationPageIndex], "/Fit"]]
+        ]
+    }
+
+    private static func annotationReferences(from rawValue: Any?, objects: [String: Any]) -> [String] {
+        if let reference = rawValue as? String,
+           let annotationObject = objects["obj:\(reference)"] as? [String: Any],
+           let values = annotationObject["value"] as? [Any] {
+            return values.compactMap { $0 as? String }
+        }
+        return (rawValue as? [Any])?.compactMap { $0 as? String } ?? []
+    }
+
+    private static func isGeneratedLinkReference(_ reference: String, objects: [String: Any]) -> Bool {
+        guard let annotationObject = objects["obj:\(reference)"] as? [String: Any],
+              let value = annotationObject["value"] as? [String: Any] else {
+            return false
+        }
+        return [value["/Contents"], value["/T"]].compactMap { $0 as? String }.contains {
+            $0.contains(generatedLinkMarker)
         }
     }
 
