@@ -373,74 +373,6 @@ extension MainViewController {
         }
     }
 
-    private func persistFastSnapshotThenDeferredEmbeddedSave(to url: URL, document: PDFDocument) -> Bool {
-        persistFastSnapshot(to: url, document: document, scheduleEmbeddedWrite: true)
-    }
-
-    private func persistFastSnapshot(
-        to url: URL,
-        document: PDFDocument,
-        scheduleEmbeddedWrite: Bool
-    ) -> Bool {
-        let sourceURL = canonicalDocumentURL(url)
-        let currentDocumentID = ObjectIdentifier(document)
-        let snapshotVersion = markupChangeVersion
-        deferredEmbeddedSaveRequestedVersion += 1
-        let saveToken = deferredEmbeddedSaveRequestedVersion
-        let snapshot = buildSidecarSnapshot(document: document, sourcePDFURL: sourceURL)
-        let snapshotSaved = snapshotStore.writeSnapshot(snapshot, to: sidecarURL(for: sourceURL))
-        guard snapshotSaved else {
-            runAlert(
-                title: "Failed to save PDF",
-                informativeText: "Could not save the recovery data for \(sourceURL.lastPathComponent).",
-                style: .warning
-            )
-            return false
-        }
-        let activeDocumentID = pdfView.document.map(ObjectIdentifier.init)
-        let activeURL = openDocumentURL.map { canonicalDocumentURL($0) }
-        let saveContextStillActive = (activeDocumentID == currentDocumentID) && (activeURL == sourceURL)
-        if saveContextStillActive {
-            lastAutosavedChangeVersion = max(lastAutosavedChangeVersion, snapshotVersion)
-            if markupChangeVersion <= snapshotVersion {
-                markDocumentClean(updateStatusBarValue: true)
-            }
-        }
-        if scheduleEmbeddedWrite {
-            scheduleDeferredEmbeddedSave(to: sourceURL, documentID: currentDocumentID, requestedVersion: saveToken)
-        }
-        return true
-    }
-
-    private func scheduleDeferredEmbeddedSave(to url: URL, documentID: ObjectIdentifier, requestedVersion: Int) {
-        deferredEmbeddedSaveRequestedVersion = max(deferredEmbeddedSaveRequestedVersion, requestedVersion)
-        deferredEmbeddedSaveWorkItem?.cancel()
-        let canonicalURL = canonicalDocumentURL(url)
-        let workItem = DispatchWorkItem { [weak self] in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.deferredEmbeddedSaveWorkItem = nil
-                guard self.deferredEmbeddedSaveRequestedVersion > self.lastEmbeddedSaveCompletedVersion else { return }
-                guard let liveDocument = self.pdfView.document,
-                      ObjectIdentifier(liveDocument) == documentID else { return }
-                guard let activeURL = self.openDocumentURL.map({ self.canonicalDocumentURL($0) }),
-                      activeURL == canonicalURL else { return }
-                self.persistDocument(
-                    to: canonicalURL,
-                    adoptAsPrimaryDocument: false,
-                    busyMessage: "Saving PDF…",
-                    document: liveDocument,
-                    showBusyOverlay: false,
-                    deferEmbeddedWrite: false,
-                    embeddedSaveToken: requestedVersion
-                )
-            }
-        }
-        deferredEmbeddedSaveWorkItem = workItem
-        // Coalesce rapid saves/edits before PDFKit starts its unavoidable full-document rewrite.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: workItem)
-    }
-
     nonisolated static func temporaryLocalSaveURL(for destinationURL: URL) -> URL {
         let name = destinationURL.lastPathComponent
         let token = UUID().uuidString
@@ -474,7 +406,7 @@ extension MainViewController {
         try synchronizeDirectory(containing: destinationURL)
     }
 
-    nonisolated private static func synchronizePersistedFile(at url: URL) throws {
+    nonisolated static func synchronizePersistedFile(at url: URL) throws {
         let descriptor = open(url.path, O_RDONLY)
         guard descriptor >= 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
@@ -540,21 +472,16 @@ extension MainViewController {
         pageLabels: [Int: String],
         options: [PDFDocumentWriteOption: Any]? = nil
     ) -> Bool {
+        if PDFTKBookmarkWriter.writeNavigation(in: document, to: url, pageLabels: pageLabels) {
+            return true
+        }
         let preservedPageRotations = pageRotations(in: document)
         // `write(to:withOptions:)` is materially faster than `write(to:)` on large drawing sets.
         guard document.write(to: url, withOptions: options) else {
             return false
         }
         restorePageRotations(preservedPageRotations, to: document)
-        if !pageLabels.isEmpty {
-            do {
-                try PDFPageLabelsEmbedder.embedPageLabels(pageLabels, in: url)
-            } catch {
-                return false
-            }
-        }
         do {
-            try PDFAutoSheetLinkFitDestinationRewriter.rewriteAutoSheetLinksToFit(in: url)
             guard writtenPageRotationsMatch(preservedPageRotations, at: url) else {
                 return false
             }
@@ -654,6 +581,27 @@ extension MainViewController {
         return false
     }
 
+    /// Navigation commands own their save: when their completion alert appears, the PDF on disk
+    /// already contains the generated bookmarks or links.
+    func saveNavigationCommandChanges(
+        in document: PDFDocument,
+        completion: @escaping @MainActor (Bool) -> Void
+    ) {
+        guard let sourceURL = openDocumentURL else {
+            completion(true)
+            return
+        }
+        persistDocument(
+            to: sourceURL,
+            adoptAsPrimaryDocument: false,
+            busyMessage: "Saving Navigation Changes…",
+            document: document,
+            showBusyOverlay: true,
+            deferEmbeddedWrite: false,
+            completion: completion
+        )
+    }
+
     func waitForInFlightSaveToSettle(timeout: TimeInterval = 90) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while (isSavingDocumentOperation || persistenceCoordinator.isManualSaveInFlight), Date() < deadline {
@@ -663,8 +611,6 @@ extension MainViewController {
     }
 
     private func flushEmbeddedSaveBeforeClose(to sourceURL: URL, document: PDFDocument) -> Bool {
-        deferredEmbeddedSaveWorkItem?.cancel()
-        deferredEmbeddedSaveWorkItem = nil
         var completed: Bool?
         persistDocument(
             to: sourceURL,
@@ -684,8 +630,7 @@ extension MainViewController {
     }
 
     func hasPendingPDFWriteForTermination() -> Bool {
-        deferredEmbeddedSaveWorkItem != nil
-            || isSavingDocumentOperation
+        isSavingDocumentOperation
             || persistenceCoordinator.isManualSaveInFlight
     }
 
