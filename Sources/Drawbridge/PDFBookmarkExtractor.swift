@@ -95,7 +95,7 @@ enum PDFBookmarkExtractor {
         }
     }
 
-    static func extract(page: PDFPage, rect: CGRect, box: PDFDisplayBox, field: Field) -> Result {
+    static func extract(page: PDFPage, rect: CGRect, box: PDFDisplayBox, field: Field, preferOCR: Bool = false) -> Result {
         let geometry = Geometry(page: page, box: box)
         let bounded = rect.intersection(page.bounds(for: box))
         guard !bounded.isNull, !bounded.isEmpty else { return Result(text: "", source: "outside page") }
@@ -139,7 +139,9 @@ enum PDFBookmarkExtractor {
                 return !overlap.isNull && overlap.width * overlap.height > min(a.width * a.height, b.width * b.height) * 0.65
             }
         }
-        if !overlapping, !overprintedGlyphs, let text = value(native, field: field) { return Result(text: text, source: "PDF text") }
+        if !preferOCR, !overlapping, !overprintedGlyphs, let text = value(native, field: field) {
+            return Result(text: text, source: "PDF text")
+        }
         guard let image = render(page: page, rect: bounded, box: box) else { return Result(text: "", source: "render failed") }
         let primary = recognize(image: image, field: field)
 
@@ -159,7 +161,8 @@ enum PDFBookmarkExtractor {
     }
 
     static func extractAdaptiveNumber(page: PDFPage, normalizedRect: CGRect,
-                                      box: PDFDisplayBox) -> LocatedResult {
+                                      box: PDFDisplayBox,
+                                      preferOCR: Bool = false) -> LocatedResult {
         let geometry = Geometry(page: page, box: box)
         let yOffsets: [CGFloat] = [0, -0.01, 0.01, -0.02, 0.02, -0.03, 0.03, -0.04, 0.04]
         let centeredXOffsets: [CGFloat] = [0, -0.01, 0.01, -0.02, 0.02, -0.03, 0.03]
@@ -172,7 +175,7 @@ enum PDFBookmarkExtractor {
                 guard geometry.bounds.contains(geometry.displayedRect(candidate)) else { continue }
                 let pageRect = geometry.pageRect(candidate)
                 if xOffset == 0, yOffset == 0 {
-                    let result = extract(page: page, rect: pageRect, box: box, field: .number)
+                    let result = extract(page: page, rect: pageRect, box: box, field: .number, preferOCR: preferOCR)
                     firstFailure = result
                     if !result.text.isEmpty {
                         return LocatedResult(result: result, normalizedXOffset: 0,
@@ -182,7 +185,7 @@ enum PDFBookmarkExtractor {
                 }
                 guard let image = render(page: page, rect: pageRect, box: box, requestedScale: 2),
                       !recognize(image: image, field: .number).text.isEmpty else { continue }
-                let verified = extract(page: page, rect: pageRect, box: box, field: .number)
+                let verified = extract(page: page, rect: pageRect, box: box, field: .number, preferOCR: preferOCR)
                 if !verified.text.isEmpty {
                     return LocatedResult(result: verified, normalizedXOffset: xOffset,
                                          normalizedYOffset: yOffset)
@@ -231,7 +234,7 @@ enum PDFBookmarkExtractor {
                 let closeReading = overlap >= 0.65 &&
                     Double(editDistance(left, right)) / Double(denominator) <= 0.35
                 let peerSupported = overlap >= 0.5 && observedTitles.contains(right)
-                if closeReading || peerSupported {
+                if (closeReading || peerSupported), !titleHintAppearsAbbreviated(hint, of: result.text) {
                     return Result(text: hint, source: "OCR (label-disambiguated)",
                                   alternatives: Array(Set([result.text] + result.alternatives).filter { $0 != hint }).sorted())
                 }
@@ -250,6 +253,23 @@ enum PDFBookmarkExtractor {
             return Result(text: chosen, source: "OCR (peer-supported alternative)",
                           alternatives: candidates.filter { $0 != chosen })
         }
+    }
+
+    static func titleHintAppearsAbbreviated(_ hint: String, of reading: String) -> Bool {
+        let hintWords = hint.uppercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        let readingWords = reading.uppercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+        guard hintWords.count == readingWords.count, !hintWords.isEmpty else { return false }
+        return zip(hintWords, readingWords).contains { hintWord, readingWord in
+            guard hintWord.count >= 3, hintWord.count + 1 < readingWord.count else { return false }
+            return readingWord.hasPrefix(hintWord) || consonantSkeleton(readingWord) == hintWord
+        }
+    }
+
+    static func consonantSkeleton(_ word: String) -> String {
+        let vowels = Set("AEIOU")
+        return String(word.enumerated().compactMap { index, character in
+            index == 0 || !vowels.contains(character) ? character : nil
+        })
     }
 
     static func recognizedValue(_ lines: [String], field: Field) -> String? {

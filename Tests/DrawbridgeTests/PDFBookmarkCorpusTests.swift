@@ -77,6 +77,16 @@ final class PDFBookmarkCorpusTests: XCTestCase {
         let expoLandscape = try XCTUnwrap(PDFDocument(url: expo.appendingPathComponent(
             "260925 - 12222 EXPOSITION - BID SET 2 - LAND.pdf")))
         let expectedExpoLandscape = ["L1.11", "L1.12", "L1.21", "L1.22", "L1.31", "L2.11", "L2.12", "L2.21"]
+        let expectedExpoLandscapeTitles = [
+            "IRRIGATION PLAN GROUND LEVEL",
+            "IRRIGATION PLAN ROOF LEVEL",
+            "IRRIGATION DETAILS",
+            "IRRIGATION DETAILS",
+            "IRRIGATION SPECIFICATIONS",
+            "PLANTING PLAN GROUND LEVEL",
+            "PLANTING PLAN ROOF LEVEL",
+            "PLANTING DETAILS",
+        ]
         let expoNumberRegion = CGRect(x: 0.918, y: 0.024, width: 0.070, height: 0.043)
         let expoTitleRegion = CGRect(x: 0.918, y: 0.080, width: 0.064, height: 0.045)
         var expoNumbers: [String] = []
@@ -94,7 +104,7 @@ final class PDFBookmarkCorpusTests: XCTestCase {
             ).text)
         }
         XCTAssertEqual(expoNumbers, expectedExpoLandscape)
-        XCTAssertEqual(expoTitles[7], "PLANTING DETAILS")
+        XCTAssertEqual(expoTitles, expectedExpoLandscapeTitles)
     }
 
     func testFourLocalDrawingPDFs() throws {

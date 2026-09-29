@@ -398,6 +398,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var sidebarCurrentPageIndex: Int = -1
     private var bookmarkLabelOverrides: [String: String] = [:]
     var pageLabelOverrides: [Int: String] = [:]
+    private var suppressedEmbeddedPageLabelIndexes: Set<Int> = []
     var hasPromptedForInitialMarkupSaveCopy = false
     var isPresentingInitialMarkupSaveCopyPrompt = false
     var isGridVisible = false
@@ -414,6 +415,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var pendingSheetNumberZone: NormalizedPageRect?
     private var pendingSheetTitleZone: NormalizedPageRect?
     private var autoNamePreviousToolMode: ToolMode?
+    private var autoNameIgnoresExistingPageLabels = false
     private var autoLinkCaptureReferencePageIndex: Int?
     private var autoLinkPreviousToolMode: ToolMode?
     private var shouldChainAutoNameAfterBatchLink = false
@@ -1314,6 +1316,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             syncPrompt.addButton(withTitle: "Keep Current Page Label")
             if syncPrompt.runModal() == .alertFirstButtonReturn {
                 pageLabelOverrides[pageIndex] = updated
+                suppressedEmbeddedPageLabelIndexes.remove(pageIndex)
                 if let document = pdfView.document {
                     applyPageLabelOverridesToDocumentIfNeeded(document)
                 }
@@ -1436,6 +1439,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guard !updated.isEmpty else { return }
 
         pageLabelOverrides[row] = updated
+        suppressedEmbeddedPageLabelIndexes.remove(row)
         if let document = pdfView.document {
             applyPageLabelOverridesToDocumentIfNeeded(document)
         }
@@ -5267,6 +5271,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pendingScaleReminderSuppressionPageIndex = -1
         pendingScaleReminderSuppressionOneShot = false
         pageLabelOverrides.removeAll()
+        suppressedEmbeddedPageLabelIndexes.removeAll()
         hasPromptedForInitialMarkupSaveCopy = false
         isPresentingInitialMarkupSaveCopyPrompt = false
         loadSidecarSnapshotIfAvailable(for: url, document: document)
@@ -5405,6 +5410,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pendingScaleReminderSuppressionPageIndex = -1
         pendingScaleReminderSuppressionOneShot = false
         pageLabelOverrides.removeAll()
+        suppressedEmbeddedPageLabelIndexes.removeAll()
         flattenedPDFItems.removeAll(keepingCapacity: false)
         openDocumentURL = nil
         dominantDocumentPageSizeInInches = nil
@@ -5917,6 +5923,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
            !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return override
         }
+        if suppressedEmbeddedPageLabelIndexes.contains(pageIndex) {
+            return "\(pageIndex + 1)"
+        }
         guard let doc = pdfView.document else { return "\(pageIndex + 1)" }
         guard let page = doc.page(at: pageIndex) else { return "\(pageIndex + 1)" }
         let label = page.label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -6187,6 +6196,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             remappedPageLabels[newIndex] = label
         }
         pageLabelOverrides = remappedPageLabels
+        suppressedEmbeddedPageLabelIndexes = Set(suppressedEmbeddedPageLabelIndexes.compactMap(remapIndex))
 
         var remappedPageScaleLocks: [Int: PageScaleLock] = [:]
         for (pageIndex, lock) in pageScaleLocks {
@@ -6208,19 +6218,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             beep()
             return
         }
-        let bookmarkPrompt = NSAlert()
-        bookmarkPrompt.messageText = "Delete Existing Bookmarks and Page Names?"
-        bookmarkPrompt.informativeText = "Would you like to delete all existing bookmarks and page names before running Auto Sheet Names and Numbers?"
-        bookmarkPrompt.alertStyle = .warning
-        bookmarkPrompt.addButton(withTitle: "Yes, Delete Both")
-        bookmarkPrompt.addButton(withTitle: "No, Keep Existing")
-        bookmarkPrompt.addButton(withTitle: "Cancel")
-        let bookmarkPromptResponse = bookmarkPrompt.runModal()
-        if bookmarkPromptResponse == .alertFirstButtonReturn {
-            clearAllBookmarks(in: document)
-        } else if bookmarkPromptResponse == .alertThirdButtonReturn {
-            return
-        }
+        autoNameIgnoresExistingPageLabels = true
         autoNameReferencePageIndex = document.index(for: currentPage)
         guard guardOrBeep((autoNameReferencePageIndex ?? -1) >= 0) else { return }
         pendingSheetNumberZone = nil
@@ -6251,6 +6249,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         autoNameReferencePageIndex = nil
         pendingSheetNumberZone = nil
         pendingSheetTitleZone = nil
+        autoNameIgnoresExistingPageLabels = false
         if let previous = autoNamePreviousToolMode {
             setTool(previous)
         }
@@ -6333,6 +6332,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             cancelAutoNameCapture()
             return
         }
+        clearAllBookmarks(in: document)
         beginBusyIndicator("Reading Sheet Names…")
         defer {
             endBusyIndicator()
@@ -6344,6 +6344,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             autoNameCapturePhase = nil
             pendingSheetNumberZone = nil
             pendingSheetTitleZone = nil
+            autoNameIgnoresExistingPageLabels = false
         }
 
         guard let referenceIndex = autoNameReferencePageIndex,
@@ -6367,13 +6368,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 }
                 let target = PDFBookmarkExtractor.Geometry(page: page, box: box)
                 let locatedNumber = PDFBookmarkExtractor.extractAdaptiveNumber(
-                    page: page, normalizedRect: numberRegion, box: box)
+                    page: page, normalizedRect: numberRegion, box: box, preferOCR: true)
                 numbers.append(locatedNumber.result)
                 let adjustedTitleRegion = titleRegion.offsetBy(
                     dx: locatedNumber.normalizedXOffset, dy: locatedNumber.normalizedYOffset)
                 titles.append(PDFBookmarkExtractor.extract(
-                    page: page, rect: target.pageRect(adjustedTitleRegion), box: box, field: .title))
-                let labelInfo = sheetInfoFromPageLabel(page.label ?? "")
+                    page: page, rect: target.pageRect(adjustedTitleRegion), box: box, field: .title, preferOCR: true))
+                let labelInfo = autoNameIgnoresExistingPageLabels ? (number: nil as String?, title: nil as String?) : sheetInfoFromPageLabel(page.label ?? "")
                 labelHints.append(labelInfo.number)
                 titleLabelHints.append(labelInfo.title)
             }
@@ -6387,7 +6388,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         for pageIndex in 0..<document.pageCount {
             let number = numbers[pageIndex], title = titles[pageIndex]
             if !number.text.isEmpty { detectedSheetNumberCount += 1 }
-            let labelNumber = sheetInfoFromPageLabel(document.page(at: pageIndex)?.label ?? "").number
+            let labelNumber = autoNameIgnoresExistingPageLabels ? nil : sheetInfoFromPageLabel(document.page(at: pageIndex)?.label ?? "").number
             let labelConflict = labelNumber != nil && labelNumber != number.text
             let needsReview = number.source != "PDF text" || title.source != "PDF text" || labelConflict
             if needsReview { reviewPages.append(pageIndex + 1) }
@@ -7697,6 +7698,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             for sheet in sheets {
                 let cleanedTitle = sheet.sheetTitle.isEmpty ? "Untitled" : sheet.sheetTitle
                 pageLabelOverrides[sheet.pageIndex] = "\(sheet.sheetNumber) - \(cleanedTitle)"
+                suppressedEmbeddedPageLabelIndexes.remove(sheet.pageIndex)
             }
             applyPageLabelOverridesToDocumentIfNeeded(document)
         }
@@ -7764,6 +7766,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         document.outlineRoot = PDFOutline()
         bookmarkLabelOverrides.removeAll()
         pageLabelOverrides.removeAll()
+        suppressedEmbeddedPageLabelIndexes = Set(0..<document.pageCount)
         markMarkupChangedAndScheduleAutosave()
         reloadBookmarks()
         updateStatusBar()
