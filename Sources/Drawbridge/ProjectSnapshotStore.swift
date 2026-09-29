@@ -3,24 +3,33 @@ import PDFKit
 
 final class ProjectSnapshotStore: @unchecked Sendable {
     private let fileManager: FileManager
+    private let snapshotDirectory: URL?
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default, snapshotDirectory: URL? = nil) {
         self.fileManager = fileManager
+        self.snapshotDirectory = snapshotDirectory
     }
 
     func sidecarURL(for sourcePDFURL: URL) -> URL {
+        if let snapshotDirectory {
+            try? fileManager.createDirectory(at: snapshotDirectory, withIntermediateDirectories: true)
+            return snapshotDirectory.appendingPathComponent(snapshotFileName(for: sourcePDFURL))
+        }
         guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             let fallback = sourcePDFURL.deletingPathExtension()
             return fallback.appendingPathExtension("drawbridge.json")
         }
         let dir = appSupport.appendingPathComponent("Drawbridge").appendingPathComponent("ProjectSnapshots")
         try? fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent(snapshotFileName(for: sourcePDFURL))
+    }
+
+    private func snapshotFileName(for sourcePDFURL: URL) -> String {
         let key = Data(sourcePDFURL.standardizedFileURL.path.utf8).base64EncodedString()
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "=", with: "")
-        let filename = (key.isEmpty ? UUID().uuidString : key) + ".drawbridge.snapshot"
-        return dir.appendingPathComponent(filename)
+        return (key.isEmpty ? UUID().uuidString : key) + ".drawbridge.snapshot"
     }
 
     func cleanupLegacyJSONArtifacts(for sourcePDFURL: URL, autosaveDirectory: URL?) {
@@ -41,32 +50,19 @@ final class ProjectSnapshotStore: @unchecked Sendable {
         document: PDFDocument,
         sourcePDFURL: URL,
         initialCapacity: Int,
-        pageScaleLocks: [Int: PageScaleLock],
+        pageScaleLocks _: [Int: PageScaleLock],
         pageLabels: [Int: String] = [:],
-        resolvedLineWidth: (PDFAnnotation) -> CGFloat
+        resolvedLineWidth _: (PDFAnnotation) -> CGFloat
     ) -> SidecarSnapshot {
-        var records: [SidecarAnnotationRecord] = []
-        records.reserveCapacity(max(64, initialCapacity))
-        for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex) else { continue }
-            for annotation in page.annotations {
-                let archivedData = (try? NSKeyedArchiver.archivedData(withRootObject: annotation, requiringSecureCoding: true))
-                    ?? (try? NSKeyedArchiver.archivedData(withRootObject: annotation, requiringSecureCoding: false))
-                guard let data = archivedData else { continue }
-                records.append(
-                    SidecarAnnotationRecord(
-                        pageIndex: pageIndex,
-                        archivedAnnotation: data,
-                        lineWidth: resolvedLineWidth(annotation)
-                    )
-                )
-            }
-        }
+        // Navigation edits are written directly into the PDF. Keeping an annotation
+        // archive as a second source of truth can replace or restyle a page during
+        // recovery, so the sidecar deliberately contains only bookmark metadata.
+        let records: [SidecarAnnotationRecord] = []
         return SidecarSnapshot(
             sourcePDFPath: sourcePDFURL.standardizedFileURL.path,
             pageCount: document.pageCount,
             annotations: records,
-            pageScaleLocks: pageScaleLocks,
+            pageScaleLocks: nil,
             pageLabels: pageLabels,
             bookmarks: snapshotBookmarks(in: document),
             savedAt: Date()
@@ -80,7 +76,7 @@ final class ProjectSnapshotStore: @unchecked Sendable {
             return false
         }
         do {
-            try data.write(to: url, options: .atomic)
+            try writeSnapshotData(data, to: url)
             return true
         } catch {
             return false
@@ -91,7 +87,7 @@ final class ProjectSnapshotStore: @unchecked Sendable {
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
         let data = try encoder.encode(snapshot)
-        try data.write(to: url, options: .atomic)
+        try writeSnapshotData(data, to: url)
     }
 
     func loadSnapshotIfAvailable(
@@ -99,7 +95,7 @@ final class ProjectSnapshotStore: @unchecked Sendable {
         document: PDFDocument,
         applyPageScaleLocks: ([Int: PageScaleLock]) -> Void,
         applyPageLabels: ([Int: String]) -> Void = { _ in },
-        assignLineWidth: (CGFloat, PDFAnnotation) -> Void
+        assignLineWidth _: (CGFloat, PDFAnnotation) -> Void
     ) {
         let url = sidecarURL(for: sourcePDFURL)
         guard fileManager.fileExists(atPath: url.path),
@@ -117,11 +113,14 @@ final class ProjectSnapshotStore: @unchecked Sendable {
         jsonDecoder.dateDecodingStrategy = .iso8601
         guard let snapshot = (try? plistDecoder.decode(SidecarSnapshot.self, from: data))
             ?? (try? jsonDecoder.decode(SidecarSnapshot.self, from: data)) else { return }
-        guard snapshot.sourcePDFPath == sourcePDFURL.standardizedFileURL.path else { return }
+        guard snapshot.sourcePDFPath == sourcePDFURL.standardizedFileURL.path,
+              snapshot.pageCount == document.pageCount else { return }
 
-        applyPageScaleLocks(snapshot.pageScaleLocks ?? [:])
+        // Legacy snapshots may contain drawing-scale settings and archived markups.
+        // Only navigation edits belong to the current app; the PDF remains authoritative
+        // for all other annotation appearance, geometry, flags, and page orientation.
+        applyPageScaleLocks([:])
         applyPageLabels(snapshot.pageLabels ?? [:])
-        applySnapshot(snapshot, to: document, assignLineWidth: assignLineWidth)
         applyBookmarks(snapshot.bookmarks, to: document)
     }
 
@@ -182,42 +181,16 @@ final class ProjectSnapshotStore: @unchecked Sendable {
         return outline
     }
 
-    private func applySnapshot(
-        _ snapshot: SidecarSnapshot,
-        to document: PDFDocument,
-        assignLineWidth: (CGFloat, PDFAnnotation) -> Void
-    ) {
-        guard snapshot.pageCount == document.pageCount else { return }
-        for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex) else { continue }
-            for annotation in page.annotations {
-                page.removeAnnotation(annotation)
-            }
+    private func writeSnapshotData(_ data: Data, to url: URL) throws {
+        let directory = url.deletingLastPathComponent()
+        if !fileManager.fileExists(atPath: directory.path) {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         }
-        for record in snapshot.annotations {
-            guard record.pageIndex >= 0,
-                  record.pageIndex < document.pageCount,
-                  let page = document.page(at: record.pageIndex),
-                  let annotation = decodeAnnotation(from: record.archivedAnnotation) else {
-                continue
-            }
-            if let lineWidth = record.lineWidth, lineWidth > 0 {
-                assignLineWidth(lineWidth, annotation)
-            }
-            page.addAnnotation(annotation)
+        // Project snapshots are small, recoverable metadata. `createFile` avoids
+        // Foundation's fragile replace/remove sequence on Application Support paths.
+        guard fileManager.createFile(atPath: url.path, contents: data) else {
+            throw CocoaError(.fileWriteUnknown)
         }
     }
 
-    private func decodeAnnotation(from data: Data) -> PDFAnnotation? {
-        if let secure = try? NSKeyedUnarchiver.unarchivedObject(ofClass: PDFAnnotation.self, from: data) {
-            return secure
-        }
-        guard let unarchiver = try? NSKeyedUnarchiver(forReadingFrom: data) else {
-            return nil
-        }
-        unarchiver.requiresSecureCoding = false
-        let insecure = unarchiver.decodeObject(of: PDFAnnotation.self, forKey: NSKeyedArchiveRootObjectKey)
-        unarchiver.finishDecoding()
-        return insecure
-    }
 }

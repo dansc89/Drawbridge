@@ -195,6 +195,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     var toolMode: ToolMode = .select {
         didSet {
+            if !toolMode.isEnabledInScratchReset { toolMode = .select }
             guard oldValue != toolMode else { return }
             window?.invalidateCursorRects(for: self)
             if toolMode != .text {
@@ -286,6 +287,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var movingPolygonOriginalPointsByID: [ObjectIdentifier: [NSPoint]] = [:]
     private var didMoveAnnotation = false
     private var delegatedLinkMouseDownToSuper = false
+    private var navigationSelectionStart: (page: PDFPage, point: NSPoint)?
     private var navigationBackStack: [ViewportHistoryEntry] = []
     private var navigationForwardStack: [ViewportHistoryEntry] = []
     private var applyingHistoryNavigation = false
@@ -1033,1095 +1035,86 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
-        let locationInView = convert(event.locationInWindow, from: nil)
-        guard let page = page(for: locationInView, nearest: true) else {
-            return super.menu(for: event)
-        }
-        let pointInPage = convert(locationInView, to: page)
-        guard let hit = nearestAnnotation(to: pointInPage, on: page, maxDistance: selectionHitDistanceInPage()) else {
-            return super.menu(for: event)
-        }
-        pendingContextMenuHitAnnotation = hit
-        onAnnotationClicked?(page, hit, false)
-
-        let menu = NSMenu(title: "Markup")
-        let sendToBack = NSMenuItem(title: "Move To Back", action: #selector(contextMenuSendToBack(_:)), keyEquivalent: "")
-        sendToBack.target = self
-        let bringForward = NSMenuItem(title: "Move Forward", action: #selector(contextMenuBringForward(_:)), keyEquivalent: "")
-        bringForward.target = self
-        let sendBackward = NSMenuItem(title: "Move Backward", action: #selector(contextMenuSendBackward(_:)), keyEquivalent: "")
-        sendBackward.target = self
-        let bringToFront = NSMenuItem(title: "Bring To Front", action: #selector(contextMenuBringToFront(_:)), keyEquivalent: "")
-        bringToFront.target = self
-
-        menu.addItem(sendToBack)
-        menu.addItem(bringForward)
-        menu.addItem(sendBackward)
-        menu.addItem(bringToFront)
-        menu.addItem(NSMenuItem.separator())
-        let applyToPages = NSMenuItem(title: "Apply to Pages…", action: #selector(contextMenuApplyToPages(_:)), keyEquivalent: "")
-        applyToPages.target = self
-        menu.addItem(applyToPages)
-        if hit is PDFSnapshotAnnotation {
-            menu.addItem(NSMenuItem.separator())
-            let assignLayer = NSMenuItem(title: "Assign Layer…", action: #selector(contextMenuAssignLayer(_:)), keyEquivalent: "")
-            assignLayer.target = self
-            menu.addItem(assignLayer)
-        }
+        let menu = NSMenu(title: "PDF")
+        let copyItem = menu.addItem(withTitle: "Copy Text", action: #selector(copy(_:)), keyEquivalent: "")
+        copyItem.target = self
+        let selectItem = menu.addItem(withTitle: "Select All Text", action: #selector(selectAll(_:)), keyEquivalent: "")
+        selectItem.target = self
         return menu
     }
 
-    @objc private func contextMenuSendToBack(_ sender: Any?) {
-        _ = sender
-        guard pendingContextMenuHitAnnotation != nil else { return }
-        pendingContextMenuHitAnnotation = nil
-        onReorderActionRequested?(.sendToBack)
-    }
-
-    @objc private func contextMenuBringForward(_ sender: Any?) {
-        _ = sender
-        guard pendingContextMenuHitAnnotation != nil else { return }
-        pendingContextMenuHitAnnotation = nil
-        onReorderActionRequested?(.bringForward)
-    }
-
-    @objc private func contextMenuSendBackward(_ sender: Any?) {
-        _ = sender
-        guard pendingContextMenuHitAnnotation != nil else { return }
-        pendingContextMenuHitAnnotation = nil
-        onReorderActionRequested?(.sendBackward)
-    }
-
-    @objc private func contextMenuBringToFront(_ sender: Any?) {
-        _ = sender
-        guard pendingContextMenuHitAnnotation != nil else { return }
-        pendingContextMenuHitAnnotation = nil
-        onReorderActionRequested?(.bringToFront)
-    }
-
-    @objc private func contextMenuAssignLayer(_ sender: Any?) {
-        _ = sender
-        guard pendingContextMenuHitAnnotation is PDFSnapshotAnnotation else { return }
-        pendingContextMenuHitAnnotation = nil
-        onAssignLayerRequested?()
-    }
-
-    @objc private func contextMenuApplyToPages(_ sender: Any?) {
-        _ = sender
-        guard pendingContextMenuHitAnnotation != nil else { return }
-        pendingContextMenuHitAnnotation = nil
-        onApplyToPagesRequested?()
-    }
-
     override func mouseDown(with event: NSEvent) {
-        sanitizeToolModeForScratchReset()
-        delegatedLinkMouseDownToSuper = false
-        let locationInView = convert(event.locationInWindow, from: nil)
-        lastPointerInView = locationInView
+        window?.makeFirstResponder(self)
+        let location = convert(event.locationInWindow, from: nil)
+        lastPointerInView = location
+        navigationSelectionStart = nil
+        guard let page = page(for: location, nearest: false) else { return }
         if isRegionCaptureModeEnabled {
-            guard let page = page(for: locationInView, nearest: true) else { return }
-            regionCaptureStartInView = locationInView
+            regionCaptureStartInView = location
             regionCapturePage = page
             dragPreviewLayer.strokeColor = NSColor.systemBlue.cgColor
             dragPreviewLayer.fillColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
             dragPreviewLayer.lineWidth = 1.5
             dragPreviewLayer.lineDashPattern = [6, 4]
-            dragPreviewLayer.path = CGPath(rect: NSRect(origin: locationInView, size: .zero), transform: nil)
+            dragPreviewLayer.path = CGPath(rect: NSRect(origin: location, size: .zero), transform: nil)
             dragPreviewLayer.isHidden = false
             return
         }
-        let eventModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if event.clickCount == 1,
-           eventModifiers.isDisjoint(with: [.command, .shift, .option, .control]),
-           let page = page(for: locationInView, nearest: true) {
-            let pointInPage = convert(locationInView, to: page)
-            if let linkAnnotation = linkAnnotation(at: pointInPage, on: page) {
-                if followLinkIfPossible(linkAnnotation) {
-                    return
-                }
-                delegatedLinkMouseDownToSuper = true
-                super.mouseDown(with: event)
-                onViewportChanged?()
+        let point = convert(location, to: page)
+        if event.clickCount == 1, let link = linkAnnotation(at: point, on: page) {
+            if followLinkIfPossible(link) { return }
+            if let action = link.action as? PDFActionURL {
+                perform(action)
+                return
+            }
+            if let action = link.action as? PDFActionRemoteGoTo {
+                perform(action)
+                return
+            }
+            if let action = link.action as? PDFActionNamed {
+                perform(action)
                 return
             }
         }
-        let createsMarkupTool: Bool
-        switch toolMode {
-        case .pen, .arrow, .highlighter, .line, .polyline, .polygon, .area, .cloud, .rectangle, .circle, .note, .callout, .measure, .calibrate:
-            createsMarkupTool = true
-        default:
-            createsMarkupTool = false
-        }
-        if createsMarkupTool, (shouldBeginMarkupInteraction?() == false) {
-            return
-        }
-
-        if toolMode == .callout {
-            handleCalloutClick(at: locationInView)
-            return
-        }
-        if toolMode == .select, let page = page(for: locationInView, nearest: true) {
-            let pointInPage = convert(locationInView, to: page)
-            if let handleTarget = selectedHandleDragTarget(on: page, at: locationInView, pointInPage: pointInPage) {
-                unlockAnnotationForEditing(handleTarget.annotation)
-                movingAnnotation = handleTarget.annotation
-                movingAnnotationPage = page
-                movingAnnotationStartBounds = handleTarget.annotation.bounds
-                movingStartPointInPage = pointInPage
-                movingLineEndpointHandle = handleTarget.lineEndpointHandle
-                movingPolygonVertexIndex = handleTarget.polygonVertexIndex
-                movingPolygonPointsAtDragStart = (handleTarget.polygonVertexIndex != nil) ? (polygonVerticesInPage(for: handleTarget.annotation) ?? []) : []
-                movingLineSegmentAtDragStart = lineSegmentInPage(for: handleTarget.annotation)
-                movingResizeCorner = handleTarget.resizeCorner
-                movingAnnotations = [handleTarget.annotation]
-                movingAnnotationStartBoundsByID = [ObjectIdentifier(handleTarget.annotation): handleTarget.annotation.bounds]
-                captureMovingPolygonOriginalPoints()
-                didMoveAnnotation = false
-                return
-            }
-            if let hit = nearestAnnotation(
-                to: pointInPage,
-                on: page,
-                maxDistance: selectionHitDistanceInPage()
-            ) {
-                let selectedIDs = Set((selectedAnnotationsProvider?(page) ?? []).map(ObjectIdentifier.init))
-                let hitIsSelected = selectedIDs.contains(ObjectIdentifier(hit))
-                if isPolygonMarkup(hit),
-                   let nearest = nearestPolygonVertexIndex(for: hit, on: page, at: locationInView),
-                   nearest.distance <= polygonVertexCaptureThresholdInView() {
-                    var activeHit = hit
-                    var activeNearest = nearest
-                    if !hitIsSelected {
-                        onAnnotationClicked?(page, hit, event.modifierFlags.contains(.shift))
-                        if let refreshed = nearestAnnotation(
-                            to: pointInPage,
-                            on: page,
-                            maxDistance: selectionHitDistanceInPage()
-                        ),
-                           isPolygonMarkup(refreshed),
-                           let refreshedNearest = nearestPolygonVertexIndex(for: refreshed, on: page, at: locationInView),
-                           refreshedNearest.distance <= polygonVertexCaptureThresholdInView() {
-                            activeHit = refreshed
-                            activeNearest = refreshedNearest
-                        }
-                    }
-                    movingAnnotation = activeHit
-                    movingAnnotationPage = page
-                    movingAnnotationStartBounds = activeHit.bounds
-                    movingStartPointInPage = pointInPage
-                    movingLineEndpointHandle = nil
-                    movingResizeCorner = nil
-                    movingPolygonVertexIndex = activeNearest.index
-                    movingPolygonPointsAtDragStart = polygonVerticesInPage(for: activeHit) ?? []
-                    movingLineSegmentAtDragStart = nil
-                    movingAnnotations = [activeHit]
-                    movingAnnotationStartBoundsByID = [ObjectIdentifier(activeHit): activeHit.bounds]
-                    captureMovingPolygonOriginalPoints()
-                    didMoveAnnotation = false
-                    return
-                }
-                var activeHit = hit
-                var dragCandidates = onResolveDragSelection?(page, activeHit) ?? [activeHit]
-                let shouldPreserveSelectionForDrag = dragCandidates.count > 1
-                if !shouldPreserveSelectionForDrag {
-                    onAnnotationClicked?(page, activeHit, event.modifierFlags.contains(.shift))
-                    if let refreshed = nearestAnnotation(
-                        to: pointInPage,
-                        on: page,
-                        maxDistance: selectionHitDistanceInPage()
-                    ) {
-                        activeHit = refreshed
-                    }
-                    dragCandidates = onResolveDragSelection?(page, activeHit) ?? [activeHit]
-                }
-                unlockAnnotationForEditing(activeHit)
-                if let calloutState = initialCalloutDragState(from: activeHit, on: page, pointerInView: locationInView, pointerInPage: pointInPage) {
-                    movingCalloutState = calloutState
-                    didMoveAnnotation = false
-                    return
-                }
-                movingAnnotation = activeHit
-                movingAnnotationPage = page
-                movingAnnotationStartBounds = activeHit.bounds
-                movingStartPointInPage = pointInPage
-                movingLineEndpointHandle = lineEndpointHit(for: activeHit, on: page, at: locationInView)
-                movingPolygonVertexIndex = polygonVertexHit(for: activeHit, on: page, at: locationInView)
-                if movingPolygonVertexIndex != nil {
-                    movingPolygonPointsAtDragStart = polygonVerticesInPage(for: activeHit) ?? []
-                } else {
-                    movingPolygonPointsAtDragStart = []
-                }
-                movingLineSegmentAtDragStart = lineSegmentInPage(for: activeHit)
-                movingResizeCorner = resizeCornerHit(for: activeHit, on: page, at: locationInView)
-                let requested = dragCandidates
-                if movingResizeCorner != nil || movingLineEndpointHandle != nil || movingPolygonVertexIndex != nil {
-                    movingAnnotations = [activeHit]
-                } else {
-                    var seen = Set<ObjectIdentifier>()
-                    movingAnnotations = requested.filter { candidate in
-                        let key = ObjectIdentifier(candidate)
-                        if seen.contains(key) { return false }
-                        seen.insert(key)
-                        return candidate.page === page
-                    }
-                    if movingAnnotations.isEmpty {
-                        movingAnnotations = [activeHit]
-                    }
-                }
-                for candidate in movingAnnotations {
-                    unlockAnnotationForEditing(candidate)
-                }
-                movingAnnotationStartBoundsByID = Dictionary(uniqueKeysWithValues: movingAnnotations.map { (ObjectIdentifier($0), $0.bounds) })
-                captureMovingPolygonOriginalPoints()
-                didMoveAnnotation = false
-                return
-            }
-            fenceStartInView = locationInView
-            fencePage = page
-            dragPreviewLayer.strokeColor = NSColor.controlAccentColor.cgColor
-            dragPreviewLayer.fillColor = NSColor.controlAccentColor.withAlphaComponent(0.12).cgColor
-            dragPreviewLayer.lineWidth = 1.5
-            dragPreviewLayer.lineDashPattern = [6, 4]
-            dragPreviewLayer.path = CGPath(rect: NSRect(origin: locationInView, size: .zero), transform: nil)
-            dragPreviewLayer.isHidden = false
-            return
-        }
-
-        switch toolMode {
-        case .select:
-            return
-        case .text:
-            return
-        case .note:
-            guard let page = page(for: locationInView, nearest: true) else {
-                super.mouseDown(with: event)
-                return
-            }
-            addNoteAnnotation(at: convert(locationInView, to: page), on: page)
-            return
-        case .grab:
-            guard let page = page(for: locationInView, nearest: true) else {
-                super.mouseDown(with: event)
-                return
-            }
-            dragStartInView = locationInView
-            dragPage = page
-            dragPreviewLayer.strokeColor = NSColor.controlAccentColor.cgColor
-            dragPreviewLayer.fillColor = NSColor.controlAccentColor.withAlphaComponent(0.12).cgColor
-            dragPreviewLayer.lineWidth = 1.5
-            dragPreviewLayer.lineDashPattern = [6, 4]
-            dragPreviewLayer.path = CGPath(rect: NSRect(origin: locationInView, size: .zero), transform: nil)
-            dragPreviewLayer.isHidden = false
-            return
-        case .pen, .highlighter:
-            if inlineTextField != nil {
-                _ = commitInlineTextEditor(cancel: false)
-            }
-            guard let page = page(for: locationInView, nearest: true) else {
-                super.mouseDown(with: event)
-                return
-            }
-            penPage = page
-            penPointsPage = [convert(locationInView, to: page)]
-            let path = CGMutablePath()
-            path.move(to: locationInView)
-            penPreviewPath = path
-            penLastPointInView = locationInView
-            let strokeColor = (toolMode == .highlighter) ? highlighterColor : penColor
-            let strokeWidth = (toolMode == .highlighter) ? highlighterLineWidth : penLineWidth
-            dragPreviewLayer.strokeColor = strokeColor.cgColor
-            dragPreviewLayer.fillColor = NSColor.clear.cgColor
-            dragPreviewLayer.lineWidth = strokeWidth
-            dragPreviewLayer.path = path
-            dragPreviewLayer.isHidden = false
-        case .arrow:
-            if inlineTextField != nil {
-                _ = commitInlineTextEditor(cancel: false)
-            }
-            guard let page = page(for: locationInView, nearest: true) else {
-                super.mouseDown(with: event)
-                return
-            }
-            let pointInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
-            if pendingArrowPage == nil || pendingArrowPage !== page || pendingArrowStartInPage == nil {
-                pendingArrowPage = page
-                pendingArrowStartInPage = pointInPage
-                updateArrowPreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: event.modifierFlags.contains(.shift))
-            } else if let start = pendingArrowStartInPage {
-                let endInPage: NSPoint
-                if event.modifierFlags.contains(.shift) {
-                    let startInView = convert(start, from: page)
-                    let snapped = orthogonalSnapPoint(anchor: startInView, current: locationInView)
-                    endInPage = snapPointInPageIfNeeded(convert(snapped, to: page), on: page)
-                } else {
-                    endInPage = pointInPage
-                }
-                addArrowAnnotation(from: start, to: endInPage, on: page)
-                clearPendingArrow()
-            }
-            return
-        case .line:
-            if inlineTextField != nil {
-                _ = commitInlineTextEditor(cancel: false)
-            }
-            guard let page = page(for: locationInView, nearest: true) else {
-                super.mouseDown(with: event)
-                return
-            }
-            typedDistanceBuffer = ""
-            let pointInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
-            let ortho = isOrthoConstraintActive(for: event)
-            if pendingLinePage == nil || pendingLinePage !== page || pendingLineStartInPage == nil {
-                pendingLinePage = page
-                pendingLineStartInPage = pointInPage
-            } else if let start = pendingLineStartInPage {
-                let endInPage: NSPoint
-                if ortho {
-                    let startInView = convert(start, from: page)
-                    let snapped = orthogonalSnapPoint(anchor: startInView, current: locationInView)
-                    endInPage = snapPointInPageIfNeeded(convert(snapped, to: page), on: page)
-                } else {
-                    endInPage = pointInPage
-                }
-                addLineAnnotation(from: start, to: endInPage, on: page, actionName: "Add Line", contents: "Line")
-                clearPendingLine()
-            }
-            let previewPoint = snapPointInViewIfNeeded(locationInView, on: page)
-            updateLinePreview(at: previewPoint, orthogonal: ortho)
-            return
-        case .circle:
-            if inlineTextField != nil {
-                _ = commitInlineTextEditor(cancel: false)
-            }
-            guard let page = page(for: locationInView, nearest: true) else {
-                super.mouseDown(with: event)
-                return
-            }
-            typedDistanceBuffer = ""
-            let pointInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
-            if pendingCirclePage == nil || pendingCirclePage !== page || pendingCircleCenterInPage == nil {
-                pendingCirclePage = page
-                pendingCircleCenterInPage = pointInPage
-            } else if let center = pendingCircleCenterInPage {
-                let radius = hypot(pointInPage.x - center.x, pointInPage.y - center.y)
-                if radius > 0.5 {
-                    addCircleAnnotation(center: center, radius: radius, on: page)
-                }
-                clearPendingCircle()
-            }
-            let previewPoint = snapPointInViewIfNeeded(locationInView, on: page)
-            updateCirclePreview(at: previewPoint)
-            return
-        case .polyline:
-            if inlineTextField != nil {
-                _ = commitInlineTextEditor(cancel: false)
-            }
-            guard let page = page(for: locationInView, nearest: true) else {
-                super.mouseDown(with: event)
-                return
-            }
-            let ortho = isOrthoConstraintActive(for: event)
-            let pointInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
-            let constrainedPointInPage: NSPoint
-            if ortho,
-               pendingPolylinePage === page,
-               let last = pendingPolylinePointsInPage.last {
-                let lastInView = convert(last, from: page)
-                let currentInView = convert(pointInPage, from: page)
-                constrainedPointInPage = snapPointInPageIfNeeded(convert(orthogonalSnapPoint(anchor: lastInView, current: currentInView), to: page), on: page)
-            } else {
-                constrainedPointInPage = pointInPage
-            }
-            if pendingPolylinePage == nil || pendingPolylinePage !== page {
-                pendingPolylinePage = page
-                pendingPolylinePointsInPage = [constrainedPointInPage]
-            } else if event.clickCount >= 2, pendingPolylinePointsInPage.count >= 1 {
-                pendingPolylinePointsInPage.append(constrainedPointInPage)
-                _ = endPendingPolyline()
-            } else {
-                pendingPolylinePointsInPage.append(constrainedPointInPage)
-            }
-            typedDistanceBuffer = ""
-            let previewPoint = snapPointInViewIfNeeded(locationInView, on: page)
-            updatePolylineLikePreview(at: previewPoint, orthogonal: ortho)
-        case .polygon:
-            if inlineTextField != nil {
-                _ = commitInlineTextEditor(cancel: false)
-            }
-            guard let page = page(for: locationInView, nearest: true) else {
-                super.mouseDown(with: event)
-                return
-            }
-            let ortho = isOrthoConstraintActive(for: event)
-            let pointInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
-            let constrainedPointInPage: NSPoint
-            if ortho,
-               pendingPolygonPage === page,
-               let last = pendingPolygonPointsInPage.last {
-                let lastInView = convert(last, from: page)
-                let currentInView = convert(pointInPage, from: page)
-                constrainedPointInPage = snapPointInPageIfNeeded(convert(orthogonalSnapPoint(anchor: lastInView, current: currentInView), to: page), on: page)
-            } else {
-                constrainedPointInPage = pointInPage
-            }
-            if pendingPolygonPage == nil || pendingPolygonPage !== page {
-                pendingPolygonPage = page
-                pendingPolygonPointsInPage = [constrainedPointInPage]
-            } else if event.clickCount >= 2 {
-                if let last = pendingPolygonPointsInPage.last,
-                   hypot(last.x - constrainedPointInPage.x, last.y - constrainedPointInPage.y) > 0.5 {
-                    pendingPolygonPointsInPage.append(constrainedPointInPage)
-                }
-                if pendingPolygonPointsInPage.count >= 3 {
-                    _ = endPendingPolygon()
-                }
-            } else {
-                pendingPolygonPointsInPage.append(constrainedPointInPage)
-            }
-            typedDistanceBuffer = ""
-            let previewPoint = snapPointInViewIfNeeded(locationInView, on: page)
-            updatePolylineLikePreview(at: previewPoint, orthogonal: ortho)
-        case .area:
-            if inlineTextField != nil {
-                _ = commitInlineTextEditor(cancel: false)
-            }
-            guard let page = page(for: locationInView, nearest: true) else {
-                super.mouseDown(with: event)
-                return
-            }
-            let pointInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
-            let constrainedPointInPage: NSPoint
-            if event.modifierFlags.contains(.shift),
-               pendingAreaPage === page,
-               let last = pendingAreaPointsInPage.last {
-                let lastInView = convert(last, from: page)
-                let currentInView = convert(pointInPage, from: page)
-                constrainedPointInPage = snapPointInPageIfNeeded(convert(orthogonalSnapPoint(anchor: lastInView, current: currentInView), to: page), on: page)
-            } else {
-                constrainedPointInPage = pointInPage
-            }
-            if pendingAreaPage == nil || pendingAreaPage !== page {
-                pendingAreaPage = page
-                pendingAreaPointsInPage = [constrainedPointInPage]
-            } else if event.clickCount >= 2, pendingAreaPointsInPage.count >= 2 {
-                pendingAreaPointsInPage.append(constrainedPointInPage)
-                _ = endPendingArea()
-            } else {
-                pendingAreaPointsInPage.append(constrainedPointInPage)
-            }
-            let previewPoint = snapPointInViewIfNeeded(locationInView, on: page)
-            updateAreaPreview(at: previewPoint, orthogonal: event.modifierFlags.contains(.shift))
-        case .cloud, .rectangle:
-            if inlineTextField != nil {
-                _ = commitInlineTextEditor(cancel: false)
-            }
-            guard let page = page(for: locationInView, nearest: true) else {
-                super.mouseDown(with: event)
-                return
-            }
-            let snappedLocationInView = snapPointInViewIfNeeded(locationInView, on: page)
-            dragStartInView = snappedLocationInView
-            dragPage = page
-            dragPreviewLayer.isHidden = false
-            dragPreviewLayer.path = CGPath(rect: NSRect(origin: snappedLocationInView, size: .zero), transform: nil)
-        case .callout:
-            return
-        case .measure, .calibrate:
-            if inlineTextField != nil {
-                _ = commitInlineTextEditor(cancel: false)
-            }
-            guard let page = page(for: locationInView, nearest: true) else {
-                super.mouseDown(with: event)
-                return
-            }
-            if toolMode == .measure {
-                let pointInPage = snapPointInPageIfNeeded(convert(locationInView, to: page), on: page)
-                if let startPage = pendingMeasurePage,
-                   let start = pendingMeasureStartInPage,
-                   startPage == page {
-                    addMeasurementAnnotation(from: start, to: pointInPage, on: page)
-                    pendingMeasurePage = nil
-                    pendingMeasureStartInPage = nil
-                    dragPreviewLayer.isHidden = true
-                    dragPreviewLayer.path = nil
-                } else {
-                    pendingMeasurePage = page
-                    pendingMeasureStartInPage = pointInPage
-                    let startInView = convert(pointInPage, from: page)
-                    let path = CGMutablePath()
-                    path.move(to: startInView)
-                    path.addLine(to: startInView)
-                    dragPreviewLayer.strokeColor = measurementStrokeColor.cgColor
-                    dragPreviewLayer.fillColor = NSColor.clear.cgColor
-                    dragPreviewLayer.lineWidth = measurementLineWidth
-                    dragPreviewLayer.path = path
-                    dragPreviewLayer.isHidden = false
-                }
-            } else {
-                let snappedLocationInView = snapPointInViewIfNeeded(locationInView, on: page)
-                dragStartInView = snappedLocationInView
-                dragPage = page
-                dragPreviewLayer.strokeColor = calibrationStrokeColor.cgColor
-                dragPreviewLayer.fillColor = NSColor.clear.cgColor
-                dragPreviewLayer.lineWidth = measurementLineWidth
-                dragPreviewLayer.path = CGPath(rect: NSRect(origin: snappedLocationInView, size: .zero), transform: nil)
-                dragPreviewLayer.isHidden = false
-            }
+        // Text selection never invokes PDFKit's annotation/widget editing path.
+        // Existing annotations stay visible and cannot be moved, resized or edited.
+        if event.clickCount > 1 {
+            setCurrentSelection(page.selectionForWord(at: point), animate: false)
+        } else {
+            setCurrentSelection(nil, animate: false)
+            navigationSelectionStart = (page, point)
         }
     }
 
     override func mouseDragged(with event: NSEvent) {
-        sanitizeToolModeForScratchReset()
-        lastPointerInView = convert(event.locationInWindow, from: nil)
-        updateTypedDistanceHUD()
+        let location = convert(event.locationInWindow, from: nil)
+        lastPointerInView = location
         if isRegionCaptureModeEnabled {
             guard let start = regionCaptureStartInView else { return }
-            let current = convert(event.locationInWindow, from: nil)
-            let rect = normalizedRect(from: start, to: current)
-            dragPreviewLayer.path = CGPath(rect: rect, transform: nil)
+            dragPreviewLayer.path = CGPath(rect: normalizedRect(from: start, to: location), transform: nil)
             return
         }
-        if toolMode == .select {
-            if let start = fenceStartInView {
-                let current = convert(event.locationInWindow, from: nil)
-                let rect = normalizedRect(from: start, to: current)
-                dragPreviewLayer.path = CGPath(rect: rect, transform: nil)
-                return
-            }
-            if var calloutState = movingCalloutState {
-                let locationInView = convert(event.locationInWindow, from: nil)
-                let currentPoint = convert(locationInView, to: calloutState.page)
-                let minSize = minimumResizeSize(for: calloutState.textAnnotation)
-                var nextTextBounds = calloutState.startTextBounds
-                var nextElbow = calloutState.startElbow
-                var nextTip = calloutState.startTip
-                switch calloutState.handle {
-                case .moveAll:
-                    let dx = currentPoint.x - calloutState.startPointerInPage.x
-                    let dy = currentPoint.y - calloutState.startPointerInPage.y
-                    if abs(dx) < 0.01, abs(dy) < 0.01 { return }
-                    nextTextBounds = calloutState.startTextBounds.offsetBy(dx: dx, dy: dy)
-                    nextElbow = NSPoint(x: calloutState.startElbow.x + dx, y: calloutState.startElbow.y + dy)
-                    nextTip = NSPoint(x: calloutState.startTip.x + dx, y: calloutState.startTip.y + dy)
-                case .tip:
-                    nextTip = currentPoint
-                case .elbow:
-                    nextElbow = currentPoint
-                case let .textCorner(corner):
-                    var minX = calloutState.startTextBounds.minX
-                    var minY = calloutState.startTextBounds.minY
-                    var maxX = calloutState.startTextBounds.maxX
-                    var maxY = calloutState.startTextBounds.maxY
-                    switch corner {
-                    case .lowerLeft:
-                        minX = min(currentPoint.x, maxX - minSize.width)
-                        minY = min(currentPoint.y, maxY - minSize.height)
-                    case .lowerRight:
-                        maxX = max(currentPoint.x, minX + minSize.width)
-                        minY = min(currentPoint.y, maxY - minSize.height)
-                    case .upperLeft:
-                        minX = min(currentPoint.x, maxX - minSize.width)
-                        maxY = max(currentPoint.y, minY + minSize.height)
-                    case .upperRight:
-                        maxX = max(currentPoint.x, minX + minSize.width)
-                        maxY = max(currentPoint.y, minY + minSize.height)
-                    }
-                    nextTextBounds = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-                }
-
-                calloutState.textAnnotation.bounds = nextTextBounds
-                replaceCalloutLeader(
-                    state: &calloutState,
-                    elbow: nextElbow,
-                    tip: nextTip
-                )
-                movingCalloutState = calloutState
-                didMoveAnnotation = true
-                needsDisplay = true
-                onViewportChanged?()
-                return
-            }
-            guard let annotation = movingAnnotation,
-                  let page = movingAnnotationPage,
-                  let startBounds = movingAnnotationStartBounds,
-                  let startPoint = movingStartPointInPage else {
-                return
-            }
-
-            let locationInView = convert(event.locationInWindow, from: nil)
-            let currentPoint = convert(locationInView, to: page)
-            if movingPolygonVertexIndex == nil,
-               isPolygonMarkup(annotation) {
-                if movingPolygonPointsAtDragStart.isEmpty {
-                    movingPolygonPointsAtDragStart = polygonVerticesInPage(for: annotation) ?? []
-                }
-                if movingPolygonPointsAtDragStart.count >= 3 {
-                    let startPointInView = convert(startPoint, from: page)
-                    if let nearest = nearestPolygonVertexIndex(for: annotation, on: page, at: startPointInView),
-                       nearest.distance <= polygonVertexCaptureThresholdInView() {
-                        movingPolygonVertexIndex = nearest.index
-                    }
-                }
-            }
-            if let endpointHandle = movingLineEndpointHandle,
-               var segment = movingLineSegmentAtDragStart,
-               isLineEndpointEditable(annotation) {
-                switch endpointHandle {
-                case .start:
-                    segment.start = currentPoint
-                case .end:
-                    segment.end = currentPoint
-                }
-                if hypot(segment.end.x - segment.start.x, segment.end.y - segment.start.y) > 0.5 {
-                    updateLineAnnotationGeometry(annotation, start: segment.start, end: segment.end)
-                    didMoveAnnotation = true
-                    needsDisplay = true
-                    onViewportChanged?()
-                }
-                return
-            }
-            if movingPolygonVertexIndex != nil,
-               isPolygonMarkup(annotation),
-               movingPolygonPointsAtDragStart.count < 3 {
-                movingPolygonPointsAtDragStart = polygonVerticesInPage(for: annotation) ?? []
-            }
-            if let vertexIndex = movingPolygonVertexIndex,
-               isPolygonMarkup(annotation),
-               movingPolygonPointsAtDragStart.indices.contains(vertexIndex),
-               movingPolygonPointsAtDragStart.count >= 3 {
-                var points = movingPolygonPointsAtDragStart
-                points[vertexIndex] = currentPoint
-                updatePolygonGeometryForGroup(anchor: annotation, points: points)
-                didMoveAnnotation = true
-                needsDisplay = true
-                onViewportChanged?()
-                return
-            }
-            if let resizeCorner = movingResizeCorner {
-                let minSize = minimumResizeSize(for: annotation)
-                var minX = startBounds.minX
-                var minY = startBounds.minY
-                var maxX = startBounds.maxX
-                var maxY = startBounds.maxY
-                switch resizeCorner {
-                case .lowerLeft:
-                    minX = min(currentPoint.x, maxX - minSize.width)
-                    minY = min(currentPoint.y, maxY - minSize.height)
-                case .lowerRight:
-                    maxX = max(currentPoint.x, minX + minSize.width)
-                    minY = min(currentPoint.y, maxY - minSize.height)
-                case .upperLeft:
-                    minX = min(currentPoint.x, maxX - minSize.width)
-                    maxY = max(currentPoint.y, minY + minSize.height)
-                case .upperRight:
-                    maxX = max(currentPoint.x, minX + minSize.width)
-                    maxY = max(currentPoint.y, minY + minSize.height)
-                }
-                let annotationType = (annotation.type ?? "").lowercased()
-                let shouldLockAspect = event.modifierFlags.contains(.shift) &&
-                    (annotationType.contains("circle") || annotationType.contains("square"))
-                if shouldLockAspect,
-                   startBounds.width > 0.001,
-                   startBounds.height > 0.001 {
-                    let startW = startBounds.width
-                    let startH = startBounds.height
-                    let tentativeW = max(minSize.width, maxX - minX)
-                    let tentativeH = max(minSize.height, maxY - minY)
-                    let sx = tentativeW / startW
-                    let sy = tentativeH / startH
-                    let scale = (sx >= 1 || sy >= 1) ? max(sx, sy) : min(sx, sy)
-                    let lockedW = max(minSize.width, startW * scale)
-                    let lockedH = max(minSize.height, startH * scale)
-                    switch resizeCorner {
-                    case .lowerLeft:
-                        maxX = startBounds.maxX
-                        maxY = startBounds.maxY
-                        minX = maxX - lockedW
-                        minY = maxY - lockedH
-                    case .lowerRight:
-                        minX = startBounds.minX
-                        maxY = startBounds.maxY
-                        maxX = minX + lockedW
-                        minY = maxY - lockedH
-                    case .upperLeft:
-                        maxX = startBounds.maxX
-                        minY = startBounds.minY
-                        minX = maxX - lockedW
-                        maxY = minY + lockedH
-                    case .upperRight:
-                        minX = startBounds.minX
-                        minY = startBounds.minY
-                        maxX = minX + lockedW
-                        maxY = minY + lockedH
-                    }
-                }
-                let resized = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-                if abs(resized.width - annotation.bounds.width) > 0.01 || abs(resized.height - annotation.bounds.height) > 0.01 || abs(resized.origin.x - annotation.bounds.origin.x) > 0.01 || abs(resized.origin.y - annotation.bounds.origin.y) > 0.01 {
-                    didMoveAnnotation = true
-                    annotation.bounds = resized
-                    syncRectangleHatchOverlayIfNeeded(for: annotation)
-                    syncPolygonHatchOverlayIfNeeded(for: annotation)
-                    needsDisplay = true
-                    onViewportChanged?()
-                }
-                return
-            }
-            let dx = currentPoint.x - startPoint.x
-            let dy = currentPoint.y - startPoint.y
-            if abs(dx) < 0.01, abs(dy) < 0.01 {
-                return
-            }
-            didMoveAnnotation = true
-            if movingAnnotations.count > 1 {
-                for candidate in movingAnnotations {
-                    let key = ObjectIdentifier(candidate)
-                    guard let base = movingAnnotationStartBoundsByID[key] else { continue }
-                    candidate.bounds = base.offsetBy(dx: dx, dy: dy)
-                    syncMovingPolygonMetadataPoints(for: candidate, offsetX: dx, offsetY: dy)
-                    syncRectangleHatchOverlayIfNeeded(for: candidate)
-                    syncPolygonHatchOverlayIfNeeded(for: candidate)
-                }
-            } else {
-                annotation.bounds = startBounds.offsetBy(dx: dx, dy: dy)
-                syncMovingPolygonMetadataPoints(for: annotation, offsetX: dx, offsetY: dy)
-                syncRectangleHatchOverlayIfNeeded(for: annotation)
-                syncPolygonHatchOverlayIfNeeded(for: annotation)
-            }
-            needsDisplay = true
-            onViewportChanged?()
-            return
-        }
-
-        if toolMode == .polyline || toolMode == .polygon {
-            let locationInView = convert(event.locationInWindow, from: nil)
-            let ortho = isOrthoConstraintActive(for: event)
-            if let page = activePolylineLikePage() {
-                updatePolylineLikePreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: ortho)
-            } else {
-                updatePolylineLikePreview(at: locationInView, orthogonal: ortho)
-            }
-            return
-        }
-        if toolMode == .arrow {
-            let locationInView = convert(event.locationInWindow, from: nil)
-            if let page = pendingArrowPage {
-                updateArrowPreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: event.modifierFlags.contains(.shift))
-            } else {
-                updateArrowPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
-            }
-            return
-        }
-        if toolMode == .line {
-            let locationInView = convert(event.locationInWindow, from: nil)
-            let ortho = isOrthoConstraintActive(for: event)
-            if let page = pendingLinePage {
-                updateLinePreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: ortho)
-            } else {
-                updateLinePreview(at: locationInView, orthogonal: ortho)
-            }
-            return
-        }
-        if toolMode == .circle {
-            let locationInView = convert(event.locationInWindow, from: nil)
-            if let page = pendingCirclePage {
-                updateCirclePreview(at: snapPointInViewIfNeeded(locationInView, on: page))
-            } else {
-                updateCirclePreview(at: locationInView)
-            }
-            return
-        }
-        if toolMode == .area {
-            let locationInView = convert(event.locationInWindow, from: nil)
-            if let page = pendingAreaPage {
-                updateAreaPreview(at: snapPointInViewIfNeeded(locationInView, on: page), orthogonal: event.modifierFlags.contains(.shift))
-            } else {
-                updateAreaPreview(at: locationInView, orthogonal: event.modifierFlags.contains(.shift))
-            }
-            return
-        }
-
-        guard (toolMode == .pen || toolMode == .highlighter || toolMode == .cloud || toolMode == .rectangle || toolMode == .calibrate || toolMode == .grab) else {
-            super.mouseDragged(with: event)
-            return
-        }
-
-        if toolMode == .pen || toolMode == .highlighter {
-            guard let page = penPage else { return }
-            let rawCurrent = convert(event.locationInWindow, from: nil)
-            let isOrthogonal = event.modifierFlags.contains(.shift)
-            let firstPagePoint = penPointsPage.first ?? convert(rawCurrent, to: page)
-            let firstViewPoint = convert(firstPagePoint, from: page)
-
-            if isOrthogonal {
-                let snapped = orthogonalSnapPoint(anchor: firstViewPoint, current: rawCurrent)
-                penPointsPage = [firstPagePoint, convert(snapped, to: page)]
-                let path = CGMutablePath()
-                path.move(to: firstViewPoint)
-                path.addLine(to: snapped)
-                penPreviewPath = path
-            } else {
-                let last = penLastPointInView ?? rawCurrent
-                let dx = rawCurrent.x - last.x
-                let dy = rawCurrent.y - last.y
-                let distance = hypot(dx, dy)
-                let steps = max(1, Int(distance / 4.0))
-                for step in 1...steps {
-                    let t = CGFloat(step) / CGFloat(steps)
-                    let pointInView = NSPoint(x: last.x + dx * t, y: last.y + dy * t)
-                    penPointsPage.append(convert(pointInView, to: page))
-                    penPreviewPath?.addLine(to: pointInView)
-                }
-            }
-            penLastPointInView = rawCurrent
-
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            let strokeColor = (toolMode == .highlighter) ? highlighterColor : penColor
-            let strokeWidth = (toolMode == .highlighter) ? highlighterLineWidth : penLineWidth
-            dragPreviewLayer.strokeColor = strokeColor.cgColor
-            dragPreviewLayer.fillColor = NSColor.clear.cgColor
-            dragPreviewLayer.lineWidth = strokeWidth
-            dragPreviewLayer.path = penPreviewPath
-            CATransaction.commit()
-            return
-        } else if toolMode == .cloud || toolMode == .rectangle || toolMode == .grab {
-            let rawCurrent = convert(event.locationInWindow, from: nil)
-            guard let start = dragStartInView else { return }
-            let current: NSPoint
-            if (toolMode == .cloud || toolMode == .rectangle),
-               let page = dragPage {
-                current = snapPointInViewIfNeeded(rawCurrent, on: page)
-            } else {
-                current = rawCurrent
-            }
-            let rect = normalizedRect(from: start, to: current)
-            if toolMode == .grab {
-                dragPreviewLayer.strokeColor = NSColor.controlAccentColor.cgColor
-                dragPreviewLayer.fillColor = NSColor.controlAccentColor.withAlphaComponent(0.12).cgColor
-                dragPreviewLayer.lineWidth = 1.5
-                dragPreviewLayer.lineDashPattern = [6, 4]
-            } else {
-                dragPreviewLayer.strokeColor = (toolMode == .cloud ? NSColor.systemCyan : rectangleStrokeColor).cgColor
-                let previewFill: NSColor
-                if toolMode == .cloud {
-                    previewFill = .clear
-                } else if rectangleHatchStyle == .solid {
-                    previewFill = rectangleFillColor
-                } else {
-                    previewFill = rectangleHatchBackgroundColor
-                }
-                dragPreviewLayer.fillColor = previewFill.cgColor
-            }
-            dragPreviewLayer.path = CGPath(rect: rect, transform: nil)
-        } else {
-            let rawCurrent = convert(event.locationInWindow, from: nil)
-            guard let start = dragStartInView else { return }
-            let current: NSPoint
-            if let page = dragPage {
-                current = snapPointInViewIfNeeded(rawCurrent, on: page)
-            } else {
-                current = rawCurrent
-            }
-            let path = CGMutablePath()
-            path.move(to: start)
-            path.addLine(to: current)
-            dragPreviewLayer.strokeColor = calibrationStrokeColor.cgColor
-            dragPreviewLayer.fillColor = NSColor.clear.cgColor
-            dragPreviewLayer.lineWidth = measurementLineWidth
-            dragPreviewLayer.path = path
-        }
+        guard let start = navigationSelectionStart else { return }
+        let end = convert(location, to: start.page)
+        setCurrentSelection(start.page.selection(from: start.point, to: end), animate: false)
     }
 
     override func mouseUp(with event: NSEvent) {
-        sanitizeToolModeForScratchReset()
-        if delegatedLinkMouseDownToSuper {
-            delegatedLinkMouseDownToSuper = false
-            super.mouseUp(with: event)
-            onViewportChanged?()
-            return
-        }
-        if isRegionCaptureModeEnabled {
-            defer {
-                regionCaptureStartInView = nil
-                regionCapturePage = nil
-                dragPreviewLayer.isHidden = true
-                dragPreviewLayer.path = nil
-                dragPreviewLayer.lineDashPattern = nil
-            }
-            guard let startInView = regionCaptureStartInView,
-                  let page = regionCapturePage else { return }
-            let endInView = convert(event.locationInWindow, from: nil)
-            let startInPage = convert(startInView, to: page)
-            let endInPage = convert(endInView, to: page)
-            let rectInPage = normalizedRect(from: startInPage, to: endInPage)
-            guard guardOrBeep(rectInPage.width > 2 && rectInPage.height > 2) else { return }
-            cancelRegionCaptureMode()
-            onRegionCaptured?(page, rectInPage)
-            return
-        }
+        navigationSelectionStart = nil
+        guard isRegionCaptureModeEnabled else { return }
         defer {
-            dragStartInView = nil
-            dragPage = nil
-            penPage = nil
-            penPointsPage = []
-            penPreviewPath = nil
-            penLastPointInView = nil
-            movingAnnotation = nil
-            movingAnnotationPage = nil
-            movingAnnotationStartBounds = nil
-            movingStartPointInPage = nil
-            movingResizeCorner = nil
-            movingLineEndpointHandle = nil
-            movingPolygonVertexIndex = nil
-            movingPolygonPointsAtDragStart = []
-            movingLineSegmentAtDragStart = nil
-            movingCalloutState = nil
-            movingAnnotations = []
-            movingAnnotationStartBoundsByID.removeAll(keepingCapacity: false)
-            movingPolygonOriginalPointsByID.removeAll(keepingCapacity: false)
-            didMoveAnnotation = false
-            fenceStartInView = nil
-            fencePage = nil
-            if (toolMode != .measure || pendingMeasureStartInPage == nil) &&
-                !(toolMode == .arrow && pendingArrowStartInPage != nil) &&
-                !(toolMode == .line && pendingLineStartInPage != nil) &&
-                !(toolMode == .polyline && !pendingPolylinePointsInPage.isEmpty) &&
-                !(toolMode == .polygon && !pendingPolygonPointsInPage.isEmpty) &&
-                !(toolMode == .area && !pendingAreaPointsInPage.isEmpty) {
-                dragPreviewLayer.isHidden = true
-                dragPreviewLayer.path = nil
-            }
+            regionCaptureStartInView = nil
+            regionCapturePage = nil
+            dragPreviewLayer.isHidden = true
+            dragPreviewLayer.path = nil
             dragPreviewLayer.lineDashPattern = nil
         }
-
-        if toolMode == .select {
-            if let start = fenceStartInView, let page = fencePage {
-                let end = convert(event.locationInWindow, from: nil)
-                let rectInView = normalizedRect(from: start, to: end)
-                guard rectInView.width > 4, rectInView.height > 4 else {
-                    onAnnotationsBoxSelected?(page, [])
-                    return
-                }
-                let p1 = convert(rectInView.origin, to: page)
-                let p2 = convert(NSPoint(x: rectInView.maxX, y: rectInView.maxY), to: page)
-                let box = normalizedRect(from: p1, to: p2)
-                let hits = page.annotations.filter { candidate in
-                    !isHatchOverlayAnnotation(candidate) &&
-                        !isLinkAnnotation(candidate) &&
-                        candidate.bounds.intersects(box)
-                }
-                onAnnotationsBoxSelected?(page, hits)
-                return
-            }
-            if didMoveAnnotation, let calloutState = movingCalloutState {
-                onAnnotationMoved?(calloutState.page, calloutState.textAnnotation, calloutState.startTextBounds)
-                return
-            }
-            guard didMoveAnnotation, let page = movingAnnotationPage else { return }
-            if !movingAnnotations.isEmpty {
-                for annotation in movingAnnotations {
-                    let key = ObjectIdentifier(annotation)
-                    guard let startBounds = movingAnnotationStartBoundsByID[key] else { continue }
-                    onAnnotationMoved?(page, annotation, startBounds)
-                }
-                return
-            }
-            guard let annotation = movingAnnotation,
-                  let startBounds = movingAnnotationStartBounds else { return }
-            onAnnotationMoved?(page, annotation, startBounds)
-            return
-        }
-
-        if toolMode == .pen || toolMode == .highlighter {
-            guard let page = penPage, penPointsPage.count >= 2 else { return }
-            let strokeWidth = (toolMode == .highlighter) ? highlighterLineWidth : penLineWidth
-            let simplifyTolerance = max(0.9, strokeWidth * 0.08)
-            let simplifiedPoints = simplifyPolyline(penPointsPage, tolerance: simplifyTolerance)
-            guard simplifiedPoints.count >= 2 else { return }
-
-            let xs = simplifiedPoints.map(\.x)
-            let ys = simplifiedPoints.map(\.y)
-            guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else { return }
-            let inkBounds = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY).insetBy(dx: -4, dy: -4)
-            let localPath = NSBezierPath()
-            for (idx, point) in simplifiedPoints.enumerated() {
-                let local = NSPoint(x: point.x - inkBounds.origin.x, y: point.y - inkBounds.origin.y)
-                if idx == 0 {
-                    localPath.move(to: local)
-                } else {
-                    localPath.line(to: local)
-                }
-            }
-
-            let annotation = PDFAnnotation(bounds: inkBounds, forType: .ink, withProperties: nil)
-            let strokeColor = (toolMode == .highlighter) ? highlighterColor : penColor
-            annotation.color = strokeColor
-            localPath.lineWidth = strokeWidth
-            assignLineWidth(strokeWidth, to: annotation)
-            annotation.contents = (toolMode == .highlighter) ? "Highlighter" : "Pen"
-            annotation.add(localPath)
-            page.addAnnotation(annotation)
-            onAnnotationAdded?(page, annotation, (toolMode == .highlighter) ? "Add Highlighter" : "Add Pen")
-            return
-        }
-
-        if toolMode == .grab,
-           let start = dragStartInView,
-           let page = dragPage {
-            let end = convert(event.locationInWindow, from: nil)
-            let rectInView = normalizedRect(from: start, to: end)
-            guard rectInView.width > 4, rectInView.height > 4 else { return }
-            let p1 = convert(rectInView.origin, to: page)
-            let p2 = convert(NSPoint(x: rectInView.maxX, y: rectInView.maxY), to: page)
-            let pageRect = normalizedRect(from: p1, to: p2)
-            if let snapshotData = captureSnapshotVectorData(on: page, in: pageRect) {
-                onSnapshotCaptured?(snapshotData, pageRect)
-            }
-            return
-        }
-
-        guard (toolMode == .cloud || toolMode == .rectangle || toolMode == .calibrate),
-              let start = dragStartInView,
-              let page = dragPage else {
-            super.mouseUp(with: event)
-            return
-        }
-
-        let rawEnd = convert(event.locationInWindow, from: nil)
-        let end = snapPointInViewIfNeeded(rawEnd, on: page)
-        if toolMode == .calibrate {
-            let p1 = convert(start, to: page)
-            let p2 = convert(end, to: page)
-            let distance = hypot(p2.x - p1.x, p2.y - p1.y)
-            guard distance > 4 else { return }
-            onCalibrationDistanceMeasured?(distance)
-            return
-        }
-
-        let rectInView = normalizedRect(from: start, to: end)
-        guard rectInView.width > 4, rectInView.height > 4 else { return }
-
-        let p1 = convert(rectInView.origin, to: page)
-        let p2 = convert(NSPoint(x: rectInView.maxX, y: rectInView.maxY), to: page)
-        let annotationRect = normalizedRect(from: p1, to: p2)
-
-        if toolMode == .cloud {
-            addCloudAnnotation(on: page, in: annotationRect)
-            return
-        }
-
-        let annotation = PDFAnnotation(bounds: annotationRect, forType: .square, withProperties: nil)
-        annotation.color = rectangleStrokeColor
-        assignLineWidth(rectangleLineWidth, to: annotation)
-        page.addAnnotation(annotation)
-        applyRectangleHatchStyle(
-            rectangleHatchStyle,
-            to: annotation,
-            fillColor: rectangleFillColor,
-            backgroundColor: rectangleHatchBackgroundColor,
-            lineWidth: rectangleLineWidth
-        )
-        onAnnotationAdded?(page, annotation, "Add Rectangle")
+        guard let start = regionCaptureStartInView, let page = regionCapturePage else { return }
+        let end = convert(event.locationInWindow, from: nil)
+        let rect = normalizedRect(from: convert(start, to: page), to: convert(end, to: page))
+        guard rect.width > 2, rect.height > 2 else { return }
+        cancelRegionCaptureMode()
+        onRegionCaptured?(page, rect)
     }
 
     @discardableResult
@@ -4230,6 +3223,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         color: NSColor,
         actionName: String
     ) {
+        guard ToolMode.allowsMarkupEditing else { return }
         guard let selection = currentSelection else {
             beep()
             return
@@ -6477,45 +5471,19 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func keyDown(with event: NSEvent) {
-        sanitizeToolModeForScratchReset()
-        if handleTypedDistanceKey(event) {
-            return
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard modifiers.isDisjoint(with: [.command, .option, .control]) else { return }
+        switch event.keyCode {
+        case 123, 126: onPageNavigationShortcut?(-1)
+        case 124, 125: onPageNavigationShortcut?(1)
+        case 53:
+            cancelRegionCaptureMode()
+            setCurrentSelection(nil, animate: false)
+        default:
+            // Inherited PDFKit keyboard handling can focus editable form widgets.
+            // PDF canvas keys only navigate; AppKit text fields retain normal editing.
+            break
         }
-        let noCommandModifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).isDisjoint(with: [.command, .option, .control])
-        if noCommandModifiers,
-           (event.keyCode == 36 || event.keyCode == 76),
-           typedDistanceBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-           toolMode == .polygon,
-           pendingPolygonPage != nil,
-           pendingPolygonPointsInPage.count >= 2 {
-            _ = endPendingPolygon()
-            return
-        }
-        if noCommandModifiers {
-            switch event.keyCode {
-            case 123, 126: // Left / Up
-                onPageNavigationShortcut?(-1)
-                return
-            case 124, 125: // Right / Down
-                onPageNavigationShortcut?(1)
-                return
-            default:
-                break
-            }
-        }
-        if noCommandModifiers,
-           (event.keyCode == 51 || event.keyCode == 117) {
-            onDeleteKeyPressed?()
-            return
-        }
-        let disallowed: NSEvent.ModifierFlags = [.command, .option, .control]
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask).isDisjoint(with: disallowed),
-           let chars = event.charactersIgnoringModifiers?.lowercased(),
-           let mode = shortcutMode(for: chars, isShift: event.modifierFlags.contains(.shift)) {
-            onToolShortcut?(mode)
-            return
-        }
-        super.keyDown(with: event)
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -6772,7 +5740,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard droppedPDFURL(from: sender) != nil || droppedImageURL(from: sender) != nil else {
+        guard droppedPDFURL(from: sender) != nil else {
             return []
         }
         dropHighlightLayer.isHidden = false
@@ -6789,29 +5757,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         defer { dropHighlightLayer.isHidden = true }
-        if let pdfURL = droppedPDFURL(from: sender) {
-            onOpenDroppedPDF?(pdfURL)
-            return true
-        }
-        guard let imageURL = droppedImageURL(from: sender),
-              let document,
-              let image = NSImage(contentsOf: imageURL) else {
-            return false
-        }
-
-        let locationInView = convert(sender.draggingLocation, from: nil)
-        guard let page = page(for: locationInView, nearest: true) else {
-            return false
-        }
-        let pageIndex = document.index(for: page)
-        guard pageIndex >= 0 else { return false }
-
-        let pagePoint = convert(locationInView, to: page)
-        let initialBounds = initialImageBounds(for: image, dropPoint: pagePoint, on: page)
-        let annotation = ImageMarkupAnnotation(bounds: initialBounds, imageURL: imageURL)
-        page.addAnnotation(annotation)
-        onAnnotationAdded?(page, annotation, "Add Image")
-        onImageDropped?(page, annotation, initialBounds)
+        guard let pdfURL = droppedPDFURL(from: sender) else { return false }
+        onOpenDroppedPDF?(pdfURL)
         return true
     }
 

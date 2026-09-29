@@ -250,7 +250,7 @@ extension MainViewController {
 
         let alert = NSAlert()
         alert.messageText = "Keyboard Shortcuts"
-        alert.informativeText = "Customize tool and drafting shortcuts."
+        alert.informativeText = "Customize the text selection shortcut."
         alert.alertStyle = .informational
         alert.accessoryView = scroll
         alert.addButton(withTitle: "Save")
@@ -441,36 +441,7 @@ extension MainViewController {
             NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: sender)
             return
         }
-        guard let document = pdfView.document else { beep(); return }
-        let selectedItems = currentSelectedMarkupItems()
-        guard guardOrBeep(!selectedItems.isEmpty) else { return }
-
-        var uniqueByID: [ObjectIdentifier: (pageIndex: Int, annotation: PDFAnnotation)] = [:]
-        for item in selectedItems {
-            guard let page = document.page(at: item.pageIndex) else { continue }
-            uniqueByID[ObjectIdentifier(item.annotation)] = (item.pageIndex, item.annotation)
-            for sibling in relatedCalloutAnnotations(for: item.annotation, on: page) where sibling !== item.annotation {
-                uniqueByID[ObjectIdentifier(sibling)] = (item.pageIndex, sibling)
-            }
-        }
-
-        let records: [MarkupClipboardRecord] = uniqueByID.values.compactMap { entry in
-            let archivedData = (try? NSKeyedArchiver.archivedData(withRootObject: entry.annotation, requiringSecureCoding: true))
-                ?? (try? NSKeyedArchiver.archivedData(withRootObject: entry.annotation, requiringSecureCoding: false))
-            guard let archivedData else { return nil }
-            return MarkupClipboardRecord(
-                pageIndex: entry.pageIndex,
-                archivedAnnotation: archivedData,
-                lineWidth: resolvedLineWidth(for: entry.annotation)
-            )
-        }
-        guard guardOrBeep(!records.isEmpty) else { return }
-
-        let payload = MarkupClipboardPayload(sourceDocumentPageCount: document.pageCount, records: records)
-        guard let encoded = try? PropertyListEncoder().encode(payload) else { beep(); return }
-        let board = NSPasteboard.general
-        board.clearContents()
-        board.setData(encoded, forType: markupClipboardPasteboardType)
+        pdfView.copy(sender)
     }
     @objc func commandPaste(_ sender: Any?) {
         if let firstResponder = view.window?.firstResponder,
@@ -478,7 +449,6 @@ extension MainViewController {
             NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: sender)
             return
         }
-        pasteCopiedMarkupsFromPasteboard()
     }
     @objc func commandDeleteMarkup(_ sender: Any?) { deleteSelectedMarkup() }
     @objc func commandBringMarkupToFront(_ sender: Any?) { reorderSelectedMarkups(.bringToFront) }
@@ -497,23 +467,7 @@ extension MainViewController {
             textView.selectAll(nil)
             return
         }
-        guard let document = pdfView.document, let page = pdfView.currentPage else { beep(); return }
-        let pageIndex = document.index(for: page)
-        guard guardOrBeep(pageIndex >= 0) else { return }
-        let rows = IndexSet(markupItems.enumerated().compactMap { idx, item in
-            item.pageIndex == pageIndex ? idx : nil
-        })
-        guard !rows.isEmpty else {
-            markupsTable.deselectAll(nil)
-            updateSelectionOverlay()
-            return
-        }
-        markupsTable.selectRowIndexes(rows, byExtendingSelection: false)
-        if let first = rows.first {
-            markupsTable.scrollRowToVisible(first)
-        }
-        updateSelectionOverlay()
-        updateStatusBar()
+        pdfView.selectAll(sender)
     }
     @objc func commandEditMarkup(_ sender: Any?) { editSelectedMarkupText() }
     @objc func commandToggleSidebar(_ sender: Any?) { toggleSidebar() }
@@ -664,88 +618,36 @@ extension MainViewController {
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         guard let action = menuItem.action else { return true }
-        let hasDocument = (pdfView.document != nil)
-        let hasSelection = (currentSelectedMarkupItem() != nil)
-        let hasTextSelection = (pdfView.currentSelection != nil)
-
+        let hasDocument = pdfView.document != nil
         switch action {
-        case #selector(commandOpen(_:)),
-             #selector(commandNew(_:)),
-             #selector(commandKeyboardShortcuts(_:)),
-             #selector(commandPerformanceSettings(_:)),
-             #selector(commandExportPagesAsJPEGAndRebuildPDF(_:)),
-             #selector(commandBatchExportToMobile(_:)),
-             #selector(commandConvertImagesToPDF(_:)),
-             #selector(commandBatchCombinePDFs(_:)),
-             #selector(commandBatchExportPDFsAsJPEG(_:)):
+        case #selector(commandOpen(_:)), #selector(commandKeyboardShortcuts(_:)),
+             #selector(commandPerformanceSettings(_:)), #selector(commandQuickStart(_:)):
             return true
-        case #selector(commandCycleNextDocument(_:)),
-             #selector(commandCyclePreviousDocument(_:)):
+        case #selector(commandCycleNextDocument(_:)), #selector(commandCyclePreviousDocument(_:)):
             return sessionDocumentURLs.count > 1
         case #selector(commandCloseDocument(_:)):
             return hasDocument || !sessionDocumentURLs.isEmpty
-        case #selector(commandSave(_:)),
-             #selector(commandSaveCopy(_:)),
-             #selector(commandExportPagesAsJPEG(_:)),
-             #selector(commandFlattenPDF(_:)),
-             #selector(commandReduceFileSize(_:)),
-             #selector(commandAutoGenerateSheetNames(_:)),
-             #selector(commandBatchLinkSheetNumbers(_:)),
-             #selector(commandSetScale(_:)),
-             #selector(commandLockScalePages(_:)),
-             #selector(commandClearScalePages(_:)),
-             #selector(commandToggleOrthoSnap(_:)),
-             #selector(commandToggleHyperlinkHighlights(_:)),
-             #selector(commandRefreshMarkups(_:)),
-             #selector(commandSelectAll(_:)),
-             #selector(commandFocusSearch(_:)),
-             #selector(commandZoomIn(_:)),
-             #selector(commandZoomOut(_:)),
-             #selector(commandPreviousPage(_:)),
-             #selector(commandNextPage(_:)),
-             #selector(commandActualSize(_:)),
-             #selector(commandFitWidth(_:)),
-             #selector(selectSelectionTool(_:)),
-             #selector(selectPenTool(_:)),
-             #selector(selectHighlighterTool(_:)),
-             #selector(selectTextTool(_:)),
-             #selector(selectNoteTool(_:)),
-             #selector(selectLineTool(_:)),
-             #selector(selectArrowTool(_:)),
-             #selector(selectRectangleTool(_:)),
-             #selector(selectEllipseTool(_:)):
-            if action == #selector(commandToggleOrthoSnap(_:)) {
-                menuItem.state = isOrthoSnapEnabled ? .on : .off
-            }
-            if action == #selector(commandToggleHyperlinkHighlights(_:)) {
-                menuItem.state = isHyperlinkHighlightsVisible ? .on : .off
-            }
+        case #selector(deleteBookmarkFromSidebar):
+            let row = bookmarksOutlineView.clickedRow >= 0 ? bookmarksOutlineView.clickedRow : bookmarksOutlineView.selectedRow
+            return hasDocument && row >= 0 && bookmarksOutlineView.item(atRow: row) is PDFOutline
+        case #selector(commandCopy(_:)), #selector(commandPaste(_:)), #selector(commandSelectAll(_:)):
+            if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField { return true }
+            if action == #selector(commandPaste(_:)) { return false }
+            if action == #selector(commandCopy(_:)) { return pdfView.currentSelection != nil }
             return hasDocument
-        case #selector(commandHighlight(_:)),
-             #selector(commandUnderline(_:)),
-             #selector(commandStrikethrough(_:)):
-            return hasTextSelection
-        case #selector(commandCopy(_:)):
-            if let firstResponder = view.window?.firstResponder,
-               firstResponder is NSTextView || firstResponder is NSTextField {
-                return true
-            }
-            return hasSelection
-        case #selector(commandPaste(_:)):
-            if let firstResponder = view.window?.firstResponder,
-               firstResponder is NSTextView || firstResponder is NSTextField {
-                return true
-            }
-            return hasDocument && NSPasteboard.general.data(forType: markupClipboardPasteboardType) != nil
-        case #selector(commandDeleteMarkup(_:)),
-             #selector(commandEditMarkup(_:)),
-             #selector(commandBringMarkupToFront(_:)),
-             #selector(commandSendMarkupToBack(_:)),
-             #selector(commandBringMarkupForward(_:)),
-             #selector(commandSendMarkupBackward(_:)):
-            return hasSelection
+        case #selector(commandSave(_:)), #selector(commandSaveCopy(_:)),
+             #selector(commandAutoGenerateSheetNames(_:)), #selector(commandBatchLinkSheetNumbers(_:)),
+             #selector(commandFocusSearch(_:)), #selector(commandZoomIn(_:)), #selector(commandZoomOut(_:)),
+             #selector(commandPreviousPage(_:)), #selector(commandNextPage(_:)),
+             #selector(commandNavigateBack(_:)), #selector(commandNavigateForward(_:)),
+             #selector(commandActualSize(_:)), #selector(commandFitWidth(_:)), #selector(selectSelectionTool(_:)):
+            return hasDocument
+        case #selector(commandToggleHyperlinkHighlights(_:)):
+            menuItem.state = isHyperlinkHighlightsVisible ? .on : .off
+            return hasDocument
         default:
-            return true
+            // Legacy annotation selectors cannot be re-enabled by old menu state.
+            return false
         }
     }
 
@@ -760,21 +662,15 @@ extension MainViewController {
         guide.drawsBackground = false
         guide.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         guide.string = """
-1) Open PDF: ⌘O
-2) Tool (keyboard shortcut): V Select
-3) Navigation:
-   • Mouse wheel = zoom in/out
-   • Middle mouse drag = pan
-   • Single-page view only (no continuous scroll)
-   • Page nav: use the left navigation pane (Pages/Bookmarks)
-4) Markups:
-   • Select text then Highlight
-   • Use right panel to edit, filter, delete
-5) Export:
-   • Export CSV from Actions or File menu
-6) System Requirements:
-   • Apple Silicon Mac (M1/M2/M3/M4)
-   • macOS 13.0 or newer
+1) Open a PDF with ⌘O or drop it into the window.
+2) Generate bookmarks with ⌘⇧A, then review the sheet names.
+3) Create sheet-reference hyperlinks with ⌘⇧H.
+4) Navigate with the Pages/Bookmarks sidebar or arrow keys.
+   Mouse wheel zooms at the pointer; middle mouse drag pans.
+5) Rename/delete bookmarks by right-clicking a bookmark.
+6) Save with ⌘S; Save As PDF with ⌘⇧S.
+
+Existing PDF annotations are displayed without editing tools.
 """
         alert.accessoryView = guide
         alert.addButton(withTitle: "Done")

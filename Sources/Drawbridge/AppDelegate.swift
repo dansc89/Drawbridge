@@ -205,7 +205,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         fileItem.title = "File"
         mainMenu.addItem(fileItem)
         let fileMenu = NSMenu(title: "File")
-        fileMenu.addItem(withTitle: "New...", action: #selector(MainViewController.commandNew(_:)), keyEquivalent: "n").target = controller
         fileMenu.addItem(withTitle: "Open PDF...", action: #selector(MainViewController.commandOpen(_:)), keyEquivalent: "o").target = controller
         fileMenu.addItem(withTitle: "Close", action: #selector(MainViewController.commandCloseDocument(_:)), keyEquivalent: "w").target = controller
         let openRecentRoot = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
@@ -232,21 +231,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let saveCopyItem = fileMenu.addItem(withTitle: "Save As PDF...", action: #selector(MainViewController.commandSaveCopy(_:)), keyEquivalent: "S")
         saveCopyItem.keyEquivalentModifierMask = [.command, .shift]
         saveCopyItem.target = controller
-        fileMenu.addItem(NSMenuItem.separator())
-        fileMenu.addItem(withTitle: "Batch Combine PDFs…", action: #selector(MainViewController.commandBatchCombinePDFs(_:)), keyEquivalent: "").target = controller
-        fileMenu.addItem(withTitle: "Flatten PDF…", action: #selector(MainViewController.commandFlattenPDF(_:)), keyEquivalent: "").target = controller
-        fileMenu.addItem(withTitle: "Reduce File Size…", action: #selector(MainViewController.commandReduceFileSize(_:)), keyEquivalent: "").target = controller
-        let convertRoot = NSMenuItem(title: "Convert...", action: nil, keyEquivalent: "")
-        let convertMenu = NSMenu(title: "Convert")
-        convertMenu.addItem(withTitle: "Export to iPhone / iPad…", action: #selector(MainViewController.commandExportPagesAsJPEGAndRebuildPDF(_:)), keyEquivalent: "").target = controller
-        convertMenu.addItem(withTitle: "Batch Export to iPhone / iPad…", action: #selector(MainViewController.commandBatchExportToMobile(_:)), keyEquivalent: "").target = controller
-        convertMenu.addItem(withTitle: "JPG Folder to PDF…", action: #selector(MainViewController.commandConvertImagesToPDF(_:)), keyEquivalent: "").target = controller
-        convertMenu.addItem(withTitle: "Batch Export PDFs as JPEGs…", action: #selector(MainViewController.commandBatchExportPDFsAsJPEG(_:)), keyEquivalent: "").target = controller
-        convertRoot.submenu = convertMenu
-        fileMenu.addItem(convertRoot)
-        let exportJPGItem = fileMenu.addItem(withTitle: "Export Pages as JPEG...", action: #selector(MainViewController.commandExportPagesAsJPEG(_:)), keyEquivalent: "j")
-        exportJPGItem.keyEquivalentModifierMask = [.command, .shift]
-        exportJPGItem.target = controller
         fileItem.submenu = fileMenu
 
         let editItem = NSMenuItem()
@@ -259,64 +243,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: "Copy", action: #selector(MainViewController.commandCopy(_:)), keyEquivalent: "c").target = controller
         editMenu.addItem(withTitle: "Paste", action: #selector(MainViewController.commandPaste(_:)), keyEquivalent: "v").target = controller
+        editMenu.addItem(withTitle: "Select All Text", action: #selector(MainViewController.commandSelectAll(_:)), keyEquivalent: "a").target = controller
         editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: "Find…", action: #selector(MainViewController.commandFocusSearch(_:)), keyEquivalent: "f").target = controller
-        editMenu.addItem(withTitle: "Select All Markups On Page", action: #selector(MainViewController.commandSelectAll(_:)), keyEquivalent: "a").target = controller
-        editMenu.addItem(NSMenuItem.separator())
-        editMenu.addItem(withTitle: "Edit Selected Markup", action: #selector(MainViewController.commandEditMarkup(_:)), keyEquivalent: "e").target = controller
-        editMenu.addItem(withTitle: "Delete Selected Markup", action: #selector(MainViewController.commandDeleteMarkup(_:)), keyEquivalent: "\u{8}").target = controller
         editItem.submenu = editMenu
 
-        let markupsItem = NSMenuItem()
-        markupsItem.title = "Markups"
-        mainMenu.addItem(markupsItem)
-        let markupsMenu = NSMenu(title: "Markups")
-        let highlightItem = markupsMenu.addItem(withTitle: "Highlight Selection", action: #selector(MainViewController.commandHighlight(_:)), keyEquivalent: "h")
-        highlightItem.keyEquivalentModifierMask = [.command, .option]
-        let underlineItem = markupsMenu.addItem(withTitle: "Underline Selection", action: #selector(MainViewController.commandUnderline(_:)), keyEquivalent: "u")
-        underlineItem.keyEquivalentModifierMask = [.command, .option]
-        let strikeItem = markupsMenu.addItem(withTitle: "Strikethrough Selection", action: #selector(MainViewController.commandStrikethrough(_:)), keyEquivalent: "s")
-        strikeItem.keyEquivalentModifierMask = [.command, .option]
-        markupsMenu.addItem(NSMenuItem.separator())
-        let autoNamesItem = markupsMenu.addItem(withTitle: "Auto-Generate Sheet Names/Bookmarks…", action: #selector(MainViewController.commandAutoGenerateSheetNames(_:)), keyEquivalent: "a")
+        let bookmarksItem = NSMenuItem()
+        bookmarksItem.title = "Bookmarks"
+        mainMenu.addItem(bookmarksItem)
+        let bookmarksMenu = NSMenu(title: "Bookmarks")
+        let autoNamesItem = bookmarksMenu.addItem(withTitle: "Auto-Generate Sheet Names/Bookmarks…", action: #selector(MainViewController.commandAutoGenerateSheetNames(_:)), keyEquivalent: "a")
         autoNamesItem.keyEquivalentModifierMask = [.command, .shift]
         autoNamesItem.target = controller
-        let batchLinkItem = markupsMenu.addItem(withTitle: "Batch Link Sheet Numbers…", action: #selector(MainViewController.commandBatchLinkSheetNumbers(_:)), keyEquivalent: "h")
+        bookmarksMenu.addItem(NSMenuItem.separator())
+        bookmarksMenu.addItem(withTitle: "Delete Bookmark…", action: #selector(MainViewController.deleteBookmarkFromSidebar), keyEquivalent: "").target = controller
+        bookmarksItem.submenu = bookmarksMenu
+
+        let hyperlinksItem = NSMenuItem()
+        hyperlinksItem.title = "Hyperlinks"
+        mainMenu.addItem(hyperlinksItem)
+        let hyperlinksMenu = NSMenu(title: "Hyperlinks")
+        let batchLinkItem = hyperlinksMenu.addItem(withTitle: "Batch Link Sheet Numbers…", action: #selector(MainViewController.commandBatchLinkSheetNumbers(_:)), keyEquivalent: "h")
         batchLinkItem.keyEquivalentModifierMask = [.command, .shift]
         batchLinkItem.target = controller
-        markupsMenu.addItem(NSMenuItem.separator())
-        markupsMenu.addItem(withTitle: "Refresh Markups", action: #selector(MainViewController.commandRefreshMarkups(_:)), keyEquivalent: "r").target = controller
-        markupsMenu.addItem(withTitle: "Edit Selected Markup", action: #selector(MainViewController.commandEditMarkup(_:)), keyEquivalent: "e").target = controller
-        let deleteItem = markupsMenu.addItem(withTitle: "Delete Selected Markup", action: #selector(MainViewController.commandDeleteMarkup(_:)), keyEquivalent: "\u{8}")
-        deleteItem.keyEquivalentModifierMask = []
-        markupsMenu.addItem(NSMenuItem.separator())
-        markupsMenu.addItem(withTitle: "Bring to Front", action: #selector(MainViewController.commandBringMarkupToFront(_:)), keyEquivalent: "]").target = controller
-        markupsMenu.item(at: markupsMenu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command, .shift]
-        markupsMenu.addItem(withTitle: "Send to Back", action: #selector(MainViewController.commandSendMarkupToBack(_:)), keyEquivalent: "[").target = controller
-        markupsMenu.item(at: markupsMenu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command, .shift]
-        markupsMenu.addItem(withTitle: "Bring Forward", action: #selector(MainViewController.commandBringMarkupForward(_:)), keyEquivalent: "]").target = controller
-        markupsMenu.item(at: markupsMenu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command, .option]
-        markupsMenu.addItem(withTitle: "Send Backward", action: #selector(MainViewController.commandSendMarkupBackward(_:)), keyEquivalent: "[").target = controller
-        markupsMenu.item(at: markupsMenu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command, .option]
-        for item in markupsMenu.items { item.target = controller }
-        markupsItem.submenu = markupsMenu
-
-        let toolsItem = NSMenuItem()
-        toolsItem.title = "Tools"
-        mainMenu.addItem(toolsItem)
-        let toolsMenu = NSMenu(title: "Tools")
-        toolsMenu.addItem(withTitle: "Selection Tool", action: #selector(MainViewController.selectSelectionTool(_:)), keyEquivalent: "0").target = controller
-        toolsMenu.addItem(withTitle: "Pen Tool", action: #selector(MainViewController.selectPenTool(_:)), keyEquivalent: "1").target = controller
-        toolsMenu.addItem(withTitle: "Highlighter Tool", action: #selector(MainViewController.selectHighlighterTool(_:)), keyEquivalent: "2").target = controller
-        toolsMenu.addItem(withTitle: "Text Tool", action: #selector(MainViewController.selectTextTool(_:)), keyEquivalent: "3").target = controller
-        toolsMenu.addItem(withTitle: "Note Tool", action: #selector(MainViewController.selectNoteTool(_:)), keyEquivalent: "4").target = controller
-        toolsMenu.addItem(NSMenuItem.separator())
-        toolsMenu.addItem(withTitle: "Line Tool", action: #selector(MainViewController.selectLineTool(_:)), keyEquivalent: "5").target = controller
-        toolsMenu.addItem(withTitle: "Arrow Tool", action: #selector(MainViewController.selectArrowTool(_:)), keyEquivalent: "6").target = controller
-        toolsMenu.addItem(withTitle: "Rectangle Tool", action: #selector(MainViewController.selectRectangleTool(_:)), keyEquivalent: "7").target = controller
-        toolsMenu.addItem(withTitle: "Ellipse Tool", action: #selector(MainViewController.selectEllipseTool(_:)), keyEquivalent: "8").target = controller
-        for item in toolsMenu.items { item.keyEquivalentModifierMask = [.command] }
-        toolsItem.submenu = toolsMenu
+        hyperlinksItem.submenu = hyperlinksMenu
 
         let viewItem = NSMenuItem()
         viewItem.title = "View"
@@ -328,26 +278,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let fitWidthItem = viewMenu.addItem(withTitle: "Fit Width", action: #selector(MainViewController.commandFitWidth(_:)), keyEquivalent: "9")
         fitWidthItem.keyEquivalentModifierMask = [.command, .option]
         fitWidthItem.target = controller
-        let setScaleItem = viewMenu.addItem(withTitle: "Set Drawing Scale...", action: #selector(MainViewController.commandSetScale(_:)), keyEquivalent: "k")
-        setScaleItem.keyEquivalentModifierMask = [.command, .shift]
-        setScaleItem.target = controller
-        let lockScaleItem = viewMenu.addItem(withTitle: "Lock Scale to Pages...", action: #selector(MainViewController.commandLockScalePages(_:)), keyEquivalent: "k")
-        lockScaleItem.keyEquivalentModifierMask = [.command, .option, .shift]
-        lockScaleItem.target = controller
-        let clearScaleLocksItem = viewMenu.addItem(withTitle: "Clear Scale Locks...", action: #selector(MainViewController.commandClearScalePages(_:)), keyEquivalent: "")
-        clearScaleLocksItem.target = controller
-        let snapOrthoItem = viewMenu.addItem(withTitle: "Snap to Ortho", action: #selector(MainViewController.commandToggleOrthoSnap(_:)), keyEquivalent: "g")
-        snapOrthoItem.keyEquivalentModifierMask = [.command, .option]
-        snapOrthoItem.target = controller
-        snapOrthoItem.state = controller.isOrthoSnapEnabled ? .on : .off
+        viewMenu.addItem(NSMenuItem.separator())
+        let previousPageItem = viewMenu.addItem(withTitle: "Previous Page", action: #selector(MainViewController.commandPreviousPage(_:)), keyEquivalent: "")
+        previousPageItem.keyEquivalentModifierMask = []
+        previousPageItem.target = controller
+        let nextPageItem = viewMenu.addItem(withTitle: "Next Page", action: #selector(MainViewController.commandNextPage(_:)), keyEquivalent: "")
+        nextPageItem.keyEquivalentModifierMask = []
+        nextPageItem.target = controller
+        let backItem = viewMenu.addItem(withTitle: "Back", action: #selector(MainViewController.commandNavigateBack(_:)), keyEquivalent: String(UnicodeScalar(NSLeftArrowFunctionKey)!))
+        backItem.keyEquivalentModifierMask = [.option]
+        backItem.target = controller
+        let forwardItem = viewMenu.addItem(withTitle: "Forward", action: #selector(MainViewController.commandNavigateForward(_:)), keyEquivalent: String(UnicodeScalar(NSRightArrowFunctionKey)!))
+        forwardItem.keyEquivalentModifierMask = [.option]
+        forwardItem.target = controller
+        viewMenu.addItem(NSMenuItem.separator())
         let linkHighlightsItem = viewMenu.addItem(withTitle: "Show Hyperlink Highlights", action: #selector(MainViewController.commandToggleHyperlinkHighlights(_:)), keyEquivalent: "h")
         linkHighlightsItem.keyEquivalentModifierMask = [.command, .option, .shift]
         linkHighlightsItem.target = controller
         linkHighlightsItem.state = controller.isHyperlinkHighlightsVisible ? .on : .off
-        viewMenu.addItem(NSMenuItem.separator())
-        let toggleSidebarItem = viewMenu.addItem(withTitle: "Toggle Sidebar", action: #selector(MainViewController.commandToggleSidebar(_:)), keyEquivalent: "s")
-        toggleSidebarItem.keyEquivalentModifierMask = [.command, .option]
-        toggleSidebarItem.target = controller
         viewItem.submenu = viewMenu
 
         let helpItem = NSMenuItem()
@@ -371,7 +319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 Drawbridge
 Version \(version) (\(build))
 
-Drawbridge is a native macOS PDF editor for architects, designers, and engineers, built on the idea that drawing can bridge people, disciplines, and decisions in one shared workflow.
+Drawbridge is a native macOS PDF viewer for architects, designers, and engineers, focused on sheet bookmarks and hyperlinks.
 
 System Requirements:
 • Apple Silicon Mac (M1 or newer)

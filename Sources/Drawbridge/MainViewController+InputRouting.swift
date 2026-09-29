@@ -126,7 +126,10 @@ extension MainViewController {
         if modifiers == [.command, .shift],
            event.charactersIgnoringModifiers?.lowercased() == "v" {
             lastUserInteractionAt = Date()
-            pasteGrabSnapshotInPlace()
+            // Keep paste shortcuts available to text fields, never the PDF canvas.
+            if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField {
+                return event
+            }
             return nil
         }
         if modifiers == [.command, .shift],
@@ -193,7 +196,6 @@ extension MainViewController {
                 deleteBookmarkFromSidebar()
                 return nil
             }
-            deleteSelectedMarkup()
             return nil
         }
 

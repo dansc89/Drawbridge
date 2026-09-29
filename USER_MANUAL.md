@@ -1,93 +1,35 @@
-# Drawbridge User Manual (Minimal)
+# Drawbridge User Manual
 
-Drawbridge is a macOS PDF markup and takeoff app for design and construction workflows.
+Drawbridge is a macOS PDF viewer for architectural drawing sets, focused on bookmarks and hyperlinks.
 
-## 1. Start
+## Open and Navigate
 
-1. Open Drawbridge.
-2. Open an existing PDF (`File > Open PDF...`) or create a new one (`File > New...`).
-3. Choose a tool from the toolbar and start marking up.
+1. Open an existing PDF with **File > Open PDF...** (`Cmd+O`).
+2. Use the left sidebar to switch between page thumbnails and bookmarks.
+3. Scroll over the PDF to zoom around the pointer. Use **View > Zoom In**, **Zoom Out**, **Actual Size**, or **Fit Width** for additional zoom controls.
+4. Use the arrow keys to move between pages, or hold Control while scrolling. Use `Option+Left` and `Option+Right` to move backward and forward through navigation history.
+5. Use **Edit > Find…** (`Cmd+F`) to search the document. Select and copy PDF text with `Cmd+C`.
 
-## 2. Main Areas
+## Generate and Manage Bookmarks
 
-- `Navigation` (left): page thumbnails + bookmarks.
-- `Canvas` (center): live PDF markup area.
-- `Tool/Layer Settings` (right or bottom controls): style, snap, layer visibility/color.
-- `Status Bar`: active tool, page, zoom, scale, and active layer.
+Choose **Bookmarks > Auto-Generate Sheet Names/Bookmarks…** (`Cmd+Shift+A`), or use the sheet-naming toolbar button. Follow the prompts to identify sheet numbers and titles, then apply the results.
 
-## 3. Toolset
+In the **Bookmarks** sidebar, right-click a bookmark to rename or delete it. When renaming, you can also update the matching page label. Deleting a bookmark removes the navigation entry, not its PDF page. Deleting a bookmark group also removes its child bookmarks. Bookmark deletion supports Undo.
 
-- `Select`: move/resize/edit markups.
-- `Grab`: capture linework/snapshots from a PDF region.
-- `Pen`, `Highlighter`
-- `Line`, `Polyline`, `Polygon`, `Arrow`
-- `Cloud`, `Rectangle`, `Ellipse`
-- `Text`, `Callout`
-- `Area`, `Measure`, `Calibrate`
+## Hyperlinks
 
-Tip: polygon and line markups support node/endpoint editing in selection mode.
+Choose **Hyperlinks > Batch Link Sheet Numbers…** (`Cmd+Shift+H`), or use the link toolbar button. Follow the prompts to create links from sheet references to their destination pages.
 
-## 4. Layers (Global Snapshot Control)
+Click a hyperlink to follow it. Use **View > Show Hyperlink Highlights** to show or hide link highlights, and **View > Back** to return after following a link.
 
-Layers are designed for grabbed/pasted snapshot linework and update globally across the document.
+## Save
 
-- Default layer set includes `DEFAULT`, `ARCHITECTURAL`, `STRUCTURAL`, `MECHANICAL`, `ELECTRICAL`, `PLUMBING`, `CIVL`, `LANDSCAPE`.
-- `Eye` icon per layer: show/hide that layer.
-- `Color well` per layer: set global layer color (all snapshots on that layer update across all pages).
-- `DEFAULT` layer: preserves original colors (no forced tint).
+- **File > Save** (`Cmd+S`) saves bookmark and hyperlink changes.
+- **File > Save As PDF...** (`Cmd+Shift+S`) saves a separate PDF copy.
+- **File > Close** (`Cmd+W`) closes the current document.
 
-Assigning layers:
+Markup, drawing, measurement, snapshot pasting, page-combining, and page-conversion tools are not available. Existing PDF content remains visible; removing the tools does not remove annotations already stored in a PDF.
 
-- During grab paste flow: choose a layer when prompted.
-- On existing snapshot markup: right-click and use `Assign Layer…`.
+## Settings
 
-## 5. Grab + Paste Workflow
-
-1. Choose `Grab`.
-2. Drag a region to capture snapshot linework.
-3. Paste using normal paste or `Cmd+Shift+V` (paste in place).
-4. Assign to a target layer.
-5. Use layer color controls to globally recolor consultant linework.
-
-## 6. Bookmarks + Auto Sheet Naming
-
-Use `Markups > Auto-Generate Sheet Names/Bookmarks…`.
-
-Flow:
-
-1. Prompt asks whether to delete existing bookmarks and page names first.
-2. Capture sequence runs for sheet number/title.
-3. Apply generated bookmark/page naming results.
-
-## 7. Scale + Takeoff
-
-- `Calibrate` to set drawing scale from known distance.
-- `Measure` for linear dimensions.
-- `Area` for area takeoff.
-- Use `View > Set Drawing Scale...` and page scale lock tools for multi-page sets.
-
-## 8. Search + Export
-
-- `Cmd+F`: unified search (document text + markup text).
-- `File > Save As PDF...`: export a new PDF copy.
-- `File > Export Markups CSV...`: export markup data.
-
-## 9. Shortcuts
-
-- Tool shortcuts are customizable: `Drawbridge > Keyboard Shortcuts…`.
-- Useful defaults:
-- `Cmd+Shift+V`: paste grab snapshot in place
-- `Cmd+F`: search
-- `Cmd+S`: save
-- `Cmd+Shift+S`: Save As PDF
-
-## 10. Cloud Sync Backend (Optional)
-
-Drawbridge includes an optional backend for:
-
-- Username/password accounts
-- Project/document permissions
-- Upload/download
-- Session-based realtime sync
-
-See backend setup: `Backend/README.md`.
+Use **Drawbridge > Keyboard Shortcuts…** to review shortcuts and **Drawbridge > Performance Settings…** for performance preferences.
