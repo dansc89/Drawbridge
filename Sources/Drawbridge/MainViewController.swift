@@ -164,6 +164,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let bookmarksScrollView = NSScrollView(frame: .zero)
     let bookmarksOutlineView = NSOutlineView(frame: .zero)
     private let bookmarksEmptyLabel = NSTextField(labelWithString: "No Bookmarks")
+    private let bookmarksSelectionLabel = NSTextField(labelWithString: "")
     private let pdfContentsTitleLabel = NSTextField(labelWithString: "PDF Contents")
     private let pdfContentsSummaryLabel = NSTextField(labelWithString: "No PDF loaded")
     private let horizontalRuler = PDFRulerView(orientation: .horizontal)
@@ -381,8 +382,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var isSavingDocumentOperation = false
     var queuedFastEmbeddedSave = false
     var lastEmbeddedSaveCompletedVersion = 0
-    var deferredEmbeddedSaveRequestedVersion = 0
-    var deferredEmbeddedSaveWorkItem: DispatchWorkItem?
     private var busyInteractionLocked = false
     private var captureToastHideWorkItem: DispatchWorkItem?
     private var grabClipboardPDFData: Data?
@@ -960,9 +959,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         bookmarksOutlineView.outlineTableColumn = column
         bookmarksOutlineView.headerView = nil
         bookmarksOutlineView.rowHeight = 22
+        bookmarksOutlineView.allowsMultipleSelection = true
         bookmarksOutlineView.focusRingType = .none
         bookmarksOutlineView.style = .sourceList
-        bookmarksOutlineView.selectionHighlightStyle = .none
+        // A visible row fill is essential here: the outline supports range and
+        // discontiguous selection for bulk deletion, so a focus ring alone is
+        // not enough feedback about what a command will affect.
+        bookmarksOutlineView.selectionHighlightStyle = .regular
         bookmarksOutlineView.backgroundColor = sidebarBackgroundColor
         bookmarksOutlineView.delegate = self
         bookmarksOutlineView.dataSource = self
@@ -974,7 +977,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         renameBookmarkItem.target = self
         bookmarksContextMenu.addItem(renameBookmarkItem)
         bookmarksContextMenu.addItem(NSMenuItem.separator())
-        let deleteBookmarkItem = NSMenuItem(title: "Delete Bookmark…", action: #selector(deleteBookmarkFromSidebar), keyEquivalent: "")
+        let deleteBookmarkItem = NSMenuItem(title: "Delete Selected Bookmark(s)…", action: #selector(deleteBookmarkFromSidebar), keyEquivalent: "")
         deleteBookmarkItem.target = self
         bookmarksContextMenu.addItem(deleteBookmarkItem)
         bookmarksOutlineView.menu = bookmarksContextMenu
@@ -997,6 +1000,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         bookmarksEmptyLabel.textColor = .secondaryLabelColor
         bookmarksEmptyLabel.alignment = .center
         bookmarksEmptyLabel.isHidden = true
+        bookmarksSelectionLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        bookmarksSelectionLabel.textColor = .systemBlue
+        bookmarksSelectionLabel.alignment = .center
+        bookmarksSelectionLabel.lineBreakMode = .byTruncatingTail
+        bookmarksSelectionLabel.isHidden = true
         pdfContentsTitleLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         pdfContentsTitleLabel.textColor = .secondaryLabelColor
         pdfContentsTitleLabel.setContentCompressionResistancePriority(.required, for: .vertical)
@@ -1023,6 +1031,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             pagesControlRow,
             thumbnailScrollView,
             thumbnailsEmptyLabel,
+            bookmarksSelectionLabel,
             bookmarksScrollView,
             bookmarksEmptyLabel,
             pdfContentsStack
@@ -1039,6 +1048,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             stack.bottomAnchor.constraint(equalTo: bookmarksContainer.bottomAnchor)
         ])
         changeNavigationMode()
+        updateBookmarkSelectionPresentation()
     }
 
     private func refreshRulers() {
@@ -1053,6 +1063,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         thumbnailsEmptyLabel.isHidden = !showingPages || (pdfView.document != nil)
         bookmarksScrollView.isHidden = showingPages
         bookmarksEmptyLabel.isHidden = showingPages || !(bookmarksOutlineView.numberOfRows == 0)
+        updateBookmarkSelectionPresentation()
         addPageButton.isHidden = true
         addPageButton.isEnabled = false
     }
@@ -1176,6 +1187,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             }
         }
         changeNavigationMode()
+        updateBookmarkSelectionPresentation()
+    }
+
+    private func updateBookmarkSelectionPresentation() {
+        let selectedCount = bookmarksOutlineView.selectedRowIndexes.count
+        let shouldShow = navigationModeControl.selectedSegment == 1 && selectedCount > 1
+        bookmarksSelectionLabel.isHidden = !shouldShow
+        guard shouldShow else { return }
+        bookmarksSelectionLabel.stringValue = "(selectedCount) bookmarks selected • Delete to remove"
     }
 
     func updatePDFContentsSummary() {
@@ -1254,6 +1274,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc private func selectBookmarkFromSidebar() {
+        guard bookmarksOutlineView.selectedRowIndexes.count == 1 else { return }
         let row = bookmarksOutlineView.selectedRow
         guard row >= 0,
               let outline = bookmarksOutlineView.item(atRow: row) as? PDFOutline,
@@ -1261,7 +1282,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
         pdfView.navigateToDestinationWithHistory(destination)
-        bookmarksOutlineView.deselectAll(nil)
         requestChromeRefresh(immediate: true)
     }
 
@@ -1307,38 +1327,55 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc func deleteBookmarkFromSidebar() {
-        let row = bookmarksOutlineView.clickedRow >= 0 ? bookmarksOutlineView.clickedRow : bookmarksOutlineView.selectedRow
-        guard row >= 0,
-              let outline = bookmarksOutlineView.item(atRow: row) as? PDFOutline,
-              let parent = outline.parent else {
+        let clickedRow = bookmarksOutlineView.clickedRow
+        if clickedRow >= 0, !bookmarksOutlineView.selectedRowIndexes.contains(clickedRow) {
+            bookmarksOutlineView.selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
+        }
+        let selectedOutlines = bookmarksOutlineView.selectedRowIndexes.compactMap {
+            bookmarksOutlineView.item(atRow: $0) as? PDFOutline
+        }
+        let outlines = selectedOutlines.filter { outline in
+            var ancestor = outline.parent
+            while let current = ancestor {
+                if selectedOutlines.contains(where: { $0 === current }) { return false }
+                ancestor = current.parent
+            }
+            return outline.parent != nil
+        }
+        guard !outlines.isEmpty else {
             beep()
             return
         }
-
-        let title = displayBookmarkTitle(for: outline)
-        let descendantCount = bookmarkDescendantCount(outline)
         let alert = NSAlert()
-        alert.messageText = descendantCount > 0 ? "Delete Bookmark Group?" : "Delete Bookmark?"
-        if descendantCount > 0 {
-            alert.informativeText = "“\(title)” contains \(descendantCount) nested bookmark\(descendantCount == 1 ? "" : "s"). The group and its contents will be removed. PDF pages are unaffected."
+        let descendantCount = outlines.reduce(0) { $0 + bookmarkDescendantCount($1) }
+        if outlines.count == 1, let outline = outlines.first {
+            let title = displayBookmarkTitle(for: outline)
+            alert.messageText = descendantCount > 0 ? "Delete Bookmark Group?" : "Delete Bookmark?"
+            alert.informativeText = descendantCount > 0
+                ? "“\(title)” contains \(descendantCount) nested bookmark\(descendantCount == 1 ? "" : "s"). The group and its contents will be removed. PDF pages are unaffected."
+                : "Remove “\(title)”? The PDF page is unaffected."
         } else {
-            alert.informativeText = "Remove “\(title)”? The PDF page is unaffected."
+            alert.messageText = "Delete \(outlines.count) Bookmarks?"
+            alert.informativeText = "This also removes \(descendantCount) nested bookmark\(descendantCount == 1 ? "" : "s"). PDF pages are unaffected."
         }
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        let index = outline.index
-        outline.removeFromParent()
+        for outline in outlines {
+            guard let parent = outline.parent else { continue }
+            let index = outline.index
+            outline.removeFromParent()
+            registerBookmarkPresenceUndo(
+                outline: outline,
+                parent: parent,
+                index: index,
+                shouldExist: true,
+                actionName: outlines.count == 1 ? "Delete Bookmark" : "Delete Bookmarks"
+            )
+        }
         bookmarkLabelOverrides.removeAll()
-        registerBookmarkPresenceUndo(
-            outline: outline,
-            parent: parent,
-            index: index,
-            shouldExist: true,
-            actionName: "Delete Bookmark"
-        )
         reloadBookmarks()
         markMarkupChangedAndScheduleAutosave()
     }
@@ -1505,6 +1542,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         let node = (item as? PDFOutline) ?? pdfView.document?.outlineRoot
         return node?.child(at: index) as Any
+    }
+
+    func outlineViewSelectionDidChange(_ notification: Notification) {
+        guard let outlineView = notification.object as? NSOutlineView,
+              outlineView === bookmarksOutlineView else {
+            return
+        }
+        updateBookmarkSelectionPresentation()
     }
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
@@ -6827,20 +6872,32 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
 
         if addedLinks > 0 {
-            markMarkupChangedAndScheduleAutosave()
+            markMarkupChanged()
             refreshMarkups()
             pdfView.refreshHyperlinkHighlights()
         }
         reloadBookmarks()
         updateStatusBar()
-
-        let completionResponse = runAlert(
-            title: "Batch Link Complete",
-            informativeText: "Detected \(sheetTokenToPageIndex.count) sheet numbers and created \(addedLinks) hyperlink(s) across \(document.pageCount) page(s).\n\nZone read: \(zoneDetectedCount)/\(document.pageCount) pages (\(zoneFallbackRecoveredCount) recovered by fallback probes).",
-            buttons: ["OK", "Show Diagnostics"]
-        )
-        if completionResponse == .alertSecondButtonReturn {
-            showBatchLinkZoneDiagnostics(document: document, diagnostics: zonePageDiagnostics)
+        let presentCompletion = { [weak self] in
+            guard let self else { return }
+            let completionResponse = self.runAlert(
+                title: "Batch Link Complete",
+                informativeText: "Detected \(sheetTokenToPageIndex.count) sheet numbers and created \(addedLinks) hyperlink(s) across \(document.pageCount) page(s).\n\nZone read: \(zoneDetectedCount)/\(document.pageCount) pages (\(zoneFallbackRecoveredCount) recovered by fallback probes).",
+                buttons: ["OK", "Show Diagnostics"]
+            )
+            if completionResponse == .alertSecondButtonReturn {
+                self.showBatchLinkZoneDiagnostics(document: document, diagnostics: zonePageDiagnostics)
+            }
+        }
+        if addedLinks > 0 {
+            DispatchQueue.main.async { [weak self] in
+                self?.saveNavigationCommandChanges(in: document) { success in
+                    guard success else { return }
+                    presentCompletion()
+                }
+            }
+        } else {
+            presentCompletion()
         }
         completedBatchLink = true
 
@@ -7641,7 +7698,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         bookmarkLabelOverrides.removeAll()
         document.outlineRoot = root
 
-        markMarkupChangedAndScheduleAutosave()
+        markMarkupChanged()
         reloadBookmarks()
         updateStatusBar()
 
@@ -7651,7 +7708,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         } else {
             informativeText = "Applied bookmarks for \(sheets.count) pages."
         }
-        runAlert(title: "Sheet Names Updated", informativeText: informativeText)
+        saveNavigationCommandChanges(in: document) { [weak self] success in
+            guard success else { return }
+            self?.runAlert(title: "Sheet Names Updated", informativeText: informativeText)
+        }
 
     }
 

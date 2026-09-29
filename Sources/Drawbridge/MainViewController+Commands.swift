@@ -628,8 +628,7 @@ extension MainViewController {
         case #selector(commandCloseDocument(_:)):
             return hasDocument || !sessionDocumentURLs.isEmpty
         case #selector(deleteBookmarkFromSidebar):
-            let row = bookmarksOutlineView.clickedRow >= 0 ? bookmarksOutlineView.clickedRow : bookmarksOutlineView.selectedRow
-            return hasDocument && row >= 0 && bookmarksOutlineView.item(atRow: row) is PDFOutline
+            return hasDocument && !bookmarksOutlineView.selectedRowIndexes.isEmpty
         case #selector(commandCopy(_:)), #selector(commandPaste(_:)), #selector(commandSelectAll(_:)):
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField { return true }
             if action == #selector(commandPaste(_:)) { return false }

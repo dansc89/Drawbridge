@@ -14,16 +14,19 @@ INSTALL_APP_PATH="${DRAWBRIDGE_INSTALL_APP_PATH:-$HOME/Applications/$APP_NAME.ap
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
+FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 PLIST_PATH="$CONTENTS_DIR/Info.plist"
 ICONSET_DIR="Assets/AppIcon.iconset"
 ICON_SOURCE_PNG="Assets/db.png"
 ICON_FILL_SCALE="${ICON_FILL_SCALE:-1.0}"
 ICON_FILE_NAME="Drawbridge"
 ICON_ICNS_PATH="$RESOURCES_DIR/$ICON_FILE_NAME.icns"
+QPDF_VENDOR_DIR="ThirdParty/QPDF/arm64"
 VERSION_TAG="${DRAWBRIDGE_VERSION_TAG:-$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")}"
 APP_VERSION="${VERSION_TAG#v}"
-if [[ ! "$APP_VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
-  APP_VERSION="0.0.0"
+if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]$ ]]; then
+  echo "Release versions must use the major.minor sequence (for example v2.1 through v2.9, then v3.0)."
+  exit 1
 fi
 BUILD_NUMBER="${DRAWBRIDGE_BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo "1")}"
 SIGN_IDENTITY="${DRAWBRIDGE_CODESIGN_IDENTITY:-}"
@@ -38,9 +41,31 @@ fi
 
 echo "Creating app bundle..."
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$FRAMEWORKS_DIR"
 cp "$BIN_PATH" "$MACOS_DIR/$APP_NAME"
 chmod +x "$MACOS_DIR/$APP_NAME"
+
+echo "Bundling native PDF navigation engine..."
+for file in qpdf libqpdf.30.4.2.dylib libjpeg.8.3.2.dylib libcrypto.3.dylib; do
+  if [[ ! -f "$QPDF_VENDOR_DIR/$file" ]]; then
+    echo "Missing bundled qpdf component: $QPDF_VENDOR_DIR/$file"
+    exit 1
+  fi
+done
+cp "$QPDF_VENDOR_DIR/qpdf" "$MACOS_DIR/qpdf"
+cp "$QPDF_VENDOR_DIR/libqpdf.30.4.2.dylib" "$FRAMEWORKS_DIR/libqpdf.30.4.2.dylib"
+cp "$QPDF_VENDOR_DIR/libjpeg.8.3.2.dylib" "$FRAMEWORKS_DIR/libjpeg.8.3.2.dylib"
+cp "$QPDF_VENDOR_DIR/libcrypto.3.dylib" "$FRAMEWORKS_DIR/libcrypto.3.dylib"
+chmod +x "$MACOS_DIR/qpdf"
+install_name_tool -add_rpath "@loader_path/../Frameworks" "$MACOS_DIR/qpdf"
+install_name_tool -id "@rpath/libqpdf.30.dylib" "$FRAMEWORKS_DIR/libqpdf.30.4.2.dylib"
+install_name_tool -change "/opt/homebrew/opt/jpeg-turbo/lib/libjpeg.8.dylib" "@rpath/libjpeg.8.dylib" "$FRAMEWORKS_DIR/libqpdf.30.4.2.dylib"
+install_name_tool -change "/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib" "@rpath/libcrypto.3.dylib" "$FRAMEWORKS_DIR/libqpdf.30.4.2.dylib"
+install_name_tool -id "@rpath/libjpeg.8.dylib" "$FRAMEWORKS_DIR/libjpeg.8.3.2.dylib"
+install_name_tool -id "@rpath/libcrypto.3.dylib" "$FRAMEWORKS_DIR/libcrypto.3.dylib"
+ln -s "libqpdf.30.4.2.dylib" "$FRAMEWORKS_DIR/libqpdf.30.dylib"
+ln -s "libqpdf.30.dylib" "$FRAMEWORKS_DIR/libqpdf.dylib"
+ln -s "libjpeg.8.3.2.dylib" "$FRAMEWORKS_DIR/libjpeg.8.dylib"
 
 echo "Generating app icon..."
 mkdir -p "$ICONSET_DIR"
@@ -123,9 +148,17 @@ EOF
 
 if [[ -n "$SIGN_IDENTITY" ]]; then
   echo "Signing app bundle with Developer ID identity: $SIGN_IDENTITY"
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$FRAMEWORKS_DIR/libcrypto.3.dylib"
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$FRAMEWORKS_DIR/libjpeg.8.3.2.dylib"
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$FRAMEWORKS_DIR/libqpdf.30.4.2.dylib"
+  codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$MACOS_DIR/qpdf"
   codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_DIR"
 else
   echo "No DRAWBRIDGE_CODESIGN_IDENTITY set. Using ad-hoc signing (not trusted for internet distribution)."
+  codesign --force --sign - "$FRAMEWORKS_DIR/libcrypto.3.dylib"
+  codesign --force --sign - "$FRAMEWORKS_DIR/libjpeg.8.3.2.dylib"
+  codesign --force --sign - "$FRAMEWORKS_DIR/libqpdf.30.4.2.dylib"
+  codesign --force --sign - "$MACOS_DIR/qpdf"
   codesign --force --deep --sign - "$APP_DIR"
 fi
 

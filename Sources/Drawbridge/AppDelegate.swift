@@ -256,7 +256,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         autoNamesItem.keyEquivalentModifierMask = [.command, .shift]
         autoNamesItem.target = controller
         bookmarksMenu.addItem(NSMenuItem.separator())
-        bookmarksMenu.addItem(withTitle: "Delete Bookmark…", action: #selector(MainViewController.deleteBookmarkFromSidebar), keyEquivalent: "").target = controller
+        bookmarksMenu.addItem(withTitle: "Delete Selected Bookmark(s)…", action: #selector(MainViewController.deleteBookmarkFromSidebar), keyEquivalent: "").target = controller
         bookmarksItem.submenu = bookmarksMenu
 
         let hyperlinksItem = NSMenuItem()
