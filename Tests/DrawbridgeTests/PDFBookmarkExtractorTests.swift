@@ -116,6 +116,23 @@ final class PDFBookmarkExtractorTests: XCTestCase {
         "MECHANICAL DETAILS")
     }
 
+    func testTitleLabelHintDoesNotAbbreviateFreshReading() {
+        typealias R = PDFBookmarkExtractor.Result
+        let resolved = PDFBookmarkExtractor.resolveTitles([
+            R(text: "PLANTING PLAN ROOF LEVEL", source: "OCR", alternatives: [])
+        ], labelHints: ["Planting Plan - Roof Lvl"])
+
+        XCTAssertEqual(resolved[0].text, "PLANTING PLAN ROOF LEVEL")
+        XCTAssertTrue(PDFBookmarkExtractor.titleHintAppearsAbbreviated(
+            "Planting Plan - Roof Lvl",
+            of: "PLANTING PLAN ROOF LEVEL"
+        ))
+        XCTAssertFalse(PDFBookmarkExtractor.titleHintAppearsAbbreviated(
+            "MECHANICAL NOTES SYMBOLS LEGEND",
+            of: "MICUNANIVAL NOTES SYMBOLS LEGEND"
+        ))
+    }
+
     func testOCRCandidateAlternativesParticipateInPeerResolution() {
         typealias R = PDFBookmarkExtractor.Result
         let rows = PDFBookmarkExtractor.resolveTitles([
