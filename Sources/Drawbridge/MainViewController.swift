@@ -7601,16 +7601,36 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             recognitionLevel: .accurate,
             customWords: words
         )
-        if !primary.isEmpty {
-            return primary
-        }
-        return recognizeTextLines(
+        let detailed = recognizeTextLines(
             in: page,
             scale: 4.0,
             minimumTextHeight: 0.003,
             recognitionLevel: .accurate,
             customWords: words
         )
+        let tiled = recognizeTextLinesInTiles(
+            in: page,
+            scale: 5.0,
+            columns: 4,
+            rows: 4,
+            overlap: 48,
+            customWords: words
+        )
+        return mergedOCRLineHits(primary + detailed + tiled)
+    }
+
+    private func mergedOCRLineHits(_ hits: [OCRLineHit]) -> [OCRLineHit] {
+        var merged: [OCRLineHit] = []
+        merged.reserveCapacity(hits.count)
+        var seen = Set<String>()
+        for hit in hits {
+            let rect = hit.rectInPage.standardized
+            let key = "\(hit.text.uppercased()):\(Int((rect.minX * 2).rounded())):\(Int((rect.minY * 2).rounded())):\(Int((rect.width * 2).rounded())):\(Int((rect.height * 2).rounded()))"
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
+            merged.append(hit)
+        }
+        return merged
     }
 
     private func recognizeTextLines(
@@ -7684,10 +7704,132 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             )
             let rectInPage = rectInOrientedPage.applying(inversePageTransform).standardized
             guard rectInPage.width > 1, rectInPage.height > 1 else { continue }
-            guard let top = observation.topCandidates(1).first else { continue }
-            let text = cleanDetectedSheetText(top.string)
-            guard !text.isEmpty else { continue }
-            hits.append(OCRLineHit(text: text, rectInPage: rectInPage))
+            var seenCandidates = Set<String>()
+            for candidate in observation.topCandidates(3) {
+                let text = cleanDetectedSheetText(candidate.string)
+                guard !text.isEmpty, !seenCandidates.contains(text) else { continue }
+                seenCandidates.insert(text)
+                hits.append(OCRLineHit(text: text, rectInPage: rectInPage))
+            }
+        }
+        return hits
+    }
+
+    private func recognizeTextLinesInTiles(
+        in page: PDFPage,
+        scale: CGFloat,
+        columns: Int,
+        rows: Int,
+        overlap: CGFloat,
+        customWords: [String]
+    ) -> [OCRLineHit] {
+        guard columns > 0, rows > 0 else { return [] }
+        let displayBox: PDFDisplayBox = .mediaBox
+        let pageBounds = page.bounds(for: displayBox)
+        guard pageBounds.width > 1, pageBounds.height > 1 else { return [] }
+        let pageTransform = page.transform(for: displayBox)
+        let orientedFullBox = pageBounds.applying(pageTransform).standardized
+        guard orientedFullBox.width > 1, orientedFullBox.height > 1 else { return [] }
+
+        let tileWidth = orientedFullBox.width / CGFloat(columns)
+        let tileHeight = orientedFullBox.height / CGFloat(rows)
+        var hits: [OCRLineHit] = []
+        for row in 0..<rows {
+            autoreleasepool {
+                for column in 0..<columns {
+                    let tile = NSRect(
+                        x: orientedFullBox.minX + CGFloat(column) * tileWidth - overlap,
+                        y: orientedFullBox.minY + CGFloat(row) * tileHeight - overlap,
+                        width: tileWidth + overlap * 2,
+                        height: tileHeight + overlap * 2
+                    ).intersection(orientedFullBox).standardized
+                    guard !tile.isEmpty, tile.width > 1, tile.height > 1 else { continue }
+                    hits.append(contentsOf: recognizeTextLines(
+                        in: page,
+                        orientedTile: tile,
+                        orientedFullBox: orientedFullBox,
+                        pageTransform: pageTransform,
+                        scale: scale,
+                        customWords: customWords
+                    ))
+                }
+            }
+        }
+        return hits
+    }
+
+    private func recognizeTextLines(
+        in page: PDFPage,
+        orientedTile: NSRect,
+        orientedFullBox: NSRect,
+        pageTransform: CGAffineTransform,
+        scale: CGFloat,
+        customWords: [String]
+    ) -> [OCRLineHit] {
+        let width = Int((orientedTile.width * scale).rounded(.up))
+        let height = Int((orientedTile.height * scale).rounded(.up))
+        guard width > 0, height > 0 else { return [] }
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            return []
+        }
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.scaleBy(x: scale, y: scale)
+        context.translateBy(x: -orientedTile.minX, y: -orientedTile.minY)
+        page.draw(with: .mediaBox, to: context)
+        guard let image = context.makeImage() else { return [] }
+
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.usesLanguageCorrection = false
+        request.minimumTextHeight = 0
+        if !customWords.isEmpty {
+            request.customWords = customWords
+        }
+        let handler = VNImageRequestHandler(cgImage: image, orientation: .up, options: [:])
+        do {
+            try handler.perform([request])
+        } catch {
+            return []
+        }
+        guard let observations = request.results, !observations.isEmpty else { return [] }
+
+        var hits: [OCRLineHit] = []
+        hits.reserveCapacity(observations.count)
+        let imageWidth = CGFloat(width)
+        let imageHeight = CGFloat(height)
+        let inversePageTransform = pageTransform.inverted()
+        for observation in observations {
+            let box = observation.boundingBox
+            let rectPx = NSRect(
+                x: box.minX * imageWidth,
+                y: box.minY * imageHeight,
+                width: box.width * imageWidth,
+                height: box.height * imageHeight
+            )
+            let rectInOrientedPage = NSRect(
+                x: orientedTile.minX + rectPx.minX / scale,
+                y: orientedTile.minY + rectPx.minY / scale,
+                width: rectPx.width / scale,
+                height: rectPx.height / scale
+            ).intersection(orientedFullBox)
+            let rectInPage = rectInOrientedPage.applying(inversePageTransform).standardized
+            guard rectInPage.width > 1, rectInPage.height > 1 else { continue }
+            var seenCandidates = Set<String>()
+            for candidate in observation.topCandidates(5) {
+                let text = cleanDetectedSheetText(candidate.string)
+                guard !text.isEmpty, !seenCandidates.contains(text) else { continue }
+                seenCandidates.insert(text)
+                hits.append(OCRLineHit(text: text, rectInPage: rectInPage))
+            }
         }
         return hits
     }
