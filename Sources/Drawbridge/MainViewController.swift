@@ -6796,10 +6796,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         updateBusyIndicatorDetail("Step 2/3: Scanning selectable text…")
         updateBusyIndicatorProgress(current: 0, total: document.pageCount)
         updateBusyIndicatorSubdetail(contextualSubdetail(prefix: "\(addedLinks) links created", current: 0, total: document.pageCount))
+        var scannedPageIndexes = Set<Int>()
+        scannedPageIndexes.reserveCapacity(document.pageCount)
         for sourcePageIndex in 0..<document.pageCount {
             guard let page = document.page(at: sourcePageIndex) else { continue }
             updateBusyIndicatorProgress(current: sourcePageIndex + 1, total: document.pageCount)
             updateBusyIndicatorDetail("Step 2/3: Scanning selectable text… \(sourcePageIndex + 1)/\(document.pageCount)")
+            if page.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+                scannedPageIndexes.insert(sourcePageIndex)
+            }
             let hits = selectableSheetTokenHits(on: page)
             for hit in hits {
                 let canonical = canonicalizeSheetToken(hit.token)
@@ -6826,7 +6831,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             )
         }
 
-        // OCR fallback for scanned pages with no selectable text.
+        // OCR is expensive. It is a fallback for scanned pages that have no
+        // selectable text, so avoid rasterizing every vector drawing sheet.
         stageStartedAt = Date()
         updateBusyIndicatorDetail("Step 3/3: OCR fallback + linking…")
         updateBusyIndicatorProgress(current: 0, total: document.pageCount)
@@ -6836,6 +6842,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             guard let page = document.page(at: sourcePageIndex) else { continue }
             updateBusyIndicatorProgress(current: sourcePageIndex + 1, total: document.pageCount)
             updateBusyIndicatorDetail("Step 3/3: OCR fallback + linking… \(sourcePageIndex + 1)/\(document.pageCount)")
+            guard scannedPageIndexes.contains(sourcePageIndex) else {
+                continue
+            }
             let ocrHits = recognizeTextLines(in: page, customWords: ocrCustomWords)
             for hit in ocrHits {
                 let tokens = extractSheetTokens(from: hit.text)

@@ -146,6 +146,21 @@ extension MainViewController {
         }
         let targetURL = url
         let originDocumentURLForAdoption = openDocumentURL.map { canonicalDocumentURL($0) }
+        // PDFKit can report an opaque temporary URL for a document opened from a
+        // file-provider volume.  That URL is often gone by the time Save runs,
+        // which used to force the slow, full-PDFKit rewrite.  The opened file is
+        // the authoritative pre-edit source for a metadata-only navigation save.
+        let navigationSourceURL: URL? = {
+            if let originDocumentURLForAdoption,
+               FileManager.default.fileExists(atPath: originDocumentURLForAdoption.path) {
+                return originDocumentURLForAdoption
+            }
+            if let documentURL = document.documentURL,
+               FileManager.default.fileExists(atPath: documentURL.path) {
+                return documentURL
+            }
+            return nil
+        }()
         let startedAt = CFAbsoluteTimeGetCurrent()
         let documentBox = PDFDocumentBox(document: document)
         let pageLabelsForEmbeddedSave = embeddedPageLabelsForSave(in: document)
@@ -169,7 +184,8 @@ extension MainViewController {
                 success = Self.writePDFDocument(
                     documentBox.document,
                     to: localStagingURL,
-                    pageLabels: pageLabelsForEmbeddedSave
+                    pageLabels: pageLabelsForEmbeddedSave,
+                    navigationSourceURL: navigationSourceURL
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
 
@@ -200,7 +216,8 @@ extension MainViewController {
                 success = Self.writePDFDocument(
                     documentBox.document,
                     to: targetURL,
-                    pageLabels: pageLabelsForEmbeddedSave
+                    pageLabels: pageLabelsForEmbeddedSave,
+                    navigationSourceURL: navigationSourceURL
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - directWriteStartedAt
 
@@ -216,7 +233,8 @@ extension MainViewController {
                     success = Self.writePDFDocument(
                         documentBox.document,
                         to: stagingURL,
-                        pageLabels: pageLabelsForEmbeddedSave
+                        pageLabels: pageLabelsForEmbeddedSave,
+                        navigationSourceURL: navigationSourceURL
                     )
                     writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
                     if success {
@@ -248,7 +266,8 @@ extension MainViewController {
                 success = Self.writePDFDocument(
                     documentBox.document,
                     to: stagingURL,
-                    pageLabels: pageLabelsForEmbeddedSave
+                    pageLabels: pageLabelsForEmbeddedSave,
+                    navigationSourceURL: navigationSourceURL
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
                 if success {
@@ -269,7 +288,8 @@ extension MainViewController {
                 success = Self.writePDFDocument(
                     documentBox.document,
                     to: targetURL,
-                    pageLabels: pageLabelsForEmbeddedSave
+                    pageLabels: pageLabelsForEmbeddedSave,
+                    navigationSourceURL: navigationSourceURL
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - writeStartedAt
             }
@@ -470,10 +490,23 @@ extension MainViewController {
         _ document: PDFDocument,
         to url: URL,
         pageLabels: [Int: String],
+        navigationSourceURL: URL? = nil,
         options: [PDFDocumentWriteOption: Any]? = nil
     ) -> Bool {
-        if PDFTKBookmarkWriter.writeNavigation(in: document, to: url, pageLabels: pageLabels) {
+        switch PDFTKBookmarkWriter.writeNavigation(
+            in: document,
+            sourceURL: navigationSourceURL,
+            to: url,
+            pageLabels: pageLabels
+        ) {
+        case .saved:
             return true
+        case .rejectedSizeGrowth:
+            // Do not let the PDFKit fallback silently replace a compact source with
+            // a much larger full-document rewrite.
+            return false
+        case .unavailable:
+            break
         }
         let preservedPageRotations = pageRotations(in: document)
         // `write(to:withOptions:)` is materially faster than `write(to:)` on large drawing sets.
