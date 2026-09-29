@@ -1,6 +1,6 @@
 import Foundation
 
-enum ToolMode {
+enum ToolMode: CaseIterable {
     case select
     case grab
     case pen
@@ -21,64 +21,19 @@ enum ToolMode {
 }
 
 extension ToolMode {
-    static let enabledModesInScratchReset: Set<ToolMode> = [
-        .select,
-        .grab,
-        .pen,
-        .arrow,
-        .line,
-        .polyline,
-        .polygon,
-        .area,
-        .highlighter,
-        .cloud,
-        .rectangle,
-        .circle,
-        .text,
-        .note,
-        .callout,
-        .measure,
-        .calibrate
-    ]
+    // Annotation authoring is deliberately unavailable. Legacy modes/types remain
+    // for reading existing documents, but cannot be activated by UI or shortcuts.
+    static let allowsMarkupEditing = false
+    static let enabledModesInScratchReset: Set<ToolMode> = [.select]
 
-    var isEnabledInScratchReset: Bool {
-        Self.enabledModesInScratchReset.contains(self)
-    }
+    var isEnabledInScratchReset: Bool { Self.enabledModesInScratchReset.contains(self) }
 
-    static let navigationToolbarModes: [ToolMode] = [
-        .select
-    ]
-
-    static let drawingToolbarModes: [ToolMode] = [
-        .pen,
-        .highlighter,
-        .text,
-        .note,
-        .callout
-    ]
-
-    static let geometryToolbarModes: [ToolMode] = [
-        .line,
-        .arrow,
-        .rectangle,
-        .circle
-    ]
-
-    static let primaryToolbarModes: [ToolMode] = [
-        .select
-    ]
-
-    static let takeoffToolbarModes: [ToolMode] = [
-        .measure,
-        .calibrate
-    ]
-
-    static let allToolbarModes: [ToolMode] = (
-        navigationToolbarModes
-        + drawingToolbarModes
-        + geometryToolbarModes
-        + takeoffToolbarModes
-    )
+    static let navigationToolbarModes: [ToolMode] = [.select]
+    static let drawingToolbarModes: [ToolMode] = []
+    static let geometryToolbarModes: [ToolMode] = []
+    static let primaryToolbarModes: [ToolMode] = [.select]
+    static let takeoffToolbarModes: [ToolMode] = []
+    static let allToolbarModes: [ToolMode] = [.select]
 
     static func fromPrimaryToolbarSegment(_ segment: Int) -> ToolMode? {
         guard segment >= 0, segment < primaryToolbarModes.count else { return nil }

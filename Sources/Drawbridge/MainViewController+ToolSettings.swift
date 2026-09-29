@@ -9,12 +9,14 @@ extension MainViewController {
     }
 
     @objc func toolSettingsOpacityChanged() {
+        guard ToolMode.allowsMarkupEditing else { return }
         let opacityPercent = Int(round(toolSettingsOpacitySlider.doubleValue * 100))
         toolSettingsOpacityValueLabel.stringValue = "\(opacityPercent)%"
         applyToolSettingsToPDFView()
     }
 
     @objc func toolSettingsChanged() {
+        guard ToolMode.allowsMarkupEditing else { return }
         applyToolSettingsToPDFView()
     }
 
@@ -64,6 +66,7 @@ extension MainViewController {
     }
 
     @objc func colorizeSnapshotsBlackToRed() {
+        guard ToolMode.allowsMarkupEditing else { return }
         let snapshots = currentSelectedMarkupItems().compactMap { $0.annotation as? PDFSnapshotAnnotation }
         guard !snapshots.isEmpty else {
             NSSound.beep()
@@ -83,6 +86,7 @@ extension MainViewController {
     }
 
     func applyToolSettingsToPDFView() {
+        guard ToolMode.allowsMarkupEditing else { return }
         let selectedItems = currentSelectedMarkupItems()
         let selectedCount = selectedItems.count
         let settingsSpan = PerformanceMetrics.begin(

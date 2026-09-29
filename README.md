@@ -2,7 +2,7 @@
   <img src="Assets/readme/drawbridge-hero-v017.png" alt="Drawbridge" width="100%" />
 </p>
 
-Drawbridge is a native macOS PDF markup and takeoff app built for architects, designers, and engineers, with cloud markups, text annotations, highlights, freehand drawing, callouts, measurements, and fast save/export workflows.
+Drawbridge is a native macOS PDF viewer for architectural drawing sets, focused on generating sheet bookmarks and hyperlinks. Open, search, and navigate PDFs, then save bookmark and hyperlink changes. Markup, drawing, measurement, and page-conversion tools are not available.
 
 ## Requirements
 
@@ -20,8 +20,10 @@ Download the `.dmg`, open it, then drag **Drawbridge.app** into **Applications**
 ## Quick Start
 
 1. Open Drawbridge.
-2. Open an existing PDF or create a new one.
-3. Add markups.
+2. Open an existing PDF.
+3. Use **Bookmarks > Auto-Generate Sheet Names/Bookmarks…** to name sheets and create bookmarks.
+4. Use **Hyperlinks > Batch Link Sheet Numbers…** to link sheet references.
+5. Save the PDF, or choose **File > Save As PDF...** to save a copy.
 
 ## Support
 
@@ -35,7 +37,3 @@ If you hit an issue, open a GitHub issue with:
 Developer/build/release docs are in `DEVELOPMENT.md`.
 For trusted macOS distribution (Developer ID signing + Apple notarization), see the same doc.
 User manual is in `USER_MANUAL.md`.
-
-## Cloud Backend
-
-Backend API and deployment docs for account auth, uploads, sessions, and realtime sync are in `Backend/README.md`.

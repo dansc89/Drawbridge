@@ -17,34 +17,21 @@ enum ShortcutModifier: String, CaseIterable {
 
 enum ShortcutAction: String, CaseIterable {
     case selectTool
-    case toggleGrid
-    case toggleOrtho
 
     var toolMode: ToolMode? {
         switch self {
         case .selectTool: return .select
-        case .toggleGrid, .toggleOrtho: return nil
         }
     }
 
     var defaultBinding: ShortcutBinding {
         switch self {
         case .selectTool: return ShortcutBinding(key: "v", modifier: .plain)
-        case .toggleGrid: return ShortcutBinding(key: "x", modifier: .plain)
-        case .toggleOrtho: return ShortcutBinding(key: "o", modifier: .plain)
         }
     }
 
-    var displayName: String {
-        if let mode = toolMode {
-            return "\(mode.shortcutDisplayName) Tool"
-        }
-        switch self {
-        case .toggleGrid: return "Toggle Grid"
-        case .toggleOrtho: return "Toggle Ortho"
-        default: return "Shortcut"
-        }
-    }
+    var displayName: String { "Select Text" }
+
 }
 
 struct ShortcutBinding: Equatable {
@@ -169,14 +156,6 @@ extension MainViewController {
             setTool(mode)
             return true
         }
-        switch action {
-        case .toggleGrid:
-            toggleGridVisibilityShortcut()
-        case .toggleOrtho:
-            setOrthoSnapEnabled(!isOrthoSnapEnabled)
-        default:
-            return false
-        }
-        return true
+        return false
     }
 }

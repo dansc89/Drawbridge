@@ -694,9 +694,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             self?.updateSelectionOverlay()
             self?.pdfView.refreshHyperlinkHighlights()
         }
-        pdfView.onCalibrationDistanceMeasured = { [weak self] distance in
-            self?.showCalibrationDialog(distanceInPoints: distance)
-        }
         pdfView.onToolShortcut = { [weak self] mode in
             self?.setTool(mode)
         }
@@ -709,142 +706,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 self.commandNextPage(nil)
             }
         }
-        pdfView.onAnnotationAdded = { [weak self] page, annotation, actionName in
-            self?.markPageMarkupCacheDirty(page)
-            self?.registerAnnotationPresenceUndo(page: page, annotation: annotation, shouldExist: false, actionName: actionName)
-            self?.markMarkupChangedAndScheduleAutosave()
-            self?.scheduleMarkupsRefresh(selecting: nil)
-        }
-        pdfView.onAnnotationTextEdited = { [weak self] page, annotation, previousContents in
-            guard let self else { return }
-            let current = self.snapshot(for: annotation)
-            let previous = AnnotationSnapshot(
-                bounds: current.bounds,
-                contents: previousContents,
-                color: current.color,
-                interiorColor: current.interiorColor,
-                fontColor: current.fontColor,
-                fontName: current.fontName,
-                fontSize: current.fontSize,
-                lineWidth: current.lineWidth,
-                renderOpacity: current.renderOpacity,
-                renderTintColor: current.renderTintColor,
-                renderTintStrength: current.renderTintStrength,
-                tintBlendStyleRawValue: current.tintBlendStyleRawValue,
-                lineworkOnlyTint: current.lineworkOnlyTint,
-                snapshotLayerName: current.snapshotLayerName
-            )
-            self.registerAnnotationStateUndo(annotation: annotation, previous: previous, actionName: "Edit Markup Text")
-            self.markPageMarkupCacheDirty(page)
-            self.markMarkupChangedAndScheduleAutosave()
-            self.scheduleMarkupsRefresh(selecting: annotation)
-        }
-        pdfView.onAnnotationMoved = { [weak self] page, annotation, startBounds in
-            guard let self else { return }
-            let before = AnnotationSnapshot(
-                bounds: startBounds,
-                contents: annotation.contents,
-                color: annotation.color,
-                interiorColor: annotation.interiorColor,
-                fontColor: annotation.fontColor,
-                fontName: annotation.font?.fontName,
-                fontSize: annotation.font?.pointSize,
-                lineWidth: resolvedLineWidth(for: annotation),
-                renderOpacity: (annotation as? PDFSnapshotAnnotation)?.renderOpacity,
-                renderTintColor: (annotation as? PDFSnapshotAnnotation)?.renderTintColor,
-                renderTintStrength: (annotation as? PDFSnapshotAnnotation)?.renderTintStrength,
-                tintBlendStyleRawValue: (annotation as? PDFSnapshotAnnotation)?.tintBlendStyle.rawValue,
-                lineworkOnlyTint: (annotation as? PDFSnapshotAnnotation)?.lineworkOnlyTint,
-                snapshotLayerName: (annotation as? PDFSnapshotAnnotation)?.snapshotLayerName
-            )
-            self.registerAnnotationStateUndo(annotation: annotation, previous: before, actionName: "Move Markup")
-            self.pdfView.syncTextOutlineGeometry(for: annotation)
-            self.markPageMarkupCacheDirty(page)
-            self.markMarkupChangedAndScheduleAutosave()
-            self.scheduleMarkupsRefresh(selecting: annotation)
-        }
-        pdfView.onResolveDragSelection = { [weak self] page, anchor in
-            guard let self else { return [anchor] }
-            let polygonSiblings = self.pdfView.relatedPolygonMarkupAnnotations(for: anchor, on: page)
-            if !polygonSiblings.isEmpty {
-                return [anchor] + polygonSiblings
-            }
-            let selectedItems = self.currentSelectedMarkupItems()
-            guard !selectedItems.isEmpty else {
-                // No prior selection: let direct click select the clicked annotation first.
-                return [anchor]
-            }
-            let selectedSet = Set(selectedItems.map { ObjectIdentifier($0.annotation) })
-            guard selectedSet.contains(ObjectIdentifier(anchor)) else {
-                // Clicking a different annotation should switch selection to that annotation.
-                return [anchor]
-            }
-            if !self.shouldDragAsGroupedPasteSelection(on: page, selectedSet: selectedSet, anchor: anchor) {
-                return [anchor]
-            }
-            var resolved: [PDFAnnotation] = []
-            var seen = Set<ObjectIdentifier>()
-            for item in selectedItems where item.annotation.page === page {
-                let related = self.relatedCalloutAnnotations(for: item.annotation, on: page)
-                for candidate in related {
-                    let key = ObjectIdentifier(candidate)
-                    if seen.insert(key).inserted {
-                        resolved.append(candidate)
-                    }
-                }
-            }
-            return resolved.isEmpty ? [anchor] : resolved
-        }
-        pdfView.selectedAnnotationsProvider = { [weak self] page in
-            guard let self else { return [] }
-            return self.currentSelectedMarkupItems()
-                .map(\.annotation)
-                .filter { $0.page === page }
-        }
-        pdfView.onAnnotationClicked = { [weak self] page, annotation, additive in
-            self?.selectMarkupFromPageClick(page: page, annotation: annotation, additive: additive)
-        }
-        pdfView.onReorderActionRequested = { [weak self] action in
-            guard let self else { return }
-            switch action {
-            case .sendToBack:
-                self.reorderSelectedMarkups(.sendToBack)
-            case .bringForward:
-                self.reorderSelectedMarkups(.bringForward)
-            case .sendBackward:
-                self.reorderSelectedMarkups(.sendBackward)
-            case .bringToFront:
-                self.reorderSelectedMarkups(.bringToFront)
-            }
-        }
-        pdfView.onAssignLayerRequested = { [weak self] in
-            self?.assignSnapshotLayerForCurrentSelection()
-        }
-        pdfView.onApplyToPagesRequested = { [weak self] in
-            self?.applySelectedMarkupsToPages()
-        }
-        pdfView.onAnnotationsBoxSelected = { [weak self] page, annotations in
-            self?.selectMarkupsFromFence(page: page, annotations: annotations)
-        }
-        pdfView.onDeleteKeyPressed = { [weak self] in
-            self?.deleteSelectedMarkup()
-        }
-        pdfView.onImageDropped = { [weak self] page, annotation, baseBounds in
-            self?.presentDroppedImageScaleDialog(page: page, annotation: annotation, baseBounds: baseBounds)
-        }
-        pdfView.onSnapshotCaptured = { [weak self] pdfData, pageRect in
-            let captureID = UUID()
-            self?.grabClipboardCaptureID = captureID
-            self?.grabClipboardPDFData = pdfData
-            self?.grabClipboardPageRect = pageRect
-            self?.grabClipboardSnapshotURL = nil
-            self?.grabClipboardTintBlendStyle = self?.preferredSnapshotTintBlendStyle(for: pdfData) ?? .screen
-            self?.warmGrabSnapshotPersistence(pdfData, captureID: captureID)
-            let board = NSPasteboard.general
-            board.clearContents()
-            board.setData(pdfData, forType: .pdf)
-            self?.showCaptureToast("Captured - Cmd+Shift+V to paste in place")
-        }
         pdfView.onRegionCaptured = { [weak self] page, rectInPage in
             guard let self else { return }
             if self.autoNameCapturePhase != nil {
@@ -855,9 +716,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 self.handleAutoLinkRegionCaptured(on: page, rectInPage: rectInPage)
             }
         }
-        pdfView.shouldBeginMarkupInteraction = { [weak self] in
-            self?.ensureWorkingCopyBeforeFirstMarkup() ?? true
-        }
+        pdfView.shouldBeginMarkupInteraction = { false }
         pdfView.layer?.addSublayer(selectedMarkupOverlayLayer)
         pdfView.layer?.addSublayer(selectedTextOverlayLayer)
         pdfView.layer?.addSublayer(selectedLineEndpointHaloLayer)
@@ -1052,7 +911,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         addPageButton.setContentHuggingPriority(.required, for: .horizontal)
         addPageButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        let pagesControlRow = NSStackView(views: [navigationModeControl, NSView(), addPageButton])
+        let pagesControlRow = NSStackView(views: [navigationModeControl, NSView()])
         pagesControlRow.orientation = .horizontal
         pagesControlRow.spacing = 6
         pagesControlRow.alignment = .centerY
@@ -1082,10 +941,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let renamePageItem = NSMenuItem(title: "Rename Page Label…", action: #selector(renamePageLabelFromSidebar), keyEquivalent: "")
         renamePageItem.target = self
         pagesContextMenu.addItem(renamePageItem)
-        pagesContextMenu.addItem(NSMenuItem.separator())
-        let deletePagesItem = NSMenuItem(title: "Delete Page(s)…", action: #selector(deletePagesFromSidebar), keyEquivalent: "")
-        deletePagesItem.target = self
-        pagesContextMenu.addItem(deletePagesItem)
         pagesTableView.menu = pagesContextMenu
 
         thumbnailScrollView.borderType = .noBorder
@@ -1198,11 +1053,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         thumbnailsEmptyLabel.isHidden = !showingPages || (pdfView.document != nil)
         bookmarksScrollView.isHidden = showingPages
         bookmarksEmptyLabel.isHidden = showingPages || !(bookmarksOutlineView.numberOfRows == 0)
-        addPageButton.isHidden = !showingPages
-        addPageButton.isEnabled = showingPages && (pdfView.document != nil)
+        addPageButton.isHidden = true
+        addPageButton.isEnabled = false
     }
 
     @objc private func addPageFromNavigation() {
+        guard ToolMode.allowsMarkupEditing else { return }
         guard ensureWorkingCopyBeforeFirstMarkup() else { return }
         guard let document = pdfView.document else { beep(); return }
         guard let targetSize = preferredPageSizeForInsertion(in: document) else {
@@ -1567,6 +1423,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc private func deletePagesFromSidebar() {
+        guard ToolMode.allowsMarkupEditing else { return }
         guard ensureWorkingCopyBeforeFirstMarkup() else { return }
         guard let document = pdfView.document else {
             beep()
@@ -1766,26 +1623,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         actionsPopup.addItem(withTitle: "")
 
         let menu = NSMenu(title: "Actions")
-        menu.addItem(withTitle: highlightButton.title, action: highlightButton.action, keyEquivalent: "h")
-        menu.item(at: menu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command, .shift]
-        menu.addItem(withTitle: exportButton.title, action: exportButton.action, keyEquivalent: "S")
-        menu.item(at: menu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command, .shift]
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(withTitle: refreshMarkupsButton.title, action: refreshMarkupsButton.action, keyEquivalent: "r")
-        menu.item(at: menu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command]
-        menu.addItem(withTitle: deleteMarkupButton.title, action: deleteMarkupButton.action, keyEquivalent: "\u{8}")
-        menu.item(at: menu.numberOfItems - 1)?.keyEquivalentModifierMask = []
-        menu.addItem(withTitle: editMarkupButton.title, action: editMarkupButton.action, keyEquivalent: "e")
-        menu.item(at: menu.numberOfItems - 1)?.keyEquivalentModifierMask = [.command]
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(withTitle: "Bring to Front", action: #selector(commandBringMarkupToFront(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Send to Back", action: #selector(commandSendMarkupToBack(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Bring Forward", action: #selector(commandBringMarkupForward(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Send Backward", action: #selector(commandSendMarkupBackward(_:)), keyEquivalent: "")
-
-        for item in menu.items {
-            item.target = self
-        }
+        // The only authoring actions available in this app are bookmarks and links.
+        menu.addItem(withTitle: "Auto-Generate Sheet Names/Bookmarks…", action: #selector(commandAutoGenerateSheetNames(_:)), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Batch Link Sheet Numbers…", action: #selector(commandBatchLinkSheetNumbers(_:)), keyEquivalent: "").target = self
         actionsPopup.menu = menu
     }
 
@@ -1793,7 +1633,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         statusBar.wantsLayer = true
         statusBar.layer?.backgroundColor = panelBackgroundColor.cgColor
 
-        let labels = [statusPageSizeLabel, statusPageLabel, statusZoomLabel, statusScaleLabel]
+        let labels = [statusPageSizeLabel, statusPageLabel, statusZoomLabel]
         labels.forEach {
             $0.font = NSFont.systemFont(ofSize: 11, weight: .regular)
             $0.textColor = .secondaryLabelColor
@@ -2015,12 +1855,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         emptyStateSampleButton.bezelStyle = .texturedRounded
         emptyStateBatchMobileButton.bezelStyle = .texturedRounded
 
-        let actions = NSStackView(views: [emptyStateOpenButton, emptyStateRecentButton, emptyStateSampleButton])
+        let actions = NSStackView(views: [emptyStateOpenButton, emptyStateRecentButton])
         actions.orientation = .horizontal
         actions.spacing = 8
         actions.alignment = .centerY
 
-        let stack = NSStackView(views: [emptyStateTitle, actions, emptyStateBatchMobileButton])
+        let stack = NSStackView(views: [emptyStateTitle, actions])
         stack.orientation = .vertical
         stack.spacing = 10
         stack.alignment = .centerX
@@ -2148,12 +1988,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             toolbarControlsStack.addArrangedSubview(openButton)
             toolbarControlsStack.addArrangedSubview(autoNameSheetsButton)
             toolbarControlsStack.addArrangedSubview(batchLinkSheetsButton)
-            toolbarControlsStack.addArrangedSubview(flattenPDFButton)
-            toolbarControlsStack.addArrangedSubview(reduceFileSizeButton)
-            toolbarControlsStack.addArrangedSubview(toolbarModeGroupsStack)
         }
 
-        toolbarSearchField.placeholderString = "Search document + markups"
+        toolbarSearchField.placeholderString = "Search PDF text"
         toolbarSearchField.sendsWholeSearchString = false
         toolbarSearchField.maximumRecents = 0
         toolbarSearchField.recentsAutosaveName = nil
@@ -2612,7 +2449,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             toolbarToolButtons[mode]?.toolTip = "\(title) (\(shortcut))"
         }
 
-        gridToggleButton.toolTip = "Show/Hide Grid (\(shortcutDisplayString(for: .toggleGrid)))"
     }
 
     private func symbolImage(
@@ -2809,11 +2645,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.drawbridgePrimaryControls, .drawbridgeSecondaryControls, .flexibleSpace, .space]
+        [.drawbridgePrimaryControls, .flexibleSpace, .space]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.drawbridgePrimaryControls, .flexibleSpace, .drawbridgeSecondaryControls]
+        [.drawbridgePrimaryControls, .flexibleSpace]
     }
 
     func toolbar(
@@ -2823,13 +2659,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     ) -> NSToolbarItem? {
         let item = NSToolbarItem(itemIdentifier: itemIdentifier)
         if itemIdentifier == .drawbridgePrimaryControls {
-            item.label = "Tools"
+            item.label = "Bookmarks and Hyperlinks"
             item.view = toolbarControlsStack
-            return item
-        }
-        if itemIdentifier == .drawbridgeSecondaryControls {
-            item.label = "Takeoff"
-            item.view = secondaryToolbarControlsStack
             return item
         }
         return nil
@@ -3300,6 +3131,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func pasteGrabSnapshotInPlace() {
+        guard ToolMode.allowsMarkupEditing else { return }
         guard ensureWorkingCopyBeforeFirstMarkup() else { return }
         guard let pdfData = grabClipboardPDFData,
               let sourceRect = grabClipboardPageRect,
@@ -3321,7 +3153,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         registerAnnotationPresenceUndo(page: page, annotation: annotation, shouldExist: false, actionName: "Paste Grab Snapshot")
         markPageMarkupCacheDirty(page)
         markMarkupChanged()
-        applySnapshotLayerVisibility()
         setTool(.select)
         lastDirectlySelectedAnnotation = annotation
         markupsTable.deselectAll(nil)
@@ -3506,6 +3337,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc func highlightSelection() {
+        guard ToolMode.allowsMarkupEditing else { return }
         guard ensureWorkingCopyBeforeFirstMarkup() else { return }
         pdfView.addHighlightForCurrentSelection()
         refreshMarkups()
@@ -3513,6 +3345,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc func underlineSelection() {
+        guard ToolMode.allowsMarkupEditing else { return }
         guard ensureWorkingCopyBeforeFirstMarkup() else { return }
         pdfView.addUnderlineForCurrentSelection()
         refreshMarkups()
@@ -3520,6 +3353,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc func strikethroughSelection() {
+        guard ToolMode.allowsMarkupEditing else { return }
         guard ensureWorkingCopyBeforeFirstMarkup() else { return }
         pdfView.addStrikethroughForCurrentSelection()
         refreshMarkups()
@@ -3619,6 +3453,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func pasteCopiedMarkupsFromPasteboard() {
+        guard ToolMode.allowsMarkupEditing else { return }
         guard let document = pdfView.document else { beep(); return }
         guard ensureWorkingCopyBeforeFirstMarkup() else { return }
         guard let payload = decodeMarkupClipboardPayloadFromPasteboard() else {
@@ -5389,9 +5224,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pageLabelOverrides.removeAll()
         hasPromptedForInitialMarkupSaveCopy = false
         isPresentingInitialMarkupSaveCopyPrompt = false
-        let annotationOptimization = optimizeDocumentAnnotationsIfNeeded(in: document)
         loadSidecarSnapshotIfAvailable(for: url, document: document)
-        applySnapshotLayerVisibility()
         openDocumentURL = url
         registerSessionDocument(url)
         configureAutosaveURL(for: url)
@@ -5412,99 +5245,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             extra: [
                 "result": "ok",
                 "pages": "\(document.pageCount)",
-                "cached_markups": "\(totalCachedAnnotationCount())",
-                "rehydrated_images": "\(annotationOptimization.rehydratedImages)",
-                "rehydrated_snapshots": "\(annotationOptimization.rehydratedSnapshots)",
-                "normalized_fonts": "\(annotationOptimization.normalizedFonts)",
-                "repaired_ink_paths": "\(annotationOptimization.repairedInkPaths)"
+                "cached_markups": "\(totalCachedAnnotationCount())"
             ]
         )
-    }
-
-    private func optimizeDocumentAnnotationsIfNeeded(in document: PDFDocument) -> (
-        rehydratedImages: Int,
-        rehydratedSnapshots: Int,
-        normalizedFonts: Int,
-        repairedInkPaths: Int
-    ) {
-        var rehydratedImages = 0
-        var rehydratedSnapshots = 0
-        var normalizedFonts = 0
-        var repairedInkPaths = 0
-        for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex) else { continue }
-            for original in page.annotations {
-                var annotation = original
-                if let contents = original.contents {
-                    if !(original is ImageMarkupAnnotation),
-                       contents.hasPrefix(ImageMarkupAnnotation.contentsPrefix) {
-                        let replacement = ImageMarkupAnnotation(
-                            bounds: original.bounds,
-                            imageURL: URL(fileURLWithPath: String(contents.dropFirst(ImageMarkupAnnotation.contentsPrefix.count))),
-                            contents: contents
-                        )
-                        replacement.border = original.border
-                        replacement.color = original.color
-                        replacement.shouldDisplay = original.shouldDisplay
-                        replacement.shouldPrint = original.shouldPrint
-                        page.removeAnnotation(original)
-                        page.addAnnotation(replacement)
-                        annotation = replacement
-                        rehydratedImages += 1
-                    } else if !(original is PDFSnapshotAnnotation),
-                              contents.hasPrefix(PDFSnapshotAnnotation.contentsPrefix) {
-                        let replacement = PDFSnapshotAnnotation(
-                            bounds: original.bounds,
-                            snapshotURL: URL(fileURLWithPath: String(contents.dropFirst(PDFSnapshotAnnotation.contentsPrefix.count))),
-                            contents: contents
-                        )
-                        replacement.border = original.border
-                        replacement.color = original.color
-                        replacement.shouldDisplay = original.shouldDisplay
-                        replacement.shouldPrint = original.shouldPrint
-                        page.removeAnnotation(original)
-                        page.addAnnotation(replacement)
-                        annotation = replacement
-                        rehydratedSnapshots += 1
-                    }
-                }
-
-                let type = (annotation.type ?? "").lowercased()
-                if type.contains("link") || annotation.destination != nil || annotation.action != nil {
-                    if let border = annotation.border, border.lineWidth > 0 {
-                        border.lineWidth = 0
-                        annotation.border = border
-                    }
-                }
-                if type.contains("freetext") {
-                    let size = max(6.0, annotation.font?.pointSize ?? 15.0)
-                    let currentName = annotation.font?.fontName ?? ""
-                    let currentSize = annotation.font?.pointSize ?? -1
-                    if abs(currentSize - size) > 0.01 || !currentName.contains("SF") {
-                        annotation.font = resolveFont(family: "San Francisco", size: size)
-                        normalizedFonts += 1
-                    }
-                    // Legacy cleanup: older builds stored textbox background in interiorColor.
-                    // Current rendering uses color, so normalize to avoid black-filled boxes.
-                    if let legacyBackground = annotation.interiorColor {
-                        annotation.color = legacyBackground
-                        annotation.interiorColor = nil
-                        normalizedFonts += 1
-                    }
-                }
-                if type.contains("ink"),
-                   let target = annotation.border?.lineWidth,
-                   target > 0,
-                   let paths = annotation.paths,
-                   !paths.isEmpty {
-                    for path in paths where abs(path.lineWidth - target) > 0.01 {
-                        path.lineWidth = target
-                        repairedInkPaths += 1
-                    }
-                }
-            }
-        }
-        return (rehydratedImages, rehydratedSnapshots, normalizedFonts, repairedInkPaths)
     }
 
     private func presentDroppedImageScaleDialog(page: PDFPage, annotation: PDFAnnotation, baseBounds: NSRect) {

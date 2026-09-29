@@ -4,6 +4,7 @@ import PDFKit
 @MainActor
 extension MainViewController {
     @objc func applySelectedMarkupsToPages() {
+        guard ToolMode.allowsMarkupEditing else { return }
         guard let document = pdfView.document else { beep(); return }
         let sourceRecords = makeSelectedMarkupClipboardRecords(in: document)
         guard !sourceRecords.isEmpty else {
@@ -113,6 +114,7 @@ extension MainViewController {
     }
 
     @objc func deleteSelectedMarkup() {
+        guard ToolMode.allowsMarkupEditing else { return }
         let selectedRows = markupsTable.selectedRowIndexes
         var annotationsToDelete: [(page: PDFPage, annotation: PDFAnnotation)] = []
         var seen = Set<ObjectIdentifier>()
@@ -186,6 +188,7 @@ extension MainViewController {
     }
 
     @objc func editSelectedMarkupText() {
+        guard ToolMode.allowsMarkupEditing else { return }
         let row = markupsTable.selectedRow
         guard guardOrBeep(row >= 0 && row < markupItems.count) else { return }
 
@@ -308,6 +311,7 @@ extension MainViewController {
     }
 
     func reorderSelectedMarkups(_ action: AnnotationReorderAction) {
+        guard ToolMode.allowsMarkupEditing else { return }
         guard let document = pdfView.document else { beep(); return }
         let selectedItems = currentSelectedMarkupItems()
         guard guardOrBeep(!selectedItems.isEmpty) else { return }

@@ -16,7 +16,7 @@ extension MainViewController {
 
     private func showSearchNoResultsFeedback() {
         toolbarSearchCountLabel.stringValue = "No results"
-        toolbarSearchCountLabel.toolTip = "No matches found in document text or markups."
+        toolbarSearchCountLabel.toolTip = "No matches found in document text."
         NSSound.beep()
     }
 
@@ -127,26 +127,8 @@ extension MainViewController {
             return
         }
 
-        let loweredQuery = query.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         var hits: [SearchHit] = []
         hits.reserveCapacity(256)
-        var markupHitCount = 0
-
-        // Markup-text search: fast pass through annotation contents across the full PDF.
-        for pageIndex in 0..<document.pageCount {
-            let annotations = annotationsForPageIndex(pageIndex, in: document)
-            for annotation in annotations {
-                let normalized = searchableAnnotationText(for: annotation, pageIndex: pageIndex)
-                guard normalized.contains(loweredQuery) else { continue }
-                let raw = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let raw, !raw.isEmpty else { continue }
-                hits.append(.markup(pageIndex: pageIndex, annotation: annotation, preview: raw))
-                markupHitCount += 1
-                if hits.count >= 2500 { break }
-            }
-            if hits.count >= 2500 { break }
-        }
-
         // Document-text search: iterate PDFKit selections with cap for responsiveness.
         let options: NSString.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
         var cursor: PDFSelection?
@@ -182,7 +164,6 @@ extension MainViewController {
             extra: [
                 "result": "ok",
                 "hits": "\(hits.count)",
-                "markup_hits": "\(markupHitCount)",
                 "text_hits": "\(textHitCount)",
                 "pages": "\(document.pageCount)"
             ]
@@ -235,7 +216,6 @@ extension MainViewController {
             if let page = pdfView.document?.page(at: pageIndex) {
                 let destination = PDFDestination(page: page, at: NSPoint(x: annotation.bounds.minX, y: annotation.bounds.maxY))
                 pdfView.navigateToDestinationWithHistory(destination)
-                selectMarkupFromPageClick(page: page, annotation: annotation, additive: false)
             }
             updateSearchControlsState(overridePreview: preview)
         }

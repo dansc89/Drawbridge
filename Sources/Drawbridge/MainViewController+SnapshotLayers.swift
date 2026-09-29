@@ -239,6 +239,7 @@ extension MainViewController {
     }
 
     func applySnapshotLayerVisibility() {
+        guard ToolMode.allowsMarkupEditing else { return }
         guard let document = pdfView.document else { return }
         ensureLayerVisibilityDefaults()
         var hidSelectedSnapshot = false
