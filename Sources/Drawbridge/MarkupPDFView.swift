@@ -4722,18 +4722,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func centerWholePageInViewport(_ page: PDFPage) {
-        guard let clipView = contentClipView else { return }
-        let pageBounds = page.bounds(for: displayBox)
-        let pageCenter = NSPoint(x: pageBounds.midX, y: pageBounds.midY)
-        let viewportCenterInWindow = clipView.convert(
-            NSPoint(x: clipView.bounds.midX, y: clipView.bounds.midY),
-            to: nil
+        guard let clipView = contentClipView,
+              let documentView else { return }
+        let pageRectInPDFView = convert(page.bounds(for: displayBox), from: page).standardized
+        let pageRectInDocumentView = documentView.convert(pageRectInPDFView, from: self).standardized
+        let centeredOrigin = NSPoint(
+            x: pageRectInDocumentView.midX - clipView.bounds.width * 0.5,
+            y: pageRectInDocumentView.midY - clipView.bounds.height * 0.5
         )
-        correctZoomAnchor(
-            page: page,
-            pagePoint: pageCenter,
-            desiredWindowPoint: viewportCenterInWindow
-        )
+        scrollContentClipView(to: centeredOrigin)
     }
 
     private func scheduleWholePageFitCorrection(
