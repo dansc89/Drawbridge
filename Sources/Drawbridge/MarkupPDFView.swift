@@ -4658,19 +4658,69 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return
         }
         if fitWholePage {
-            navigateToPageWithHistory(page)
-            autoScales = true
-            let fit = scaleFactorForSizeToFit
-            if fit > 0 {
-                scaleFactor = fit
-                autoScales = false
-            }
+            navigateToPageFittingWholePageWithHistory(page)
             return
         }
         if let destination {
             navigateToDestinationWithHistory(destination)
         } else {
             navigateToPageWithHistory(page)
+        }
+    }
+
+    /// Navigates to a page and fits its complete crop box in the viewport.
+    ///
+    /// PDFKit can report `scaleFactorForSizeToFit` using the previous page's
+    /// layout immediately after a page change. Let automatic scaling establish
+    /// the target page first, then lock in and reassert the target page's fit
+    /// scale over the next layout passes.
+    func navigateToPageFittingWholePageWithHistory(_ page: PDFPage) {
+        if !applyingHistoryNavigation {
+            pushBackHistoryCurrentLocation()
+            navigationForwardStack.removeAll(keepingCapacity: true)
+        }
+
+        zoomAnchorGeneration &+= 1
+        let generation = zoomAnchorGeneration
+        autoScales = true
+        go(to: page)
+        forceZoomLayout()
+        applyWholePageFit(page)
+        scheduleWholePageFitCorrection(page: page, generation: generation, remainingPasses: 3)
+        onViewportChanged?()
+    }
+
+    private func applyWholePageFit(_ page: PDFPage) {
+        guard currentPage === page else { return }
+        forceZoomLayout()
+        let fitScale = scaleFactorForSizeToFit
+        guard fitScale.isFinite, fitScale > 0 else { return }
+        autoScales = false
+        scaleFactor = min(max(minScaleFactor, fitScale), maxScaleFactor)
+        forceZoomLayout()
+        // PDFView centers the complete crop box for page navigation at the
+        // fitted scale. A point destination would instead retain a local zoom.
+        go(to: page)
+    }
+
+    private func scheduleWholePageFitCorrection(
+        page: PDFPage,
+        generation: UInt,
+        remainingPasses: Int
+    ) {
+        guard remainingPasses > 0 else { return }
+        DispatchQueue.main.async { [weak self, weak page] in
+            guard let self,
+                  let page,
+                  self.zoomAnchorGeneration == generation,
+                  self.currentPage === page else { return }
+            self.applyWholePageFit(page)
+            self.scheduleWholePageFitCorrection(
+                page: page,
+                generation: generation,
+                remainingPasses: remainingPasses - 1
+            )
+            self.onViewportChanged?()
         }
     }
 

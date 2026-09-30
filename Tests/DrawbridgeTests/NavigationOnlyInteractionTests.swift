@@ -77,6 +77,30 @@ final class NavigationOnlyInteractionTests: XCTestCase {
         XCTAssertEqual(page.rotation, 90)
     }
 
+    func testGeneratedLinkFitsCompleteTargetPageAfterNavigation() throws {
+        let (window, view, page) = try makeView(rotation: 0)
+        let target = try makePage()
+        target.setBounds(NSRect(x: 110, y: 70, width: 360, height: 1_000), for: .cropBox)
+        target.rotation = 90
+        view.document?.insert(target, at: 1)
+        view.autoScales = false
+        view.scaleFactor = 2.4
+
+        let link = PDFAnnotation(bounds: NSRect(x: 160, y: 160, width: 100, height: 60), forType: .link, withProperties: nil)
+        link.action = PDFActionGoTo(destination: PDFDestination(page: target, at: NSPoint(x: 250, y: 800)))
+        link.contents = "DrawbridgeAutoSheetLink:1"
+        page.addAnnotation(link)
+
+        view.mouseDown(with: try mouse(.leftMouseDown, pagePoint: NSPoint(x: 200, y: 190), page: page, view: view, window: window))
+        drainMainQueue()
+
+        XCTAssertTrue(view.currentPage === target)
+        XCTAssertEqual(view.scaleFactor, view.scaleFactorForSizeToFit, accuracy: 0.0001)
+        let targetRectInView = view.convert(target.bounds(for: .cropBox), from: target).standardized
+        XCTAssertLessThanOrEqual(targetRectInView.width, view.bounds.width + 1)
+        XCTAssertLessThanOrEqual(targetRectInView.height, view.bounds.height + 1)
+    }
+
     func testLegacyControllerCommandsCannotEditOrPasteAnnotations() throws {
         let controller = MainViewController()
         _ = controller.view
@@ -133,5 +157,9 @@ final class NavigationOnlyInteractionTests: XCTestCase {
     private func mouse(_ type: NSEvent.EventType, pagePoint: NSPoint, page: PDFPage, view: MarkupPDFView, window: NSWindow, clicks: Int = 1) throws -> NSEvent {
         let point = view.convert(view.convert(pagePoint, from: page), to: nil)
         return try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: clicks, pressure: 1))
+    }
+
+    private func drainMainQueue() {
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.08))
     }
 }
