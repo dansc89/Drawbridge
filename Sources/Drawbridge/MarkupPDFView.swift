@@ -4619,7 +4619,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     @discardableResult
     private func followLinkIfPossible(_ annotation: PDFAnnotation) -> Bool {
         let destinationPageIndex = destinationPageIndexFromLinkMetadata(annotation)
-        let shouldFitTargetPage = destinationPageIndex != nil
         if let destinationPageIndex,
            let document,
            destinationPageIndex >= 0,
@@ -4631,23 +4630,42 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         if let destination = annotation.destination,
            let resolved = destinationIfValidInCurrentDocument(destination) {
-            navigateToLinkTarget(page: resolved.page, destination: resolved, fitWholePage: shouldFitTargetPage)
+            navigateToLinkTarget(
+                page: resolved.page,
+                destination: resolved,
+                fitWholePage: destinationPageIndex != nil || destinationRequestsWholePageFit(destination)
+            )
             onViewportChanged?()
             return true
         }
         if let destination = annotation.value(forAnnotationKey: .destination) as? PDFDestination,
            let resolved = destinationIfValidInCurrentDocument(destination) {
-            navigateToLinkTarget(page: resolved.page, destination: resolved, fitWholePage: shouldFitTargetPage)
+            navigateToLinkTarget(
+                page: resolved.page,
+                destination: resolved,
+                fitWholePage: destinationPageIndex != nil || destinationRequestsWholePageFit(destination)
+            )
             onViewportChanged?()
             return true
         }
         if let action = annotation.action as? PDFActionGoTo,
            let resolved = destinationIfValidInCurrentDocument(action.destination) {
-            navigateToLinkTarget(page: resolved.page, destination: resolved, fitWholePage: shouldFitTargetPage)
+            navigateToLinkTarget(
+                page: resolved.page,
+                destination: resolved,
+                fitWholePage: destinationPageIndex != nil || destinationRequestsWholePageFit(action.destination)
+            )
             onViewportChanged?()
             return true
         }
         return false
+    }
+
+    private func destinationRequestsWholePageFit(_ destination: PDFDestination) -> Bool {
+        let unspecified = kPDFDestinationUnspecifiedValue
+        return destination.point.x == unspecified
+            && destination.point.y == unspecified
+            && destination.zoom == unspecified
     }
 
     private func navigateToLinkTarget(page: PDFPage?, destination: PDFDestination?, fitWholePage: Bool) {
@@ -4698,9 +4716,24 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         autoScales = false
         scaleFactor = min(max(minScaleFactor, fitScale), maxScaleFactor)
         forceZoomLayout()
-        // PDFView centers the complete crop box for page navigation at the
-        // fitted scale. A point destination would instead retain a local zoom.
         go(to: page)
+        forceZoomLayout()
+        centerWholePageInViewport(page)
+    }
+
+    private func centerWholePageInViewport(_ page: PDFPage) {
+        guard let clipView = contentClipView else { return }
+        let pageBounds = page.bounds(for: displayBox)
+        let pageCenter = NSPoint(x: pageBounds.midX, y: pageBounds.midY)
+        let viewportCenterInWindow = clipView.convert(
+            NSPoint(x: clipView.bounds.midX, y: clipView.bounds.midY),
+            to: nil
+        )
+        correctZoomAnchor(
+            page: page,
+            pagePoint: pageCenter,
+            desiredWindowPoint: viewportCenterInWindow
+        )
     }
 
     private func scheduleWholePageFitCorrection(

@@ -99,6 +99,32 @@ final class NavigationOnlyInteractionTests: XCTestCase {
         let targetRectInView = view.convert(target.bounds(for: .cropBox), from: target).standardized
         XCTAssertLessThanOrEqual(targetRectInView.width, view.bounds.width + 1)
         XCTAssertLessThanOrEqual(targetRectInView.height, view.bounds.height + 1)
+        XCTAssertEqual(targetRectInView.midX, view.bounds.midX, accuracy: 2)
+        XCTAssertEqual(targetRectInView.midY, view.bounds.midY, accuracy: 2)
+    }
+
+    func testUnmarkedFitDestinationStillFitsCompleteTargetPage() throws {
+        let (window, view, page) = try makeView(rotation: 0)
+        let target = try makePage()
+        target.setBounds(NSRect(x: 90, y: 50, width: 960, height: 620), for: .cropBox)
+        view.document?.insert(target, at: 1)
+        view.autoScales = false
+        view.scaleFactor = 2.4
+
+        let fitDestination = PDFDestination(
+            page: target,
+            at: NSPoint(x: kPDFDestinationUnspecifiedValue, y: kPDFDestinationUnspecifiedValue)
+        )
+        fitDestination.zoom = kPDFDestinationUnspecifiedValue
+        let link = PDFAnnotation(bounds: NSRect(x: 160, y: 160, width: 100, height: 60), forType: .link, withProperties: nil)
+        link.action = PDFActionGoTo(destination: fitDestination)
+        page.addAnnotation(link)
+
+        view.mouseDown(with: try mouse(.leftMouseDown, pagePoint: NSPoint(x: 200, y: 190), page: page, view: view, window: window))
+        drainMainQueue()
+
+        XCTAssertTrue(view.currentPage === target)
+        XCTAssertEqual(view.scaleFactor, view.scaleFactorForSizeToFit, accuracy: 0.0001)
     }
 
     func testLegacyControllerCommandsCannotEditOrPasteAnnotations() throws {
