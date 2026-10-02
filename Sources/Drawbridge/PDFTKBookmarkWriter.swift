@@ -69,7 +69,7 @@ enum PDFTKBookmarkWriter {
         return (attributes[.size] as? NSNumber)?.int64Value ?? 0
     }
 
-    private static func executableURL() -> URL? {
+    static func executableURL() -> URL? {
         var candidates: [String] = []
         candidates.append(Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/qpdf").path)
         // Retained for development builds only. Release bundles ship qpdf inside Drawbridge.
@@ -79,7 +79,7 @@ enum PDFTKBookmarkWriter {
         }
     }
 
-    private static func run(_ executable: URL, arguments: [String]) -> Bool {
+    static func run(_ executable: URL, arguments: [String]) -> Bool {
         let process = Process()
         process.executableURL = executable
         process.arguments = arguments

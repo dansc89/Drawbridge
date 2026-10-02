@@ -95,6 +95,53 @@ final class HyperlinkRegressionTests: XCTestCase {
         XCTAssertEqual(index.targets, ["L2.12": 5])
     }
 
+    func testMalformedCMapRecoveryPreservesMappingsAndLeavesValidMapsAlone() {
+        let mappings = "1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n2 beginbfchar\n<0036> <0053>\n<0015> <0032>\nendbfchar\n"
+        let malformed = "begincmap\n/CMapName /Adobe-Identity-UCS (def)\n/CMapType (2) def\n" + mappings + "endcmap\nend"
+        let normalized = PDFSelectableTextRecovery.normalizedCMap(malformed)
+        XCTAssertTrue(normalized?.contains(mappings) == true)
+        XCTAssertTrue(normalized?.contains("/CMapType 2 def") == true)
+        XCTAssertTrue(normalized?.hasSuffix("end\nend\n") == true)
+        XCTAssertNil(PDFSelectableTextRecovery.normalizedCMap(normalized ?? ""))
+        XCTAssertNil(PDFSelectableTextRecovery.normalizedCMap("not a CMap"))
+    }
+
+    func testArchitecturalMalformedFontMapsRecoverExactIndexReferencesAndSaveS202() throws {
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_ARCHITECTURAL_FIXTURE"] else { throw XCTSkip("Set DRAWBRIDGE_ARCHITECTURAL_FIXTURE") }
+        let source = URL(fileURLWithPath: path)
+        let originalData = try Data(contentsOf: source)
+        let original = try XCTUnwrap(PDFDocument(url: source))
+        let recovered = try XCTUnwrap(PDFSelectableTextRecovery.document(for: source))
+        let index = try XCTUnwrap(recovered.page(at: 0))
+        let controller = MainViewController()
+        let hits = controller.selectableSheetTokenHits(on: index, knownExactTokens: ["S202", "S202A", "S202B", "S202C"])
+        XCTAssertEqual(hits.map(\.token).sorted(), ["S202", "S202A", "S202B", "S202C"])
+        let hit = try XCTUnwrap(hits.first { $0.token == "S202" })
+        let page = try XCTUnwrap(original.page(at: 0))
+        let target = try XCTUnwrap(original.page(at: 21))
+        let link = PDFAnnotation(bounds: hit.bounds, forType: .link, withProperties: nil)
+        link.contents = "DrawbridgeAutoSheetLink:21"
+        link.action = PDFActionGoTo(destination: PDFDestination(page: target, at: .zero))
+        page.addAnnotation(link)
+        let outputPath = ProcessInfo.processInfo.environment["DRAWBRIDGE_ARCHITECTURAL_OUTPUT"] ?? FileManager.default.temporaryDirectory.appendingPathComponent("architectural-s202-verified.pdf").path
+        let output = URL(fileURLWithPath: outputPath)
+        XCTAssertEqual(PDFTKBookmarkWriter.writeNavigation(in: original, sourceURL: source, to: output, pageLabels: [:]), .saved)
+        let saved = try XCTUnwrap(PDFDocument(url: output))
+        let savedLink = try XCTUnwrap(saved.page(at: 0)?.annotations.first { $0.contents == "DrawbridgeAutoSheetLink:21" })
+        let destination = try XCTUnwrap((savedLink.action as? PDFActionGoTo)?.destination.page)
+        XCTAssertEqual(saved.index(for: destination), 21)
+        XCTAssertEqual(try Data(contentsOf: source), originalData)
+        print("Verified exact S202 link to page 22: \(output.path)")
+    }
+
+    func testOrientationRecoveryRequiresOneLiteralIdentifier() {
+        XCTAssertEqual(SheetReferencePolicy.uniqueOCRSheetIdentifier(inOrientationReadings: ["ZOZS", "S202", "S202"]), "S202")
+        XCTAssertNil(SheetReferencePolicy.uniqueOCRSheetIdentifier(inOrientationReadings: ["ZOZS", "5202", "SZOZ"]))
+        XCTAssertNil(SheetReferencePolicy.uniqueOCRSheetIdentifier(inOrientationReadings: ["S202", "S202A"]))
+        XCTAssertNil(SheetReferencePolicy.uniqueOCRSheetIdentifier(inOrientationReadings: ["S202 S203", "22"]))
+        XCTAssertEqual(SheetReferencePolicy.exactReferences(in: "S202\n3RD FLOOR DECK FRAMING PLAN (PODIUM)\nS202A", knownTokens: ["S202", "S202A", "S202B", "S202C"]), ["S202", "S202A"])
+    }
+
     func testExactOCRWhitelistDoesNotGeneralizeReferences() {
         let known: Set<String> = ["A1.12", "G0.10"]
         XCTAssertEqual(SheetReferencePolicy.exactReferences(in: "12 1.12 A112 GO.10 XA1.12 A1.12.0", knownTokens: known), [])

@@ -17,6 +17,14 @@ enum SheetReferencePolicy {
         return tokens.first
     }
 
+    /// Orientation scoring for prose must not discard a literal sheet identifier.
+    /// Conflicting valid readings are ambiguous; never infer a destination.
+    static func uniqueOCRSheetIdentifier(inOrientationReadings readings: [String]) -> String? {
+        let tokens = Set(readings.compactMap { uniqueOCRSheetIdentifier(in: $0) })
+        guard tokens.count == 1 else { return nil }
+        return tokens.first
+    }
+
     static func exactReferences(in text: String, knownTokens: Set<String>) -> [String] {
         let nsText = text as NSString
         return knownTokens.sorted().filter { token in
