@@ -43,8 +43,21 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN_PATH"
           echo "DRAWBRIDGE_CODESIGN_IDENTITY=$APPLE_DEVELOPER_ID_SIGNING_IDENTITY" >> "$GITHUB_ENV"
 
+      - name: Validate hyperlink matching
+        run: swift test --filter HyperlinkRegressionTests
+
       - name: Build app bundle
+        env:
+          DRAWBRIDGE_VERSION_TAG: ${{ github.ref_name }}
+          DRAWBRIDGE_BUILD_NUMBER: "131"
         run: ./Scripts/package-app.sh
+
+      - name: Notarize app before packaging
+        env:
+          DRAWBRIDGE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          DRAWBRIDGE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+          DRAWBRIDGE_NOTARY_APP_PASSWORD: ${{ secrets.APPLE_NOTARY_APP_PASSWORD }}
+        run: ./Scripts/notarize-release.sh dist/Drawbridge.app
 
       - name: Install DMG tooling
         run: brew install create-dmg
@@ -62,7 +75,7 @@ jobs:
           echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
           echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
 
-      - name: Notarize app and DMG
+      - name: Notarize DMG
         env:
           DRAWBRIDGE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
           DRAWBRIDGE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
@@ -72,7 +85,9 @@ jobs:
             echo "Missing notarization secrets (APPLE_NOTARY_APPLE_ID / APPLE_NOTARY_TEAM_ID / APPLE_NOTARY_APP_PASSWORD)."
             exit 1
           fi
-          ./Scripts/notarize-release.sh "dist/Drawbridge.app" "${DMG_PATH}"
+          xcrun notarytool submit "${DMG_PATH}" --apple-id "$DRAWBRIDGE_NOTARY_APPLE_ID" --team-id "$DRAWBRIDGE_NOTARY_TEAM_ID" --password "$DRAWBRIDGE_NOTARY_APP_PASSWORD" --wait
+          xcrun stapler staple "${DMG_PATH}"
+          xcrun stapler validate "${DMG_PATH}"
 
       - name: Rebuild ZIP from stapled app
         run: |

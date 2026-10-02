@@ -6543,29 +6543,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             }
         }
 
-        var sheetTokenToPageIndex: [String: Int] = [:]
-        var canonicalSheetTokenToPageIndex: [String: Int] = [:]
-        var tokenConfidenceByToken: [String: Int] = [:]
-        var tokenConfidenceByCanonical: [String: Int] = [:]
+        var ocrTargets = OCRSheetTargetIndex()
         var zonePageDiagnostics: [BatchLinkZonePageDiagnostic] = []
         let batchStartedAt = Date()
         var stageStartedAt = Date()
-
-        func recordSheetToken(_ token: String, pageIndex: Int, confidence: Int) {
-            let existingTokenConfidence = tokenConfidenceByToken[token] ?? 0
-            if existingTokenConfidence <= confidence {
-                sheetTokenToPageIndex[token] = pageIndex
-                tokenConfidenceByToken[token] = confidence
-            }
-            let canonical = canonicalizeSheetToken(token)
-            if !canonical.isEmpty {
-                let existingCanonicalConfidence = tokenConfidenceByCanonical[canonical] ?? 0
-                if existingCanonicalConfidence <= confidence {
-                    canonicalSheetTokenToPageIndex[canonical] = pageIndex
-                    tokenConfidenceByCanonical[canonical] = confidence
-                }
-            }
-        }
 
         func contextualSubdetail(prefix: String, current: Int, total: Int) -> String {
             let safeTotal = max(1, total)
@@ -6588,31 +6569,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             guard let page = document.page(at: pageIndex) else { continue }
             updateBusyIndicatorProgress(current: pageIndex + 1, total: document.pageCount)
             updateBusyIndicatorDetail("Step 1/3: Reading sheet numbers… \(pageIndex + 1)/\(document.pageCount)")
-            let labelCanonicalTokens = Set(extractSheetTokens(from: page.label ?? "").map(canonicalizeSheetToken))
-            if let labelToken = sheetInfoFromPageLabel(page.label ?? "").number {
-                recordSheetToken(labelToken, pageIndex: pageIndex, confidence: 5)
-                zonePageDiagnostics.append(
-                    BatchLinkZonePageDiagnostic(
-                        pageIndex: pageIndex,
-                        pageLabel: page.label ?? "",
-                        detectedToken: labelToken,
-                        strategy: "page label",
-                        rawTextPreview: truncatedZoneDiagnosticText(page.label ?? ""),
-                        failureReason: nil,
-                        usedFallback: true
-                    )
-                )
-                updateBusyIndicatorSubdetail(
-                    contextualSubdetail(
-                        prefix: "\(sheetTokenToPageIndex.count) found",
-                        current: pageIndex + 1,
-                        total: document.pageCount
-                    )
-                )
-                continue
-            }
-
-            let detected = detectSheetTokenForBatchLink(on: page, normalizedZone: normalizedZone, labelCanonicalTokens: labelCanonicalTokens)
+            let detected = detectSheetTokenForBatchLink(on: page, normalizedZone: normalizedZone)
             guard let token = detected.token else {
                 zonePageDiagnostics.append(
                     BatchLinkZonePageDiagnostic(
@@ -6627,7 +6584,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 )
                 updateBusyIndicatorSubdetail(
                     contextualSubdetail(
-                        prefix: "\(sheetTokenToPageIndex.count) found",
+                        prefix: "\(ocrTargets.targets.count) found",
                         current: pageIndex + 1,
                         total: document.pageCount
                     )
@@ -6647,25 +6604,17 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 )
             )
 
-            let canonical = canonicalizeSheetToken(token)
-            let zoneConfidence = (!canonical.isEmpty && labelCanonicalTokens.contains(canonical)) ? 3 : 2
-            recordSheetToken(token, pageIndex: pageIndex, confidence: zoneConfidence)
+            ocrTargets.record(token, pageIndex: pageIndex)
             updateBusyIndicatorSubdetail(
                 contextualSubdetail(
-                    prefix: "\(sheetTokenToPageIndex.count) found",
+                    prefix: "\(ocrTargets.targets.count) found",
                     current: pageIndex + 1,
                     total: document.pageCount
                 )
             )
         }
 
-        supplementSheetTokenMapFromExistingLabelsAndBookmarks(
-            document: document,
-            sheetTokenToPageIndex: &sheetTokenToPageIndex,
-            canonicalSheetTokenToPageIndex: &canonicalSheetTokenToPageIndex,
-            tokenConfidenceByToken: &tokenConfidenceByToken,
-            tokenConfidenceByCanonical: &tokenConfidenceByCanonical
-        )
+        let sheetTokenToPageIndex = ocrTargets.targets
 
         let zoneDetectedCount = zonePageDiagnostics.reduce(0) { partial, diagnostic in
             partial + (diagnostic.detectedToken == nil ? 0 : 1)
@@ -6736,24 +6685,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         var touchedPageIDs = Set<ObjectIdentifier>()
         typealias LinkTarget = (destination: PDFDestination, targetPageIndex: Int)
         var linkTargetsByToken: [String: LinkTarget] = [:]
-        var linkTargetsByCanonicalToken: [String: LinkTarget] = [:]
         for (sheetToken, targetPageIndex) in sheetTokenToPageIndex.sorted(by: { $0.key < $1.key }) {
-            guard targetPageIndex >= 0,
-                  targetPageIndex < document.pageCount,
-                  let targetPage = document.page(at: targetPageIndex) else { continue }
-            let target: LinkTarget = (bookmarkStyleDestination(for: targetPage), targetPageIndex)
-            linkTargetsByToken[sheetToken] = target
-            let canonical = canonicalizeSheetToken(sheetToken)
-            if !canonical.isEmpty {
-                linkTargetsByCanonicalToken[canonical] = target
-            }
-        }
-        for (canonical, targetPageIndex) in canonicalSheetTokenToPageIndex {
-            guard linkTargetsByCanonicalToken[canonical] == nil,
-                  targetPageIndex >= 0,
-                  targetPageIndex < document.pageCount,
-                  let targetPage = document.page(at: targetPageIndex) else { continue }
-            linkTargetsByCanonicalToken[canonical] = (bookmarkStyleDestination(for: targetPage), targetPageIndex)
+            guard let targetPage = document.page(at: targetPageIndex) else { continue }
+            linkTargetsByToken[sheetToken] = (bookmarkStyleDestination(for: targetPage), targetPageIndex)
         }
 
         var createdBoundsKeys = Set<String>()
@@ -6772,6 +6706,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                     if target.targetPageIndex == sourcePageIndex {
                         continue
                     }
+                    guard selection.numberOfTextRanges(on: page) == 1,
+                          let pageText = page.string,
+                          SheetReferencePolicy.isWholeToken(selection.range(at: 0, on: page), in: pageText as NSString) else { continue }
                     let bounds = selection.bounds(for: page).insetBy(dx: -1.5, dy: -1.0)
                     guard bounds.width > 0.5, bounds.height > 0.5 else { continue }
                     let key = "\(sourcePageIndex):\(sheetToken):\(bounds.origin.x.rounded()):\(bounds.origin.y.rounded()):\(bounds.width.rounded()):\(bounds.height.rounded())"
@@ -6806,10 +6743,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             if page.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
                 scannedPageIndexes.insert(sourcePageIndex)
             }
-            let hits = selectableSheetTokenHits(on: page)
+            let hits = selectableSheetTokenHits(on: page, knownExactTokens: Set(linkTargetsByToken.keys))
             for hit in hits {
-                let canonical = canonicalizeSheetToken(hit.token)
-                let target = linkTargetsByToken[hit.token] ?? linkTargetsByCanonicalToken[canonical]
+                let target = linkTargetsByToken[hit.token.uppercased()]
                 guard let target else { continue }
                 if target.targetPageIndex == sourcePageIndex {
                     continue
@@ -6848,15 +6784,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             }
             let ocrHits = recognizeTextLines(in: page, customWords: ocrCustomWords)
             for hit in ocrHits {
-                let tokens = extractSheetTokens(from: hit.text)
+                let tokens = SheetReferencePolicy.exactReferences(in: hit.text, knownTokens: Set(linkTargetsByToken.keys))
                 guard !tokens.isEmpty else { continue }
                 for token in tokens {
-                    let canonical = canonicalizeSheetToken(token)
-                    let target = linkTargetsByToken[token] ?? linkTargetsByCanonicalToken[canonical]
+                    let target = linkTargetsByToken[token.uppercased()]
                     guard let target else { continue }
                     if target.targetPageIndex == sourcePageIndex {
                         continue
                     }
+                    guard SheetReferencePolicy.isSheetIdentifier(token) else { continue }
                     let expanded = hyperlinkActivationBounds(for: hit.rectInPage, token: token)
                     let key = "\(sourcePageIndex):\(token):\(expanded.origin.x.rounded()):\(expanded.origin.y.rounded()):\(expanded.width.rounded()):\(expanded.height.rounded())"
                     if createdBoundsKeys.contains(key) { continue }
@@ -6994,8 +6930,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func isProtectedAutoSheetLink(_ annotation: PDFAnnotation) -> Bool {
-        let type = (annotation.type ?? "").lowercased()
-        guard type == PDFAnnotationSubtype.link.rawValue.lowercased() else { return false }
+        let type = (annotation.type ?? "").lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard type == "link" else { return false }
         let marker = autoSheetLinkAnnotationMarker
         let rawValues = [annotation.userName, annotation.contents]
         return rawValues.contains { raw in
@@ -7063,11 +6999,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         extractSheetTokens(from: raw).first
     }
 
-    private func sheetInfoFromPageLabel(_ label: String) -> (number: String?, title: String?) {
+    func sheetInfoFromPageLabel(_ label: String) -> (number: String?, title: String?) {
         let cleaned = cleanDetectedSheetText(label)
         guard !cleaned.isEmpty else { return (nil, nil) }
         let tokens = extractSheetTokens(from: cleaned)
-        guard let number = preferredSheetToken(from: tokens) else { return (nil, nil) }
+        guard let number = preferredSheetToken(from: tokens.filter(SheetReferencePolicy.isSheetIdentifier)) else { return (nil, nil) }
 
         var title = cleaned
         let escapedNumber = NSRegularExpression.escapedPattern(for: number)
@@ -7112,59 +7048,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     private func detectSheetTokenForBatchLink(
         on page: PDFPage,
-        normalizedZone: NormalizedPageRect,
-        labelCanonicalTokens: Set<String>
+        normalizedZone: NormalizedPageRect
     ) -> (token: String?, strategy: String, rawTextPreview: String, failureReason: String?, usedFallback: Bool) {
-        let detected = detectSheetTokensInCapturedZone(on: page, normalizedZone: normalizedZone)
-        if let detectedResult = detected.result {
-            let token = preferredSheetToken(
-                from: Array(Set(detectedResult.tokens)),
-                labelCanonicalTokens: labelCanonicalTokens
-            )
-            if let token {
-                return (
-                    token,
-                    detectedResult.strategy,
-                    truncatedZoneDiagnosticText(detectedResult.rawText),
-                    nil,
-                    detectedResult.usedFallback
-                )
-            }
+        // Read only rendered pixels in the user-selected sheet-number region.
+        // Never fall back to PDF text, page ordinals, labels, or bookmark titles.
+        let rect = denormalize(rect: normalizedZone, for: page)
+        guard let image = renderCroppedImage(from: page, rectInPage: rect) else {
+            return (nil, "captured zone OCR", "", "Could not render the captured region.", false)
         }
-
-        let numRect = denormalize(rect: normalizedZone, for: page)
-        let expandedNumRect = numRect
-            .insetBy(dx: -max(numRect.width * 0.20, 10.0), dy: -max(numRect.height * 0.50, 8.0))
-            .intersection(page.bounds(for: pdfView.displayBox))
-        let expandedText = extractText(from: page, rectInPage: expandedNumRect, allowOCR: true, preferOCR: true)
-        let expandedTokens = extractSheetTokens(from: expandedText)
-        if let token = preferredSheetToken(from: expandedTokens, labelCanonicalTokens: labelCanonicalTokens) {
-            return (
-                token,
-                "expanded zone + OCR",
-                truncatedZoneDiagnosticText(expandedText),
-                nil,
-                true
-            )
-        }
-
-        if let anchored = detectAnchoredSheetNumber(on: page, expectedRect: numRect, labelCanonicalTokens: labelCanonicalTokens) {
-            return (
-                anchored,
-                "anchored SHEET NO OCR",
-                "",
-                nil,
-                true
-            )
-        }
-
-        return (
-            nil,
-            detected.result?.strategy ?? "none",
-            detected.rawTextPreview.isEmpty ? truncatedZoneDiagnosticText(expandedText) : detected.rawTextPreview,
-            detected.failureReason ?? "No valid sheet token detected from page label, captured zone, or anchored OCR.",
-            true
-        )
+        let raw = recognizeText(in: image)
+        let token = SheetReferencePolicy.uniqueOCRSheetIdentifier(in: raw)
+        return (token, "captured zone OCR", truncatedZoneDiagnosticText(raw),
+                token == nil ? "OCR did not read one unambiguous full sheet number in the captured region." : nil, false)
     }
 
     private func detectAutoNameSheetTitle(on page: PDFPage, primaryRect: NSRect) -> String {
@@ -7381,7 +7276,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return deduped
     }
 
-    private func canonicalizeSheetToken(_ token: String) -> String {
+    func canonicalizeSheetToken(_ token: String) -> String {
         let upper = token.uppercased()
         var canonical = upper.unicodeScalars
             .filter { CharacterSet.alphanumerics.contains($0) }
@@ -7509,63 +7404,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             .first
     }
 
-    private func supplementSheetTokenMapFromExistingLabelsAndBookmarks(
-        document: PDFDocument,
-        sheetTokenToPageIndex: inout [String: Int],
-        canonicalSheetTokenToPageIndex: inout [String: Int],
-        tokenConfidenceByToken: inout [String: Int],
-        tokenConfidenceByCanonical: inout [String: Int]
-    ) {
-        func preferredSupplementToken(from label: String) -> String? {
-            let cleaned = cleanDetectedSheetText(label)
-            guard !cleaned.isEmpty else { return nil }
-            if let pageLabelNumber = sheetInfoFromPageLabel(cleaned).number {
-                return pageLabelNumber
-            }
-            return preferredSheetToken(from: extractSheetTokens(from: cleaned))
-        }
-
-        func recordSupplementToken(_ token: String, pageIndex: Int, confidence: Int) {
-            let existingTokenConfidence = tokenConfidenceByToken[token] ?? 0
-            if existingTokenConfidence <= confidence {
-                sheetTokenToPageIndex[token] = pageIndex
-                tokenConfidenceByToken[token] = confidence
-            }
-
-            let canonical = canonicalizeSheetToken(token)
-            guard !canonical.isEmpty else { return }
-            let existingCanonicalConfidence = tokenConfidenceByCanonical[canonical] ?? 0
-            if existingCanonicalConfidence <= confidence {
-                canonicalSheetTokenToPageIndex[canonical] = pageIndex
-                tokenConfidenceByCanonical[canonical] = confidence
-            }
-        }
-
-        for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex),
-                  let token = preferredSupplementToken(from: page.label ?? "")
-            else { continue }
-            recordSupplementToken(token, pageIndex: pageIndex, confidence: 4)
-        }
-
-        func walkOutline(_ outline: PDFOutline?) {
-            guard let outline else { return }
-            if let pageIndex = destinationPageIndex(for: outline),
-               pageIndex >= 0,
-               pageIndex < document.pageCount,
-               let token = preferredSupplementToken(from: outline.label ?? "") {
-                recordSupplementToken(token, pageIndex: pageIndex, confidence: 3)
-            }
-            guard outline.numberOfChildren > 0 else { return }
-            for childIndex in 0..<outline.numberOfChildren {
-                walkOutline(outline.child(at: childIndex))
-            }
-        }
-
-        walkOutline(document.outlineRoot)
-    }
-
-    private func selectableSheetTokenHits(on page: PDFPage) -> [(token: String, bounds: NSRect)] {
+    func selectableSheetTokenHits(on page: PDFPage, knownCanonicalTokens: Set<String>? = nil, knownExactTokens: Set<String>? = nil) -> [(token: String, bounds: NSRect)] {
         guard let pageText = page.string, !pageText.isEmpty else { return [] }
         let nsText = pageText as NSString
         guard let regex = try? NSRegularExpression(pattern: #"[A-Za-z0-9][A-Za-z0-9._\-]{1,}"#) else { return [] }
@@ -7577,10 +7416,21 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         var seen = Set<String>()
         for match in matches {
             let rawCandidate = nsText.substring(with: match.range)
-            let tokens = extractSheetTokens(from: rawCandidate)
+            // Avoid cleaning and selecting every word in large note/specification sheets.
+            guard rawCandidate.rangeOfCharacter(from: .decimalDigits) != nil,
+                  rawCandidate.rangeOfCharacter(from: .letters) != nil else { continue }
+            let literal = rawCandidate.uppercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            let candidates = knownExactTokens != nil
+                ? (SheetReferencePolicy.isSheetIdentifier(literal) ? [literal] : [])
+                : (SheetReferencePolicy.isSheetIdentifier(rawCandidate) ? [rawCandidate.uppercased()] : extractSheetTokens(from: rawCandidate))
+            let tokens = candidates.filter {
+                SheetReferencePolicy.isSheetIdentifier($0)
+                    && (knownCanonicalTokens?.contains(canonicalizeSheetToken($0)) ?? true)
+                    && (knownExactTokens?.contains($0.uppercased()) ?? true)
+            }
             guard !tokens.isEmpty,
                   let selection = page.selection(for: match.range) else { continue }
-            let bounds = selection.bounds(for: page).insetBy(dx: -1.5, dy: -1.0)
+            let bounds = selection.bounds(for: page)
             guard bounds.width > 0.5, bounds.height > 0.5 else { continue }
             for token in tokens {
                 let key = "\(token):\(bounds.origin.x.rounded()):\(bounds.origin.y.rounded()):\(bounds.width.rounded()):\(bounds.height.rounded())"
