@@ -1723,6 +1723,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         busySubdetailLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         busySubdetailLabel.textColor = .secondaryLabelColor
         busySubdetailLabel.stringValue = ""
+        busySubdetailLabel.maximumNumberOfLines = 3
+        busySubdetailLabel.lineBreakMode = .byWordWrapping
+        busySubdetailLabel.preferredMaxLayoutWidth = 390
 
         busyProgressIndicator.style = .bar
         busyProgressIndicator.isIndeterminate = true
@@ -1845,19 +1848,32 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         setBusyCancelAction(nil)
     }
 
+    private func refreshBusyIndicatorDisplay() {
+        busyOverlayView.needsLayout = true
+        busyStatusLabel.needsDisplay = true
+        busyDetailLabel.needsDisplay = true
+        busySubdetailLabel.needsDisplay = true
+        busyProgressIndicator.needsDisplay = true
+        busyOverlayView.layoutSubtreeIfNeeded()
+        view.window?.displayIfNeeded()
+        // OCR runs synchronously. Commit label/progress changes before entering
+        // Vision, rather than leaving the initial message on screen until it ends.
+        CATransaction.flush()
+    }
+
     func updateBusyIndicatorStatus(_ status: String) {
         busyStatusLabel.stringValue = status
-        busyOverlayView.displayIfNeeded()
+        refreshBusyIndicatorDisplay()
     }
 
     func updateBusyIndicatorDetail(_ detail: String) {
         busyDetailLabel.stringValue = detail
-        busyOverlayView.displayIfNeeded()
+        refreshBusyIndicatorDisplay()
     }
 
     func updateBusyIndicatorSubdetail(_ detail: String) {
         busySubdetailLabel.stringValue = detail
-        busyOverlayView.displayIfNeeded()
+        refreshBusyIndicatorDisplay()
     }
 
     func updateBusyIndicatorProgress(current: Int, total: Int) {
@@ -1866,7 +1882,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         busyProgressIndicator.minValue = 0
         busyProgressIndicator.maxValue = Double(total)
         busyProgressIndicator.doubleValue = Double(max(0, min(current, total)))
-        busyOverlayView.displayIfNeeded()
+        refreshBusyIndicatorDisplay()
     }
 
     func setBusyCancelAction(_ handler: (() -> Void)?, title: String = "Cancel", enabled: Bool = true) {
@@ -6554,11 +6570,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             let percent = Int((Double(done) / Double(safeTotal) * 100).rounded())
             let elapsed = shortDuration(Date().timeIntervalSince(batchStartedAt))
             guard done > 0 else {
-                return "\(prefix) • \(done)/\(safeTotal) (\(percent)%) • ETA -- • elapsed \(elapsed)"
+                return "\(prefix)\n\(done)/\(safeTotal) completed • \(percent)% • \(elapsed) elapsed"
             }
             let stageElapsed = Date().timeIntervalSince(stageStartedAt)
             let remaining = stageElapsed * Double(safeTotal - done) / Double(done)
-            return "\(prefix) • \(done)/\(safeTotal) (\(percent)%) • ETA \(shortDuration(remaining)) • elapsed \(elapsed)"
+            return "\(prefix)\n\(done)/\(safeTotal) completed • \(percent)% • \(elapsed) elapsed\nAbout \(shortDuration(remaining)) left in this stage"
         }
 
         updateBusyIndicatorStatus("Batch Linking Sheet Numbers…")
@@ -6567,9 +6583,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         updateBusyIndicatorProgress(current: 0, total: document.pageCount)
         for pageIndex in 0..<document.pageCount {
             guard let page = document.page(at: pageIndex) else { continue }
-            updateBusyIndicatorProgress(current: pageIndex + 1, total: document.pageCount)
-            updateBusyIndicatorDetail("Step 1/3: Reading sheet numbers… \(pageIndex + 1)/\(document.pageCount)")
+            updateBusyIndicatorProgress(current: pageIndex, total: document.pageCount)
+            updateBusyIndicatorDetail("Stage 1 of 3 • Reading page \(pageIndex + 1) of \(document.pageCount)")
             let detected = detectSheetTokenForBatchLink(on: page, normalizedZone: normalizedZone)
+            updateBusyIndicatorProgress(current: pageIndex + 1, total: document.pageCount)
             guard let token = detected.token else {
                 zonePageDiagnostics.append(
                     BatchLinkZonePageDiagnostic(
@@ -6584,7 +6601,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 )
                 updateBusyIndicatorSubdetail(
                     contextualSubdetail(
-                        prefix: "\(ocrTargets.targets.count) found",
+                        prefix: "\(ocrTargets.targets.count) sheet numbers found • \(zonePageDiagnostics.filter { $0.detectedToken == nil }.count) missed",
                         current: pageIndex + 1,
                         total: document.pageCount
                     )
@@ -6607,7 +6624,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             ocrTargets.record(token, pageIndex: pageIndex)
             updateBusyIndicatorSubdetail(
                 contextualSubdetail(
-                    prefix: "\(ocrTargets.targets.count) found",
+                    prefix: "\(ocrTargets.targets.count) sheet numbers found • \(zonePageDiagnostics.filter { $0.detectedToken == nil }.count) missed",
                     current: pageIndex + 1,
                     total: document.pageCount
                 )
@@ -6622,11 +6639,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let zoneFallbackRecoveredCount = zonePageDiagnostics.reduce(0) { partial, diagnostic in
             partial + ((diagnostic.detectedToken != nil && diagnostic.usedFallback) ? 1 : 0)
         }
+        let missedZonePages = zonePageDiagnostics.filter { $0.detectedToken == nil }
+            .map { String($0.pageIndex + 1) }
+        let missedZoneSummary = missedZonePages.isEmpty ? "" : "\nSheet number not detected on page(s): \(missedZonePages.joined(separator: ", "))."
 
         guard !sheetTokenToPageIndex.isEmpty else {
             let response = runAlert(
                 title: "No Sheet Numbers Detected",
-                informativeText: "Could not detect sheet numbers from the captured zone.\n\nZone read: \(zoneDetectedCount)/\(document.pageCount) pages (\(zoneFallbackRecoveredCount) recovered by fallback probes).",
+                informativeText: "Could not detect sheet numbers from the captured zone.\n\nZone read: \(zoneDetectedCount)/\(document.pageCount) pages (\(zoneFallbackRecoveredCount) recovered by fallback probes).\(missedZoneSummary)",
                 style: .warning,
                 buttons: ["OK", "Show Diagnostics"]
             )
@@ -6690,6 +6710,21 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             linkTargetsByToken[sheetToken] = (bookmarkStyleDestination(for: targetPage), targetPageIndex)
         }
 
+        updateBusyIndicatorDetail("Preparing sheet reference text…")
+        let recoveredTextDocument: PDFDocument? = {
+            guard document.page(at: referenceIndex)?.string?.isEmpty != false,
+                  let sourceURL = openDocumentURL ?? document.documentURL,
+                  let recovered = PDFSelectableTextRecovery.document(for: sourceURL),
+                  recovered.pageCount == document.pageCount else { return nil }
+            for index in 0..<document.pageCount {
+                guard let original = document.page(at: index), let copy = recovered.page(at: index),
+                      original.bounds(for: .mediaBox) == copy.bounds(for: .mediaBox),
+                      original.bounds(for: .cropBox) == copy.bounds(for: .cropBox),
+                      original.rotation == copy.rotation else { return nil }
+            }
+            return recovered
+        }()
+
         var createdBoundsKeys = Set<String>()
         let sortedTargets = linkTargetsByToken.sorted(by: { $0.key < $1.key })
         let linkingTargetTotal = max(1, sortedTargets.count)
@@ -6740,10 +6775,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             guard let page = document.page(at: sourcePageIndex) else { continue }
             updateBusyIndicatorProgress(current: sourcePageIndex + 1, total: document.pageCount)
             updateBusyIndicatorDetail("Step 2/3: Scanning selectable text… \(sourcePageIndex + 1)/\(document.pageCount)")
-            if page.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+            let textPage = recoveredTextDocument?.page(at: sourcePageIndex) ?? page
+            if textPage.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
                 scannedPageIndexes.insert(sourcePageIndex)
             }
-            let hits = selectableSheetTokenHits(on: page, knownExactTokens: Set(linkTargetsByToken.keys))
+            let hits = selectableSheetTokenHits(on: textPage, knownExactTokens: Set(linkTargetsByToken.keys))
             for hit in hits {
                 let target = linkTargetsByToken[hit.token.uppercased()]
                 guard let target else { continue }
@@ -6828,7 +6864,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             guard let self else { return }
             let completionResponse = self.runAlert(
                 title: "Batch Link Complete",
-                informativeText: "Detected \(sheetTokenToPageIndex.count) sheet numbers and created \(addedLinks) hyperlink(s) across \(document.pageCount) page(s).\n\nZone read: \(zoneDetectedCount)/\(document.pageCount) pages (\(zoneFallbackRecoveredCount) recovered by fallback probes).",
+                informativeText: "Detected \(sheetTokenToPageIndex.count) sheet numbers and created \(addedLinks) hyperlink(s) across \(document.pageCount) page(s).\n\nZone read: \(zoneDetectedCount)/\(document.pageCount) pages (\(zoneFallbackRecoveredCount) recovered by fallback probes).\(missedZoneSummary)",
                 buttons: ["OK", "Show Diagnostics"]
             )
             if completionResponse == .alertSecondButtonReturn {
@@ -6892,6 +6928,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             }
             if missed.count > 30 {
                 lines.append("... plus \(missed.count - 30) more missed pages.")
+            }
+        }
+
+        if !detected.isEmpty {
+            lines.append("")
+            lines.append("Detected Page Details:")
+            for item in detected {
+                lines.append("\(pageDescriptor(pageIndex: item.pageIndex, pageLabel: item.pageLabel)): \(item.detectedToken ?? "?")")
             }
         }
 
@@ -7057,9 +7101,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return (nil, "captured zone OCR", "", "Could not render the captured region.", false)
         }
         let raw = recognizeText(in: image)
-        let token = SheetReferencePolicy.uniqueOCRSheetIdentifier(in: raw)
-        return (token, "captured zone OCR", truncatedZoneDiagnosticText(raw),
-                token == nil ? "OCR did not read one unambiguous full sheet number in the captured region." : nil, false)
+        if let token = SheetReferencePolicy.uniqueOCRSheetIdentifier(in: raw) {
+            return (token, "captured zone OCR", truncatedZoneDiagnosticText(raw), nil, false)
+        }
+        // The generic reader ranks orientations by prose confidence/length.
+        // A high-scoring upside-down reading can hide a valid sheet number.
+        // Retry the same captured pixels; no labels, bookmarks or substitutions.
+        let readings = [CGImagePropertyOrientation.up, .right, .left, .down].compactMap {
+            recognizeText(in: image, orientation: $0, usesLanguageCorrection: false)?.text
+        }
+        let token = SheetReferencePolicy.uniqueOCRSheetIdentifier(inOrientationReadings: readings)
+        return (token, "captured zone OCR orientation recovery", truncatedZoneDiagnosticText(readings.joined(separator: " | ")),
+                token == nil ? "OCR did not read one unambiguous full sheet number in the captured region." : nil, token != nil)
     }
 
     private func detectAutoNameSheetTitle(on page: PDFPage, primaryRect: NSRect) -> String {
