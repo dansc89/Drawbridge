@@ -33,7 +33,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     struct PDFDocumentBox: @unchecked Sendable {
         let document: PDFDocument
     }
-    private struct NormalizedPageRect {
+    struct NormalizedPageRect {
         let x: CGFloat
         let y: CGFloat
         let width: CGFloat
@@ -7768,41 +7768,23 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         page.bounds(for: pdfView.displayBox).standardized
     }
 
-    private func normalize(rectInPage: NSRect, for page: PDFPage) -> NormalizedPageRect {
-        let bounds = zoneCaptureBounds(for: page)
-        let bounded = rectInPage.standardized.intersection(bounds)
-        guard !bounded.isEmpty else {
+    func normalize(rectInPage: NSRect, for page: PDFPage) -> NormalizedPageRect {
+        // Share captured regions in displayed coordinates, not raw PDF coordinates.
+        // Identical landscape sheets may be stored as portrait pages with /Rotate.
+        let geometry = PDFBookmarkExtractor.Geometry(page: page, box: pdfView.displayBox)
+        let visible = geometry.normalized(rectInPage.standardized)
+        guard !visible.isEmpty else {
             return NormalizedPageRect(x: 0, y: 0, width: 0, height: 0)
         }
-        let safeWidth = max(bounds.width, 1)
-        let safeHeight = max(bounds.height, 1)
-
-        // Anchor to Bottom-Right for architectural stability.
-        // x is distance from RIGHT edge, y is distance from BOTTOM edge.
-        return NormalizedPageRect(
-            x: (bounds.maxX - bounded.maxX) / safeWidth,
-            y: (bounded.minY - bounds.minY) / safeHeight,
-            width: bounded.width / safeWidth,
-            height: bounded.height / safeHeight
-        )
+        return NormalizedPageRect(x: 1 - visible.maxX, y: visible.minY,
+                                  width: visible.width, height: visible.height)
     }
 
-    private func denormalize(rect: NormalizedPageRect, for page: PDFPage) -> NSRect {
-        let bounds = zoneCaptureBounds(for: page)
-        let width = rect.width * bounds.width
-        let height = rect.height * bounds.height
-
-        // Re-calculate based on distance from right and bottom.
-        let maxX = bounds.maxX - (rect.x * bounds.width)
-        let minX = maxX - width
-        let minY = bounds.minY + (rect.y * bounds.height)
-
-        return NSRect(
-            x: minX,
-            y: minY,
-            width: width,
-            height: height
-        )
+    func denormalize(rect: NormalizedPageRect, for page: PDFPage) -> NSRect {
+        let geometry = PDFBookmarkExtractor.Geometry(page: page, box: pdfView.displayBox)
+        let visible = CGRect(x: 1 - rect.x - rect.width, y: rect.y,
+                             width: rect.width, height: rect.height)
+        return geometry.pageRect(visible).standardized
     }
 
     private func zoneDetectionCandidates(for page: PDFPage, normalizedZone: NormalizedPageRect) -> [ZoneDetectionCandidate] {
