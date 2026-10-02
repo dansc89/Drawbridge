@@ -5,6 +5,54 @@ import XCTest
 
 @MainActor
 final class HyperlinkRegressionTests: XCTestCase {
+    func testCapturedZoneUsesVisibleCoordinatesAcrossRotationsAndCropOrigins() throws {
+        let data = NSMutableData()
+        var box = CGRect(x: 0, y: 0, width: 600, height: 800)
+        let consumer = try XCTUnwrap(CGDataConsumer(data: data))
+        let context = try XCTUnwrap(CGContext(consumer: consumer, mediaBox: &box, nil))
+        context.beginPDFPage(nil); context.endPDFPage(); context.closePDF()
+        let document = try XCTUnwrap(PDFDocument(data: data as Data))
+        let page = try XCTUnwrap(document.page(at: 0))
+        page.setBounds(CGRect(x: 20, y: 35, width: 550, height: 720), for: .cropBox)
+        let controller = MainViewController()
+        let visible = CGRect(x: 0.91, y: 0.02, width: 0.065, height: 0.035)
+        for rotation in [0, 90, 180, 270] {
+            page.rotation = rotation
+            let geometry = PDFBookmarkExtractor.Geometry(page: page, box: .cropBox)
+            let raw = geometry.pageRect(visible)
+            let zone = controller.normalize(rectInPage: raw, for: page)
+            XCTAssertEqual(zone.x, 1 - visible.maxX, accuracy: 0.000001)
+            for targetRotation in [0, 90, 180, 270] {
+                page.rotation = targetRotation
+                let target = PDFBookmarkExtractor.Geometry(page: page, box: .cropBox)
+                let mapped = target.normalized(controller.denormalize(rect: zone, for: page))
+                XCTAssertEqual(mapped.minX, visible.minX, accuracy: 0.000001)
+                XCTAssertEqual(mapped.minY, visible.minY, accuracy: 0.000001)
+                XCTAssertEqual(mapped.width, visible.width, accuracy: 0.000001)
+                XCTAssertEqual(mapped.height, visible.height, accuracy: 0.000001)
+            }
+        }
+    }
+
+    func testMechanicalMixedRotationSheetZonesAlign() throws {
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_MECHANICAL_FIXTURE"] else { throw XCTSkip("Set DRAWBRIDGE_MECHANICAL_FIXTURE") }
+        let document = try XCTUnwrap(PDFDocument(url: URL(fileURLWithPath: path)))
+        let reference = try XCTUnwrap(document.page(at: 0))
+        let controller = MainViewController()
+        let visible = CGRect(x: 0.93, y: 0.015, width: 0.055, height: 0.03)
+        let geometry = PDFBookmarkExtractor.Geometry(page: reference, box: .cropBox)
+        let zone = controller.normalize(rectInPage: geometry.pageRect(visible), for: reference)
+        for i in 0..<document.pageCount {
+            let page = try XCTUnwrap(document.page(at: i))
+            let target = PDFBookmarkExtractor.Geometry(page: page, box: .cropBox)
+            let mapped = target.normalized(controller.denormalize(rect: zone, for: page))
+            XCTAssertEqual(mapped.minX, visible.minX, accuracy: 0.000001, "Page \(i + 1)")
+            XCTAssertEqual(mapped.minY, visible.minY, accuracy: 0.000001, "Page \(i + 1)")
+            XCTAssertEqual(mapped.width, visible.width, accuracy: 0.000001)
+            XCTAssertEqual(mapped.height, visible.height, accuracy: 0.000001)
+        }
+    }
+
     func testDefaultPageLabelsCannotBecomeSheetTargets() {
         let controller = MainViewController()
         for label in ["1", "2", "56", "Page 4 - Untitled", "PROJECT INFO"] {
