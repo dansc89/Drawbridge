@@ -42,7 +42,7 @@ enum PDFTKBookmarkWriter {
                 return .unavailable
             }
             try JSONSerialization.data(withJSONObject: json).write(to: jsonURL, options: .atomic)
-            guard run(executable, arguments: [sourceURL.path, "--update-from-json=\(jsonURL.path)", outputURL.path]),
+            guard run(executable, arguments: [sourceURL.path, "--stream-data=preserve", "--update-from-json=\(jsonURL.path)", outputURL.path]),
                   FileManager.default.fileExists(atPath: outputURL.path) else {
                 return .unavailable
             }
@@ -50,13 +50,15 @@ enum PDFTKBookmarkWriter {
             let outputSize = try fileSize(at: outputURL)
             let allowedSize = max(
                 sourceSize + maximumNavigationGrowthBytes,
-                Int64(Double(sourceSize) * maximumNavigationGrowthRatio)
+                max(Int64(Double(sourceSize) * maximumNavigationGrowthRatio),
+                    sourceSize + Int64(generatedLinksByPage(in: document).values.reduce(0) { $0 + $1.count }) * 512)
             )
             guard outputSize <= allowedSize else {
                 return .rejectedSizeGrowth
             }
+            guard outlineMatches(document, writtenURL: outputURL) else { return .unavailable }
             try MainViewController.commitStagedSave(from: outputURL, to: destinationURL)
-            return outlineMatches(document, writtenURL: destinationURL) ? .saved : .unavailable
+            return .saved
         } catch {
             return .unavailable
         }
@@ -101,7 +103,7 @@ enum PDFTKBookmarkWriter {
         pageLabels: [Int: String]
     ) -> Bool {
         guard var qpdf = json["qpdf"] as? [[String: Any]], qpdf.count >= 2,
-              var maxObjectID = qpdf[0]["maxobjectid"] as? Int else {
+              let maxObjectID = qpdf[0]["maxobjectid"] as? Int else {
             return false
         }
         var objects = qpdf[1]
@@ -117,16 +119,16 @@ enum PDFTKBookmarkWriter {
         let pageReferences = pages.compactMap { $0["object"] as? String }
         guard pageReferences.count == document.pageCount else { return false }
 
+        var nextObjectID = maxObjectID + 1
         guard updateGeneratedSheetLinks(
             in: &objects,
             pageReferences: pageReferences,
             document: document,
-            nextObjectID: &maxObjectID
+            nextObjectID: &nextObjectID
         ) else {
             return false
         }
 
-        var nextObjectID = maxObjectID + 1
         let outlineRootID = nextObjectID
         nextObjectID += 1
         let rootReference = "\(outlineRootID) 0 R"
@@ -215,7 +217,7 @@ enum PDFTKBookmarkWriter {
     private static func outlineMatches(_ expected: PDFDocument, writtenURL: URL) -> Bool {
         guard let written = PDFDocument(url: writtenURL) else { return false }
         return written.pageCount == expected.pageCount
-            && written.outlineRoot?.numberOfChildren == expected.outlineRoot?.numberOfChildren
+            && (written.outlineRoot?.numberOfChildren ?? 0) == (expected.outlineRoot?.numberOfChildren ?? 0)
     }
 
     private struct GeneratedLink {
