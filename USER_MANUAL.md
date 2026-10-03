@@ -30,6 +30,14 @@ Click a hyperlink to follow it. Use **View > Show Hyperlink Highlights** to show
 
 Markup, drawing, measurement, snapshot pasting, page-combining, and page-conversion tools are not available. Existing PDF content remains visible; removing the tools does not remove annotations already stored in a PDF.
 
+## Flatten Existing Markups
+
+Click the **Flatten PDF** toolbar button beside the hyperlink button, or choose **File > Flatten PDF…**, to flatten and save the PDF you have open. Flattening makes supported visible consultant markups part of the page content, so those markups cannot be edited individually while flattened. Pending bookmark/link changes are saved first. Drawbridge verifies the flattened result before replacing the file, then reloads it. Completion means the write has finished. The button then changes to **Unflatten PDF**: click it again to restore the original editable annotations and save the same file. Recovery is embedded in PDFs flattened by this version and survives closing/reopening. Bookmark, page-label, and hyperlink changes made in Drawbridge are preserved when unflattening. Older files flattened without recovery data cannot be unflattened. If page content or geometry was changed after flattening, Unflatten stops rather than overwrite those changes.
+
+Drawbridge preserves vector drawing content, page size/crop/rotation, bookmarks, page labels, clickable links, and form fields. Markups with missing or unsupported appearance streams and hidden items remain unchanged; the completion message reports them. Redundant AutoCAD SHX text comments with no appearance and an explicit zero-width border are removed; the actual drawing text remains in the page content. Other unsupported annotations are retained. Flattening does not guarantee a smaller file.
+
+Encrypted PDFs and PDFs with signature fields are not supported. Redaction annotations are retained: this command is not a secure redaction tool.
+
 ## Settings
 
 Use **Drawbridge > Keyboard Shortcuts…** to review shortcuts and **Drawbridge > Performance Settings…** for performance preferences.

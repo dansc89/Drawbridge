@@ -243,56 +243,6 @@ extension MainViewController {
         MeasurementParsing.baseUnitsPerPoint(for: unit)
     }
 
-    func showCalibrationDialog(distanceInPoints: CGFloat) {
-        pendingCalibrationDistanceInPoints = distanceInPoints
-
-        let alert = NSAlert()
-        alert.messageText = "Calibrate Measurement Scale"
-        alert.informativeText = "Enter the real-world distance between the two calibration points."
-        alert.alertStyle = .informational
-
-        let knownDistanceField = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
-        knownDistanceField.placeholderString = "Known distance"
-        knownDistanceField.stringValue = "10"
-
-        let unitPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 100, height: 24), pullsDown: false)
-        unitPopup.addItems(withTitles: ["pt", "in", "ft", "m"])
-        if let current = measurementUnitPopup.titleOfSelectedItem {
-            unitPopup.selectItem(withTitle: current)
-        } else {
-            unitPopup.selectItem(withTitle: "ft")
-        }
-
-        let row = NSStackView(views: [NSTextField(labelWithString: "Distance:"), knownDistanceField, unitPopup])
-        row.orientation = .horizontal
-        row.spacing = 8
-        row.alignment = .centerY
-        alert.accessoryView = row
-        alert.addButton(withTitle: "Apply Calibration")
-        alert.addButton(withTitle: "Cancel")
-
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        let knownDistance = CGFloat(knownDistanceField.doubleValue)
-        let selectedUnit = unitPopup.titleOfSelectedItem ?? "ft"
-        guard knownDistance > 0, let points = pendingCalibrationDistanceInPoints, guardOrBeep(points > 0) else { return }
-
-        let unitsPerPoint = knownDistance / points
-        let base = baseUnitsPerPoint(for: selectedUnit)
-        let scale = unitsPerPoint / base
-
-        recordExplicitScaleSetForCurrentPage()
-        applyMeasurementScaleState(
-            PageScaleLock(unit: selectedUnit, scale: Double(scale)),
-            updateControls: true,
-            updateStatus: true
-        )
-        lockScaleToCurrentPage(PageScaleLock(unit: selectedUnit, scale: Double(scale)))
-        pendingCalibrationDistanceInPoints = nil
-        setTool(.measure)
-    }
-
     private func lockScaleToCurrentPage(_ state: PageScaleLock) {
         armPendingScaleReminderSuppressionForCurrentPage()
         guard let document = pdfView.document,

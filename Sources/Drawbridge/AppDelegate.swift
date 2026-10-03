@@ -141,14 +141,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    @objc private func toggleRestoreLastDocument(_ sender: Any?) {
-        let next = !shouldRestoreLastDocumentOnLaunch()
-        UserDefaults.standard.set(next, forKey: restoreLastDocumentDefaultsKey)
-        if let controller = mainViewController {
-            setupMainMenu(controller: controller)
-        }
-    }
-
     private func recordRecentFile(_ url: URL) {
         let normalized = url.standardizedFileURL
         recentFiles.removeAll { $0.standardizedFileURL == normalized }
@@ -166,13 +158,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func saveRecentFiles() {
         UserDefaults.standard.set(recentFiles.map(\.path), forKey: recentFilesDefaultsKey)
-    }
-
-    private func shouldRestoreLastDocumentOnLaunch() -> Bool {
-        if UserDefaults.standard.object(forKey: restoreLastDocumentDefaultsKey) == nil {
-            return true
-        }
-        return UserDefaults.standard.bool(forKey: restoreLastDocumentDefaultsKey)
     }
 
     private func setupMainMenu(controller: MainViewController) {
@@ -231,6 +216,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let saveCopyItem = fileMenu.addItem(withTitle: "Save As PDF...", action: #selector(MainViewController.commandSaveCopy(_:)), keyEquivalent: "S")
         saveCopyItem.keyEquivalentModifierMask = [.command, .shift]
         saveCopyItem.target = controller
+        fileMenu.addItem(NSMenuItem.separator())
+        fileMenu.addItem(withTitle: "Flatten PDF…", action: #selector(MainViewController.commandFlattenPDF(_:)), keyEquivalent: "").target = controller
         fileItem.submenu = fileMenu
 
         let editItem = NSMenuItem()
