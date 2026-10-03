@@ -282,3 +282,9 @@ Output files:
 - `*.links-fith.pdf`
 - `*.links-fitr.pdf`
 - `*.links-xyz0.pdf`
+
+## Recovered-font hyperlink placement (v3.8)
+
+Recovered AutoCAD text is used only to locate search regions. `VisualSheetReferenceLocator` positions link activation rectangles from exact OCR word bounds in original page pixels. Overlapping regions render once; a missed reference gets a wider isolated crop retry. Destination identifiers remain restricted to literal OCR sheet numbers.
+
+Validation: native app fixture produced and saved all 31 expected references across an 11-page rotated civil PDF. Decoded drawing streams, resource trees, page boxes, and rotations remained unchanged; the saved file did not grow. `CivilLinkBoundsTests` accepts `DRAWBRIDGE_CIVIL_FIXTURE` and `DRAWBRIDGE_RUN_VISION_TESTS=1` in a native Vision-capable environment. Terminal CI skips this fixture test; the native fixture was validated locally before release.
