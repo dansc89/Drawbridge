@@ -12,11 +12,6 @@ extension MainViewController {
         updateStatusBar()
     }
 
-    @discardableResult
-    private func togglePolygonVertexEditModeShortcut() -> Bool {
-        false
-    }
-
     func cancelPendingMarkupInteractions(except preservedMode: ToolMode? = nil) {
         pdfView.cancelPendingMeasurement()
         pdfView.cancelPendingCallout()
@@ -62,22 +57,6 @@ extension MainViewController {
             guard let self else { return event }
             return self.routeKeyDownEvent(event)
         }
-    }
-
-    func installFlagsMonitorIfNeeded() {
-        guard flagsEventMonitor == nil else { return }
-        flagsEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            guard let self else { return event }
-            return self.routeFlagsChangedEvent(event)
-        }
-    }
-
-    func routeFlagsChangedEvent(_ event: NSEvent) -> NSEvent? {
-        guard view.window?.isKeyWindow == true else { return event }
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let optionNowDown = modifiers.contains(.option)
-        defer { isOrthoModifierKeyDown = optionNowDown }
-        return event
     }
 
     func routeKeyDownEvent(_ event: NSEvent) -> NSEvent? {
@@ -201,14 +180,6 @@ extension MainViewController {
 
         if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField {
             return event
-        }
-
-        if modifiers.isDisjoint(with: [.command, .option, .control]),
-           event.charactersIgnoringModifiers?.lowercased() == "a",
-           pdfView.toolMode == .select,
-           togglePolygonVertexEditModeShortcut() {
-            lastUserInteractionAt = Date()
-            return nil
         }
 
         if event.keyCode == 53 {

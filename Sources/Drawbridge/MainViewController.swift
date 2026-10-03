@@ -48,18 +48,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let text: String
         let rectInPage: NSRect
     }
-    private struct ZoneDetectionCandidate {
-        let rectInPage: NSRect
-        let strategy: String
-        let allowOCR: Bool
-        let usedFallback: Bool
-    }
-    private struct ZoneDetectionResult {
-        let tokens: [String]
-        let rawText: String
-        let strategy: String
-        let usedFallback: Bool
-    }
+
     private struct BatchLinkZonePageDiagnostic {
         let pageIndex: Int
         let pageLabel: String
@@ -88,20 +77,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         case sheetNumber
         case sheetTitle
     }
-    struct ToolSettingsState {
-        var strokeColor: NSColor
-        var fillColor: NSColor
-        var outlineColor: NSColor = .clear
-        var opacity: CGFloat
-        var lineWeightLevel: Int
-        var outlineWidth: CGFloat = 0
-        var fontName: String
-        var fontSize: CGFloat
-        var calloutArrowStyleRawValue: Int
-        var arrowHeadSize: CGFloat
-        var rectangleHatchStyleRawValue: Int
-        var hatchBackgroundColor: NSColor
-    }
+
     enum SearchHit {
         case document(selection: PDFSelection, pageIndex: Int, preview: String)
         case markup(pageIndex: Int, annotation: PDFAnnotation, preview: String)
@@ -116,24 +92,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let records: [MarkupClipboardRecord]
     }
 
-    let lineWeightLevels = Array(1...10)
-    let standardFontSizes = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 60, 72]
     private let autosaveIntervalSeconds: TimeInterval = 120
     let snapshotStore = ProjectSnapshotStore()
-    let markupClipboardPasteboardType = NSPasteboard.PasteboardType("com.drawbridge.markups")
     private let chromeBackgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1.0)
     private let panelBackgroundColor = NSColor(calibratedWhite: 0.12, alpha: 1.0)
     private let sidebarBackgroundColor = NSColor(calibratedWhite: 0.14, alpha: 1.0)
-    let snapshotLayerOptions = [
-        "DEFAULT",
-        "ARCHITECTURAL",
-        "STRUCTURAL",
-        "MECHANICAL",
-        "ELECTRICAL",
-        "PLUMBING",
-        "CIVL",
-        "LANDSCAPE"
-    ]
 
     static let defaultsAdaptiveIndexCapEnabledKey = "DrawbridgeAdaptiveIndexCapEnabled"
     static let defaultsIndexCapKey = "DrawbridgeIndexCap"
@@ -148,7 +111,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return formatter
     }()
 
-    private let rulerThickness: CGFloat = 22
     private let showNavigationPane = true
     let pdfView = MarkupPDFView(frame: .zero)
     private let pdfCanvasContainer = StartupDropView(frame: .zero)
@@ -158,7 +120,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let navigationModeControl = NSSegmentedControl(labels: ["Pages", "Bookmarks"], trackingMode: .selectOne, target: nil, action: nil)
     private let addPageButton = NSButton(title: "", target: nil, action: nil)
     private let pagesTableView = NSTableView(frame: .zero)
-    private let thumbnailView = PDFThumbnailView(frame: .zero)
     private let thumbnailScrollView = NSScrollView(frame: .zero)
     private let thumbnailsEmptyLabel = NSTextField(labelWithString: "No Pages")
     private let bookmarksScrollView = NSScrollView(frame: .zero)
@@ -167,9 +128,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let bookmarksSelectionLabel = NSTextField(labelWithString: "")
     private let pdfContentsTitleLabel = NSTextField(labelWithString: "PDF Contents")
     private let pdfContentsSummaryLabel = NSTextField(labelWithString: "No PDF loaded")
-    private let horizontalRuler = PDFRulerView(orientation: .horizontal)
-    private let verticalRuler = PDFRulerView(orientation: .vertical)
-    private let rulerCornerView = NSView(frame: .zero)
     private let splitView = NSSplitView(frame: .zero)
     private let emptyStateView = StartupDropView(frame: .zero)
     private let emptyStateTitle = NSTextField(labelWithString: "Open or create a PDF to start marking up")
@@ -179,10 +137,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let emptyStateBatchMobileButton = NSButton(title: "Batch Export to iPhone / iPad", target: nil, action: nil)
     let markupsTable = NSTableView(frame: .zero)
     private let markupsCountLabel = NSTextField(labelWithString: "0 items")
-    private let markupFilterField = NSSearchField(frame: .zero)
     let measurementScaleField = NSTextField(frame: .zero)
     let measurementUnitPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let applyScaleButton = NSButton(title: "Apply Scale", target: nil, action: nil)
     private let actionsPopup = NSPopUpButton(frame: .zero, pullsDown: true)
     private let openButton = NSButton(title: "Open", target: nil, action: nil)
     private let autoNameSheetsButton = NSButton(title: "", target: nil, action: nil)
@@ -197,11 +153,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let editMarkupButton = NSButton(title: "Edit Markup Text", target: nil, action: nil)
     let pageJumpField = ClickOnlyTextField(frame: .zero)
     let scalePresetPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let measureLabel = NSTextField(labelWithString: "Measure:")
     private let toolbarControlsStack = NSStackView(frame: .zero)
-    private let secondaryToolbarControlsStack = NSStackView(frame: .zero)
     private let toolbarModeGroupsStack = NSStackView(frame: .zero)
-    private let toolbarQuickControlsStack = NSStackView(frame: .zero)
     let toolbarSearchField = NSSearchField(frame: .zero)
     let toolbarSearchPrevButton = NSButton(title: "", target: nil, action: nil)
     let toolbarSearchNextButton = NSButton(title: "", target: nil, action: nil)
@@ -241,47 +194,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let statusScaleLabel = NSTextField(labelWithString: "Scale: 1.0 ft")
     private let measurementCountLabel = NSTextField(labelWithString: "Measurements: 0")
     private let measurementTotalLabel = NSTextField(labelWithString: "Total Length: 0")
-    private let toolSettingsSectionButton = NSButton(title: "Tool Settings", target: nil, action: nil)
     private let toolSettingsSidebarToggleButton = NSButton(title: "", target: nil, action: nil)
     private let collapsedSidebarRevealButton = NSButton(title: "", target: nil, action: nil)
-    private let toolSettingsSectionContent = NSStackView(frame: .zero)
-    private let snapSectionButton = NSButton(title: "", target: nil, action: nil)
     private let snapSectionContent = NSStackView(frame: .zero)
     private let snapRowsStack = NSStackView(frame: .zero)
-    private let layersSectionButton = NSButton(title: "", target: nil, action: nil)
-    let layersSectionContent = NSStackView(frame: .zero)
-    let layersRowsStack = NSStackView(frame: .zero)
-    let toolSettingsToolLabel = NSTextField(labelWithString: "Active Tool: Pen")
-    let toolSettingsStrokeTitleLabel = NSTextField(labelWithString: "Color:")
-    let toolSettingsFillTitleLabel = NSTextField(labelWithString: "Fill:")
-    let toolSettingsStrokeColorWell = NSColorWell(frame: .zero)
-    let toolSettingsFillColorWell = NSColorWell(frame: .zero)
-    let toolSettingsOutlineTitleLabel = NSTextField(labelWithString: "Outline:")
-    let toolSettingsOutlineColorWell = NSColorWell(frame: .zero)
-    let toolSettingsOutlineWidthPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    let toolSettingsFontTitleLabel = NSTextField(labelWithString: "Text Size:")
-    let toolSettingsFontPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    let toolSettingsFontSizePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    let toolSettingsArrowTitleLabel = NSTextField(labelWithString: "Arrow End:")
-    let toolSettingsArrowPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    let toolSettingsArrowSizeTitleLabel = NSTextField(labelWithString: "Arrow Size:")
-    let toolSettingsArrowSizePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    let toolSettingsHatchTitleLabel = NSTextField(labelWithString: "Hatch:")
-    let toolSettingsHatchPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    let toolSettingsHatchBackgroundTitleLabel = NSTextField(labelWithString: "Background:")
-    let toolSettingsHatchBackgroundColorWell = NSColorWell(frame: .zero)
-    let toolSettingsLineWidthPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    let toolSettingsOpacitySlider = NSSlider(value: 0.8, minValue: 0.0, maxValue: 1.0, target: nil, action: nil)
-    let toolSettingsOpacityValueLabel = NSTextField(labelWithString: "80%")
-    let snapshotColorizeButton = NSButton(title: "Colorize Black -> Red", target: nil, action: nil)
-    let toolSettingsFillRow = NSStackView(frame: .zero)
-    let toolSettingsOutlineRow = NSStackView(frame: .zero)
-    let toolSettingsFontRow = NSStackView(frame: .zero)
-    let toolSettingsArrowRow = NSStackView(frame: .zero)
-    let toolSettingsArrowSizeRow = NSStackView(frame: .zero)
-    let toolSettingsHatchRow = NSStackView(frame: .zero)
-    let toolSettingsHatchBackgroundRow = NSStackView(frame: .zero)
-    let toolSettingsWidthRow = NSStackView(frame: .zero)
     private let selectedMarkupOverlayLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
         layer.strokeColor = NSColor.systemOrange.cgColor
@@ -336,13 +252,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return layer
     }()
     var markupItems: [MarkupItem] = []
-    var flattenedPDFItems: [(page: PDFPage, annotation: PDFAnnotation)] = []
-    private var markupsTimer: Timer?
     var scrollEventMonitor: Any?
     var keyEventMonitor: Any?
-    var flagsEventMonitor: Any?
     private var markupFilterText = ""
     var pendingCalibrationDistanceInPoints: CGFloat?
+    var isPDFProcessingBusy: Bool { busyOperationDepth > 0 || isSavingDocumentOperation }
     private var busyOperationDepth = 0
     var markupChangeVersion = 0
     var lastAutosavedChangeVersion = 0
@@ -379,22 +293,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var saveOperationStartedAt: CFAbsoluteTime?
     private var savePhase: String?
     var saveGenerateElapsed: Double = 0
+    var isFlatteningDocumentOperation = false
     var isSavingDocumentOperation = false
     var queuedFastEmbeddedSave = false
     var lastEmbeddedSaveCompletedVersion = 0
     private var busyInteractionLocked = false
-    private var captureToastHideWorkItem: DispatchWorkItem?
-    private var grabClipboardPDFData: Data?
-    private var grabClipboardPageRect: NSRect?
-    private var grabClipboardSnapshotURL: URL?
-    private var grabClipboardCaptureID = UUID()
-    private var grabClipboardTintBlendStyle: PDFSnapshotAnnotation.TintBlendStyle = .screen
-    private var grabSnapshotPreferredLayer = "ARCHITECTURAL"
     weak var lastDirectlySelectedAnnotation: PDFAnnotation?
     private var groupedPasteDragPageID: ObjectIdentifier?
     private var groupedPasteDragAnnotationIDs: Set<ObjectIdentifier> = []
-    private var cachedMarkupPasteboardChangeCount = -1
-    private var cachedMarkupPasteboardPayload: MarkupClipboardPayload?
     private var sidebarCurrentPageIndex: Int = -1
     private var bookmarkLabelOverrides: [String: String] = [:]
     var pageLabelOverrides: [Int: String] = [:]
@@ -404,12 +310,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var isGridVisible = false
     var isHyperlinkHighlightsVisible = false
     var isPolygonVertexEditModeEnabled = false
-    var isOrthoModifierKeyDown = false
     var isOrthoSnapEnabled = true
     private var isEndpointSnapEnabled = true
     private var isMidpointSnapEnabled = true
     private var isIntersectionSnapEnabled = true
-    private var suppressScaleReminderForSession = false
     private var autoNameCapturePhase: AutoNameCapturePhase?
     private var autoNameReferencePageIndex: Int?
     private var pendingSheetNumberZone: NormalizedPageRect?
@@ -432,7 +336,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var pendingScaleReminderSuppressionDocumentID: ObjectIdentifier?
     var pendingScaleReminderSuppressionPageIndex: Int = -1
     var pendingScaleReminderSuppressionOneShot = false
-    var toolSettingsByTool: [ToolMode: ToolSettingsState] = [:]
     var shortcutBindings: [ShortcutAction: ShortcutBinding] = [:]
     var layerVisibilityByName: [String: Bool] = [:]
     var layerTintColorByName: [String: NSColor] = [:]
@@ -443,10 +346,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var sidebarContainerView: NSView?
     private var lastSidebarExpandedWidth: CGFloat = 240
     private var isSidebarCollapsed = false
-    private let markupsSectionButton = NSButton(title: "", target: nil, action: nil)
-    private let summarySectionButton = NSButton(title: "", target: nil, action: nil)
-    private let markupsSectionContent = NSStackView(frame: .zero)
-    private let summarySectionContent = NSStackView(frame: .zero)
     private let toolSelector: NSSegmentedControl = {
         let control = NSSegmentedControl(labels: ["Select"], trackingMode: .selectOne, target: nil, action: nil)
         control.selectedSegment = 0
@@ -512,24 +411,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private weak var newDocumentOrientationPopup: NSPopUpButton?
     private var newDocumentPanelCloseObserver: NSObjectProtocol?
     private var didInstallToolbarWidthConstraints = false
-    private var toolSelectorWidthConstraint: NSLayoutConstraint?
-    private var takeoffSelectorWidthConstraint: NSLayoutConstraint?
     private var toolbarToolButtons: [ToolMode: NSButton] = [:]
-    private var toolbarQuickControlContainers: [String: NSView] = [:]
-    private let toolbarQuickStrokeLabel = NSTextField(labelWithString: "Stroke")
-    private let toolbarQuickStrokeColorWell = NSColorWell(frame: .zero)
-    private let toolbarQuickFillLabel = NSTextField(labelWithString: "Fill")
-    private let toolbarQuickFillColorWell = NSColorWell(frame: .zero)
-    private let toolbarQuickWidthLabel = NSTextField(labelWithString: "Weight")
-    private let toolbarQuickLineWidthPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let toolbarQuickFontSizeLabel = NSTextField(labelWithString: "Text")
-    private let toolbarQuickFontSizePopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let toolbarQuickArrowLabel = NSTextField(labelWithString: "Arrow")
-    private let toolbarQuickArrowPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let toolbarQuickOpacityLabel = NSTextField(labelWithString: "Opacity")
-    private let toolbarQuickOpacitySlider = NSSlider(value: 0.8, minValue: 0.0, maxValue: 1.0, target: nil, action: nil)
-    private let toolbarQuickOpacityValueLabel = NSTextField(labelWithString: "80%")
-    private var isSyncingToolbarQuickControls = false
     private var bookmarksWidthConstraint: NSLayoutConstraint?
     private var navigationWidthAtDragStart: CGFloat = 220
     private var navigationWidth: CGFloat = 220
@@ -568,7 +450,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         )
         updateShortcutHintLabel()
         configureWatchdogFromDefaults()
-        startMarkupsRefreshTimer()
         updateEmptyStateVisibility()
     }
 
@@ -584,7 +465,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         applySplitLayoutIfPossible(force: true)
         installScrollMonitorIfNeeded()
         installKeyMonitorIfNeeded()
-        installFlagsMonitorIfNeeded()
     }
 
     override func viewDidLayout() {
@@ -596,8 +476,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         super.viewWillDisappear()
         watchdog?.stop()
         stopSaveProgressTracking()
-        markupsTimer?.invalidate()
-        markupsTimer = nil
         if let monitor = scrollEventMonitor {
             NSEvent.removeMonitor(monitor)
             scrollEventMonitor = nil
@@ -606,10 +484,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             NSEvent.removeMonitor(monitor)
             keyEventMonitor = nil
         }
-        if let monitor = flagsEventMonitor {
-            NSEvent.removeMonitor(monitor)
-            flagsEventMonitor = nil
-        }
+
     }
 
     private func setupUI() {
@@ -647,9 +522,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         editMarkupButton.target = self
         editMarkupButton.action = #selector(editSelectedMarkupText)
         configureMeasurementScaleState()
-        initializePerToolSettings()
-        ensureLayerVisibilityDefaults()
-        configureActionsPopup(highlightButton: highlightButton, exportButton: exportButton, refreshMarkupsButton: refreshMarkupsButton, deleteMarkupButton: deleteMarkupButton, editMarkupButton: editMarkupButton)
 
         toolSelector.target = self
         toolSelector.action = #selector(changeTool)
@@ -660,7 +532,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfView.translatesAutoresizingMaskIntoConstraints = false
         pdfCanvasContainer.translatesAutoresizingMaskIntoConstraints = false
         statusBar.translatesAutoresizingMaskIntoConstraints = false
-        configureMarkupsSidebar()
         configureStatusBar()
         configurePDFCanvasContainer()
         configureCollapsedSidebarRevealButton()
@@ -1071,94 +942,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc private func addPageFromNavigation() {
-        guard ToolMode.allowsMarkupEditing else { return }
-        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
-        guard let document = pdfView.document else { beep(); return }
-        guard let targetSize = preferredPageSizeForInsertion(in: document) else {
-            return
-        }
-        let page = makeBlankPDFPage(size: targetSize)
-        document.insert(page, at: max(0, document.pageCount))
-        commitMarkupMutation(selecting: nil, forceImmediateRefresh: true)
-        reloadBookmarks()
-        pdfView.navigateToPageWithHistory(page)
-        DispatchQueue.main.async { [weak self] in
-            self?.requestChromeRefresh(immediate: true)
-        }
-    }
-
-    private func preferredPageSizeForInsertion(in document: PDFDocument) -> NSSize? {
-        var unique: [(size: NSSize, label: String, representativeIndex: Int)] = []
-        func signature(for size: NSSize) -> String {
-            let w = (size.width * 10.0).rounded() / 10.0
-            let h = (size.height * 10.0).rounded() / 10.0
-            return "\(w)x\(h)"
-        }
-        var seen = Set<String>()
-        for index in 0..<document.pageCount {
-            guard let page = document.page(at: index) else { continue }
-            let bounds = page.bounds(for: .mediaBox)
-            let size = NSSize(width: max(1.0, bounds.width), height: max(1.0, bounds.height))
-            let key = signature(for: size)
-            if seen.insert(key).inserted {
-                let label = "Page \(index + 1): \(formatInches(size.width / 72.0)) x \(formatInches(size.height / 72.0))"
-                unique.append((size: size, label: label, representativeIndex: index))
-            }
-        }
-
-        if unique.isEmpty {
-            return NSSize(width: 612, height: 792)
-        }
-        if unique.count == 1 {
-            return unique[0].size
-        }
-
-        let alert = NSAlert()
-        alert.messageText = "This PDF has mixed page sizes"
-        alert.informativeText = "Choose the page size for the new page."
-        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 24), pullsDown: false)
-        popup.addItems(withTitles: unique.map(\.label))
-        if let current = pdfView.currentPage {
-            let currentIndex = max(0, document.index(for: current))
-            if let preferred = unique.firstIndex(where: { $0.representativeIndex == currentIndex }) {
-                popup.selectItem(at: preferred)
-            }
-        }
-        alert.accessoryView = popup
-        alert.addButton(withTitle: "Add Page")
-        alert.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            return nil
-        }
-        let selected = max(0, popup.indexOfSelectedItem)
-        return unique[min(selected, unique.count - 1)].size
-    }
-
-    private func makeBlankPDFPage(size: NSSize) -> PDFPage {
-        let safeSize = NSSize(width: max(1, size.width), height: max(1, size.height))
-        let image = NSImage(size: safeSize)
-        image.lockFocus()
-        NSColor.white.setFill()
-        NSBezierPath(rect: NSRect(origin: .zero, size: safeSize)).fill()
-        image.unlockFocus()
-        if let page = PDFPage(image: image) {
-            return page
-        }
-        let fallbackImage = NSImage(size: NSSize(width: 612, height: 792))
-        fallbackImage.lockFocus()
-        NSColor.white.setFill()
-        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 612, height: 792)).fill()
-        fallbackImage.unlockFocus()
-        if let fallbackPage = PDFPage(image: fallbackImage) {
-            return fallbackPage
-        }
-        let tiny = NSImage(size: NSSize(width: 1, height: 1))
-        tiny.lockFocus()
-        NSColor.white.setFill()
-        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 1, height: 1)).fill()
-        tiny.unlockFocus()
-        return PDFPage(image: tiny)!
+        // Compatibility entry point: annotation authoring is unavailable.
     }
 
     private func reloadBookmarks() {
@@ -1463,75 +1247,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         markMarkupChangedAndScheduleAutosave()
     }
 
-    @objc private func deletePagesFromSidebar() {
-        guard ToolMode.allowsMarkupEditing else { return }
-        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
-        guard let document = pdfView.document else {
-            beep()
-            return
-        }
-        let pageIndexes = selectedSidebarPageIndexesForDeletion()
-        guard !pageIndexes.isEmpty else {
-            beep()
-            return
-        }
-
-        let deletePrompt = NSAlert()
-        let pageCountText = pageIndexes.count == 1 ? "page" : "pages"
-        deletePrompt.messageText = "Delete \(pageIndexes.count) \(pageCountText)?"
-        deletePrompt.informativeText = "This removes the selected page(s) from the PDF."
-        deletePrompt.alertStyle = .warning
-        deletePrompt.addButton(withTitle: "Delete Pages")
-        deletePrompt.addButton(withTitle: "Cancel")
-        guard deletePrompt.runModal() == .alertFirstButtonReturn else { return }
-
-        let removedPageSet = Set(pageIndexes)
-        let matchingBookmarkCount = countBookmarksDirectlyTargetingPages(removedPageSet, in: document)
-        var removeAssociatedBookmarks = false
-        if matchingBookmarkCount > 0 {
-            let bookmarkPrompt = NSAlert()
-            let bookmarkCountText = matchingBookmarkCount == 1 ? "bookmark" : "bookmarks"
-            bookmarkPrompt.messageText = "Remove associated \(bookmarkCountText)?"
-            bookmarkPrompt.informativeText = "Found \(matchingBookmarkCount) bookmark(s) pointing to the page(s) being deleted."
-            bookmarkPrompt.alertStyle = .informational
-            bookmarkPrompt.addButton(withTitle: "Remove Bookmarks")
-            bookmarkPrompt.addButton(withTitle: "Keep Bookmarks")
-            bookmarkPrompt.addButton(withTitle: "Cancel")
-            let response = bookmarkPrompt.runModal()
-            if response == .alertThirdButtonReturn {
-                return
-            }
-            removeAssociatedBookmarks = (response == .alertFirstButtonReturn)
-        }
-
-        if removeAssociatedBookmarks {
-            _ = removeBookmarksTargetingPages(removedPageSet, in: document)
-            // Bookmark path keys can shift after structural edits.
-            bookmarkLabelOverrides.removeAll()
-        }
-
-        let sortedDescending = pageIndexes.sorted(by: >)
-        for pageIndex in sortedDescending where pageIndex >= 0 && pageIndex < document.pageCount {
-            document.removePage(at: pageIndex)
-        }
-        remapPageIndexedStateAfterDeletingPages(pageIndexes)
-
-        if document.pageCount > 0 {
-            let targetIndex = min(pageIndexes.min() ?? 0, document.pageCount - 1)
-            if let targetPage = document.page(at: max(0, targetIndex)) {
-                pdfView.navigateToPageWithHistory(targetPage)
-            }
-        } else {
-            clearMarkupSelection()
-        }
-
-        clearMarkupCache()
-        markMarkupChangedAndScheduleAutosave()
-        performRefreshMarkups(selecting: nil, forceImmediate: true)
-        reloadBookmarks()
-        requestChromeRefresh(immediate: true)
-    }
-
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         guard outlineView == bookmarksOutlineView else { return 0 }
         let node = (item as? PDFOutline) ?? pdfView.document?.outlineRoot
@@ -1548,14 +1263,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return node?.child(at: index) as Any
     }
 
-    func outlineViewSelectionDidChange(_ notification: Notification) {
-        guard let outlineView = notification.object as? NSOutlineView,
-              outlineView === bookmarksOutlineView else {
-            return
-        }
-        updateBookmarkSelectionPresentation()
-    }
-
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard outlineView == bookmarksOutlineView, let node = item as? PDFOutline else { return nil }
         let title = displayBookmarkTitle(for: node)
@@ -1566,116 +1273,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         cell.textColor = .labelColor
         cell.lineBreakMode = .byTruncatingTail
         return cell
-    }
-
-    private func configureMarkupsSidebar() {
-        let pageColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("page"))
-        pageColumn.title = "Page"
-        pageColumn.width = 56
-        markupsTable.addTableColumn(pageColumn)
-
-        let typeColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("type"))
-        typeColumn.title = "Type"
-        typeColumn.width = 100
-        markupsTable.addTableColumn(typeColumn)
-
-        let authorColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("author"))
-        authorColumn.title = "Author"
-        authorColumn.width = 130
-        markupsTable.addTableColumn(authorColumn)
-
-        let textColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("text"))
-        textColumn.title = "Text"
-        textColumn.width = 240
-        markupsTable.addTableColumn(textColumn)
-
-        markupsTable.usesAlternatingRowBackgroundColors = true
-        markupsTable.allowsMultipleSelection = true
-        markupsTable.delegate = self
-        markupsTable.dataSource = self
-        markupsTable.headerView = NSTableHeaderView()
-        markupsTable.rowHeight = 24
-        markupsTable.target = self
-        markupsTable.action = #selector(selectMarkupFromTable)
-
-        markupFilterField.placeholderString = "Filter markups"
-        markupFilterField.target = self
-        markupFilterField.action = #selector(filterMarkups)
-        markupsCountLabel.textColor = .secondaryLabelColor
-
-        toolSettingsToolLabel.textColor = .secondaryLabelColor
-        toolSettingsLineWidthPopup.removeAllItems()
-        toolSettingsLineWidthPopup.addItems(withTitles: lineWeightLevels.map(String.init))
-        toolSettingsLineWidthPopup.selectItem(withTitle: "5")
-        toolSettingsStrokeColorWell.color = .systemRed
-        toolSettingsHatchBackgroundColorWell.color = .white
-        toolSettingsFontSizePopup.removeAllItems()
-        toolSettingsFontSizePopup.addItems(withTitles: standardFontSizes.map { "\($0) pt" })
-        let nearestInitialFontSize = standardFontSizes.min { lhs, rhs in
-            abs(CGFloat(lhs) - pdfView.textFontSize) < abs(CGFloat(rhs) - pdfView.textFontSize)
-        } ?? 15
-        toolSettingsFontSizePopup.selectItem(withTitle: "\(nearestInitialFontSize) pt")
-        toolSettingsFontSizePopup.translatesAutoresizingMaskIntoConstraints = false
-        toolSettingsFontSizePopup.widthAnchor.constraint(equalToConstant: 68).isActive = true
-        toolSettingsOpacityValueLabel.alignment = .right
-        toolSettingsOpacityValueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-        toolSettingsOpacitySlider.target = self
-        toolSettingsOpacitySlider.action = #selector(toolSettingsOpacityChanged)
-        toolSettingsStrokeColorWell.target = self
-        toolSettingsStrokeColorWell.action = #selector(toolSettingsChanged)
-        toolSettingsFillColorWell.target = self
-        toolSettingsFillColorWell.action = #selector(toolSettingsChanged)
-        toolSettingsHatchBackgroundColorWell.target = self
-        toolSettingsHatchBackgroundColorWell.action = #selector(toolSettingsChanged)
-        toolSettingsOutlineColorWell.target = self
-        toolSettingsOutlineColorWell.action = #selector(toolSettingsChanged)
-        toolSettingsOutlineWidthPopup.removeAllItems()
-        toolSettingsOutlineWidthPopup.addItems(withTitles: ["None", "1 pt", "2 pt", "3 pt", "4 pt", "5 pt", "6 pt", "8 pt", "10 pt"])
-        toolSettingsOutlineWidthPopup.selectItem(withTitle: "None")
-        toolSettingsOutlineWidthPopup.target = self
-        toolSettingsOutlineWidthPopup.action = #selector(toolSettingsChanged)
-        toolSettingsFontSizePopup.target = self
-        toolSettingsFontSizePopup.action = #selector(toolSettingsChanged)
-        toolSettingsArrowPopup.removeAllItems()
-        toolSettingsArrowPopup.addItems(withTitles: MarkupPDFView.ArrowEndStyle.allCases.map(\.displayName))
-        toolSettingsArrowPopup.selectItem(at: 0)
-        toolSettingsArrowPopup.target = self
-        toolSettingsArrowPopup.action = #selector(toolSettingsChanged)
-        toolSettingsArrowSizePopup.removeAllItems()
-        toolSettingsArrowSizePopup.addItems(withTitles: ["2 pt", "3 pt", "4 pt", "5 pt", "6 pt", "8 pt", "10 pt", "12 pt", "16 pt", "20 pt"])
-        toolSettingsArrowSizePopup.selectItem(withTitle: "8 pt")
-        toolSettingsArrowSizePopup.target = self
-        toolSettingsArrowSizePopup.action = #selector(toolSettingsChanged)
-        toolSettingsHatchPopup.removeAllItems()
-        toolSettingsHatchPopup.addItems(withTitles: MarkupPDFView.RectangleHatchStyle.allCases.map(\.displayName))
-        toolSettingsHatchPopup.selectItem(withTitle: MarkupPDFView.RectangleHatchStyle.solid.displayName)
-        toolSettingsHatchPopup.target = self
-        toolSettingsHatchPopup.action = #selector(toolSettingsChanged)
-        toolSettingsLineWidthPopup.target = self
-        toolSettingsLineWidthPopup.action = #selector(toolSettingsChanged)
-        snapshotColorizeButton.target = self
-        snapshotColorizeButton.action = #selector(colorizeSnapshotsBlackToRed)
-        snapshotColorizeButton.bezelStyle = .texturedRounded
-        snapshotColorizeButton.isHidden = true
-
-        measurementCountLabel.textColor = .secondaryLabelColor
-        measurementTotalLabel.textColor = .secondaryLabelColor
-        configureSnapSectionUI()
-        configureLayersSectionUI()
-        configureSectionButtons()
-        updateToolSettingsUIForCurrentTool()
-        applyToolSettingsToPDFView()
-    }
-
-    private func configureActionsPopup(highlightButton: NSButton, exportButton: NSButton, refreshMarkupsButton: NSButton, deleteMarkupButton: NSButton, editMarkupButton: NSButton) {
-        actionsPopup.removeAllItems()
-        actionsPopup.addItem(withTitle: "")
-
-        let menu = NSMenu(title: "Actions")
-        // The only authoring actions available in this app are bookmarks and links.
-        menu.addItem(withTitle: "Auto-Generate Sheet Names/Bookmarks…", action: #selector(commandAutoGenerateSheetNames(_:)), keyEquivalent: "").target = self
-        menu.addItem(withTitle: "Batch Link Sheet Numbers…", action: #selector(commandBatchLinkSheetNumbers(_:)), keyEquivalent: "").target = self
-        actionsPopup.menu = menu
     }
 
     private func configureStatusBar() {
@@ -1781,36 +1378,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         ])
     }
 
-    private func showCaptureToast(_ message: String) {
-        captureToastHideWorkItem?.cancel()
-        captureToastLabel.stringValue = message
-        captureToastView.isHidden = false
-        captureSound?.play()
-
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.12
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            captureToastView.animator().alphaValue = 1.0
-        }
-
-        let hideWork = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            NSAnimationContext.runAnimationGroup({ context in
-                context.duration = 0.18
-                context.timingFunction = CAMediaTimingFunction(name: .easeIn)
-                self.captureToastView.animator().alphaValue = 0
-            }, completionHandler: { [weak self] in
-                DispatchQueue.main.async {
-                    self?.captureToastView.isHidden = true
-                }
-            })
-        }
-        captureToastHideWorkItem = hideWork
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9, execute: hideWork)
-    }
-
     func beginBusyIndicator(_ message: String, detail: String? = nil, lockInteraction: Bool = true) {
         busyOperationDepth += 1
+        refreshFlattenButtonState()
         busyStatusLabel.stringValue = message
         busyDetailLabel.stringValue = detail ?? ""
         busySubdetailLabel.stringValue = ""
@@ -1834,6 +1404,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     func endBusyIndicator() {
         busyOperationDepth = max(0, busyOperationDepth - 1)
+        refreshFlattenButtonState()
         guard busyOperationDepth == 0 else { return }
         view.window?.ignoresMouseEvents = false
         busyInteractionLocked = false
@@ -1904,7 +1475,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         lastDirectlySelectedAnnotation = nil
         clearGroupedPasteDragSelection()
         clearSelectionOverlayLayers()
-        updateToolSettingsUIForCurrentTool()
         updateStatusBar()
     }
 
@@ -1991,7 +1561,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             ?? NSImage(systemSymbolName: "square.stack.3d.forward.dottedline", accessibilityDescription: "Flatten PDF")
         flattenPDFButton.imagePosition = .imageOnly
         flattenPDFButton.bezelStyle = .texturedRounded
-        flattenPDFButton.toolTip = "Flatten PDF"
+        flattenPDFButton.toolTip = "Flatten PDF — make visible markups permanent and save this PDF"
+        flattenPDFButton.setAccessibilityLabel("Flatten PDF")
+        flattenPDFButton.identifier = NSUserInterfaceItemIdentifier("drawbridgeFlattenPDF")
         reduceFileSizeButton.image = NSImage(systemSymbolName: "arrow.down.doc", accessibilityDescription: "Reduce File Size")
             ?? NSImage(systemSymbolName: "doc", accessibilityDescription: "Reduce File Size")
         reduceFileSizeButton.imagePosition = .imageOnly
@@ -2053,6 +1625,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             toolbarControlsStack.addArrangedSubview(openButton)
             toolbarControlsStack.addArrangedSubview(autoNameSheetsButton)
             toolbarControlsStack.addArrangedSubview(batchLinkSheetsButton)
+            toolbarControlsStack.addArrangedSubview(flattenPDFButton)
         }
 
         toolbarSearchField.placeholderString = "Search PDF text"
@@ -2089,68 +1662,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         ensureSearchPanel()
         updateSearchControlsState()
 
-        secondaryToolbarControlsStack.orientation = .horizontal
-        secondaryToolbarControlsStack.spacing = 8
-        secondaryToolbarControlsStack.alignment = .centerY
-        secondaryToolbarControlsStack.setHuggingPriority(.required, for: .horizontal)
-        secondaryToolbarControlsStack.setContentCompressionResistancePriority(.required, for: .horizontal)
-        toolbarQuickStrokeColorWell.target = self
-        toolbarQuickStrokeColorWell.action = #selector(toolbarQuickSettingsChanged)
-        toolbarQuickFillColorWell.target = self
-        toolbarQuickFillColorWell.action = #selector(toolbarQuickSettingsChanged)
-        toolbarQuickLineWidthPopup.removeAllItems()
-        toolbarQuickLineWidthPopup.addItems(withTitles: lineWeightLevels.map(String.init))
-        toolbarQuickLineWidthPopup.target = self
-        toolbarQuickLineWidthPopup.action = #selector(toolbarQuickSettingsChanged)
-        toolbarQuickFontSizePopup.removeAllItems()
-        toolbarQuickFontSizePopup.addItems(withTitles: standardFontSizes.map { "\($0) pt" })
-        toolbarQuickFontSizePopup.target = self
-        toolbarQuickFontSizePopup.action = #selector(toolbarQuickSettingsChanged)
-        toolbarQuickArrowPopup.removeAllItems()
-        toolbarQuickArrowPopup.addItems(withTitles: MarkupPDFView.ArrowEndStyle.allCases.map(\.displayName))
-        toolbarQuickArrowPopup.target = self
-        toolbarQuickArrowPopup.action = #selector(toolbarQuickSettingsChanged)
-        toolbarQuickOpacitySlider.target = self
-        toolbarQuickOpacitySlider.action = #selector(toolbarQuickSettingsChanged)
-        toolbarQuickOpacitySlider.controlSize = .small
-        toolbarQuickOpacitySlider.translatesAutoresizingMaskIntoConstraints = false
-        toolbarQuickOpacitySlider.widthAnchor.constraint(equalToConstant: 90).isActive = true
-        toolbarQuickOpacityValueLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .medium)
-        toolbarQuickOpacityValueLabel.textColor = .secondaryLabelColor
-
-        toolbarQuickControlsStack.orientation = .horizontal
-        toolbarQuickControlsStack.spacing = 8
-        toolbarQuickControlsStack.alignment = .centerY
-        if toolbarQuickControlsStack.arrangedSubviews.isEmpty {
-            toolbarQuickControlsStack.addArrangedSubview(makeToolbarQuickControl(key: "stroke", label: toolbarQuickStrokeLabel, control: toolbarQuickStrokeColorWell))
-            toolbarQuickControlsStack.addArrangedSubview(makeToolbarQuickControl(key: "fill", label: toolbarQuickFillLabel, control: toolbarQuickFillColorWell))
-            toolbarQuickControlsStack.addArrangedSubview(makeToolbarQuickControl(key: "width", label: toolbarQuickWidthLabel, control: toolbarQuickLineWidthPopup))
-            toolbarQuickControlsStack.addArrangedSubview(makeToolbarQuickControl(key: "font", label: toolbarQuickFontSizeLabel, control: toolbarQuickFontSizePopup))
-            toolbarQuickControlsStack.addArrangedSubview(makeToolbarQuickControl(key: "arrow", label: toolbarQuickArrowLabel, control: toolbarQuickArrowPopup))
-            let opacityContent = NSStackView(views: [toolbarQuickOpacitySlider, toolbarQuickOpacityValueLabel])
-            opacityContent.orientation = .horizontal
-            opacityContent.spacing = 4
-            opacityContent.alignment = .centerY
-            let opacityControl = NSStackView(views: [toolbarQuickOpacityLabel, opacityContent])
-            opacityControl.orientation = .horizontal
-            opacityControl.spacing = 4
-            opacityControl.alignment = .centerY
-            toolbarQuickControlContainers["opacity"] = opacityControl
-            toolbarQuickControlsStack.addArrangedSubview(opacityControl)
-        }
-
-        if secondaryToolbarControlsStack.arrangedSubviews.isEmpty {
-            if !ToolMode.takeoffToolbarModes.isEmpty {
-                let takeoffToolbarGroup = makeToolbarButtonGroup(title: "Takeoff", modes: ToolMode.takeoffToolbarModes)
-                secondaryToolbarControlsStack.addArrangedSubview(takeoffToolbarGroup)
-            }
-            secondaryToolbarControlsStack.addArrangedSubview(scalePresetPopup)
-            secondaryToolbarControlsStack.addArrangedSubview(gridToggleButton)
-            secondaryToolbarControlsStack.addArrangedSubview(actionsPopup)
-        }
         refreshToolbarShortcutTooltips()
         refreshToolbarToolButtons()
-        syncToolbarQuickControlsFromToolSettings()
     }
 
     private func setGridVisibleState(_ visible: Bool) {
@@ -2167,10 +1680,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if let item = NSApp.mainMenu?.item(withTitle: "View")?.submenu?.items.first(where: { $0.action == #selector(commandToggleHyperlinkHighlights(_:)) }) {
             item.state = visible ? .on : .off
         }
-    }
-
-    func toggleGridVisibilityShortcut() {
-        setGridVisibleState(!isGridVisible)
     }
 
     @objc private func toggleGridOverlay() {
@@ -2258,64 +1767,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     @objc private func snapIntersectionSwitchChanged(_ sender: NSSwitch) {
         setIntersectionSnapEnabled(sender.state == .on)
-    }
-
-    @objc private func toggleSnapSection() {
-        snapSectionContent.isHidden.toggle()
-        updateSectionHeaders()
-    }
-
-    private func updateSectionHeaders() {
-        toolSettingsSectionButton.title = "Tool Settings"
-        markupsSectionButton.title = "\(markupsSectionContent.isHidden ? "▸" : "▾") Markups"
-        summarySectionButton.title = "\(summarySectionContent.isHidden ? "▸" : "▾") Takeoff Summary"
-        snapSectionButton.title = "\(snapSectionContent.isHidden ? "▸" : "▾") Snap"
-        layersSectionButton.title = "\(layersSectionContent.isHidden ? "▸" : "▾") Layers"
-    }
-
-    private func configureSectionButtons() {
-        markupsSectionButton.target = self
-        markupsSectionButton.action = #selector(toggleMarkupsSection)
-        summarySectionButton.target = self
-        summarySectionButton.action = #selector(toggleSummarySection)
-        snapSectionButton.target = self
-        snapSectionButton.action = #selector(toggleSnapSection)
-        layersSectionButton.target = self
-        layersSectionButton.action = #selector(toggleLayersSection)
-
-        toolSettingsSectionButton.isBordered = false
-        toolSettingsSectionButton.isEnabled = false
-        toolSettingsSectionButton.alignment = .left
-        toolSettingsSectionButton.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        toolSettingsSectionButton.contentTintColor = .secondaryLabelColor
-
-        [markupsSectionButton, summarySectionButton, snapSectionButton, layersSectionButton].forEach {
-            $0.setButtonType(.momentaryPushIn)
-            $0.bezelStyle = .recessed
-            $0.alignment = .left
-            $0.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        }
-        updateSectionHeaders()
-    }
-
-    @objc private func toggleMarkupsSection() {
-        markupsSectionContent.isHidden.toggle()
-        updateSectionHeaders()
-    }
-
-    @objc private func toggleSummarySection() {
-        summarySectionContent.isHidden.toggle()
-        updateSectionHeaders()
-    }
-
-    @objc private func toggleLayersSection() {
-        layersSectionContent.isHidden.toggle()
-        updateSectionHeaders()
-    }
-
-    @objc private func toggleToolSettingsSection() {
-        toolSettingsSectionContent.isHidden.toggle()
-        updateSectionHeaders()
     }
 
     private func applyToggleIconAppearance(_ button: NSButton, enabled: Bool) {
@@ -2615,17 +2066,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return container
     }
 
-    private func makeToolbarQuickControl(key: String, label: NSTextField, control: NSView) -> NSView {
-        label.font = NSFont.systemFont(ofSize: 9, weight: .medium)
-        label.textColor = .secondaryLabelColor
-        let stack = NSStackView(views: [label, control])
-        stack.orientation = .horizontal
-        stack.spacing = 4
-        stack.alignment = .centerY
-        toolbarQuickControlContainers[key] = stack
-        return stack
-    }
-
     private func refreshToolbarToolButtons() {
         let activeMode = pdfView.toolMode
         let activeColor = NSColor.white
@@ -2654,63 +2094,22 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         setTool(targetMode)
     }
 
-    @objc private func toolbarQuickSettingsChanged() {
-        guard !isSyncingToolbarQuickControls else { return }
-        toolSettingsStrokeColorWell.color = toolbarQuickStrokeColorWell.color
-        toolSettingsFillColorWell.color = toolbarQuickFillColorWell.color
-        if let widthTitle = toolbarQuickLineWidthPopup.titleOfSelectedItem {
-            toolSettingsLineWidthPopup.selectItem(withTitle: widthTitle)
-        }
-        if let fontSizeTitle = toolbarQuickFontSizePopup.titleOfSelectedItem {
-            toolSettingsFontSizePopup.selectItem(withTitle: fontSizeTitle)
-        }
-        if let arrowTitle = toolbarQuickArrowPopup.titleOfSelectedItem {
-            toolSettingsArrowPopup.selectItem(withTitle: arrowTitle)
-        }
-        toolSettingsOpacitySlider.doubleValue = toolbarQuickOpacitySlider.doubleValue
-        toolSettingsOpacityValueLabel.stringValue = "\(Int(round(toolSettingsOpacitySlider.doubleValue * 100)))%"
-        applyToolSettingsToPDFView()
-        syncToolbarQuickControlsFromToolSettings()
-    }
-
-    func syncToolbarQuickControlsFromToolSettings() {
-        isSyncingToolbarQuickControls = true
-        toolbarQuickStrokeLabel.stringValue = toolSettingsStrokeTitleLabel.stringValue.replacingOccurrences(of: ":", with: "")
-        toolbarQuickStrokeColorWell.color = toolSettingsStrokeColorWell.color
-        toolbarQuickStrokeColorWell.isEnabled = toolSettingsStrokeColorWell.isEnabled
-
-        toolbarQuickFillLabel.stringValue = toolSettingsFillTitleLabel.stringValue.replacingOccurrences(of: ":", with: "")
-        toolbarQuickFillColorWell.color = toolSettingsFillColorWell.color
-        toolbarQuickFillColorWell.isEnabled = toolSettingsFillColorWell.isEnabled
-
-        toolbarQuickLineWidthPopup.selectItem(withTitle: toolSettingsLineWidthPopup.titleOfSelectedItem ?? "5")
-        toolbarQuickLineWidthPopup.isEnabled = toolSettingsLineWidthPopup.isEnabled
-
-        toolbarQuickFontSizeLabel.stringValue = toolSettingsFontTitleLabel.stringValue.replacingOccurrences(of: ":", with: "")
-        toolbarQuickFontSizePopup.selectItem(withTitle: toolSettingsFontSizePopup.titleOfSelectedItem ?? "15 pt")
-        toolbarQuickFontSizePopup.isEnabled = toolSettingsFontSizePopup.isEnabled
-
-        toolbarQuickArrowLabel.stringValue = toolSettingsArrowTitleLabel.stringValue.replacingOccurrences(of: ":", with: "")
-        toolbarQuickArrowPopup.selectItem(withTitle: toolSettingsArrowPopup.titleOfSelectedItem ?? MarkupPDFView.ArrowEndStyle.solidArrow.displayName)
-        toolbarQuickArrowPopup.isEnabled = toolSettingsArrowPopup.isEnabled
-
-        toolbarQuickOpacitySlider.doubleValue = toolSettingsOpacitySlider.doubleValue
-        toolbarQuickOpacitySlider.isEnabled = toolSettingsOpacitySlider.isEnabled
-        toolbarQuickOpacityValueLabel.stringValue = toolSettingsOpacityValueLabel.stringValue
-
-        toolbarQuickControlContainers["fill"]?.isHidden = toolSettingsFillRow.isHidden
-        toolbarQuickControlContainers["width"]?.isHidden = toolSettingsWidthRow.isHidden
-        toolbarQuickControlContainers["font"]?.isHidden = toolSettingsFontRow.isHidden
-        toolbarQuickControlContainers["arrow"]?.isHidden = toolSettingsArrowRow.isHidden
-        toolbarQuickControlContainers["opacity"]?.isHidden = false
-
-        // Tool settings should live in the right sidebar only.
-        toolbarQuickControlsStack.isHidden = true
-        isSyncingToolbarQuickControls = false
-    }
-
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [.drawbridgePrimaryControls, .flexibleSpace, .space]
+    }
+
+    func outlineViewSelectionDidChange(_ notification: Notification) {
+        guard let outlineView = notification.object as? NSOutlineView,
+              outlineView === bookmarksOutlineView else {
+            return
+        }
+        updateBookmarkSelectionPresentation()
+    }
+
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        guard let sidebar = sidebarContainerView, !isSidebarCollapsed, sidebar.frame.width > 120 else { return }
+        lastSidebarExpandedWidth = min(max(sidebar.frame.width, 220), 280)
+        UserDefaults.standard.set(Double(lastSidebarExpandedWidth), forKey: "DrawbridgeSidebarWidth")
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -2724,166 +2123,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     ) -> NSToolbarItem? {
         let item = NSToolbarItem(itemIdentifier: itemIdentifier)
         if itemIdentifier == .drawbridgePrimaryControls {
-            item.label = "Bookmarks and Hyperlinks"
+            item.label = "Bookmarks, Hyperlinks and Flatten"
             item.view = toolbarControlsStack
             return item
         }
         return nil
-    }
-
-
-    private func buildMarkupsSidebar() -> NSView {
-        let scrollView = NSScrollView(frame: .zero)
-        scrollView.borderType = .bezelBorder
-        scrollView.hasVerticalScroller = true
-        scrollView.documentView = markupsTable
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
-        markupsTable.translatesAutoresizingMaskIntoConstraints = false
-        markupsTable.widthAnchor.constraint(equalTo: scrollView.widthAnchor).isActive = true
-
-        let toolStrokeRow = NSStackView(views: [toolSettingsStrokeTitleLabel, toolSettingsStrokeColorWell])
-        toolStrokeRow.orientation = .horizontal
-        toolStrokeRow.spacing = 8
-        toolStrokeRow.alignment = .centerY
-
-        toolSettingsFillRow.orientation = .horizontal
-        toolSettingsFillRow.spacing = 8
-        toolSettingsFillRow.alignment = .centerY
-        toolSettingsFillRow.addArrangedSubview(toolSettingsFillTitleLabel)
-        toolSettingsFillRow.addArrangedSubview(toolSettingsFillColorWell)
-
-        toolSettingsOutlineRow.orientation = .horizontal
-        toolSettingsOutlineRow.spacing = 8
-        toolSettingsOutlineRow.alignment = .centerY
-        toolSettingsOutlineRow.addArrangedSubview(toolSettingsOutlineTitleLabel)
-        toolSettingsOutlineRow.addArrangedSubview(toolSettingsOutlineColorWell)
-        toolSettingsOutlineRow.addArrangedSubview(toolSettingsOutlineWidthPopup)
-
-        toolSettingsFontRow.orientation = .horizontal
-        toolSettingsFontRow.spacing = 8
-        toolSettingsFontRow.alignment = .centerY
-        toolSettingsFontRow.addArrangedSubview(toolSettingsFontTitleLabel)
-        toolSettingsFontRow.addArrangedSubview(toolSettingsFontSizePopup)
-
-        toolSettingsArrowRow.orientation = .horizontal
-        toolSettingsArrowRow.spacing = 8
-        toolSettingsArrowRow.alignment = .centerY
-        toolSettingsArrowRow.addArrangedSubview(toolSettingsArrowTitleLabel)
-        toolSettingsArrowRow.addArrangedSubview(toolSettingsArrowPopup)
-
-        toolSettingsArrowSizeRow.orientation = .horizontal
-        toolSettingsArrowSizeRow.spacing = 8
-        toolSettingsArrowSizeRow.alignment = .centerY
-        toolSettingsArrowSizeRow.addArrangedSubview(toolSettingsArrowSizeTitleLabel)
-        toolSettingsArrowSizeRow.addArrangedSubview(toolSettingsArrowSizePopup)
-
-        toolSettingsHatchRow.orientation = .horizontal
-        toolSettingsHatchRow.spacing = 8
-        toolSettingsHatchRow.alignment = .centerY
-        toolSettingsHatchRow.addArrangedSubview(toolSettingsHatchTitleLabel)
-        toolSettingsHatchRow.addArrangedSubview(toolSettingsHatchPopup)
-
-        toolSettingsHatchBackgroundRow.orientation = .horizontal
-        toolSettingsHatchBackgroundRow.spacing = 8
-        toolSettingsHatchBackgroundRow.alignment = .centerY
-        toolSettingsHatchBackgroundRow.addArrangedSubview(toolSettingsHatchBackgroundTitleLabel)
-        toolSettingsHatchBackgroundRow.addArrangedSubview(toolSettingsHatchBackgroundColorWell)
-
-        toolSettingsWidthRow.orientation = .horizontal
-        toolSettingsWidthRow.spacing = 8
-        toolSettingsWidthRow.alignment = .centerY
-        toolSettingsWidthRow.addArrangedSubview(NSTextField(labelWithString: "Line Weight:"))
-        toolSettingsWidthRow.addArrangedSubview(toolSettingsLineWidthPopup)
-
-        let toolOpacityRow = NSStackView(views: [NSTextField(labelWithString: "Opacity:"), toolSettingsOpacitySlider, toolSettingsOpacityValueLabel])
-        toolOpacityRow.orientation = .horizontal
-        toolOpacityRow.spacing = 12
-        toolOpacityRow.alignment = .centerY
-        toolSettingsOpacitySlider.translatesAutoresizingMaskIntoConstraints = false
-        toolSettingsOpacityValueLabel.translatesAutoresizingMaskIntoConstraints = false
-        toolSettingsOpacitySlider.widthAnchor.constraint(equalToConstant: 120).isActive = true
-        toolSettingsOpacityValueLabel.widthAnchor.constraint(equalToConstant: 42).isActive = true
-
-        toolSettingsSectionContent.orientation = .vertical
-        toolSettingsSectionContent.spacing = 8
-        toolSettingsSectionContent.addArrangedSubview(toolSettingsToolLabel)
-        toolSettingsSectionContent.addArrangedSubview(toolStrokeRow)
-        toolSettingsSectionContent.addArrangedSubview(toolSettingsFillRow)
-        toolSettingsSectionContent.addArrangedSubview(toolSettingsOutlineRow)
-        toolSettingsSectionContent.addArrangedSubview(toolSettingsFontRow)
-        toolSettingsSectionContent.addArrangedSubview(toolSettingsArrowRow)
-        toolSettingsSectionContent.addArrangedSubview(toolSettingsArrowSizeRow)
-        toolSettingsSectionContent.addArrangedSubview(toolSettingsHatchRow)
-        toolSettingsSectionContent.addArrangedSubview(toolSettingsHatchBackgroundRow)
-        toolSettingsSectionContent.addArrangedSubview(toolSettingsWidthRow)
-        toolSettingsSectionContent.addArrangedSubview(toolOpacityRow)
-        toolSettingsSectionContent.addArrangedSubview(snapshotColorizeButton)
-
-        markupsSectionContent.orientation = .vertical
-        markupsSectionContent.spacing = 6
-        markupsSectionContent.addArrangedSubview(markupFilterField)
-        markupsSectionContent.addArrangedSubview(markupsCountLabel)
-        markupsSectionContent.addArrangedSubview(scrollView)
-
-        summarySectionContent.orientation = .vertical
-        summarySectionContent.spacing = 4
-        summarySectionContent.addArrangedSubview(measurementCountLabel)
-        summarySectionContent.addArrangedSubview(measurementTotalLabel)
-
-        toolSettingsSidebarToggleButton.image = NSImage(systemSymbolName: isSidebarCollapsed ? "sidebar.left" : "sidebar.right", accessibilityDescription: "Hide Tool Settings")
-        toolSettingsSidebarToggleButton.imagePosition = .imageOnly
-        toolSettingsSidebarToggleButton.bezelStyle = .texturedRounded
-        toolSettingsSidebarToggleButton.controlSize = .small
-        toolSettingsSidebarToggleButton.target = self
-        toolSettingsSidebarToggleButton.action = #selector(toggleSidebar)
-        toolSettingsSidebarToggleButton.toolTip = isSidebarCollapsed ? "Show Tool Settings Sidebar" : "Hide Tool Settings Sidebar"
-
-        let toolSettingsHeaderRow = NSStackView(views: [toolSettingsSectionButton, NSView(), toolSettingsSidebarToggleButton])
-        toolSettingsHeaderRow.orientation = .horizontal
-        toolSettingsHeaderRow.spacing = 6
-        toolSettingsHeaderRow.alignment = .centerY
-
-        let sidebarSpacer = NSView(frame: .zero)
-        sidebarSpacer.translatesAutoresizingMaskIntoConstraints = false
-        sidebarSpacer.setContentHuggingPriority(.defaultLow, for: .vertical)
-        sidebarSpacer.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-
-        let sidebar = NSStackView(views: [
-            toolSettingsHeaderRow,
-            toolSettingsSectionContent,
-            markupsSectionButton,
-            markupsSectionContent,
-            summarySectionButton,
-            summarySectionContent,
-            sidebarSpacer,
-            snapSectionButton,
-            snapSectionContent,
-            layersSectionButton,
-            layersSectionContent
-        ])
-        sidebar.orientation = .vertical
-        sidebar.spacing = 8
-        sidebar.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
-        sidebar.translatesAutoresizingMaskIntoConstraints = false
-
-        let container = NSView(frame: .zero)
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(sidebar)
-
-        let preferredWidth = container.widthAnchor.constraint(equalToConstant: 240)
-        sidebarPreferredWidthConstraint = preferredWidth
-        NSLayoutConstraint.activate([
-            sidebar.topAnchor.constraint(equalTo: container.topAnchor),
-            sidebar.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            sidebar.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            sidebar.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            container.widthAnchor.constraint(greaterThanOrEqualToConstant: 220),
-            container.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
-            preferredWidth
-        ])
-        updateSectionHeaders()
-        return container
     }
 
     @objc private func changeTool() {
@@ -2896,23 +2140,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func activateTool(_ requestedMode: ToolMode) {
-        let requestedMode = requestedMode.isEnabledInScratchReset ? requestedMode : .select
-        persistToolSettingsFromControls(for: pdfView.toolMode)
-
-        cancelPendingMarkupInteractions(except: requestedMode)
-
-        pdfView.toolMode = requestedMode
-        if requestedMode != .select {
-            setPolygonVertexEditMode(false)
-        }
-        applyStoredToolSettings(to: requestedMode)
+        // Only text selection is supported; stale shortcuts cannot enable editing.
+        cancelPendingMarkupInteractions()
+        pdfView.toolMode = .select
         refreshToolSegmentIcons()
         refreshTakeoffSegmentIcons()
-        if toolSelector.selectedSegment >= 0 || takeoffSelector.selectedSegment >= 0 {
-            animateToolSelectionFeedback()
-        }
-        updateToolSettingsUIForCurrentTool()
-        applyToolSettingsToPDFView()
         updateStatusBar()
     }
 
@@ -2942,46 +2174,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             takeoffSelector.selectedSegment = -1
         }
         activateTool(mode)
-    }
-
-    private func animateToolSelectionFeedback() {
-        guard let layer = toolSelector.layer else { return }
-        let bounce = CAKeyframeAnimation(keyPath: "transform.scale")
-        bounce.values = [1.0, 1.05, 0.98, 1.0]
-        bounce.keyTimes = [0.0, 0.35, 0.7, 1.0]
-        bounce.duration = 0.18
-        bounce.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        layer.add(bounce, forKey: "drawbridge.tool.bounce")
-    }
-
-    private func focusAndHighlightScalePresetControl() {
-        guard let window = view.window else { return }
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeFirstResponder(scalePresetPopup)
-        scalePresetPopup.wantsLayer = true
-        guard let layer = scalePresetPopup.layer else { return }
-        let accent = NSColor.systemBlue
-        layer.cornerRadius = 6
-        layer.borderColor = accent.cgColor
-        layer.borderWidth = 2
-        layer.shadowColor = accent.cgColor
-        layer.shadowOpacity = 0.9
-        layer.shadowRadius = 10
-        layer.shadowOffset = .zero
-
-        let pulse = CAKeyframeAnimation(keyPath: "transform.scale")
-        pulse.values = [1.0, 1.08, 1.0, 1.08, 1.0]
-        pulse.keyTimes = [0.0, 0.2, 0.45, 0.7, 1.0]
-        pulse.duration = 1.0
-        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        layer.add(pulse, forKey: "drawbridge.scalePreset.spotlight")
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            guard let self else { return }
-            self.scalePresetPopup.layer?.borderWidth = 0
-            self.scalePresetPopup.layer?.shadowOpacity = 0
-            self.scalePresetPopup.layer?.shadowRadius = 0
-        }
     }
 
     @objc func toggleSidebar() {
@@ -3016,12 +2208,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             collapsedSidebarRevealButton.imagePosition = .noImage
         }
         collapsedSidebarRevealButton.isHidden = !isSidebarCollapsed
-    }
-
-    func splitViewDidResizeSubviews(_ notification: Notification) {
-        guard let sidebar = sidebarContainerView, !isSidebarCollapsed, sidebar.frame.width > 120 else { return }
-        lastSidebarExpandedWidth = min(max(sidebar.frame.width, 220), 280)
-        UserDefaults.standard.set(Double(lastSidebarExpandedWidth), forKey: "DrawbridgeSidebarWidth")
     }
 
     func splitView(_ splitView: NSSplitView, constrainSplitPosition proposedPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
@@ -3196,166 +2382,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func pasteGrabSnapshotInPlace() {
-        guard ToolMode.allowsMarkupEditing else { return }
-        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
-        guard let pdfData = grabClipboardPDFData,
-              let sourceRect = grabClipboardPageRect,
-              let page = pdfView.currentPage else {
-            beep()
-            return
-        }
-        let selectedLayer = resolvedGrabSnapshotLayer()
-        guard let snapshotURL = resolvedGrabSnapshotURL(for: pdfData) else { beep(); return }
-
-        let destinationRect = adjustedGrabPasteRect(sourceRect, on: page)
-        let annotation = PDFSnapshotAnnotation(bounds: destinationRect, snapshotURL: snapshotURL)
-        annotation.renderOpacity = 1.0
-        annotation.tintBlendStyle = grabClipboardTintBlendStyle
-        annotation.snapshotLayerName = selectedLayer
-        grabSnapshotPreferredLayer = selectedLayer
-        applyLayerRenderingStyle(to: annotation, layer: selectedLayer)
-        page.addAnnotation(annotation)
-        registerAnnotationPresenceUndo(page: page, annotation: annotation, shouldExist: false, actionName: "Paste Grab Snapshot")
-        markPageMarkupCacheDirty(page)
-        markMarkupChanged()
-        setTool(.select)
-        lastDirectlySelectedAnnotation = annotation
-        markupsTable.deselectAll(nil)
-        performRefreshMarkups(selecting: annotation)
-        updateSelectionOverlay()
-        updateToolSettingsUIForCurrentTool()
-        updateStatusBar()
-        scheduleAutosave()
-    }
-
-    private func adjustedGrabPasteRect(_ sourceRect: NSRect, on page: PDFPage) -> NSRect {
-        let pageBounds = page.bounds(for: .mediaBox).insetBy(dx: 2, dy: 2)
-        guard pageBounds.width > 4, pageBounds.height > 4 else { return sourceRect }
-
-        var rect = sourceRect.standardized
-        rect.size.width = max(1, rect.width)
-        rect.size.height = max(1, rect.height)
-
-        if rect.width > pageBounds.width || rect.height > pageBounds.height {
-            let scale = min(pageBounds.width / rect.width, pageBounds.height / rect.height)
-            rect.size.width *= scale
-            rect.size.height *= scale
-        }
-
-        let maxX = pageBounds.maxX - rect.width
-        let maxY = pageBounds.maxY - rect.height
-        rect.origin.x = min(max(rect.origin.x, pageBounds.minX), maxX)
-        rect.origin.y = min(max(rect.origin.y, pageBounds.minY), maxY)
-        return rect
-    }
-
-    private func resolvedGrabSnapshotLayer() -> String {
-        let selectedSnapshots = currentSelectedMarkupItems().compactMap { $0.annotation as? PDFSnapshotAnnotation }
-        if let firstLayer = selectedSnapshots
-            .lazy
-            .compactMap({ $0.snapshotLayerName?.trimmingCharacters(in: .whitespacesAndNewlines) })
-            .first(where: { !$0.isEmpty }) {
-            return firstLayer
-        }
-        return grabSnapshotPreferredLayer
-    }
-
-    private func resolvedGrabSnapshotURL(for data: Data) -> URL? {
-        if let cached = grabClipboardSnapshotURL,
-           FileManager.default.fileExists(atPath: cached.path) {
-            return cached
-        }
-        guard let persisted = persistGrabSnapshotPDFData(data, captureID: grabClipboardCaptureID) else {
-            return nil
-        }
-        grabClipboardSnapshotURL = persisted
-        return persisted
-    }
-
-    private func warmGrabSnapshotPersistence(_ data: Data, captureID: UUID) {
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let url = MainViewController.persistGrabSnapshotPDFDataToDisk(data, captureID: captureID) else {
-                return
-            }
-            DispatchQueue.main.async {
-                guard let self, self.grabClipboardCaptureID == captureID else { return }
-                self.grabClipboardSnapshotURL = url
-            }
-        }
-    }
-
-    private func persistGrabSnapshotPDFData(_ data: Data, captureID: UUID) -> URL? {
-        MainViewController.persistGrabSnapshotPDFDataToDisk(data, captureID: captureID)
-    }
-
-    nonisolated private static func persistGrabSnapshotPDFDataToDisk(_ data: Data, captureID: UUID) -> URL? {
-        do {
-            let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            let directory = root?
-                .appendingPathComponent("Drawbridge", isDirectory: true)
-                .appendingPathComponent("GrabSnapshots", isDirectory: true)
-            guard let directory else { return nil }
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let url = directory.appendingPathComponent("grab-\(captureID.uuidString).pdf")
-            if !FileManager.default.fileExists(atPath: url.path) {
-                try data.write(to: url, options: .atomic)
-            }
-            return url
-        } catch {
-            return nil
-        }
-    }
-
-    func preferredSnapshotTintBlendStyle(for pdfData: Data) -> PDFSnapshotAnnotation.TintBlendStyle {
-        guard let provider = CGDataProvider(data: pdfData as CFData),
-              let doc = CGPDFDocument(provider),
-              let page = doc.page(at: 1) else {
-            return .screen
-        }
-        let sample = 48
-        guard let ctx = CGContext(
-            data: nil,
-            width: sample,
-            height: sample,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceGray(),
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else {
-            return .screen
-        }
-        ctx.setFillColor(gray: 1.0, alpha: 1.0)
-        ctx.fill(CGRect(x: 0, y: 0, width: sample, height: sample))
-        let mediaBox = page.getBoxRect(.mediaBox)
-        guard mediaBox.width > 0.1, mediaBox.height > 0.1 else {
-            return .screen
-        }
-        ctx.saveGState()
-        ctx.scaleBy(x: CGFloat(sample) / mediaBox.width, y: CGFloat(sample) / mediaBox.height)
-        ctx.drawPDFPage(page)
-        ctx.restoreGState()
-        guard let image = ctx.makeImage(),
-              let data = image.dataProvider?.data,
-              let bytes = CFDataGetBytePtr(data) else {
-            return .screen
-        }
-        let bytesPerRow = max(1, image.bytesPerRow)
-        func intensity(x: Int, y: Int) -> Double {
-            let clampedX = min(max(x, 0), sample - 1)
-            let clampedY = min(max(y, 0), sample - 1)
-            let idx = clampedY * bytesPerRow + clampedX
-            return Double(bytes[idx]) / 255.0
-        }
-
-        let margin = max(2, sample / 8)
-        let cornerValues: [Double] = [
-            intensity(x: margin, y: margin),
-            intensity(x: sample - 1 - margin, y: margin),
-            intensity(x: margin, y: sample - 1 - margin),
-            intensity(x: sample - 1 - margin, y: sample - 1 - margin)
-        ]
-        let cornerAverage = cornerValues.reduce(0, +) / Double(cornerValues.count)
-        return cornerAverage < 0.45 ? .multiply : .screen
+        // Compatibility entry point: annotation authoring is unavailable.
     }
 
     private func createBlankDocument(sizeInches: (name: String, widthInches: CGFloat, heightInches: CGFloat), landscape: Bool) {
@@ -3402,27 +2429,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc func highlightSelection() {
-        guard ToolMode.allowsMarkupEditing else { return }
-        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
-        pdfView.addHighlightForCurrentSelection()
-        refreshMarkups()
-        scheduleAutosave()
+        // Compatibility entry point: annotation authoring is unavailable.
     }
 
     @objc func underlineSelection() {
-        guard ToolMode.allowsMarkupEditing else { return }
-        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
-        pdfView.addUnderlineForCurrentSelection()
-        refreshMarkups()
-        scheduleAutosave()
+        // Compatibility entry point: annotation authoring is unavailable.
     }
 
     @objc func strikethroughSelection() {
-        guard ToolMode.allowsMarkupEditing else { return }
-        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
-        pdfView.addStrikethroughForCurrentSelection()
-        refreshMarkups()
-        scheduleAutosave()
+        // Compatibility entry point: annotation authoring is unavailable.
     }
 
     @objc func saveCopy() {
@@ -3487,85 +2502,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return fallbackDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("pdf")
     }
 
-    private func decodeAnnotation(from data: Data) -> PDFAnnotation? {
-        if let secure = try? NSKeyedUnarchiver.unarchivedObject(ofClass: PDFAnnotation.self, from: data) {
-            return secure
-        }
-        guard let unarchiver = try? NSKeyedUnarchiver(forReadingFrom: data) else {
-            return nil
-        }
-        unarchiver.requiresSecureCoding = false
-        let insecure = unarchiver.decodeObject(of: PDFAnnotation.self, forKey: NSKeyedArchiveRootObjectKey)
-        unarchiver.finishDecoding()
-        return insecure
-    }
-
-    private func decodeMarkupClipboardPayloadFromPasteboard() -> MarkupClipboardPayload? {
-        let board = NSPasteboard.general
-        let changeCount = board.changeCount
-        if changeCount == cachedMarkupPasteboardChangeCount {
-            return cachedMarkupPasteboardPayload
-        }
-        cachedMarkupPasteboardChangeCount = changeCount
-        guard let raw = board.data(forType: markupClipboardPasteboardType),
-              let payload = try? PropertyListDecoder().decode(MarkupClipboardPayload.self, from: raw),
-              !payload.records.isEmpty else {
-            cachedMarkupPasteboardPayload = nil
-            return nil
-        }
-        cachedMarkupPasteboardPayload = payload
-        return payload
-    }
-
     func pasteCopiedMarkupsFromPasteboard() {
-        guard ToolMode.allowsMarkupEditing else { return }
-        guard let document = pdfView.document else { beep(); return }
-        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
-        guard let payload = decodeMarkupClipboardPayloadFromPasteboard() else {
-            beep()
-            return
-        }
-
-        let destinationPageIndex: Int
-        if let currentPage = pdfView.currentPage {
-            destinationPageIndex = max(0, document.index(for: currentPage))
-        } else {
-            destinationPageIndex = min(max(0, payload.records.first?.pageIndex ?? 0), max(0, document.pageCount - 1))
-        }
-        guard destinationPageIndex >= 0,
-              destinationPageIndex < document.pageCount,
-              let destinationPage = document.page(at: destinationPageIndex) else {
-            beep()
-            return
-        }
-
-        let sourcePageIndex = payload.records.first?.pageIndex ?? destinationPageIndex
-        let shouldOffset = (sourcePageIndex == destinationPageIndex)
-        let deltaX: CGFloat = shouldOffset ? 12 : 0
-        let deltaY: CGFloat = shouldOffset ? -12 : 0
-
-        var pasted: [PDFAnnotation] = []
-        pasted.reserveCapacity(payload.records.count)
-        for record in payload.records {
-            guard let annotation = decodeAnnotation(from: record.archivedAnnotation) else { continue }
-            var bounds = annotation.bounds
-            bounds.origin.x += deltaX
-            bounds.origin.y += deltaY
-            annotation.bounds = bounds
-            if let lineWidth = record.lineWidth, lineWidth > 0 {
-                assignLineWidth(lineWidth, to: annotation)
-            }
-            destinationPage.addAnnotation(annotation)
-            pdfView.rebindRectangleHatchIdentityAndSync(for: annotation, preferredLineWidth: record.lineWidth)
-            registerAnnotationPresenceUndo(page: destinationPage, annotation: annotation, shouldExist: false, actionName: "Paste Markup")
-            pasted.append(annotation)
-        }
-
-        guard guardOrBeep(!pasted.isEmpty) else { return }
-        markPageMarkupCacheDirty(destinationPage)
-        pdfView.restorePolygonHatchOverlays(on: destinationPage, for: pasted)
-        commitMarkupMutation(selecting: pasted.first, forceImmediateRefresh: true)
-        selectMarkupsFromFence(page: destinationPage, annotations: pasted, enablesGroupedDrag: true, refreshBeforeSelecting: false)
+        // Compatibility entry point: annotation authoring is unavailable.
     }
 
     func startSaveProgressTracking(phase: String) {
@@ -3929,25 +2867,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         cachedMeasurementTotalPoints += summary.totalPoints
     }
 
-    func annotationsForPageIndex(_ pageIndex: Int, in document: PDFDocument) -> [PDFAnnotation] {
-        if let cached = pageMarkupCache[pageIndex] {
-            return cached
-        }
-        return document.page(at: pageIndex)?.annotations.filter(isUserEditableMarkup) ?? []
-    }
-
-    func searchableAnnotationText(for annotation: PDFAnnotation, pageIndex: Int) -> String {
-        let key = ObjectIdentifier(annotation)
-        if let cached = pageMarkupSearchIndex[pageIndex]?[key] {
-            return cached
-        }
-        let text = annotationSearchText(for: annotation)
-        var pageIndexCache = pageMarkupSearchIndex[pageIndex] ?? [:]
-        pageIndexCache[key] = text
-        pageMarkupSearchIndex[pageIndex] = pageIndexCache
-        return text
-    }
-
     private func cancelSearchIndexWarmup() {
         pendingSearchIndexWarmupWorkItem?.cancel()
         pendingSearchIndexWarmupWorkItem = nil
@@ -4216,91 +3135,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         hasPromptedForInitialMarkupSaveCopy = true
         isPresentingInitialMarkupSaveCopyPrompt = false
     }
-
-    func ensureWorkingCopyBeforeFirstMarkup() -> Bool {
-        hasPromptedForInitialMarkupSaveCopy = true
-        isPresentingInitialMarkupSaveCopyPrompt = false
-        return true
-    }
-
-    private func suggestedMarkupCopyFilename(for sourceURL: URL) -> String {
-        let datePrefix = Self.markupCopyDateFormatter.string(from: Date())
-        return "\(datePrefix) - markups \(sourceURL.lastPathComponent)"
-    }
-
-    private func promptForInitialMarkupWorkingCopy(from sourceURL: URL) -> Bool {
-        let explanation = NSAlert()
-        explanation.messageText = "Create a marked-up copy before continuing?"
-        explanation.informativeText = """
-        To protect your original PDF, Drawbridge saves markups to a separate copy.
-
-        Your source file will remain unchanged. Choose where to save the marked-up copy next.
-        """
-        explanation.alertStyle = .informational
-        explanation.addButton(withTitle: "Choose Save Location")
-        explanation.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
-        guard explanation.runModal() == .alertFirstButtonReturn else {
-            return false
-        }
-
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.pdf]
-        panel.title = "Save Marked-Up Copy"
-        panel.message = "Choose where to save your marked-up PDF. The original file will not be modified."
-        panel.prompt = "Save Markup Copy"
-        panel.nameFieldStringValue = suggestedMarkupCopyFilename(for: sourceURL)
-
-        guard panel.runModal() == .OK, let destinationURL = panel.url else {
-            return false
-        }
-
-        beginBusyIndicator("Preparing Working Copy…")
-        defer { endBusyIndicator() }
-
-        do {
-            let source = canonicalDocumentURL(sourceURL)
-            let destination = canonicalDocumentURL(destinationURL)
-            if source != destination {
-                if FileManager.default.fileExists(atPath: destination.path) {
-                    try FileManager.default.removeItem(at: destination)
-                }
-                try FileManager.default.copyItem(at: source, to: destination)
-            }
-            sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == source }
-            openDocumentURL = destination
-            registerSessionDocument(destination)
-            configureAutosaveURL(for: destination)
-            view.window?.title = "Drawbridge - \(destination.lastPathComponent)"
-            onDocumentOpened?(destination)
-            // User explicitly chose a markup file; persist current in-memory markups immediately.
-            if let document = pdfView.document {
-                persistProjectSnapshot(document: document, for: destination, busyMessage: "Saving Changes…")
-            }
-            return true
-        } catch {
-            runAlert(
-                title: "Failed to create working copy",
-                informativeText: "Could not copy \(sourceURL.lastPathComponent).\n\n\(error.localizedDescription)",
-                style: .warning
-            )
-            return false
-        }
-    }
-
-    @objc private func filterMarkups() {
-        markupFilterText = markupFilterField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        refreshMarkups()
-    }
-
-
-    @objc private func selectMarkupFromTable() {
-        jumpToSelectedMarkup()
-        updateSelectionOverlay()
-        updateToolSettingsUIForCurrentTool()
-    }
-
-
 
     @objc func exportMarkupsCSV() {
         guard let document = pdfView.document else { beep(); return }
@@ -5255,7 +4089,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         )
     }
 
-
     func openDocument(at url: URL) {
         let openSpan = PerformanceMetrics.begin(
             "open_document",
@@ -5316,85 +4149,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         )
     }
 
-    private func presentDroppedImageScaleDialog(page: PDFPage, annotation: PDFAnnotation, baseBounds: NSRect) {
-        let alert = NSAlert()
-        alert.messageText = "Scale Image"
-        alert.informativeText = "Set inserted image size."
-        alert.alertStyle = .informational
-
-        let presetPopup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 140, height: 24), pullsDown: false)
-        presetPopup.addItems(withTitles: ["50%", "75%", "100%", "125%", "150%", "200%", "Custom"])
-        presetPopup.selectItem(withTitle: "100%")
-        presetPopup.controlSize = .regular
-
-        let customField = NSTextField(frame: NSRect(x: 0, y: 0, width: 96, height: 24))
-        customField.placeholderString = "100"
-        customField.stringValue = "100"
-        customField.alignment = .right
-        customField.controlSize = .regular
-        customField.font = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)
-        customField.translatesAutoresizingMaskIntoConstraints = false
-        customField.widthAnchor.constraint(equalToConstant: 96).isActive = true
-
-        presetPopup.target = self
-        presetPopup.action = #selector(imageScalePresetChanged(_:))
-        presetPopup.identifier = NSUserInterfaceItemIdentifier("image-scale-preset")
-        customField.identifier = NSUserInterfaceItemIdentifier("image-scale-custom")
-
-        let row = NSStackView(views: [
-            NSTextField(labelWithString: "Scale:"),
-            presetPopup,
-            customField,
-            NSTextField(labelWithString: "%")
-        ])
-        row.orientation = .horizontal
-        row.spacing = 8
-        row.alignment = .centerY
-        alert.accessoryView = row
-        alert.addButton(withTitle: "Apply")
-        alert.addButton(withTitle: "Keep")
-
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else {
-            return
-        }
-
-        let fallbackFromPreset: Double = Double((presetPopup.titleOfSelectedItem ?? "100%").replacingOccurrences(of: "%", with: "")) ?? 100
-        let typedPercent = customField.doubleValue > 0 ? customField.doubleValue : fallbackFromPreset
-        let percent = max(5, CGFloat(typedPercent))
-
-        let factor = percent / 100.0
-        let center = NSPoint(x: baseBounds.midX, y: baseBounds.midY)
-        var newBounds = NSRect(
-            x: center.x - (baseBounds.width * factor) * 0.5,
-            y: center.y - (baseBounds.height * factor) * 0.5,
-            width: baseBounds.width * factor,
-            height: baseBounds.height * factor
-        )
-        let pageBounds = page.bounds(for: pdfView.displayBox)
-        if newBounds.minX < pageBounds.minX { newBounds.origin.x = pageBounds.minX }
-        if newBounds.maxX > pageBounds.maxX { newBounds.origin.x = pageBounds.maxX - newBounds.width }
-        if newBounds.minY < pageBounds.minY { newBounds.origin.y = pageBounds.minY }
-        if newBounds.maxY > pageBounds.maxY { newBounds.origin.y = pageBounds.maxY - newBounds.height }
-        let before = snapshot(for: annotation)
-        annotation.bounds = newBounds
-        markPageMarkupCacheDirty(page)
-        registerAnnotationStateUndo(annotation: annotation, previous: before, actionName: "Scale Image")
-        commitMarkupMutation(selecting: annotation)
-    }
-
-    @objc private func imageScalePresetChanged(_ sender: NSPopUpButton) {
-        guard let row = sender.superview as? NSStackView else { return }
-        guard let customField = row.arrangedSubviews.first(where: { $0.identifier == NSUserInterfaceItemIdentifier("image-scale-custom") }) as? NSTextField else {
-            return
-        }
-        guard let selected = sender.titleOfSelectedItem else { return }
-        if selected == "Custom" {
-            return
-        }
-        customField.stringValue = selected.replacingOccurrences(of: "%", with: "")
-    }
-
     func registerSessionDocument(_ url: URL) {
         let normalized = canonicalDocumentURL(url)
         sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == normalized }
@@ -5427,7 +4181,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pendingScaleReminderSuppressionOneShot = false
         pageLabelOverrides.removeAll()
         suppressedEmbeddedPageLabelIndexes.removeAll()
-        flattenedPDFItems.removeAll(keepingCapacity: false)
         openDocumentURL = nil
         dominantDocumentPageSizeInInches = nil
         hasPromptedForInitialMarkupSaveCopy = true
@@ -5449,21 +4202,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         requestChromeRefresh(immediate: true)
         refreshDocumentTabs()
     }
-
-    private func startMarkupsRefreshTimer() {
-        markupsTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            Task { @MainActor in
-                self.markupsRefreshTick()
-            }
-        }
-    }
-
-    @objc private func markupsRefreshTick() {
-        if isSavingDocumentOperation { return }
-        updateStatusBar()
-    }
-
 
     private func markupIndexSnapshotsDirectoryURL() -> URL? {
         guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
@@ -5514,19 +4252,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         false
     }
 
-    private func jumpToSelectedMarkup() {
-        let row = markupsTable.selectedRow
-        guard row >= 0, row < markupItems.count else { return }
-
-        let item = markupItems[row]
-        guard let page = pdfView.document?.page(at: item.pageIndex) else { return }
-
-        let destination = PDFDestination(page: page, at: NSPoint(x: item.annotation.bounds.minX, y: item.annotation.bounds.maxY))
-        pdfView.navigateToDestinationWithHistory(destination)
-        updateSelectionOverlay()
-    }
-
-
     func currentSelectedAnnotation() -> PDFAnnotation? {
         currentSelectedMarkupItem()?.annotation
     }
@@ -5557,7 +4282,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     func clearMarkupTableSelectionUI(updateStatusBarValue: Bool = true) {
         markupsTable.deselectAll(nil)
         clearSelectionOverlayLayers()
-        updateToolSettingsUIForCurrentTool()
         if updateStatusBarValue {
             updateStatusBar()
         }
@@ -5569,7 +4293,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             markupsTable.scrollRowToVisible(first)
         }
         updateSelectionOverlay()
-        updateToolSettingsUIForCurrentTool()
         if updateStatusBarValue {
             updateStatusBar()
         }
@@ -5686,61 +4409,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return (first, last)
     }
 
-    private func selectMarkupsFromFence(
-        page: PDFPage,
-        annotations: [PDFAnnotation],
-        enablesGroupedDrag: Bool = false,
-        refreshBeforeSelecting: Bool = true
-    ) {
-        guard let document = pdfView.document else { return }
-        let pageIndex = document.index(for: page)
-        guard pageIndex >= 0 else { return }
-
-        var selected = Set(annotations.map(ObjectIdentifier.init))
-        for annotation in annotations {
-            for sibling in relatedCalloutAnnotations(for: annotation, on: page) {
-                selected.insert(ObjectIdentifier(sibling))
-            }
-        }
-        if refreshBeforeSelecting {
-            performRefreshMarkups(selecting: nil)
-        }
-        let rows = IndexSet(markupItems.enumerated().compactMap { idx, item in
-            guard item.pageIndex == pageIndex else { return nil }
-            return selected.contains(ObjectIdentifier(item.annotation)) ? idx : nil
-        })
-        if rows.isEmpty {
-            clearGroupedPasteDragSelection()
-            clearMarkupTableSelectionUI(updateStatusBarValue: false)
-            return
-        }
-        if enablesGroupedDrag {
-            groupedPasteDragPageID = ObjectIdentifier(page)
-            groupedPasteDragAnnotationIDs = selected
-        } else {
-            clearGroupedPasteDragSelection()
-        }
-        applyMarkupTableSelectionRows(rows)
-    }
-
     private func clearGroupedPasteDragSelection() {
         groupedPasteDragPageID = nil
         groupedPasteDragAnnotationIDs.removeAll(keepingCapacity: false)
     }
-
-    private func shouldDragAsGroupedPasteSelection(on page: PDFPage, selectedSet: Set<ObjectIdentifier>, anchor: PDFAnnotation) -> Bool {
-        let anchorID = ObjectIdentifier(anchor)
-        return MarkupInteractionPolicy.shouldDragGroupedPasteSelection(
-            selectedAnnotationIDs: selectedSet,
-            anchorAnnotationID: anchorID,
-            currentPageID: ObjectIdentifier(page),
-            groupedPastePageID: groupedPasteDragPageID,
-            groupedPasteAnnotationIDs: groupedPasteDragAnnotationIDs
-        )
-    }
-
-
-
 
     func updateMeasurementSummary() {
         guard let document = pdfView.document else {
@@ -5787,7 +4459,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         measurementTotalLabel.stringValue = String(format: "Total Length: %.2f %@", totalInDisplayUnits, pdfView.measurementUnitLabel)
     }
 
+    private func refreshFlattenButtonState() {
+        let recoverable = pdfView.document.map(PDFAnnotationFlattener.canUnflatten) ?? false
+        flattenPDFButton.image = NSImage(systemSymbolName: recoverable ? "square.stack.3d.up" : "square.stack.3d.down.forward", accessibilityDescription: recoverable ? "Unflatten PDF" : "Flatten PDF")
+        flattenPDFButton.toolTip = recoverable ? "Unflatten PDF — restore editable annotations and save this PDF" : "Flatten PDF — flatten annotations and save this PDF"
+        flattenPDFButton.setAccessibilityLabel(recoverable ? "Unflatten PDF" : "Flatten PDF")
+        flattenPDFButton.isEnabled = pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy
+    }
+
     func updateStatusBar() {
+        refreshFlattenButtonState()
         statusToolLabel.stringValue = "Tool: \(currentToolName())"
         applyScaleLockForCurrentPageIfNeeded()
 
@@ -5846,67 +4527,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return pdfView.toolMode.statusDisplayName
     }
 
-    private func segmentIndex(for mode: ToolMode) -> Int {
-        mode.primaryToolbarSegmentIndex ?? -1
-    }
-
-    private func takeoffSegmentIndex(for mode: ToolMode) -> Int {
-        mode.takeoffToolbarSegmentIndex ?? -1
-    }
-
-    private func isDrawingScaleConfigured() -> Bool {
-        guard pdfView.document != nil, pdfView.currentPage != nil else {
-            return true
-        }
-        return hasScaleLockForCurrentPage()
-    }
-
-    private func hasScaleLockForCurrentPage() -> Bool {
-        guard let document = pdfView.document,
-              let pageIndex = currentPageIndexForScaleContext(in: document) else {
-            return false
-        }
-        return pageScaleLocks[pageIndex] != nil
-    }
-
-    private func shouldWarnAboutMissingScaleForCurrentPage() -> Bool {
-        guard let document = pdfView.document,
-              let pageIndex = currentPageIndexForScaleContext(in: document) else {
-            return false
-        }
-        if explicitScaleSetDocumentID == ObjectIdentifier(document),
-           explicitScaleSetPageIndexes.contains(pageIndex) {
-            return false
-        }
-        if isScalePresetControlConfiguredForCurrentPage() {
-            return false
-        }
-        if pageIndex >= 0,
-           lastExplicitScaleSetDocumentID == ObjectIdentifier(document),
-           lastExplicitScaleSetPageIndex == pageIndex {
-            return false
-        }
-        return !hasScaleLockForCurrentPage()
-    }
-
-    private func consumePendingScaleReminderSuppressionForCurrentPage() -> Bool {
-        if pendingScaleReminderSuppressionOneShot {
-            pendingScaleReminderSuppressionOneShot = false
-            return true
-        }
-        guard let document = pdfView.document,
-              let pageIndex = currentPageIndexForScaleContext(in: document) else {
-            return false
-        }
-        if pendingScaleReminderSuppressionDocumentID == ObjectIdentifier(document),
-           pendingScaleReminderSuppressionPageIndex == pageIndex {
-            pendingScaleReminderSuppressionDocumentID = nil
-            pendingScaleReminderSuppressionPageIndex = -1
-            return true
-        }
-        return false
-    }
-
     func currentPageIndexForScaleContext(in document: PDFDocument) -> Int? {
         if let page = pdfView.currentPage {
             let current = document.index(for: page)
@@ -5918,20 +4538,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return sidebarCurrentPageIndex
         }
         return nil
-    }
-
-    private func isScalePresetControlConfiguredForCurrentPage() -> Bool {
-        let title = (scalePresetPopup.titleOfSelectedItem ?? scalePresetPopup.title).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty else { return false }
-        return title != "Scale: Not Set"
-    }
-
-    private func showAreaScaleRequiredWarning() {
-        runAlert(
-            title: "Set Drawing Scale First",
-            informativeText: "Area takeoff requires a drawing scale. Set scale before using the Area tool.",
-            style: .warning
-        )
     }
 
     func displayPageLabel(forPageIndex pageIndex: Int) -> String {
@@ -6102,130 +4708,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private func bookmarkContainsCurrentPage(_ outline: PDFOutline) -> Bool {
         guard sidebarCurrentPageIndex >= 0 else { return false }
         return destinationPageIndex(for: outline) == sidebarCurrentPageIndex
-    }
-
-    private func selectedSidebarPageIndexesForDeletion() -> [Int] {
-        guard let document = pdfView.document else { return [] }
-        let clickedRow = pagesTableView.clickedRow
-        if clickedRow >= 0,
-           clickedRow < document.pageCount,
-           !pagesTableView.selectedRowIndexes.contains(clickedRow) {
-            return [clickedRow]
-        }
-        var indexes = Array(pagesTableView.selectedRowIndexes).filter { $0 >= 0 && $0 < document.pageCount }
-        if indexes.isEmpty {
-            let selected = pagesTableView.selectedRow
-            if selected >= 0, selected < document.pageCount {
-                indexes = [selected]
-            }
-        }
-        return indexes.sorted()
-    }
-
-    private func directDestinationPageIndex(for outline: PDFOutline, in document: PDFDocument) -> Int? {
-        if let destinationPage = outline.destination?.page {
-            let index = document.index(for: destinationPage)
-            return index >= 0 ? index : nil
-        }
-        if let goToAction = outline.action as? PDFActionGoTo,
-           let destinationPage = goToAction.destination.page {
-            let index = document.index(for: destinationPage)
-            return index >= 0 ? index : nil
-        }
-        return nil
-    }
-
-    private func countBookmarksDirectlyTargetingPages(_ pageIndexes: Set<Int>, in document: PDFDocument) -> Int {
-        guard !pageIndexes.isEmpty, let root = document.outlineRoot else { return 0 }
-        var count = 0
-        func walk(_ node: PDFOutline) {
-            if let targetIndex = directDestinationPageIndex(for: node, in: document),
-               pageIndexes.contains(targetIndex) {
-                count += 1
-            }
-            guard node.numberOfChildren > 0 else { return }
-            for childIndex in 0..<node.numberOfChildren {
-                if let child = node.child(at: childIndex) {
-                    walk(child)
-                }
-            }
-        }
-        walk(root)
-        return count
-    }
-
-    private func removeBookmarksTargetingPages(_ pageIndexes: Set<Int>, in document: PDFDocument) -> Int {
-        guard !pageIndexes.isEmpty, let root = document.outlineRoot else { return 0 }
-        var removedCount = 0
-
-        func cloneWithoutRemovedNodes(_ node: PDFOutline) -> PDFOutline? {
-            if let targetIndex = directDestinationPageIndex(for: node, in: document),
-               pageIndexes.contains(targetIndex) {
-                removedCount += 1
-                return nil
-            }
-
-            let clone = PDFOutline()
-            clone.label = node.label
-            clone.destination = node.destination
-            clone.action = node.action
-            clone.isOpen = node.isOpen
-            for childIndex in 0..<node.numberOfChildren {
-                guard let child = node.child(at: childIndex),
-                      let clonedChild = cloneWithoutRemovedNodes(child) else { continue }
-                clone.insertChild(clonedChild, at: clone.numberOfChildren)
-            }
-            return clone
-        }
-
-        let newRoot = PDFOutline()
-        for childIndex in 0..<root.numberOfChildren {
-            guard let child = root.child(at: childIndex),
-                  let clonedChild = cloneWithoutRemovedNodes(child) else { continue }
-            newRoot.insertChild(clonedChild, at: newRoot.numberOfChildren)
-        }
-        document.outlineRoot = newRoot
-        return removedCount
-    }
-
-    private func remapPageIndexedStateAfterDeletingPages(_ removedPageIndexes: [Int]) {
-        let sortedRemoved = removedPageIndexes.sorted()
-        guard !sortedRemoved.isEmpty else { return }
-        let removedSet = Set(sortedRemoved)
-
-        func remapIndex(_ oldIndex: Int) -> Int? {
-            if removedSet.contains(oldIndex) { return nil }
-            var shift = 0
-            for removed in sortedRemoved {
-                if removed < oldIndex {
-                    shift += 1
-                } else {
-                    break
-                }
-            }
-            return oldIndex - shift
-        }
-
-        var remappedPageLabels: [Int: String] = [:]
-        for (pageIndex, label) in pageLabelOverrides {
-            guard let newIndex = remapIndex(pageIndex) else { continue }
-            remappedPageLabels[newIndex] = label
-        }
-        pageLabelOverrides = remappedPageLabels
-        suppressedEmbeddedPageLabelIndexes = Set(suppressedEmbeddedPageLabelIndexes.compactMap(remapIndex))
-
-        var remappedPageScaleLocks: [Int: PageScaleLock] = [:]
-        for (pageIndex, lock) in pageScaleLocks {
-            guard let newIndex = remapIndex(pageIndex) else { continue }
-            remappedPageScaleLocks[newIndex] = lock
-        }
-        pageScaleLocks = remappedPageScaleLocks
-
-        explicitScaleSetPageIndexes = Set(explicitScaleSetPageIndexes.compactMap(remapIndex))
-        lastScaleLockAppliedPageIndex = remapIndex(lastScaleLockAppliedPageIndex) ?? -1
-        lastExplicitScaleSetPageIndex = remapIndex(lastExplicitScaleSetPageIndex) ?? -1
-        pendingScaleReminderSuppressionPageIndex = remapIndex(pendingScaleReminderSuppressionPageIndex) ?? -1
-        sidebarCurrentPageIndex = remapIndex(sidebarCurrentPageIndex) ?? -1
     }
 
     func startAutoGenerateSheetNamesFlow() {
@@ -6488,7 +4970,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 sheetNumber: row.number.isEmpty ? "Page \(sheet.pageIndex + 1)" : row.number,
                 sheetTitle: row.title)
         }
-
 
         let applyPagesPrompt = NSAlert()
         applyPagesPrompt.messageText = "Apply to Pages too?"
@@ -7089,10 +5570,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
     }
 
-    private func extractPrimarySheetToken(from raw: String) -> String? {
-        extractSheetTokens(from: raw).first
-    }
-
     func sheetInfoFromPageLabel(_ label: String) -> (number: String?, title: String?) {
         let cleaned = cleanDetectedSheetText(label)
         guard !cleaned.isEmpty else { return (nil, nil) }
@@ -7114,30 +5591,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             .replacingOccurrences(of: #"[\s\-–—_:|/\\.]+$"#, with: "", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return (number, isUsableSheetTitle(title) ? title : nil)
-    }
-
-    private func detectAutoNameSheetNumber(
-        on page: PDFPage,
-        normalizedZone: NormalizedPageRect,
-        labelCanonicalTokens: Set<String>
-    ) -> String? {
-        let detectedNumber = detectSheetTokensInCapturedZone(on: page, normalizedZone: normalizedZone)
-        if let detectedResult = detectedNumber.result,
-           let token = preferredSheetToken(from: detectedResult.tokens, labelCanonicalTokens: labelCanonicalTokens) {
-            return token
-        }
-
-        let numRect = denormalize(rect: normalizedZone, for: page)
-        let expandedNumRect = numRect
-            .insetBy(dx: -max(numRect.width * 0.20, 10.0), dy: -max(numRect.height * 0.50, 8.0))
-            .intersection(page.bounds(for: pdfView.displayBox))
-        let expandedText = extractText(from: page, rectInPage: expandedNumRect, allowOCR: true, preferOCR: true)
-        let expandedTokens = extractSheetTokens(from: expandedText)
-        if let token = preferredSheetToken(from: expandedTokens, labelCanonicalTokens: labelCanonicalTokens) {
-            return token
-        }
-
-        return detectAnchoredSheetNumber(on: page, expectedRect: numRect, labelCanonicalTokens: labelCanonicalTokens)
     }
 
     private func detectSheetTokenForBatchLink(
@@ -7163,161 +5616,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let token = SheetReferencePolicy.uniqueOCRSheetIdentifier(inOrientationReadings: readings)
         return (token, "captured zone OCR orientation recovery", truncatedZoneDiagnosticText(readings.joined(separator: " | ")),
                 token == nil ? "OCR did not read one unambiguous full sheet number in the captured region." : nil, token != nil)
-    }
-
-    private func detectAutoNameSheetTitle(on page: PDFPage, primaryRect: NSRect) -> String {
-        let primary = extractText(from: page, rectInPage: primaryRect, allowOCR: true, preferOCR: true, usesLanguageCorrection: true)
-        if isUsableSheetTitle(primary) {
-            return primary
-        }
-        return detectAnchoredSheetTitle(on: page, expectedRect: primaryRect) ?? primary
-    }
-
-    private func detectAnchoredSheetNumber(
-        on page: PDFPage,
-        expectedRect: NSRect,
-        labelCanonicalTokens: Set<String>
-    ) -> String? {
-        let hits = recognizeTextLines(in: page)
-        guard !hits.isEmpty else { return nil }
-        let pageBounds = zoneCaptureBounds(for: page)
-        let labels = hits.filter { isSheetNumberLabel($0.text) }
-
-        var scored: [(token: String, score: CGFloat)] = []
-        func appendCandidates(from hit: OCRLineHit, baseScore: CGFloat) {
-            for token in extractSheetTokens(from: hit.text) {
-                guard preferredSheetToken(from: [token], labelCanonicalTokens: labelCanonicalTokens) != nil else { continue }
-                let tokenScore = CGFloat(scoreSheetToken(token, labelCanonicalTokens: labelCanonicalTokens))
-                let sizeScore = min(hit.rectInPage.height / max(pageBounds.height, 1) * 500, 40)
-                scored.append((token, baseScore + tokenScore + sizeScore))
-            }
-        }
-
-        for label in labels {
-            let labelCenterX = label.rectInPage.midX
-            let labelY = label.rectInPage.midY
-            for hit in hits where hit.rectInPage != label.rectInPage {
-                let center = NSPoint(x: hit.rectInPage.midX, y: hit.rectInPage.midY)
-                let verticalBelow = labelY - center.y
-                let isBelowLabel = verticalBelow >= -pageBounds.height * 0.03 && verticalBelow <= pageBounds.height * 0.35
-                let isRightOfLabel = center.x >= label.rectInPage.minX - pageBounds.width * 0.05 && center.x <= pageBounds.maxX
-                let isNearLabelColumn = abs(center.x - labelCenterX) <= pageBounds.width * 0.30
-                guard isBelowLabel && (isRightOfLabel || isNearLabelColumn) else { continue }
-                let distancePenalty = (abs(center.x - labelCenterX) / max(pageBounds.width, 1) * 35) +
-                    (max(0, verticalBelow) / max(pageBounds.height, 1) * 20)
-                appendCandidates(from: hit, baseScore: 120 - distancePenalty)
-            }
-        }
-
-        let expectedSearchRect = expectedRect
-            .insetBy(dx: -max(expectedRect.width * 0.75, pageBounds.width * 0.05), dy: -max(expectedRect.height * 2.0, pageBounds.height * 0.06))
-            .intersection(pageBounds)
-        for hit in hits where hit.rectInPage.intersects(expectedSearchRect) {
-            let distance = hypot(hit.rectInPage.midX - expectedRect.midX, hit.rectInPage.midY - expectedRect.midY)
-            let normalizedDistance = distance / max(hypot(pageBounds.width, pageBounds.height), 1)
-            appendCandidates(from: hit, baseScore: 80 - normalizedDistance * 100)
-        }
-
-        return scored.sorted { lhs, rhs in
-            if lhs.score != rhs.score {
-                return lhs.score > rhs.score
-            }
-            return lhs.token.count < rhs.token.count
-        }.first?.token
-    }
-
-    private func detectAnchoredSheetTitle(on page: PDFPage, expectedRect: NSRect) -> String? {
-        let hits = recognizeTextLines(in: page)
-        guard !hits.isEmpty else { return nil }
-        let pageBounds = zoneCaptureBounds(for: page)
-        let titleLabels = hits.filter { isSheetTitleLabel($0.text) }
-        let numberLabels = hits.filter { isSheetNumberLabel($0.text) }
-
-        var scored: [(title: String, score: CGFloat)] = []
-        func assembledTitle(from candidates: [OCRLineHit]) -> String? {
-            let usable = candidates
-                .filter { isUsableSheetTitle($0.text) }
-                .filter { preferredSheetToken(from: extractSheetTokens(from: $0.text)) == nil }
-                .sorted { lhs, rhs in
-                    if abs(lhs.rectInPage.midY - rhs.rectInPage.midY) > pageBounds.height * 0.01 {
-                        return lhs.rectInPage.midY > rhs.rectInPage.midY
-                    }
-                    return lhs.rectInPage.minX < rhs.rectInPage.minX
-                }
-            guard !usable.isEmpty else { return nil }
-
-            let maxHeight = usable.map(\.rectInPage.height).max() ?? 0
-            let titleLike = usable.filter { $0.rectInPage.height >= maxHeight * 0.55 }
-            let lines = (titleLike.isEmpty ? usable : titleLike)
-                .map { cleanDetectedSheetText($0.text) }
-                .filter { isUsableSheetTitle($0) }
-            let title = lines.joined(separator: " ")
-            return isUsableSheetTitle(title) ? title : nil
-        }
-
-        func appendTitleCandidate(_ hit: OCRLineHit, baseScore: CGFloat) {
-            let cleaned = cleanDetectedSheetText(hit.text)
-            guard isUsableSheetTitle(cleaned) else { return }
-            let sizeScore = min(hit.rectInPage.height / max(pageBounds.height, 1) * 400, 45)
-            scored.append((cleaned, baseScore + sizeScore))
-        }
-
-        for label in titleLabels {
-            let labelY = label.rectInPage.midY
-            let nearestNumberLabel = numberLabels
-                .sorted { abs($0.rectInPage.midY - labelY) < abs($1.rectInPage.midY - labelY) }
-                .first
-            let titleBlockCandidates: [OCRLineHit]
-            if let nearestNumberLabel {
-                let lowerY = min(labelY, nearestNumberLabel.rectInPage.midY)
-                let upperY = max(labelY, nearestNumberLabel.rectInPage.midY)
-                let minX = min(label.rectInPage.minX, nearestNumberLabel.rectInPage.minX) - pageBounds.width * 0.08
-                titleBlockCandidates = hits.filter { hit in
-                    guard hit.rectInPage != label.rectInPage,
-                          hit.rectInPage != nearestNumberLabel.rectInPage else { return false }
-                    let centerY = hit.rectInPage.midY
-                    return centerY > lowerY + pageBounds.height * 0.01 &&
-                        centerY < upperY - pageBounds.height * 0.01 &&
-                        hit.rectInPage.maxX >= minX
-                }
-            } else {
-                titleBlockCandidates = hits.filter { hit in
-                    guard hit.rectInPage != label.rectInPage else { return false }
-                    let verticalDistance = abs(hit.rectInPage.midY - labelY)
-                    return verticalDistance <= pageBounds.height * 0.30 &&
-                        hit.rectInPage.maxX >= label.rectInPage.minX - pageBounds.width * 0.08
-                }
-            }
-            if let title = assembledTitle(from: titleBlockCandidates) {
-                scored.append((title, 170))
-            }
-
-            for hit in titleBlockCandidates {
-                let centerY = hit.rectInPage.midY
-                let distancePenalty = abs(centerY - labelY) / max(pageBounds.height, 1) * 40
-                appendTitleCandidate(hit, baseScore: 110 - distancePenalty)
-            }
-        }
-
-        let expectedSearchRect = expectedRect
-            .insetBy(dx: -max(expectedRect.width * 0.35, pageBounds.width * 0.04), dy: -max(expectedRect.height * 1.25, pageBounds.height * 0.04))
-            .intersection(pageBounds)
-        let expectedHits = hits.filter { $0.rectInPage.intersects(expectedSearchRect) }
-        if let title = assembledTitle(from: expectedHits) {
-            scored.append((title, 120))
-        }
-        for hit in expectedHits {
-            let distance = hypot(hit.rectInPage.midX - expectedRect.midX, hit.rectInPage.midY - expectedRect.midY)
-            let normalizedDistance = distance / max(hypot(pageBounds.width, pageBounds.height), 1)
-            appendTitleCandidate(hit, baseScore: 70 - normalizedDistance * 80)
-        }
-
-        return scored.sorted { lhs, rhs in
-            if lhs.score != rhs.score {
-                return lhs.score > rhs.score
-            }
-            return lhs.title.count > rhs.title.count
-        }.first?.title
     }
 
     private func hyperlinkActivationBounds(for rawBounds: NSRect, token: String) -> NSRect {
@@ -7867,10 +6165,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         updateStatusBar()
     }
 
-    private func zoneCaptureBounds(for page: PDFPage) -> NSRect {
-        page.bounds(for: pdfView.displayBox).standardized
-    }
-
     func normalize(rectInPage: NSRect, for page: PDFPage) -> NormalizedPageRect {
         // Share captured regions in displayed coordinates, not raw PDF coordinates.
         // Identical landscape sheets may be stored as portrait pages with /Rotate.
@@ -7890,141 +6184,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return geometry.pageRect(visible).standardized
     }
 
-    private func zoneDetectionCandidates(for page: PDFPage, normalizedZone: NormalizedPageRect) -> [ZoneDetectionCandidate] {
-        let pageBounds = zoneCaptureBounds(for: page)
-        let baseRect = denormalize(rect: normalizedZone, for: page).standardized.intersection(pageBounds)
-        guard !baseRect.isEmpty, baseRect.width > 1, baseRect.height > 1 else {
-            return []
-        }
-
-        let nudgeX = max(pageBounds.width * 0.0125, 2.0)
-        let nudgeY = max(pageBounds.height * 0.0100, 2.0)
-        let expandX = max(baseRect.width * 0.08, pageBounds.width * 0.006)
-        let expandY = max(baseRect.height * 0.15, pageBounds.height * 0.008)
-        var candidates: [ZoneDetectionCandidate] = []
-        var seen = Set<String>()
-
-        func appendCandidate(rect: NSRect, strategy: String, allowOCR: Bool, usedFallback: Bool) {
-            let bounded = rect.standardized.intersection(pageBounds).standardized
-            guard !bounded.isEmpty, bounded.width > 1, bounded.height > 1 else { return }
-            let key = "\(Int((bounded.minX * 4).rounded())):\(Int((bounded.minY * 4).rounded())):\(Int((bounded.width * 4).rounded())):\(Int((bounded.height * 4).rounded())):\(allowOCR)"
-            guard !seen.contains(key) else { return }
-            seen.insert(key)
-            candidates.append(
-                ZoneDetectionCandidate(
-                    rectInPage: bounded,
-                    strategy: strategy,
-                    allowOCR: allowOCR,
-                    usedFallback: usedFallback
-                )
-            )
-        }
-
-        appendCandidate(rect: baseRect, strategy: "primary zone", allowOCR: true, usedFallback: false)
-        appendCandidate(rect: baseRect.offsetBy(dx: nudgeX, dy: 0), strategy: "nudged right", allowOCR: false, usedFallback: true)
-        appendCandidate(rect: baseRect.offsetBy(dx: -nudgeX, dy: 0), strategy: "nudged left", allowOCR: false, usedFallback: true)
-        appendCandidate(rect: baseRect.offsetBy(dx: 0, dy: nudgeY), strategy: "nudged up", allowOCR: false, usedFallback: true)
-        appendCandidate(rect: baseRect.offsetBy(dx: 0, dy: -nudgeY), strategy: "nudged down", allowOCR: false, usedFallback: true)
-
-        let expandedRect = baseRect.insetBy(dx: -expandX, dy: -expandY)
-        appendCandidate(rect: expandedRect, strategy: "expanded zone (selection)", allowOCR: false, usedFallback: true)
-        appendCandidate(rect: expandedRect, strategy: "expanded zone (OCR)", allowOCR: true, usedFallback: true)
-        return candidates
-    }
-
-    private func detectSheetTokensInCapturedZone(
-        on page: PDFPage,
-        normalizedZone: NormalizedPageRect
-    ) -> (result: ZoneDetectionResult?, rawTextPreview: String, failureReason: String?) {
-        let candidates = zoneDetectionCandidates(for: page, normalizedZone: normalizedZone)
-        guard !candidates.isEmpty else {
-            return (nil, "", "Captured zone is outside the visible page bounds.")
-        }
-
-        var firstNonEmptyRawText: String?
-        var firstNonEmptyStrategy: String?
-        for candidate in candidates {
-            let raw = extractText(
-                from: page,
-                rectInPage: candidate.rectInPage,
-                allowOCR: candidate.allowOCR,
-                preferOCR: candidate.allowOCR
-            )
-            guard !raw.isEmpty else { continue }
-            if firstNonEmptyRawText == nil {
-                firstNonEmptyRawText = raw
-                firstNonEmptyStrategy = candidate.strategy
-            }
-            let tokens = extractSheetTokens(from: raw)
-            guard !tokens.isEmpty else { continue }
-            return (
-                ZoneDetectionResult(
-                    tokens: tokens,
-                    rawText: raw,
-                    strategy: candidate.strategy,
-                    usedFallback: candidate.usedFallback
-                ),
-                "",
-                nil
-            )
-        }
-
-        if let firstNonEmptyRawText {
-            let reasonSuffix = firstNonEmptyStrategy.map { " (\($0))." } ?? "."
-            return (
-                nil,
-                truncatedZoneDiagnosticText(firstNonEmptyRawText),
-                "Text found, but no valid sheet token was parsed\(reasonSuffix)"
-            )
-        }
-        return (nil, "", "No text found in the captured zone.")
-    }
-
     private func truncatedZoneDiagnosticText(_ raw: String, limit: Int = 64) -> String {
         let cleaned = cleanDetectedSheetText(raw)
         guard cleaned.count > limit else { return cleaned }
         let endIndex = cleaned.index(cleaned.startIndex, offsetBy: limit)
         return "\(cleaned[..<endIndex])..."
-    }
-
-    private func extractText(from page: PDFPage, rectInPage: NSRect, allowOCR: Bool = true, preferOCR: Bool = false, usesLanguageCorrection: Bool = false) -> String {
-        let displayBox = pdfView.displayBox
-        let pageBounds = page.bounds(for: displayBox)
-        let bounded = rectInPage.intersection(pageBounds)
-        guard !bounded.isEmpty else { return "" }
-
-        if preferOCR,
-           allowOCR,
-           let image = renderCroppedImage(from: page, rectInPage: bounded) {
-            let recognized = recognizeText(in: image, usesLanguageCorrection: usesLanguageCorrection)
-            if !recognized.isEmpty {
-                // Heuristic for titles: if we get a huge block of text, try to find a shorter "title-like" line.
-                if usesLanguageCorrection && recognized.count > 120 && recognized.contains("\n") {
-                    let lines = recognized.components(separatedBy: .newlines)
-                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                        .filter { !$0.isEmpty }
-                    // Prefer the first line if it looks like a title (shorter, uppercase)
-                    if let first = lines.first, first.count < 80 {
-                        return first
-                    }
-                }
-                return recognized
-            }
-        }
-
-        if let selected = page.selection(for: bounded)?.string {
-            let cleaned = cleanDetectedSheetText(selected)
-            if !cleaned.isEmpty {
-                return cleaned
-            }
-        }
-
-        guard allowOCR else { return "" }
-
-        guard let image = renderCroppedImage(from: page, rectInPage: bounded) else {
-            return ""
-        }
-        return recognizeText(in: image, usesLanguageCorrection: usesLanguageCorrection)
     }
 
     private func renderCroppedImage(from page: PDFPage, rectInPage: NSRect) -> CGImage? {
@@ -8211,8 +6375,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         scrubArchitecturalBoilerplate(raw)
     }
 
-
-
     private func csvEscape(_ text: String) -> String {
         let escaped = text.replacingOccurrences(of: "\"", with: "\"\"")
         return "\"\(escaped)\""
@@ -8241,6 +6403,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func confirmDiscardUnsavedChangesIfNeeded() -> Bool {
+        guard !isFlatteningDocumentOperation else { return false }
         guard hasUnsavedChanges() else {
             return true
         }

@@ -43,13 +43,16 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" "$KEYCHAIN_PATH"
           echo "DRAWBRIDGE_CODESIGN_IDENTITY=$APPLE_DEVELOPER_ID_SIGNING_IDENTITY" >> "$GITHUB_ENV"
 
-      - name: Validate hyperlink matching
-        run: swift test --filter 'HyperlinkRegressionTests|CivilLinkBoundsTests|OCRNumericFormatTests'
+      - name: Install PDF test helper
+        run: brew install qpdf
+
+      - name: Validate navigation, flattening and toolbar
+        run: swift test --filter 'HyperlinkRegressionTests|CivilLinkBoundsTests|OCRNumericFormatTests|PDFAnnotationFlattenerTests|ToolbarPresentationTests'
 
       - name: Build app bundle
         env:
           DRAWBRIDGE_VERSION_TAG: ${{ github.ref_name }}
-          DRAWBRIDGE_BUILD_NUMBER: "135"
+          DRAWBRIDGE_BUILD_NUMBER: "136"
         run: ./Scripts/package-app.sh
 
       - name: Notarize app before packaging

@@ -32,82 +32,55 @@ extension MainViewController {
     }
 
     func flattenPDF() {
-        guard let document = pdfView.document else { beep(); return }
-        guard ensureWorkingCopyBeforeFirstMarkup() else { return }
-
-        var targets: [(page: PDFPage, annotation: PDFAnnotation)] = []
-        for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex) else { continue }
-            for annotation in page.annotations where isExtraneousEmbeddedPDFAnnotation(annotation) {
-                targets.append((page, annotation))
+        guard let document = pdfView.document, let source = openDocumentURL,
+              !isPDFProcessingBusy else { beep(); return }
+        if hasUnsavedChanges() {
+            persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…", document: document, completion: { [weak self] saved in
+                if saved { self?.flattenPDF() }
+            })
+            return
+        }
+        let unflattening = PDFAnnotationFlattener.canUnflatten(document)
+        let output = canonicalDocumentURL(source)
+        isFlatteningDocumentOperation = true
+        beginBusyIndicator(unflattening ? "Unflattening PDF…" : "Flattening PDF…", detail: "Checking annotations…")
+        let documentID = ObjectIdentifier(document)
+        let controller = self
+        DispatchQueue.global(qos: .userInitiated).async {
+            let progress: @Sendable (String) -> Void = { detail in
+                DispatchQueue.main.async { controller.updateBusyIndicatorDetail(detail) }
+            }
+            let result = Result {
+                try unflattening ? PDFAnnotationFlattener.unflatten(source: output, progress: progress)
+                    : PDFAnnotationFlattener.flatten(source: source, destination: output, progress: progress)
+            }
+            DispatchQueue.main.async {
+                let owner = controller
+                owner.isFlatteningDocumentOperation = false
+                owner.endBusyIndicator()
+                switch result {
+                case .success(let report):
+                    if owner.pdfView.document.map(ObjectIdentifier.init) == documentID, !owner.hasUnsavedChanges() {
+                        owner.openDocument(at: output)
+                    }
+                    var details: [String] = []
+                    if unflattening { details.append("Restored \(report.restoredAnnotations) editable annotation(s) without duplicating their visible content.") }
+                    if report.flattened > 0 {
+                        details.append("Made \(report.flattened) visible markup(s) part of the page. Click Unflatten to restore editing.")
+                    }
+                    if report.removedSHXComments > 0 {
+                        details.append("Removed \(report.removedSHXComments) redundant AutoCAD text comment box(es). The original drawing text and linework are preserved.")
+                    }
+                    if report.retainedMarkups > 0 {
+                        details.append("\(report.retainedMarkups) unsupported or hidden markup(s) remain editable.")
+                    }
+                    details.append("Saved to the PDF you have open. Links and forms were preserved.")
+                    owner.runAlert(title: unflattening ? "PDF Unflattened and Saved" : "PDF Flattened and Saved", informativeText: details.joined(separator: "\n\n"))
+                case .failure(let error):
+                    owner.runAlert(title: unflattening ? "Unflatten Failed" : "Flatten Failed", informativeText: error.localizedDescription, style: .warning)
+                }
             }
         }
-
-        if targets.isEmpty,
-           !flattenedPDFItems.isEmpty {
-            unflattenPDFItems()
-            return
-        }
-
-        guard !targets.isEmpty else {
-            runAlert(
-                title: "Nothing to Flatten",
-                informativeText: "Drawbridge did not find any embedded AutoCAD SHX/non-print annotation boxes in this PDF."
-            )
-            return
-        }
-
-        let alert = NSAlert()
-        alert.messageText = "Flatten Embedded PDF Data?"
-        alert.informativeText = """
-        This will remove \(targets.count) embedded AutoCAD SHX/non-print annotation box(es) from the current PDF.
-
-        The PDF stays open as the same document. Use Edit > Undo Flatten PDF to restore the removed items before saving.
-        """
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Flatten")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-
-        flattenedPDFItems = targets
-        for target in targets {
-            registerAnnotationPresenceUndo(page: target.page, annotation: target.annotation, shouldExist: true, actionName: "Flatten PDF")
-            target.page.removeAnnotation(target.annotation)
-            markPageMarkupCacheDirty(target.page)
-        }
-        commitMarkupMutation(selecting: nil, forceImmediateRefresh: true)
-        updatePDFContentsSummary()
-        runAlert(
-            title: "Flatten Complete",
-            informativeText: "Removed \(targets.count) embedded PDF item(s). Use Edit > Undo Flatten PDF to unflatten before saving."
-        )
-    }
-
-    private func unflattenPDFItems() {
-        let targets = flattenedPDFItems.filter { target in
-            !target.page.annotations.contains { $0 === target.annotation }
-        }
-        guard !targets.isEmpty else {
-            flattenedPDFItems.removeAll(keepingCapacity: false)
-            runAlert(
-                title: "Nothing to Unflatten",
-                informativeText: "Drawbridge does not have any flattened embedded PDF items to restore in this open document."
-            )
-            return
-        }
-
-        for target in targets {
-            registerAnnotationPresenceUndo(page: target.page, annotation: target.annotation, shouldExist: false, actionName: "Unflatten PDF")
-            target.page.addAnnotation(target.annotation)
-            markPageMarkupCacheDirty(target.page)
-        }
-        flattenedPDFItems.removeAll(keepingCapacity: false)
-        commitMarkupMutation(selecting: targets.first?.annotation, forceImmediateRefresh: true)
-        updatePDFContentsSummary()
-        runAlert(
-            title: "Unflatten Complete",
-            informativeText: "Restored \(targets.count) embedded PDF item(s)."
-        )
     }
 
     func reduceFileSize() {
@@ -148,94 +121,11 @@ extension MainViewController {
         }
     }
 
-    private func promptForCompactRasterCopy(originalSize: Int64, optimizedSize: Int64) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = "Vector-Safe Reduction Did Not Shrink This PDF"
-        alert.informativeText = """
-        The quality-preserving pass would make this file larger, which usually means the PDF is already mostly compact vector linework.
-
-        Before: \(formatFileSize(originalSize))
-        Vector-safe result: \(formatFileSize(optimizedSize))
-
-        To guarantee a smaller file, Drawbridge can create a compact raster copy. It should stay legible for viewing and sharing, but the drawing linework will no longer be true vector geometry.
-        """
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Create Compact Copy")
-        alert.addButton(withTitle: "Cancel")
-        return alert.runModal() == .alertFirstButtonReturn
-    }
-
     private func processedPDFName(suffix: String) -> String {
         let base = (openDocumentURL?.deletingPathExtension().lastPathComponent).flatMap { name in
             name.isEmpty ? nil : name
         } ?? "Drawbridge"
         return "\(base)-\(suffix).pdf"
-    }
-
-    private func writeVectorPreservingFlattenedPDF(document: PDFDocument, to outputURL: URL) throws -> Int {
-        let cleanedCopy = try cleanedPDFCopy(from: document)
-        updateBusyIndicatorDetail("Writing flattened PDF…")
-        updateBusyIndicatorSubdetail("Vector content preserved")
-        let pageLabels = embeddedPageLabelsForSave(in: document)
-        guard Self.writePDFDocument(
-            cleanedCopy.document,
-            to: outputURL,
-            pageLabels: pageLabels
-        ) else {
-            throw NSError(
-                domain: "DrawbridgePDFProcessing",
-                code: 4,
-                userInfo: [NSLocalizedDescriptionKey: "Could not write the flattened PDF."]
-            )
-        }
-        return cleanedCopy.removedAnnotationCount
-    }
-
-    private func writeVectorPreservingReducedPDF(document: PDFDocument, to outputURL: URL, originalSize: Int64) throws -> ReducedPDFResult {
-        let vectorURL = temporaryPDFURL(for: outputURL)
-        defer { try? FileManager.default.removeItem(at: vectorURL) }
-        let vectorResult = try writeBluebeamStyleReducedPDF(document: document, to: vectorURL)
-        if originalSize <= 0 || vectorResult.fileSize < originalSize {
-            try replacePDF(at: outputURL, with: vectorURL)
-            return vectorResult
-        }
-        return vectorResult
-    }
-
-    private func writeBluebeamStyleReducedPDF(document: PDFDocument, to outputURL: URL) throws -> ReducedPDFResult {
-        let cleanedCopy = try cleanedPDFCopy(from: document)
-        updateBusyIndicatorDetail("Optimizing embedded images…")
-        updateBusyIndicatorSubdetail("Vector linework preserved")
-        let pageLabels = embeddedPageLabelsForSave(in: document)
-
-        var options: [PDFDocumentWriteOption: Any]? = nil
-        var method = "Vector-preserving image optimization"
-        if #available(macOS 13.4, *) {
-            options = [
-                .saveImagesAsJPEGOption: true,
-                .optimizeImagesForScreenOption: true
-            ]
-        } else {
-            method = "Vector-preserving cleanup"
-        }
-
-        guard Self.writePDFDocument(
-            cleanedCopy.document,
-            to: outputURL,
-            pageLabels: pageLabels,
-            options: options
-        ) else {
-            throw NSError(
-                domain: "DrawbridgePDFProcessing",
-                code: 5,
-                userInfo: [NSLocalizedDescriptionKey: "Could not write the reduced PDF."]
-            )
-        }
-        return ReducedPDFResult(
-            removedAnnotationCount: cleanedCopy.removedAnnotationCount,
-            fileSize: try fileSizeBytesRequired(at: outputURL),
-            method: method
-        )
     }
 
     private func writeCompactRasterReducedPDF(document: PDFDocument, to outputURL: URL, originalSize: Int64) throws -> ReducedPDFResult {
@@ -389,36 +279,6 @@ extension MainViewController {
         )
         guard CGImageDestinationFinalize(destination) else { return nil }
         return data as Data
-    }
-
-    private func cleanedPDFCopy(from document: PDFDocument) throws -> CleanedPDFCopy {
-        updateBusyIndicatorDetail("Copying vector PDF content…")
-        updateBusyIndicatorProgress(current: 0, total: document.pageCount)
-        guard let data = document.dataRepresentation(),
-              let copiedDocument = PDFDocument(data: data) else {
-            throw NSError(
-                domain: "DrawbridgePDFProcessing",
-                code: 3,
-                userInfo: [NSLocalizedDescriptionKey: "Could not prepare the PDF for processing."]
-            )
-        }
-
-        var removedAnnotationCount = 0
-        for pageIndex in 0..<copiedDocument.pageCount {
-            autoreleasepool {
-                guard let page = copiedDocument.page(at: pageIndex) else { return }
-                updateBusyIndicatorDetail("Cleaning page \(pageIndex + 1)/\(copiedDocument.pageCount) • \(displayPageLabel(forPageIndex: pageIndex))")
-                updateBusyIndicatorProgress(current: pageIndex + 1, total: copiedDocument.pageCount)
-                updateBusyIndicatorSubdetail("\(removedAnnotationCount) embedded boxes removed")
-                _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
-
-                for annotation in page.annotations where isExtraneousEmbeddedPDFAnnotation(annotation) {
-                    page.removeAnnotation(annotation)
-                    removedAnnotationCount += 1
-                }
-            }
-        }
-        return CleanedPDFCopy(document: copiedDocument, removedAnnotationCount: removedAnnotationCount)
     }
 
     private func fileSizeBytes(at url: URL) -> Int64? {

@@ -618,6 +618,7 @@ extension MainViewController {
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         guard let action = menuItem.action else { return true }
+        guard !isFlatteningDocumentOperation else { return false }
         let hasDocument = pdfView.document != nil
         switch action {
         case #selector(commandOpen(_:)), #selector(commandKeyboardShortcuts(_:)),
@@ -627,6 +628,9 @@ extension MainViewController {
             return sessionDocumentURLs.count > 1
         case #selector(commandCloseDocument(_:)):
             return hasDocument || !sessionDocumentURLs.isEmpty
+        case #selector(commandFlattenPDF(_:)):
+            menuItem.title = pdfView.document.map(PDFAnnotationFlattener.canUnflatten) == true ? "Unflatten PDF…" : "Flatten PDF…"
+            return hasDocument && openDocumentURL != nil && !isPDFProcessingBusy
         case #selector(deleteBookmarkFromSidebar):
             return hasDocument && !bookmarksOutlineView.selectedRowIndexes.isEmpty
         case #selector(commandCopy(_:)), #selector(commandPaste(_:)), #selector(commandSelectAll(_:)):

@@ -34,9 +34,7 @@ enum PerformanceMetrics {
         return elapsedMs
     }
 
-    private static var isEnabled: Bool {
-        ProcessInfo.processInfo.environment[envVar] == "1"
-    }
+    private static let isEnabled = ProcessInfo.processInfo.environment[envVar] == "1"
 
     private static func appendLogLine(fields: [String: String]) {
         let line = fields

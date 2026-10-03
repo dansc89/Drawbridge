@@ -24,6 +24,7 @@ Download the `.dmg`, open it, then drag **Drawbridge.app** into **Applications**
 3. Use **Bookmarks > Auto-Generate Sheet Names/Bookmarks…** to name sheets and create bookmarks.
 4. Use **Hyperlinks > Batch Link Sheet Numbers…** to link sheet references.
 5. Save the PDF, or choose **File > Save As PDF...** to save a copy.
+6. Use **File > Flatten PDF…** to make existing consultant markups permanent in the PDF you have open, while preserving drawing quality and interactive links.
 
 ## Support
 
