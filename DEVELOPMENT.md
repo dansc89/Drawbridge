@@ -288,3 +288,11 @@ Output files:
 Recovered AutoCAD text is used only to locate search regions. `VisualSheetReferenceLocator` positions link activation rectangles from exact OCR word bounds in original page pixels. Overlapping regions render once; a missed reference gets a wider isolated crop retry. Destination identifiers remain restricted to literal OCR sheet numbers.
 
 Validation: native app fixture produced and saved all 31 expected references across an 11-page rotated civil PDF. Decoded drawing streams, resource trees, page boxes, and rotations remained unchanged; the saved file did not grow. `CivilLinkBoundsTests` accepts `DRAWBRIDGE_CIVIL_FIXTURE` and `DRAWBRIDGE_RUN_VISION_TESTS=1` in a native Vision-capable environment. Terminal CI skips this fixture test; the native fixture was validated locally before release.
+
+## Bookmark progress and OCR numeric format checks (v3.9)
+
+Bookmark generation reports the current page, field being read, OCR verification pass, nearby search attempts, completed pages, identified numbers and elapsed time. The progress bar reflects completed pages. Review/apply stages have explicit descriptions.
+
+`SheetReferencePolicy.reconcileOCRNumbers` resolves OCR O/0 and I/L/1 confusion only in numeric positions of a strongly supported format, with ordered OCR anchors before and after the sheet. It does not consult saved labels or bookmarks, change reference matching, or allow ordinal destinations. This correction is shared by bookmarking and hyperlink destination scanning.
+
+Local native validation read 43 general-sheet title blocks in a 99-page architectural PDF, recovering three missing destinations. Saved links reopened at pages 7, 9 and 12. All 99 drawing streams, resource trees, boxes and rotations remained unchanged; three added link annotations grew the file by 1,071 bytes. `OCRNumericFormatTests` covers supported correction, insufficient evidence, legitimate letter prefixes, and ordinary numeric tokens.

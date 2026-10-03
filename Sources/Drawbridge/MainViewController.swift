@@ -6349,7 +6349,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
         clearAllBookmarks(in: document)
-        beginBusyIndicator("Reading Sheet Names…")
+        beginBusyIndicator("Generating Bookmarks…", detail: "Preparing to read \(document.pageCount) pages")
+        let readingStartedAt = Date()
+        var identifiedNumbers = 0
+        var completedPages = 0
+        var lastIdentifiedSheet = ""
+        func showReadingProgress(pageIndex: Int, activity: String) {
+            updateBusyIndicatorDetail("Page \(pageIndex + 1) of \(document.pageCount) • \(activity)")
+            let elapsed = shortDuration(Date().timeIntervalSince(readingStartedAt))
+            let latest = lastIdentifiedSheet.isEmpty ? "" : "\nLatest sheet: \(lastIdentifiedSheet)"
+            updateBusyIndicatorSubdetail("\(completedPages) pages read • \(identifiedNumbers) sheet numbers found • \(elapsed) elapsed" + latest)
+        }
+        updateBusyIndicatorProgress(current: 0, total: document.pageCount)
         defer {
             endBusyIndicator()
             if let previous = autoNamePreviousToolMode {
@@ -6382,18 +6393,35 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                     titleLabelHints.append(nil)
                     return
                 }
+                showReadingProgress(pageIndex: pageIndex, activity: "Reading sheet number")
                 let target = PDFBookmarkExtractor.Geometry(page: page, box: box)
                 let locatedNumber = PDFBookmarkExtractor.extractAdaptiveNumber(
-                    page: page, normalizedRect: numberRegion, box: box, preferOCR: true)
+                    page: page, normalizedRect: numberRegion, box: box, preferOCR: true,
+                    progress: { showReadingProgress(pageIndex: pageIndex, activity: $0) })
                 numbers.append(locatedNumber.result)
+                if !locatedNumber.result.text.isEmpty {
+                    identifiedNumbers += 1
+                    lastIdentifiedSheet = locatedNumber.result.text
+                }
                 let adjustedTitleRegion = titleRegion.offsetBy(
                     dx: locatedNumber.normalizedXOffset, dy: locatedNumber.normalizedYOffset)
                 titles.append(PDFBookmarkExtractor.extract(
-                    page: page, rect: target.pageRect(adjustedTitleRegion), box: box, field: .title, preferOCR: true))
+                    page: page, rect: target.pageRect(adjustedTitleRegion), box: box, field: .title, preferOCR: true,
+                    progress: { showReadingProgress(pageIndex: pageIndex, activity: $0) }))
                 let labelInfo = autoNameIgnoresExistingPageLabels ? (number: nil as String?, title: nil as String?) : sheetInfoFromPageLabel(page.label ?? "")
                 labelHints.append(labelInfo.number)
                 titleLabelHints.append(labelInfo.title)
             }
+            completedPages = pageIndex + 1
+            showReadingProgress(pageIndex: pageIndex, activity: "Page read")
+            updateBusyIndicatorProgress(current: completedPages, total: document.pageCount)
+        }
+        updateBusyIndicatorDetail("Checking the detected sheet numbers and titles…")
+        let reconciledNumbers = SheetReferencePolicy.reconcileOCRNumbers(numbers.map(\.text))
+        numbers = numbers.enumerated().map { index, result in
+            guard reconciledNumbers[index] != result.text else { return result }
+            return PDFBookmarkExtractor.Result(text: reconciledNumbers[index], source: "OCR (numeric format verified)",
+                                               alternatives: [result.text] + result.alternatives)
         }
         numbers = PDFBookmarkExtractor.resolveNumbers(numbers, labelHints: labelHints)
         titles = PDFBookmarkExtractor.resolveTitles(titles, labelHints: titleLabelHints)
@@ -6434,6 +6462,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
 
+        updateBusyIndicatorStatus("Bookmarks Ready for Review")
+        updateBusyIndicatorDetail("Read \(document.pageCount) pages • \(detectedSheetNumberCount) sheet numbers found")
+        updateBusyIndicatorSubdetail("Review the detected names before applying them.")
         let confirmation = NSAlert()
         confirmation.messageText = "Apply Auto-Generated Sheet Names?"
         let duplicates = Dictionary(grouping: generated, by: \.sheetNumber)
@@ -6472,6 +6503,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
         let applyPageLabels = (applyPagesResponse == .alertFirstButtonReturn)
+        updateBusyIndicatorStatus("Applying Bookmarks…")
+        updateBusyIndicatorDetail("Creating bookmarks for \(generated.count) pages")
+        updateBusyIndicatorSubdetail(applyPageLabels ? "Updating bookmarks and page labels, then saving your PDF." : "Updating bookmarks, then saving your PDF.")
         applyAutoNamedSheets(generated, to: document, applyPageLabels: applyPageLabels)
     }
 
@@ -6631,6 +6665,19 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             )
         }
 
+        let reconciledTokens = SheetReferencePolicy.reconcileOCRNumbers(zonePageDiagnostics.map { $0.detectedToken ?? "" })
+        ocrTargets = OCRSheetTargetIndex()
+        for (index, diagnostic) in zonePageDiagnostics.enumerated() {
+            let token = reconciledTokens[index]
+            guard !token.isEmpty else { continue }
+            if token != diagnostic.detectedToken {
+                zonePageDiagnostics[index] = BatchLinkZonePageDiagnostic(
+                    pageIndex: diagnostic.pageIndex, pageLabel: diagnostic.pageLabel,
+                    detectedToken: token, strategy: "OCR numeric format verified",
+                    rawTextPreview: diagnostic.rawTextPreview, failureReason: nil, usedFallback: true)
+            }
+            ocrTargets.record(token, pageIndex: diagnostic.pageIndex)
+        }
         let sheetTokenToPageIndex = ocrTargets.targets
 
         let zoneDetectedCount = zonePageDiagnostics.reduce(0) { partial, diagnostic in
