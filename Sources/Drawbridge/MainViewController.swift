@@ -6779,7 +6779,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             if textPage.string?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
                 scannedPageIndexes.insert(sourcePageIndex)
             }
-            let hits = selectableSheetTokenHits(on: textPage, knownExactTokens: Set(linkTargetsByToken.keys))
+            let textHits = selectableSheetTokenHits(on: textPage, knownExactTokens: Set(linkTargetsByToken.keys))
+            let hits = recoveredTextDocument != nil
+                ? VisualSheetReferenceLocator.locate(on: page, hints: textHits)
+                : textHits
             for hit in hits {
                 let target = linkTargetsByToken[hit.token.uppercased()]
                 guard let target else { continue }

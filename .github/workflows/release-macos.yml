@@ -44,12 +44,12 @@ jobs:
           echo "DRAWBRIDGE_CODESIGN_IDENTITY=$APPLE_DEVELOPER_ID_SIGNING_IDENTITY" >> "$GITHUB_ENV"
 
       - name: Validate hyperlink matching
-        run: swift test --filter HyperlinkRegressionTests
+        run: swift test --filter 'HyperlinkRegressionTests|CivilLinkBoundsTests'
 
       - name: Build app bundle
         env:
           DRAWBRIDGE_VERSION_TAG: ${{ github.ref_name }}
-          DRAWBRIDGE_BUILD_NUMBER: "133"
+          DRAWBRIDGE_BUILD_NUMBER: "134"
         run: ./Scripts/package-app.sh
 
       - name: Notarize app before packaging
