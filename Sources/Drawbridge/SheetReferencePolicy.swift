@@ -35,6 +35,39 @@ enum SheetReferencePolicy {
         }
     }
 
+    /// Correct OCR letter/digit confusion only where a strongly established
+    /// numeric format and surrounding OCR sheets agree. No label or ordinal input.
+    static func reconcileOCRNumbers(_ readings: [String]) -> [String] {
+        let formats = Dictionary(grouping: readings.filter(isSheetIdentifier), by: PDFBookmarkExtractor.numberFormat)
+            .mapValues { Set($0).count }
+        return readings.enumerated().map { index, token in
+            guard isSheetIdentifier(token) else { return token }
+            let currentSupport = formats[PDFBookmarkExtractor.numberFormat(token), default: 0]
+            let choices = formats.keys.compactMap { format -> String? in
+                guard formats[format, default: 0] >= max(4, currentSupport * 4),
+                      format.count == token.count else { return nil }
+                var candidate = "", changed = false
+                for (expected, observed) in zip(format, token) {
+                    if expected == "#" {
+                        if observed.isNumber { candidate.append(observed) }
+                        else if observed == "O" { candidate.append("0"); changed = true }
+                        else if observed == "I" || observed == "L" { candidate.append("1"); changed = true }
+                        else { return nil }
+                    } else {
+                        guard expected == observed else { return nil }
+                        candidate.append(observed)
+                    }
+                }
+                guard changed, isSheetIdentifier(candidate), index > 0, index + 1 < readings.count,
+                      let previous = readings[..<index].last(where: { PDFBookmarkExtractor.numberFormat($0) == format }),
+                      let next = readings[(index + 1)...].first(where: { PDFBookmarkExtractor.numberFormat($0) == format }),
+                      PDFBookmarkExtractor.isOrderedSheetHint(candidate, after: previous, before: next) else { return nil }
+                return candidate
+            }
+            return choices.count == 1 ? choices[0] : token
+        }
+    }
+
     static func isWholeToken(_ range: NSRange, in text: NSString) -> Bool {
         guard range.location != NSNotFound, range.length > 0, NSMaxRange(range) <= text.length else { return false }
         func isIdentifierCharacter(_ index: Int) -> Bool {

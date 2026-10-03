@@ -95,7 +95,7 @@ enum PDFBookmarkExtractor {
         }
     }
 
-    static func extract(page: PDFPage, rect: CGRect, box: PDFDisplayBox, field: Field, preferOCR: Bool = false) -> Result {
+    static func extract(page: PDFPage, rect: CGRect, box: PDFDisplayBox, field: Field, preferOCR: Bool = false, progress: ((String) -> Void)? = nil) -> Result {
         let geometry = Geometry(page: page, box: box)
         let bounded = rect.intersection(page.bounds(for: box))
         guard !bounded.isNull, !bounded.isEmpty else { return Result(text: "", source: "outside page") }
@@ -142,13 +142,16 @@ enum PDFBookmarkExtractor {
         if !preferOCR, !overlapping, !overprintedGlyphs, let text = value(native, field: field) {
             return Result(text: text, source: "PDF text")
         }
+        let fieldName = field == .number ? "sheet number" : "sheet title"
+        progress?("Reading \(fieldName) • read 1 of 3")
         guard let image = render(page: page, rect: bounded, box: box) else { return Result(text: "", source: "render failed") }
         let primary = recognize(image: image, field: field)
 
         // Sample lower and higher resolutions: PDF rasterization can change OCR character choices.
         var readings = primary.text.isEmpty ? [] : [primary.text] + primary.alternatives
         let scales: [CGFloat] = field == .number ? [2, 6] : [2, 8]
-        for scale in scales {
+        for (index, scale) in scales.enumerated() {
+            progress?("Verifying \(fieldName) • read \(index + 2) of 3")
             guard let image = render(page: page, rect: bounded, box: box, requestedScale: scale) else { continue }
             let reading = recognize(image: image, field: field)
             for candidate in [reading.text] + reading.alternatives where !candidate.isEmpty && !readings.contains(candidate) {
@@ -162,20 +165,24 @@ enum PDFBookmarkExtractor {
 
     static func extractAdaptiveNumber(page: PDFPage, normalizedRect: CGRect,
                                       box: PDFDisplayBox,
-                                      preferOCR: Bool = false) -> LocatedResult {
+                                      preferOCR: Bool = false,
+                                      progress: ((String) -> Void)? = nil) -> LocatedResult {
         let geometry = Geometry(page: page, box: box)
         let yOffsets: [CGFloat] = [0, -0.01, 0.01, -0.02, 0.02, -0.03, 0.03, -0.04, 0.04]
         let centeredXOffsets: [CGFloat] = [0, -0.01, 0.01, -0.02, 0.02, -0.03, 0.03]
         let shiftedXOffsets: [CGFloat] = [-0.03, -0.02, -0.01, 0, 0.01, 0.02, 0.03]
         var firstFailure = Result(text: "", source: "needs review")
+        var searchAttempt = 0
         for yOffset in yOffsets {
             let xOffsets = yOffset == 0 ? centeredXOffsets : shiftedXOffsets
             for xOffset in xOffsets {
                 let candidate = normalizedRect.offsetBy(dx: xOffset, dy: yOffset)
                 guard geometry.bounds.contains(geometry.displayedRect(candidate)) else { continue }
                 let pageRect = geometry.pageRect(candidate)
+                searchAttempt += 1
+                progress?(searchAttempt == 1 ? "Reading sheet number in your selected area" : "Searching nearby for the sheet number • area \(searchAttempt)")
                 if xOffset == 0, yOffset == 0 {
-                    let result = extract(page: page, rect: pageRect, box: box, field: .number, preferOCR: preferOCR)
+                    let result = extract(page: page, rect: pageRect, box: box, field: .number, preferOCR: preferOCR, progress: progress)
                     firstFailure = result
                     if !result.text.isEmpty {
                         return LocatedResult(result: result, normalizedXOffset: 0,
@@ -185,7 +192,7 @@ enum PDFBookmarkExtractor {
                 }
                 guard let image = render(page: page, rect: pageRect, box: box, requestedScale: 2),
                       !recognize(image: image, field: .number).text.isEmpty else { continue }
-                let verified = extract(page: page, rect: pageRect, box: box, field: .number, preferOCR: preferOCR)
+                let verified = extract(page: page, rect: pageRect, box: box, field: .number, preferOCR: preferOCR, progress: progress)
                 if !verified.text.isEmpty {
                     return LocatedResult(result: verified, normalizedXOffset: xOffset,
                                          normalizedYOffset: yOffset)
