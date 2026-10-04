@@ -234,6 +234,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenu.addItem(withTitle: "Select All Text", action: #selector(MainViewController.commandSelectAll(_:)), keyEquivalent: "a").target = controller
         editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: "Find…", action: #selector(MainViewController.commandFocusSearch(_:)), keyEquivalent: "f").target = controller
+        editMenu.addItem(withTitle: "Find Next", action: #selector(MainViewController.selectNextSearchHit), keyEquivalent: "g").target = controller
+        let findPrevious = editMenu.addItem(withTitle: "Find Previous", action: #selector(MainViewController.selectPreviousSearchHit), keyEquivalent: "g")
+        findPrevious.keyEquivalentModifierMask = [.command, .shift]
+        findPrevious.target = controller
         editItem.submenu = editMenu
 
         let bookmarksItem = NSMenuItem()
@@ -263,6 +267,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         viewMenu.addItem(withTitle: "Zoom In", action: #selector(MainViewController.commandZoomIn(_:)), keyEquivalent: "+").target = controller
         viewMenu.addItem(withTitle: "Zoom Out", action: #selector(MainViewController.commandZoomOut(_:)), keyEquivalent: "-").target = controller
         viewMenu.addItem(withTitle: "Actual Size", action: #selector(MainViewController.commandActualSize(_:)), keyEquivalent: "0").target = controller
+        viewMenu.addItem(withTitle: "Fit Entire Page", action: #selector(MainViewController.commandFitPage(_:)), keyEquivalent: "9").target = controller
+        viewMenu.addItem(withTitle: "Go to Sheet…", action: #selector(MainViewController.commandGoToSheet(_:)), keyEquivalent: "l").target = controller
         let fitWidthItem = viewMenu.addItem(withTitle: "Fit Width", action: #selector(MainViewController.commandFitWidth(_:)), keyEquivalent: "9")
         fitWidthItem.keyEquivalentModifierMask = [.command, .option]
         fitWidthItem.target = controller

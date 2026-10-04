@@ -1995,6 +1995,29 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         centerWholePageInViewport(page)
     }
 
+    func fitCurrentPageWidth() {
+        guard let page = currentPage, let clip = contentClipView else { return }
+        zoomAnchorGeneration &+= 1
+        let anchor = normalizedVisibleCenter(on: page) ?? (x: 0.5, y: 0.5)
+        autoScales = false
+        forceZoomLayout()
+        let pageRect = convert(page.bounds(for: displayBox), from: page).standardized
+        guard pageRect.width > 0, clip.bounds.width > 8 else { return }
+        let target = scaleFactor * (clip.bounds.width - 8) / pageRect.width
+        guard target.isFinite, target > 0 else { return }
+        if !applyingHistoryNavigation {
+            pushBackHistoryCurrentLocation()
+            navigationForwardStack.removeAll(keepingCapacity: true)
+        }
+        scaleFactor = min(max(minScaleFactor, target), maxScaleFactor)
+        forceZoomLayout()
+        let previousHistoryState = applyingHistoryNavigation
+        applyingHistoryNavigation = true
+        navigateToPageWithHistory(page, preservingNormalizedViewportCenter: anchor)
+        applyingHistoryNavigation = previousHistoryState
+        onViewportChanged?()
+    }
+
     private func centerWholePageInViewport(_ page: PDFPage) {
         guard let clipView = contentClipView,
               let documentView else { return }
@@ -2076,6 +2099,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
               let page = document.page(at: entry.pageIndex) else {
             return false
         }
+        zoomAnchorGeneration &+= 1
         applyingHistoryNavigation = true
         defer { applyingHistoryNavigation = false }
         autoScales = false
@@ -2152,6 +2176,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         go(to: selection)
         onViewportChanged?()
     }
+
+    var canNavigateBackInHistory: Bool { resetNavigationHistoryIfNeeded(); return !navigationBackStack.isEmpty }
+    var canNavigateForwardInHistory: Bool { resetNavigationHistoryIfNeeded(); return !navigationForwardStack.isEmpty }
 
     @discardableResult
     func navigateBackInHistory() -> Bool {

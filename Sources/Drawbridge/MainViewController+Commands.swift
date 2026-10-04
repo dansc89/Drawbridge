@@ -485,6 +485,7 @@ extension MainViewController {
         NSApp.activate(ignoringOtherApps: true)
         searchPanel?.makeFirstResponder(toolbarSearchField)
         toolbarSearchField.currentEditor()?.selectAll(nil)
+        refreshSearchIfNeeded()
     }
     @objc func commandZoomIn(_ sender: Any?) { zoom(by: 1.12) }
     @objc func commandZoomOut(_ sender: Any?) { zoom(by: 1.0 / 1.12) }
@@ -504,14 +505,22 @@ extension MainViewController {
         pdfView.scaleFactor = 1.0
         updateStatusBar()
     }
+    @objc func commandFitPage(_ sender: Any?) {
+        guard let page = pdfView.currentPage else { return }
+        pdfView.navigateToPageFittingWholePageWithHistory(page)
+        updateStatusBar()
+    }
     @objc func commandFitWidth(_ sender: Any?) {
-        guard pdfView.document != nil else { return }
-        pdfView.autoScales = true
-        let fit = pdfView.scaleFactorForSizeToFit
-        if fit > 0 {
-            pdfView.scaleFactor = fit
-            pdfView.autoScales = false
-        }
+        pdfView.fitCurrentPageWidth()
+        updateStatusBar()
+    }
+    @objc func commandGoToSheet(_ sender: Any?) {
+        guard let document = pdfView.document, !isPDFProcessingBusy else { return }
+        let entries = SheetNavigationEntry.build(document: document, label: displayPageLabel(forPageIndex:))
+        let picker = SheetNavigator(entries: entries, currentPage: pdfView.currentPage.map(document.index(for:)) ?? 0)
+        guard let index = picker.runModal(parent: view.window), pdfView.document === document,
+              let page = document.page(at: index) else { return }
+        pdfView.navigateToPageFittingWholePageWithHistory(page)
         updateStatusBar()
     }
 
@@ -644,9 +653,14 @@ extension MainViewController {
              #selector(commandAutoGenerateSheetNames(_:)), #selector(commandBatchLinkSheetNumbers(_:)),
              #selector(commandFocusSearch(_:)), #selector(commandZoomIn(_:)), #selector(commandZoomOut(_:)),
              #selector(commandPreviousPage(_:)), #selector(commandNextPage(_:)),
-             #selector(commandNavigateBack(_:)), #selector(commandNavigateForward(_:)),
-             #selector(commandActualSize(_:)), #selector(commandFitWidth(_:)), #selector(selectSelectionTool(_:)):
+             #selector(commandActualSize(_:)), #selector(commandFitWidth(_:)), #selector(commandFitPage(_:)), #selector(commandGoToSheet(_:)), #selector(selectSelectionTool(_:)):
             return hasDocument
+        case #selector(commandNavigateBack(_:)):
+            return pdfView.canNavigateBackInHistory
+        case #selector(commandNavigateForward(_:)):
+            return pdfView.canNavigateForwardInHistory
+        case #selector(selectNextSearchHit), #selector(selectPreviousSearchHit):
+            return hasDocument && !searchHits.isEmpty
         case #selector(commandToggleHyperlinkHighlights(_:)):
             menuItem.state = isHyperlinkHighlightsVisible ? .on : .off
             return hasDocument
@@ -672,8 +686,9 @@ extension MainViewController {
 3) Create sheet-reference hyperlinks with ⌘⇧H.
 4) Navigate with the Pages/Bookmarks sidebar or arrow keys.
    Mouse wheel zooms at the pointer; middle mouse drag pans.
-5) Rename/delete bookmarks by right-clicking a bookmark.
-6) Save with ⌘S; Save As PDF with ⌘⇧S.
+5) Go to Sheet with ⌘L; fit the entire page with ⌘9.
+6) Rename/delete bookmarks by right-clicking; Shift-click selects a range.
+7) Save with ⌘S; Save As PDF with ⌘⇧S.
 
 Existing PDF annotations are displayed without editing tools.
 """

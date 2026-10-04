@@ -53,7 +53,10 @@ extension MainViewController {
             row.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10)
         ])
         searchPanel = panel
+        NotificationCenter.default.addObserver(self, selector: #selector(findPanelClosed(_:)), name: NSWindow.willCloseNotification, object: panel)
     }
+
+    @objc private func findPanelClosed(_ note: Notification) { resetSearchState() }
 
     @objc func searchFieldChanged() {
         scheduleSearchRefresh()
@@ -78,6 +81,12 @@ extension MainViewController {
     }
 
     private func scheduleSearchRefresh() {
+        textSearch.cancel()
+        pdfView.setCurrentSelection(nil, animate: false)
+        searchHits.removeAll()
+        searchHitIndex = -1
+        searchResultsLimited = false
+        updateSearchControlsState()
         pendingSearchWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
             self?.runUnifiedSearchNow()
@@ -93,6 +102,8 @@ extension MainViewController {
     }
 
     func resetSearchState(clearQuery: Bool = false) {
+        textSearch.cancel()
+        searchResultsLimited = false
         pendingSearchWorkItem?.cancel()
         pendingSearchWorkItem = nil
         searchHits.removeAll()
@@ -127,47 +138,28 @@ extension MainViewController {
             return
         }
 
-        var hits: [SearchHit] = []
-        hits.reserveCapacity(256)
-        // Document-text search: iterate PDFKit selections with cap for responsiveness.
-        let options: NSString.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
-        var cursor: PDFSelection?
-        var seenSelectionKeys = Set<String>()
-        var textHitCount = 0
-        while textHitCount < 1500,
-              let match = document.findString(query, fromSelection: cursor, withOptions: options),
-              let page = match.pages.first {
-            let pageIndex = document.index(for: page)
-            let bounds = match.bounds(for: page).integral
-            let key = "\(pageIndex)|\(bounds.origin.x)|\(bounds.origin.y)|\(bounds.width)|\(bounds.height)"
-            if seenSelectionKeys.contains(key) {
-                break
+        guard !isPDFProcessingBusy else { PerformanceMetrics.end(searchSpan, extra: ["result": "busy"]); return }
+        searchResultsLimited = false
+        textSearch.start(document: document, query: query, progress: { [weak self, weak document] count, pages in
+            guard let self, let document, self.pdfView.document === document else { return }
+            self.toolbarSearchCountLabel.stringValue = "Searching… \(count)"
+            self.toolbarSearchCountLabel.toolTip = "Read \(pages) of \(document.pageCount) pages. You can keep navigating or change the query."
+        }, completion: { [weak self, weak document] result in
+            guard let self, let document, self.pdfView.document === document,
+                  self.toolbarSearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+            let hits: [SearchHit] = result.selections.compactMap { match in
+                guard let page = match.pages.first else { return nil }
+                let index = document.index(for: page)
+                guard index >= 0, index < document.pageCount else { return nil }
+                return .document(selection: match, pageIndex: index, preview: match.string ?? query)
             }
-            seenSelectionKeys.insert(key)
-            let preview = match.string?.trimmingCharacters(in: .whitespacesAndNewlines) ?? query
-            hits.append(.document(selection: match, pageIndex: max(0, pageIndex), preview: preview))
-            cursor = match
-            textHitCount += 1
-            if hits.count >= 2500 { break }
-        }
-
-        hits = hitsByPageOrder(hits, pageCount: document.pageCount)
-
-        searchHits = hits
-        searchHitIndex = hits.isEmpty ? -1 : 0
-        updateSearchControlsState()
-        if !hits.isEmpty {
-            revealCurrentSearchHit()
-        }
-        PerformanceMetrics.end(
-            searchSpan,
-            extra: [
-                "result": "ok",
-                "hits": "\(hits.count)",
-                "text_hits": "\(textHitCount)",
-                "pages": "\(document.pageCount)"
-            ]
-        )
+            self.searchHits = self.hitsByPageOrder(hits, pageCount: document.pageCount)
+            self.searchResultsLimited = result.limited
+            self.searchHitIndex = hits.isEmpty ? -1 : 0
+            self.updateSearchControlsState()
+            if !hits.isEmpty, self.searchPanel?.isVisible == true { self.revealCurrentSearchHit() }
+            PerformanceMetrics.end(searchSpan, extra: ["result": "ok", "hits": "\(hits.count)", "pages": "\(document.pageCount)"])
+        })
     }
 
     private func hitsByPageOrder(_ hits: [SearchHit], pageCount: Int) -> [SearchHit] {
@@ -230,10 +222,10 @@ extension MainViewController {
 
         if hasResults, searchHitIndex >= 0 {
             let index = min(searchHitIndex + 1, searchHits.count)
-            toolbarSearchCountLabel.stringValue = "\(index)/\(searchHits.count)"
+            toolbarSearchCountLabel.stringValue = "\(index)/\(searchHits.count)" + (searchResultsLimited ? "+" : "")
             let preview = truncatedSearchPreview(overridePreview ?? "")
             if !preview.isEmpty {
-                toolbarSearchCountLabel.toolTip = preview
+                toolbarSearchCountLabel.toolTip = preview + (searchResultsLimited ? "\nShowing the first 1,500 matches. Narrow your search to see more." : "")
             } else {
                 toolbarSearchCountLabel.toolTip = nil
             }
@@ -241,7 +233,7 @@ extension MainViewController {
             let hasQuery = !toolbarSearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             if hasQuery {
                 toolbarSearchCountLabel.stringValue = "0/0"
-                toolbarSearchCountLabel.toolTip = "No matches found in document text or markups."
+                toolbarSearchCountLabel.toolTip = "No matches in searchable PDF text. Image-only sheets may need OCR."
             } else {
                 toolbarSearchCountLabel.stringValue = ""
                 toolbarSearchCountLabel.toolTip = nil

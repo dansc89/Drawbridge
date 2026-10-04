@@ -127,10 +127,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let bookmarksEmptyLabel = NSTextField(labelWithString: "No Bookmarks")
     private let bookmarksSelectionLabel = NSTextField(labelWithString: "")
     private let pdfContentsTitleLabel = NSTextField(labelWithString: "PDF Contents")
+    private weak var contentsSummaryDocument: PDFDocument?
+    private var cachedContentsSummary: String?
     private let pdfContentsSummaryLabel = NSTextField(labelWithString: "No PDF loaded")
     private let splitView = NSSplitView(frame: .zero)
     private let emptyStateView = StartupDropView(frame: .zero)
-    private let emptyStateTitle = NSTextField(labelWithString: "Open or create a PDF to start marking up")
+    private let emptyStateTitle = NSTextField(labelWithString: "Open a drawing set to get started")
     private let emptyStateOpenButton = NSButton(title: "Open PDF", target: nil, action: nil)
     private let emptyStateRecentButton = NSButton(title: "Open Recent", target: nil, action: nil)
     private let emptyStateSampleButton = NSButton(title: "Create New", target: nil, action: nil)
@@ -144,6 +146,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let autoNameSheetsButton = NSButton(title: "", target: nil, action: nil)
     private let batchLinkSheetsButton = NSButton(title: "", target: nil, action: nil)
     private let flattenPDFButton = NSButton(title: "", target: nil, action: nil)
+    private let navigationBackButton = NSButton(title: "", target: nil, action: nil)
+    private let navigationForwardButton = NSButton(title: "", target: nil, action: nil)
+    private let goToSheetButton = NSButton(title: "", target: nil, action: nil)
+    private let fitPageButton = NSButton(title: "", target: nil, action: nil)
     private let reduceFileSizeButton = NSButton(title: "", target: nil, action: nil)
     private let highlightButton = NSButton(title: "Highlight Selection", target: nil, action: nil)
     private let exportButton = NSButton(title: "Save As PDF", target: nil, action: nil)
@@ -267,6 +273,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var pendingMarkupsRefreshWorkItem: DispatchWorkItem?
     var pendingSearchWorkItem: DispatchWorkItem?
     private var pendingChromeRefreshWorkItem: DispatchWorkItem?
+    let textSearch = PDFTextSearch()
+    var searchResultsLimited = false
     var searchHits: [SearchHit] = []
     var searchHitIndex: Int = -1
     var markupsScanGeneration = 0
@@ -476,6 +484,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     override func viewWillDisappear() {
         super.viewWillDisappear()
         watchdog?.stop()
+        resetSearchState()
         stopSaveProgressTracking()
         if let monitor = scrollEventMonitor {
             NSEvent.removeMonitor(monitor)
@@ -991,6 +1000,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
 
+        if contentsSummaryDocument === document, let cachedContentsSummary {
+            pdfContentsSummaryLabel.stringValue = cachedContentsSummary
+            return
+        }
         var totalAnnotations = 0
         var extraneousAnnotations = 0
         var nonPrintAnnotations = 0
@@ -1047,7 +1060,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if !shxSamples.isEmpty {
             lines.append("Samples:\n\(shxSamples.joined(separator: "\n"))")
         }
-        pdfContentsSummaryLabel.stringValue = lines.joined(separator: "\n")
+        let summary = lines.joined(separator: "\n")
+        contentsSummaryDocument = document
+        cachedContentsSummary = summary
+        pdfContentsSummaryLabel.stringValue = summary
     }
 
     @objc private func selectPageFromSidebar() {
@@ -1286,7 +1302,20 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             $0.textColor = .secondaryLabelColor
         }
 
-        let stack = NSStackView(views: labels)
+        for (button, symbol, name, action, identifier) in [
+            (navigationBackButton, "chevron.left", "Back to previous view (⌥←)", #selector(commandNavigateBack(_:)), "drawbridgeNavigateBack"),
+            (navigationForwardButton, "chevron.right", "Forward to next view (⌥→)", #selector(commandNavigateForward(_:)), "drawbridgeNavigateForward")
+        ] {
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)
+            button.imagePosition = .imageOnly; button.bezelStyle = .texturedRounded; button.controlSize = .small
+            button.target = self; button.action = action; button.toolTip = name
+            button.setAccessibilityLabel(name); button.identifier = NSUserInterfaceItemIdentifier(identifier)
+            button.widthAnchor.constraint(equalToConstant: 24).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        }
+        statusPageLabel.lineBreakMode = .byTruncatingMiddle
+        statusPageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let stack = NSStackView(views: [navigationBackButton, navigationForwardButton] + labels)
         stack.orientation = .horizontal
         stack.spacing = 14
         stack.edgeInsets = NSEdgeInsets(top: 4, left: 10, bottom: 4, right: 8)
@@ -1380,6 +1409,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func beginBusyIndicator(_ message: String, detail: String? = nil, lockInteraction: Bool = true) {
+        if textSearch.isSearching { resetSearchState() }
         busyOperationDepth += 1
         refreshFlattenButtonState()
         busyStatusLabel.stringValue = message
@@ -1415,6 +1445,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         busyProgressIndicator.maxValue = 100
         busyProgressIndicator.doubleValue = 0
         busyOverlayView.isHidden = true
+        if searchPanel?.isVisible == true { refreshSearchIfNeeded() }
         busyDetailLabel.stringValue = ""
         busySubdetailLabel.stringValue = ""
         setBusyCancelAction(nil)
@@ -1590,8 +1621,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         flattenPDFButton.toolTip = "Flatten PDF — make visible markups permanent and save this PDF"
         flattenPDFButton.setAccessibilityLabel("Flatten PDF")
         flattenPDFButton.identifier = NSUserInterfaceItemIdentifier("drawbridgeFlattenPDF")
-        reduceFileSizeButton.image = NSImage(systemSymbolName: "arrow.down.doc", accessibilityDescription: "Reduce File Size")
-            ?? NSImage(systemSymbolName: "doc", accessibilityDescription: "Reduce File Size")
+        reduceFileSizeButton.image = ToolbarIcons.compressionClamp()
         reduceFileSizeButton.imagePosition = .imageOnly
         reduceFileSizeButton.bezelStyle = .texturedRounded
         reduceFileSizeButton.toolTip = "Reduce File Size — lossless compression, preserving image resolution"
@@ -1629,6 +1659,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             didInstallToolbarWidthConstraints = true
         }
 
+        for (button, symbol, name, action) in [
+            (goToSheetButton, "list.bullet.rectangle", "Go to Sheet (⌘L)", #selector(commandGoToSheet(_:))),
+            (fitPageButton, "arrow.up.left.and.arrow.down.right", "Fit Entire Page (⌘9)", #selector(commandFitPage(_:)))
+        ] {
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)
+            button.imagePosition = .imageOnly; button.bezelStyle = .texturedRounded
+            button.target = self; button.action = action; button.toolTip = name
+            button.setAccessibilityLabel(name)
+        }
+
         toolbarControlsStack.orientation = .horizontal
         toolbarControlsStack.spacing = 8
         toolbarControlsStack.alignment = .centerY
@@ -1654,6 +1694,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             toolbarControlsStack.addArrangedSubview(batchLinkSheetsButton)
             toolbarControlsStack.addArrangedSubview(flattenPDFButton)
             toolbarControlsStack.addArrangedSubview(reduceFileSizeButton)
+            toolbarControlsStack.addArrangedSubview(goToSheetButton)
+            toolbarControlsStack.addArrangedSubview(fitPageButton)
         }
 
         toolbarSearchField.placeholderString = "Search PDF text"
@@ -2151,7 +2193,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     ) -> NSToolbarItem? {
         let item = NSToolbarItem(itemIdentifier: itemIdentifier)
         if itemIdentifier == .drawbridgePrimaryControls {
-            item.label = "Bookmarks, Hyperlinks and Flatten"
+            item.label = "Drawing Set Tools and Navigation"
             item.view = toolbarControlsStack
             return item
         }
@@ -2818,6 +2860,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func clearMarkupCache() {
+        contentsSummaryDocument = nil
+        cachedContentsSummary = nil
         cancelSearchIndexWarmup()
         cachedMarkupDocumentID = nil
         pageMarkupCache.removeAll(keepingCapacity: false)
@@ -2833,6 +2877,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func markPageMarkupCacheDirty(_ page: PDFPage?) {
+        cachedContentsSummary = nil
         guard let page, let document = pdfView.document else { return }
         ensureMarkupCacheDocumentIdentity(for: document)
         let pageIndex = document.index(for: page)
@@ -4488,6 +4533,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func refreshFlattenButtonState() {
+        goToSheetButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
+        fitPageButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
         reduceFileSizeButton.isEnabled = pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy
         let recoverable = pdfView.document.map(PDFAnnotationFlattener.canUnflatten) ?? false
         flattenPDFButton.image = NSImage(systemSymbolName: recoverable ? "square.stack.3d.up" : "square.stack.3d.down.forward", accessibilityDescription: recoverable ? "Unflatten PDF" : "Flatten PDF")
@@ -4498,6 +4545,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     func updateStatusBar() {
         refreshFlattenButtonState()
+        navigationBackButton.isEnabled = !isPDFProcessingBusy && pdfView.canNavigateBackInHistory
+        navigationForwardButton.isEnabled = !isPDFProcessingBusy && pdfView.canNavigateForwardInHistory
         statusToolLabel.stringValue = "Tool: \(currentToolName())"
         applyScaleLockForCurrentPageIfNeeded()
 
@@ -4506,7 +4555,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             let index = document.index(for: page)
             let label = displayPageLabel(forPageIndex: index)
             statusPageSizeLabel.stringValue = "Size: \(formattedPageSize(for: page))"
-            statusPageLabel.stringValue = "Page: \(label)"
+            statusPageLabel.stringValue = "Page \(index + 1) of \(document.pageCount): \(label)"
+            statusPageLabel.toolTip = label
             pageJumpField.stringValue = label
             if sidebarCurrentPageIndex != index {
                 sidebarCurrentPageIndex = index
@@ -4517,8 +4567,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 }
             }
             pageJumpField.isEnabled = false
-            autoNameSheetsButton.isEnabled = true
-            batchLinkSheetsButton.isEnabled = true
+            autoNameSheetsButton.isEnabled = !isPDFProcessingBusy
+            batchLinkSheetsButton.isEnabled = !isPDFProcessingBusy
         } else {
             statusPageSizeLabel.stringValue = "Size: -"
             statusPageLabel.stringValue = "Page: -"

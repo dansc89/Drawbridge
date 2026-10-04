@@ -33,9 +33,11 @@ final class ToolbarPresentationTests: XCTestCase {
         XCTAssertNotNil(stack.superview)
         XCTAssertGreaterThan(stack.frame.width, 0)
         let buttons = stack.arrangedSubviews.compactMap { $0 as? NSButton }
-        XCTAssertEqual(buttons.count, 5)
-        XCTAssertEqual(buttons.map(\.action), [#selector(MainViewController.openPDF), #selector(MainViewController.commandAutoGenerateSheetNames(_:)), #selector(MainViewController.commandBatchLinkSheetNumbers(_:)), #selector(MainViewController.commandFlattenPDF(_:)), #selector(MainViewController.commandReduceFileSize(_:))])
+        XCTAssertEqual(buttons.count, 7)
+        XCTAssertEqual(buttons.map(\.action), [#selector(MainViewController.openPDF), #selector(MainViewController.commandAutoGenerateSheetNames(_:)), #selector(MainViewController.commandBatchLinkSheetNumbers(_:)), #selector(MainViewController.commandFlattenPDF(_:)), #selector(MainViewController.commandReduceFileSize(_:)), #selector(MainViewController.commandGoToSheet(_:)), #selector(MainViewController.commandFitPage(_:))])
         XCTAssertTrue(buttons.allSatisfy { $0.target === controller && !$0.isHidden && $0.image != nil })
+        XCTAssertEqual(buttons[4].image?.name(), NSImage.Name("DrawbridgeCompressionClamp"))
+        XCTAssertTrue(buttons[4].image?.isTemplate == true)
         XCTAssertTrue(controller.responds(to: #selector(MainViewController.toolbarAllowedItemIdentifiers(_:))))
         XCTAssertTrue(controller.responds(to: #selector(MainViewController.outlineViewSelectionDidChange(_:))))
         XCTAssertTrue(controller.responds(to: #selector(MainViewController.splitViewDidResizeSubviews(_:))))

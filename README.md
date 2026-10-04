@@ -25,9 +25,15 @@ Download the `.dmg`, open it, then drag **Drawbridge.app** into **Applications**
 4. Use **Hyperlinks > Batch Link Sheet Numbers…** to link sheet references.
 5. Save the PDF, or choose **File > Save As PDF...** to save a copy.
 6. Use **File > Flatten PDF…** to make existing consultant markups permanent in the PDF you have open, while preserving drawing quality and interactive links. Click the same button again to Unflatten.
-7. Use **File > Reduce File Size…** (or the down-arrow document toolbar button) for lossless compression. Drawbridge verifies decoded PDF content and saves over the open file only when the result is smaller. Image resolution, vector graphics, text, navigation, forms, and Unflatten recovery are preserved; JPEG images may already be compact.
+7. Use **File > Reduce File Size…** (or the clamp toolbar button) for lossless compression. Drawbridge verifies decoded PDF content and saves over the open file only when the result is smaller. Image resolution, vector graphics, text, navigation, forms, and Unflatten recovery are preserved; JPEG images may already be compact.
 
 Processing dialogs show the current stage and page counts. Cancel stops at the next safe page or processing-step boundary; Escape also cancels OCR. Canceling bookmark review leaves existing bookmarks intact. Duplicate OCR sheet numbers are reported and excluded from hyperlink destinations instead of guessing a target.
+
+## Viewing drawing sets
+
+- **Go to Sheet (⌘L):** search sheet labels, bookmark titles, or page numbers. Arrow keys select a result; Return opens the whole sheet. Duplicate labels remain separate pages.
+- **Fit Entire Page (⌘9):** center the complete sheet. **Fit Width (⌘⌥9)** fits its displayed width while keeping your reading position.
+- **Find (⌘F):** search runs asynchronously with live progress. Change the query to cancel the previous search; ⌘G / ⇧⌘G move between results. Large result sets show a `+` and a prompt to narrow the query.
 
 ## Support
 
