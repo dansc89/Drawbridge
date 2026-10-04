@@ -92,7 +92,7 @@ enum SheetReferencePolicy {
 /// and cannot silently redirect references to the last page scanned.
 struct OCRSheetTargetIndex {
     private(set) var targets: [String: Int] = [:]
-    private var ambiguous = Set<String>()
+    private(set) var ambiguous = Set<String>()
 
     mutating func record(_ token: String, pageIndex: Int) {
         let key = token.uppercased()

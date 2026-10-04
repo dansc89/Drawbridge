@@ -618,7 +618,7 @@ extension MainViewController {
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         guard let action = menuItem.action else { return true }
-        guard !isFlatteningDocumentOperation else { return false }
+        guard !isPDFProcessingBusy else { return false }
         let hasDocument = pdfView.document != nil
         switch action {
         case #selector(commandOpen(_:)), #selector(commandKeyboardShortcuts(_:)),
@@ -628,6 +628,8 @@ extension MainViewController {
             return sessionDocumentURLs.count > 1
         case #selector(commandCloseDocument(_:)):
             return hasDocument || !sessionDocumentURLs.isEmpty
+        case #selector(commandReduceFileSize(_:)):
+            return hasDocument && openDocumentURL != nil && !isPDFProcessingBusy
         case #selector(commandFlattenPDF(_:)):
             menuItem.title = pdfView.document.map(PDFAnnotationFlattener.canUnflatten) == true ? "Unflatten PDF…" : "Flatten PDF…"
             return hasDocument && openDocumentURL != nil && !isPDFProcessingBusy
@@ -657,7 +659,7 @@ extension MainViewController {
     private func showQuickStartGuide() {
         let alert = NSAlert()
         alert.messageText = "Drawbridge Quick Start"
-        alert.informativeText = "Open a PDF, choose a tool, and place markups directly on the page."
+        alert.informativeText = "Open a PDF to generate bookmarks, link sheet references, flatten markups, or reduce file size."
         alert.alertStyle = .informational
 
         let guide = NSTextView(frame: NSRect(x: 0, y: 0, width: 440, height: 210))

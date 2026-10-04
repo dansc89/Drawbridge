@@ -54,6 +54,21 @@ final class PDFAnnotationFlattenerTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
     }
+    func testLosslessReductionKeepsUnflattenRecovery() throws {
+        let directory = try directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = try fixture(in: directory)
+        let original = try XCTUnwrap(PDFDocument(url: source))
+        _ = try PDFAnnotationFlattener.flatten(source: source, destination: source)
+        let reduced = try PDFLosslessReducer.reduce(source: source)
+        XCTAssertTrue(reduced.saved)
+        XCTAssertTrue(PDFAnnotationFlattener.canUnflatten(try XCTUnwrap(PDFDocument(url: source))))
+        _ = try PDFAnnotationFlattener.unflatten(source: source)
+        let restored = try XCTUnwrap(PDFDocument(url: source))
+        XCTAssertEqual(restored.page(at: 0)?.annotations.count, original.page(at: 0)?.annotations.count)
+        XCTAssertEqual(restored.page(at: 0)?.rotation, original.page(at: 0)?.rotation)
+    }
+
     func testFlattenPreservesGeometryNavigationFormsAndUnsupportedAnnotations() throws {
         let directory = try directory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -188,6 +203,8 @@ final class PDFAnnotationFlattenerTests: XCTestCase {
         XCTAssertThrowsError(try PDFAnnotationFlattener.unflatten(source: changedURL)) { error in
             XCTAssertTrue(error.localizedDescription.contains("Drawing content has changed"))
         }
+        XCTAssertEqual(try Data(contentsOf: changedURL), before)
+        XCTAssertThrowsError(try PDFLosslessReducer.reduce(source: changedURL))
         XCTAssertEqual(try Data(contentsOf: changedURL), before)
     }
 

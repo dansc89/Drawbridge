@@ -293,11 +293,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var saveOperationStartedAt: CFAbsoluteTime?
     private var savePhase: String?
     var saveGenerateElapsed: Double = 0
-    var isFlatteningDocumentOperation = false
+    var isPDFFileProcessingOperation = false
     var isSavingDocumentOperation = false
     var queuedFastEmbeddedSave = false
     var lastEmbeddedSaveCompletedVersion = 0
     private var busyInteractionLocked = false
+    private var busyInputMonitor: Any?
     weak var lastDirectlySelectedAnnotation: PDFAnnotation?
     private var groupedPasteDragPageID: ObjectIdentifier?
     private var groupedPasteDragAnnotationIDs: Set<ObjectIdentifier> = []
@@ -1456,8 +1457,33 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         refreshBusyIndicatorDisplay()
     }
 
+    private func processBusyCancellationEvents() {
+        // OCR is synchronous. Let AppKit dispatch Cancel/Escape at page boundaries;
+        // merely running the run loop does not drain its queued mouse events.
+        guard busyCancelHandler != nil else { return }
+        for _ in 0..<16 {
+            guard let event = NSApp.nextEvent(matching: .any, until: Date(), inMode: .default, dequeue: true) else { break }
+            NSApp.sendEvent(event)
+        }
+    }
+
     func setBusyCancelAction(_ handler: (() -> Void)?, title: String = "Cancel", enabled: Bool = true) {
         busyCancelHandler = handler
+        if let monitor = busyInputMonitor { NSEvent.removeMonitor(monitor); busyInputMonitor = nil }
+        view.window?.ignoresMouseEvents = busyInteractionLocked && handler == nil
+        if handler != nil && busyInteractionLocked {
+            // Keep Cancel clickable without exposing the document or toolbar to
+            // edits while OCR/file processing owns the document.
+            busyInputMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged, .rightMouseDown, .rightMouseUp, .otherMouseDown, .otherMouseUp, .scrollWheel, .magnify, .rotate, .swipe, .keyDown]) { [weak self] event in
+                guard let self, event.window === self.view.window, self.busyInteractionLocked else { return event }
+                if event.type == .keyDown {
+                    if event.keyCode == 53 { self.busyCancelHandler?() }
+                    return nil
+                }
+                let point = self.busyCancelButton.convert(event.locationInWindow, from: nil)
+                return self.busyCancelButton.bounds.contains(point) ? event : nil
+            }
+        }
         if handler == nil {
             busyCancelButton.isHidden = true
             busyCancelButton.isEnabled = true
@@ -1568,7 +1594,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             ?? NSImage(systemSymbolName: "doc", accessibilityDescription: "Reduce File Size")
         reduceFileSizeButton.imagePosition = .imageOnly
         reduceFileSizeButton.bezelStyle = .texturedRounded
-        reduceFileSizeButton.toolTip = "Reduce File Size"
+        reduceFileSizeButton.toolTip = "Reduce File Size — lossless compression, preserving image resolution"
+        reduceFileSizeButton.setAccessibilityLabel("Reduce File Size")
 
         actionsPopup.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "Actions")
         actionsPopup.imagePosition = .imageOnly
@@ -1626,6 +1653,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             toolbarControlsStack.addArrangedSubview(autoNameSheetsButton)
             toolbarControlsStack.addArrangedSubview(batchLinkSheetsButton)
             toolbarControlsStack.addArrangedSubview(flattenPDFButton)
+            toolbarControlsStack.addArrangedSubview(reduceFileSizeButton)
         }
 
         toolbarSearchField.placeholderString = "Search PDF text"
@@ -4460,6 +4488,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func refreshFlattenButtonState() {
+        reduceFileSizeButton.isEnabled = pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy
         let recoverable = pdfView.document.map(PDFAnnotationFlattener.canUnflatten) ?? false
         flattenPDFButton.image = NSImage(systemSymbolName: recoverable ? "square.stack.3d.up" : "square.stack.3d.down.forward", accessibilityDescription: recoverable ? "Unflatten PDF" : "Flatten PDF")
         flattenPDFButton.toolTip = recoverable ? "Unflatten PDF — restore editable annotations and save this PDF" : "Flatten PDF — flatten annotations and save this PDF"
@@ -4830,8 +4859,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             cancelAutoNameCapture()
             return
         }
-        clearAllBookmarks(in: document)
         beginBusyIndicator("Generating Bookmarks…", detail: "Preparing to read \(document.pageCount) pages")
+        let cancellation = PDFProcessingCancellation()
+        setBusyCancelAction({ [weak self] in
+            cancellation.cancel()
+            self?.updateBusyIndicatorDetail("Stopping after the current page…")
+        })
         let readingStartedAt = Date()
         var identifiedNumbers = 0
         var completedPages = 0
@@ -4867,6 +4900,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         var labelHints: [String?] = []
         var titleLabelHints: [String?] = []
         for pageIndex in 0..<document.pageCount {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
+            processBusyCancellationEvents()
+            if cancellation.cancelled { return }
             autoreleasepool {
                 guard let page = document.page(at: pageIndex) else {
                     numbers.append(.init(text: "", source: "missing page"))
@@ -4898,6 +4934,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             showReadingProgress(pageIndex: pageIndex, activity: "Page read")
             updateBusyIndicatorProgress(current: completedPages, total: document.pageCount)
         }
+        processBusyCancellationEvents()
+        if cancellation.cancelled { return }
+        setBusyCancelAction(nil)
         updateBusyIndicatorDetail("Checking the detected sheet numbers and titles…")
         let reconciledNumbers = SheetReferencePolicy.reconcileOCRNumbers(numbers.map(\.text))
         numbers = numbers.enumerated().map { index, result in
@@ -4916,7 +4955,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             if !number.text.isEmpty { detectedSheetNumberCount += 1 }
             let labelNumber = autoNameIgnoresExistingPageLabels ? nil : sheetInfoFromPageLabel(document.page(at: pageIndex)?.label ?? "").number
             let labelConflict = labelNumber != nil && labelNumber != number.text
-            let needsReview = number.source != "PDF text" || title.source != "PDF text" || labelConflict
+            let needsReview = number.text.isEmpty || title.text.isEmpty || !number.alternatives.isEmpty || !title.alternatives.isEmpty || labelConflict
             if needsReview { reviewPages.append(pageIndex + 1) }
             let alternatives = (number.alternatives.isEmpty ? "" : "; other number reading: " + number.alternatives.joined(separator: ", "))
                 + (title.alternatives.isEmpty ? "" : "; other title reading: " + title.alternatives.joined(separator: " / "))
@@ -4951,7 +4990,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         confirmation.messageText = "Apply Auto-Generated Sheet Names?"
         let duplicates = Dictionary(grouping: generated, by: \.sheetNumber)
             .filter { $0.value.count > 1 }.keys.sorted()
-        let reviewNote = reviewPages.isEmpty ? "" : "\nReview OCR, missing fields, or label conflicts on pages: " + reviewPages.map(String.init).joined(separator: ", ")
+        let reviewNote = reviewPages.isEmpty ? "" : "\nReview missing fields, alternative readings, or label conflicts on pages: " + reviewPages.map(String.init).joined(separator: ", ")
         let duplicateNote = duplicates.isEmpty ? "" : "\nRepeated sheet numbers (all pages retained): " + duplicates.joined(separator: ", ")
         confirmation.informativeText = "Double-click a sheet number or title to correct it. Applying replaces the existing bookmark tree in document page order."
             + reviewNote + duplicateNote
@@ -5053,6 +5092,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         let preservedPageRotations = Self.pageRotations(in: document)
         var completedBatchLink = false
+        let cancellation = PDFProcessingCancellation()
+        let originalAnnotations = (0..<document.pageCount).map { document.page(at: $0)?.annotations ?? [] }
         guard let referenceIndex = autoLinkCaptureReferencePageIndex,
               referenceIndex >= 0,
               referenceIndex < document.pageCount else {
@@ -5061,7 +5102,21 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
 
         beginBusyIndicator("Batch Linking Sheet Numbers…", detail: "Reading sheet numbers…")
+        setBusyCancelAction({ [weak self] in
+            cancellation.cancel()
+            self?.updateBusyIndicatorDetail("Stopping after the current page and restoring existing links…")
+        })
         defer {
+            if cancellation.cancelled {
+                for index in 0..<document.pageCount {
+                    guard let page = document.page(at: index) else { continue }
+                    for annotation in page.annotations { page.removeAnnotation(annotation) }
+                    for annotation in originalAnnotations[index] { page.addAnnotation(annotation) }
+                    markPageMarkupCacheDirty(page)
+                }
+                refreshMarkups()
+                pdfView.refreshHyperlinkHighlights()
+            }
             Self.restorePageRotations(preservedPageRotations, to: document)
             endBusyIndicator()
             if let previous = autoLinkPreviousToolMode {
@@ -5097,6 +5152,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         updateBusyIndicatorSubdetail(contextualSubdetail(prefix: "0 found", current: 0, total: document.pageCount))
         updateBusyIndicatorProgress(current: 0, total: document.pageCount)
         for pageIndex in 0..<document.pageCount {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
+            processBusyCancellationEvents()
+            if cancellation.cancelled { return }
             guard let page = document.page(at: pageIndex) else { continue }
             updateBusyIndicatorProgress(current: pageIndex, total: document.pageCount)
             updateBusyIndicatorDetail("Stage 1 of 3 • Reading page \(pageIndex + 1) of \(document.pageCount)")
@@ -5159,6 +5217,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             }
             ocrTargets.record(token, pageIndex: diagnostic.pageIndex)
         }
+        processBusyCancellationEvents()
+        if cancellation.cancelled { return }
+        let ambiguousNumbers = ocrTargets.ambiguous.sorted()
+        let ambiguousSummary = ambiguousNumbers.isEmpty ? "" : "\nDuplicate sheet numbers were left unlinked: " + ambiguousNumbers.joined(separator: ", ") + "."
         let sheetTokenToPageIndex = ocrTargets.targets
 
         let zoneDetectedCount = zonePageDiagnostics.reduce(0) { partial, diagnostic in
@@ -5174,7 +5236,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guard !sheetTokenToPageIndex.isEmpty else {
             let response = runAlert(
                 title: "No Sheet Numbers Detected",
-                informativeText: "Could not detect sheet numbers from the captured zone.\n\nZone read: \(zoneDetectedCount)/\(document.pageCount) pages (\(zoneFallbackRecoveredCount) recovered by fallback probes).\(missedZoneSummary)",
+                informativeText: "Could not detect sheet numbers from the captured zone.\n\nZone read: \(zoneDetectedCount)/\(document.pageCount) pages (\(zoneFallbackRecoveredCount) recovered by fallback probes).\(missedZoneSummary)\(ambiguousSummary)",
                 style: .warning,
                 buttons: ["OK", "Show Diagnostics"]
             )
@@ -5197,13 +5259,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         let shouldClearExisting = (clearResponse == .alertFirstButtonReturn)
 
+        var removedLinks = 0
         if shouldClearExisting {
             stageStartedAt = Date()
             updateBusyIndicatorStatus("Batch Linking Sheet Numbers…")
             updateBusyIndicatorDetail("Step 0/3: Removing existing batch links…")
             updateBusyIndicatorSubdetail(contextualSubdetail(prefix: "0 links removed", current: 0, total: document.pageCount))
             updateBusyIndicatorProgress(current: 0, total: max(1, document.pageCount))
-            var removedLinks = 0
             removeAutoSheetLinks(in: document) { currentPage, totalPages, removedSoFar in
                 removedLinks = removedSoFar
                 self.updateBusyIndicatorProgress(current: currentPage, total: max(1, totalPages))
@@ -5300,6 +5362,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         var scannedPageIndexes = Set<Int>()
         scannedPageIndexes.reserveCapacity(document.pageCount)
         for sourcePageIndex in 0..<document.pageCount {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
+            processBusyCancellationEvents()
+            if cancellation.cancelled { return }
             guard let page = document.page(at: sourcePageIndex) else { continue }
             updateBusyIndicatorProgress(current: sourcePageIndex + 1, total: document.pageCount)
             updateBusyIndicatorDetail("Step 2/3: Scanning selectable text… \(sourcePageIndex + 1)/\(document.pageCount)")
@@ -5343,6 +5408,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         updateBusyIndicatorSubdetail(contextualSubdetail(prefix: "\(addedLinks) links created", current: 0, total: document.pageCount))
         let ocrCustomWords = Array(linkTargetsByToken.keys)
         for sourcePageIndex in 0..<document.pageCount {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
+            processBusyCancellationEvents()
+            if cancellation.cancelled { return }
             guard let page = document.page(at: sourcePageIndex) else { continue }
             updateBusyIndicatorProgress(current: sourcePageIndex + 1, total: document.pageCount)
             updateBusyIndicatorDetail("Step 3/3: OCR fallback + linking… \(sourcePageIndex + 1)/\(document.pageCount)")
@@ -5379,12 +5447,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
 
         for pageIndex in 0..<document.pageCount {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.001))
+            processBusyCancellationEvents()
+            if cancellation.cancelled { return }
             guard let page = document.page(at: pageIndex),
                   touchedPageIDs.contains(ObjectIdentifier(page)) else { continue }
             markPageMarkupCacheDirty(page)
         }
 
-        if addedLinks > 0 {
+        processBusyCancellationEvents()
+        if cancellation.cancelled { return }
+        setBusyCancelAction(nil)
+        if addedLinks > 0 || removedLinks > 0 {
             markMarkupChanged()
             refreshMarkups()
             pdfView.refreshHyperlinkHighlights()
@@ -5395,14 +5469,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             guard let self else { return }
             let completionResponse = self.runAlert(
                 title: "Batch Link Complete",
-                informativeText: "Detected \(sheetTokenToPageIndex.count) sheet numbers and created \(addedLinks) hyperlink(s) across \(document.pageCount) page(s).\n\nZone read: \(zoneDetectedCount)/\(document.pageCount) pages (\(zoneFallbackRecoveredCount) recovered by fallback probes).\(missedZoneSummary)",
+                informativeText: "Detected \(sheetTokenToPageIndex.count) sheet numbers and created \(addedLinks) hyperlink(s) across \(document.pageCount) page(s).\n\nZone read: \(zoneDetectedCount)/\(document.pageCount) pages (\(zoneFallbackRecoveredCount) recovered by fallback probes).\(missedZoneSummary)\(ambiguousSummary)",
                 buttons: ["OK", "Show Diagnostics"]
             )
             if completionResponse == .alertSecondButtonReturn {
                 self.showBatchLinkZoneDiagnostics(document: document, diagnostics: zonePageDiagnostics)
             }
         }
-        if addedLinks > 0 {
+        if addedLinks > 0 || removedLinks > 0 {
             DispatchQueue.main.async { [weak self] in
                 self?.saveNavigationCommandChanges(in: document) { success in
                     guard success else { return }
@@ -6155,16 +6229,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
     }
 
-    private func clearAllBookmarks(in document: PDFDocument) {
-        document.outlineRoot = PDFOutline()
-        bookmarkLabelOverrides.removeAll()
-        pageLabelOverrides.removeAll()
-        suppressedEmbeddedPageLabelIndexes = Set(0..<document.pageCount)
-        markMarkupChangedAndScheduleAutosave()
-        reloadBookmarks()
-        updateStatusBar()
-    }
-
     func normalize(rectInPage: NSRect, for page: PDFPage) -> NormalizedPageRect {
         // Share captured regions in displayed coordinates, not raw PDF coordinates.
         // Identical landscape sheets may be stored as portrait pages with /Rotate.
@@ -6403,7 +6467,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func confirmDiscardUnsavedChangesIfNeeded() -> Bool {
-        guard !isFlatteningDocumentOperation else { return false }
+        guard !isPDFFileProcessingOperation else { return false }
         guard hasUnsavedChanges() else {
             return true
         }

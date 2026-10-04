@@ -218,6 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         saveCopyItem.target = controller
         fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: "Flatten PDF…", action: #selector(MainViewController.commandFlattenPDF(_:)), keyEquivalent: "").target = controller
+        fileMenu.addItem(withTitle: "Reduce File Size…", action: #selector(MainViewController.commandReduceFileSize(_:)), keyEquivalent: "").target = controller
         fileItem.submenu = fileMenu
 
         let editItem = NSMenuItem()

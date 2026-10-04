@@ -4,6 +4,21 @@ import XCTest
 
 @MainActor
 final class ToolbarPresentationTests: XCTestCase {
+    func testBusyCancellationRemainsClickableWhileDocumentIsLocked() {
+        _ = NSApplication.shared
+        let controller = MainViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = controller
+        controller.beginBusyIndicator("Testing")
+        XCTAssertTrue(window.ignoresMouseEvents)
+        controller.setBusyCancelAction({})
+        XCTAssertFalse(window.ignoresMouseEvents)
+        controller.setBusyCancelAction(nil)
+        XCTAssertTrue(window.ignoresMouseEvents)
+        controller.endBusyIndicator()
+        XCTAssertFalse(window.ignoresMouseEvents)
+    }
+
     func testAppKitInstallsPrimaryCommandButtons() throws {
         _ = NSApplication.shared
         let controller = MainViewController()
@@ -18,8 +33,8 @@ final class ToolbarPresentationTests: XCTestCase {
         XCTAssertNotNil(stack.superview)
         XCTAssertGreaterThan(stack.frame.width, 0)
         let buttons = stack.arrangedSubviews.compactMap { $0 as? NSButton }
-        XCTAssertEqual(buttons.count, 4)
-        XCTAssertEqual(buttons.map(\.action), [#selector(MainViewController.openPDF), #selector(MainViewController.commandAutoGenerateSheetNames(_:)), #selector(MainViewController.commandBatchLinkSheetNumbers(_:)), #selector(MainViewController.commandFlattenPDF(_:))])
+        XCTAssertEqual(buttons.count, 5)
+        XCTAssertEqual(buttons.map(\.action), [#selector(MainViewController.openPDF), #selector(MainViewController.commandAutoGenerateSheetNames(_:)), #selector(MainViewController.commandBatchLinkSheetNumbers(_:)), #selector(MainViewController.commandFlattenPDF(_:)), #selector(MainViewController.commandReduceFileSize(_:))])
         XCTAssertTrue(buttons.allSatisfy { $0.target === controller && !$0.isHidden && $0.image != nil })
         XCTAssertTrue(controller.responds(to: #selector(MainViewController.toolbarAllowedItemIdentifiers(_:))))
         XCTAssertTrue(controller.responds(to: #selector(MainViewController.outlineViewSelectionDidChange(_:))))

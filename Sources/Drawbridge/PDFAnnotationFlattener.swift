@@ -25,7 +25,7 @@ enum PDFAnnotationFlattener {
         NSError(domain: "DrawbridgeFlatten", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
-    static func flatten(source originalSource: URL, destination: URL, progress: @Sendable (String) -> Void = { _ in }) throws -> Report {
+    static func flatten(source originalSource: URL, destination: URL, progress: @Sendable (String) -> Void = { _ in }, cancelled: @Sendable () -> Bool = { false }) throws -> Report {
         let destination = destination.standardizedFileURL.resolvingSymlinksInPath()
         let replacingSource = originalSource.standardizedFileURL.resolvingSymlinksInPath() == destination
         guard let executable = PDFTKBookmarkWriter.executableURL() else { throw failure("The PDF processing helper is unavailable.") }
@@ -36,6 +36,7 @@ enum PDFAnnotationFlattener {
         let source = directory.appendingPathComponent("input.pdf")
         try FileManager.default.copyItem(at: originalSource, to: source)
         func run(_ arguments: [String]) throws {
+            if cancelled() { throw CancellationError() }
             let logURL = directory.appendingPathComponent("qpdf-error.log")
             FileManager.default.createFile(atPath: logURL.path, contents: nil)
             let log = try FileHandle(forWritingTo: logURL)
@@ -178,6 +179,7 @@ enum PDFAnnotationFlattener {
             }
         }
         progress(replacingSource ? "Saving flattened PDF…" : "Writing flattened copy…")
+        if cancelled() { throw CancellationError() }
         try MainViewController.commitStagedSave(from: final, to: destination)
         return Report(flattened: flattened, retainedMarkups: retained, removedSHXComments: removedSHXComments)
     }
@@ -190,7 +192,7 @@ enum PDFAnnotationFlattener {
 
     /// Recovery keeps references to original streams/annotations inside the PDF,
     /// rather than embedding a second PDF. Navigation edits survive this operation.
-    static func unflatten(source: URL, progress: @Sendable (String) -> Void = { _ in }) throws -> Report {
+    static func unflatten(source: URL, progress: @Sendable (String) -> Void = { _ in }, cancelled: @Sendable () -> Bool = { false }) throws -> Report {
         guard let executable = PDFTKBookmarkWriter.executableURL() else { throw failure("The PDF processing helper is unavailable.") }
         let destination = source.standardizedFileURL.resolvingSymlinksInPath()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeUnflatten-\(UUID().uuidString)")
@@ -200,6 +202,7 @@ enum PDFAnnotationFlattener {
         try FileManager.default.copyItem(at: destination, to: snapshot)
         let jsonURL = directory.appendingPathComponent("restore.json")
         let output = directory.appendingPathComponent("restored.pdf")
+        if cancelled() { throw CancellationError() }
         progress("Checking unflatten recovery data…")
         guard PDFTKBookmarkWriter.run(executable, arguments: ["--json=2", "--json-stream-data=inline", "--decode-level=none", snapshot.path, jsonURL.path]),
               var json = try JSONSerialization.jsonObject(with: Data(contentsOf: jsonURL)) as? [String: Any] else { throw failure("Could not read recovery data.") }
@@ -240,6 +243,7 @@ enum PDFAnnotationFlattener {
         objects["obj:\(root)"] = ["value": catalog]
         setObjects(objects, in: &json)
         try JSONSerialization.data(withJSONObject: metadataJSON(json), options: [.withoutEscapingSlashes, .sortedKeys]).write(to: jsonURL)
+        if cancelled() { throw CancellationError() }
         progress("Restoring \(restored) editable annotations…")
         guard PDFTKBookmarkWriter.run(executable, arguments: [snapshot.path, "--stream-data=preserve", "--update-from-json=\(jsonURL.path)", output.path]),
               PDFTKBookmarkWriter.run(executable, arguments: ["--check", output.path]) else { throw failure("Could not restore annotations safely; no changes were saved.") }
@@ -247,8 +251,42 @@ enum PDFAnnotationFlattener {
             throw failure("The file changed during unflattening. Reopen it and try again.")
         }
         progress("Saving restored PDF…")
+        if cancelled() { throw CancellationError() }
         try MainViewController.commitStagedSave(from: output, to: destination)
         return Report(flattened: 0, retainedMarkups: 0, removedSHXComments: 0, restoredAnnotations: restored)
+    }
+
+    /// Called only after the reducer proves the complete decoded graph is unchanged.
+    /// Validate old integrity checks before updating hashes for different compression.
+    static func refreshRecoveryAfterLosslessCompression(before: [String: Any], after: inout [String: Any]) throws -> Bool {
+        let oldObjects = try objectTable(before)
+        let oldCatalog = try dictionary(rootReference(oldObjects), oldObjects)
+        guard let archive = oldCatalog[recoveryKey] as? [String: Any] else { return false }
+        let oldPages = try pageReferences(before)
+        guard archive["/Version"] as? Int == 1, let entries = archive["/Pages"] as? [[String: Any]], entries.count == oldPages.count else { throw failure("Invalid Unflatten recovery data. No changes were saved.") }
+        for (index, entry) in entries.enumerated() {
+            let ref = oldPages[index]
+            let page = try dictionary(ref, oldObjects)
+            guard entry["/Page"] as? String == ref,
+                  entry["/FlattenedDrawingHash"] as? String == "u:" + (try drawingHash(ref, oldObjects)),
+                  let geometrySnapshot = entry["/Geometry"] as? [String: Any],
+                  let contents = entry["/FlattenedContents"],
+                  let resources = entry["/FlattenedResources"] as? [String: Any],
+                  NSDictionary(dictionary: try geometry(ref, oldObjects)).isEqual(to: geometrySnapshot),
+                  NSArray(array: [contentSnapshot(page["/Contents"], oldObjects)]).isEqual(to: [contents]),
+                  NSDictionary(dictionary: try resourceSnapshot(ref, oldObjects)).isEqual(to: resources) else { throw failure("Drawing content changed since flattening. Reduction was cancelled to preserve recovery safety.") }
+        }
+        var newObjects = try objectTable(after)
+        let root = try rootReference(newObjects)
+        var catalog = try dictionary(root, newObjects)
+        guard var newArchive = catalog[recoveryKey] as? [String: Any], var newEntries = newArchive["/Pages"] as? [[String: Any]] else { throw failure("Unflatten recovery data was lost; no changes were saved.") }
+        let newPages = try pageReferences(after)
+        guard newEntries.count == newPages.count else { throw failure("Recovery page count changed; no changes were saved.") }
+        for index in newEntries.indices { newEntries[index]["/FlattenedDrawingHash"] = "u:" + (try drawingHash(newPages[index], newObjects)) }
+        newArchive["/Pages"] = newEntries; catalog[recoveryKey] = newArchive
+        newObjects["obj:\(root)"] = ["value": catalog]
+        setObjects(newObjects, in: &after)
+        return true
     }
 
     private static func contentSnapshot(_ value: Any?, _ objects: [String: Any]) -> Any {
@@ -300,7 +338,7 @@ enum PDFAnnotationFlattener {
         return resources
     }
 
-    private static func metadataJSON(_ json: [String: Any]) -> [String: Any] {
+    static func metadataJSON(_ json: [String: Any]) -> [String: Any] {
         var result = json
         guard var qpdf = result["qpdf"] as? [[String: Any]], qpdf.count > 1 else { return result }
         var objects = qpdf[1]

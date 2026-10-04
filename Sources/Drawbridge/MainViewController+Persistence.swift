@@ -117,7 +117,7 @@ extension MainViewController {
         embeddedSaveToken: Int = 0,
         completion: (@MainActor @Sendable (Bool) -> Void)? = nil
     ) {
-        guard !isFlatteningDocumentOperation else { completion?(false); return }
+        guard !isPDFFileProcessingOperation else { completion?(false); return }
         guard let document = document ?? pdfView.document else {
             beep()
             completion?(false)
@@ -665,7 +665,7 @@ extension MainViewController {
 
     func hasPendingPDFWriteForTermination() -> Bool {
         isSavingDocumentOperation
-            || isFlatteningDocumentOperation
+            || isPDFFileProcessingOperation
             || persistenceCoordinator.isManualSaveInFlight
     }
 
