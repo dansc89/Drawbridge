@@ -2161,6 +2161,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             x: pageBounds.minX + pageBounds.width * min(max(anchor.x, 0), 1),
             y: pageBounds.minY + pageBounds.height * min(max(anchor.y, 0), 1)
         )
+        go(to: page)
+        forceZoomLayout()
+        // Changing page geometry can change the scrollbar layout and thus
+        // the viewport center. Use the destination viewport, not the old one.
         let desiredWindowPoint: NSPoint
         if let clipView = contentClipView {
             desiredWindowPoint = clipView.convert(
@@ -2171,8 +2175,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             desiredWindowPoint = convert(NSPoint(x: bounds.midX, y: bounds.midY), to: nil)
         }
 
-        go(to: page)
-        forceZoomLayout()
         zoomAnchorGeneration &+= 1
         let generation = zoomAnchorGeneration
         correctZoomAnchor(page: page, pagePoint: targetPagePoint, desiredWindowPoint: desiredWindowPoint)
