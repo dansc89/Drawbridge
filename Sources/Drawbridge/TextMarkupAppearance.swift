@@ -9,7 +9,15 @@ enum TextMarkupAppearance {
         let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byWordWrapping
         let text = NSAttributedString(string: record.text, attributes: [.font:font, .paragraphStyle:paragraph])
         let framesetter = CTFramesetterCreateWithAttributedString(text)
-        let area = CGRect(x:3,y:3,width:max(1,record.bounds.width-6),height:max(1,record.bounds.height-6))
+        // CoreText emits no lines when the padded box is shorter than one line.
+        // Lay out at least one line, anchored to the top, then clip to the user's
+        // annotation bounds instead of saving a completely empty appearance.
+        let textWidth = max(1,record.bounds.width-6)
+        let suggested = CTFramesetterSuggestFrameSizeWithConstraints(framesetter,CFRange(location:0,length:0),nil,
+                                                                     CGSize(width:textWidth,height:CGFloat.greatestFiniteMagnitude),nil)
+        let layoutHeight = max(ceil(suggested.height)+1, record.bounds.height - 6)
+        let area = CGRect(x:3,y:record.bounds.height-3-layoutHeight,
+                          width:textWidth,height:layoutHeight)
         let frame = CTFramesetterCreateFrame(framesetter,CFRange(location:0,length:0),CGPath(rect:area,transform:nil),nil)
         let lines = CTFrameGetLines(frame) as! [CTLine]
         var origins = [CGPoint](repeating:.zero,count:lines.count)
@@ -23,7 +31,8 @@ enum TextMarkupAppearance {
                 CTRunGetGlyphs(run,CFRange(location:0,length:0),&glyphs)
                 CTRunGetPositions(run,CFRange(location:0,length:0),&positions)
                 for n in 0..<count {
-                    var transform = CGAffineTransform(translationX:origins[index].x+positions[n].x,y:origins[index].y+positions[n].y)
+                    var transform = CGAffineTransform(translationX:area.minX+origins[index].x+positions[n].x,
+                                                      y:area.minY+origins[index].y+positions[n].y)
                     guard let path = CTFontCreatePathForGlyph(runFont,glyphs[n],&transform) else { continue }
                     var current = CGPoint.zero, beginning = CGPoint.zero
                     path.applyWithBlock { element in

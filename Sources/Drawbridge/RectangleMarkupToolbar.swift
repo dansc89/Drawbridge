@@ -1,17 +1,34 @@
 import AppKit
 
+/// Explicit selection drawing keeps the active tool visible inside macOS toolbars,
+/// where textured button tint and toggle bezels can otherwise disappear.
+@MainActor
+final class MarkupToolButton: NSButton {
+    var showsActiveTool: Bool { isEnabled && state == .on }
+    override func draw(_ dirtyRect: NSRect) {
+        guard showsActiveTool else { super.draw(dirtyRect); return }
+        NSColor.systemBlue.setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
+        guard let image else { return }
+        let symbol = image.withSymbolConfiguration(.init(paletteColors: [.white])) ?? image
+        let size = image.size
+        symbol.draw(in: NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
+                              width: size.width, height: size.height))
+    }
+}
+
 /// The first completed tools live in their own toolbar group, away from indexing.
 @MainActor
 final class RectangleMarkupToolbar: NSStackView {
-    let selectButton = NSButton(title: "Select", target: nil, action: nil)
-    let rectangleButton = NSButton(title: "Rectangle", target: nil, action: nil)
-    let ellipseButton = NSButton(title: "Ellipse", target: nil, action: nil)
-    let lineButton = NSButton(title: "Line", target: nil, action: nil)
-    let arrowButton = NSButton(title: "Arrow", target: nil, action: nil)
-    let polygonButton = NSButton(title:"Polygon",target:nil,action:nil)
+    let selectButton = MarkupToolButton(title: "Select", target: nil, action: nil)
+    let rectangleButton = MarkupToolButton(title: "Rectangle", target: nil, action: nil)
+    let ellipseButton = MarkupToolButton(title: "Ellipse", target: nil, action: nil)
+    let lineButton = MarkupToolButton(title: "Line", target: nil, action: nil)
+    let arrowButton = MarkupToolButton(title: "Arrow", target: nil, action: nil)
+    let polygonButton = MarkupToolButton(title:"Polygon",target:nil,action:nil)
     let fillPopup = NSPopUpButton()
-    let polylineButton = NSButton(title:"Polyline",target:nil,action:nil)
-    let textButton = NSButton(title:"Text",target:nil,action:nil)
+    let polylineButton = MarkupToolButton(title:"Polyline",target:nil,action:nil)
+    let textButton = MarkupToolButton(title:"Text",target:nil,action:nil)
     let editTextButton = NSButton(title:"",target:nil,action:nil)
     let fontPopup = NSPopUpButton()
     let fontSizes: [CGFloat] = [8,10,12,14,18,24,36,48,72]
@@ -28,7 +45,12 @@ final class RectangleMarkupToolbar: NSStackView {
         for (button, symbol, name) in [(selectButton,"cursorarrow","Select markups (V)"),(rectangleButton,"rectangle","Draw Rectangle (R)"),(ellipseButton,"circle","Draw Ellipse (E)"),(lineButton,"line.diagonal","Draw Line (L)"),(arrowButton,"arrow.up.right","Draw Arrow (A)"),(polygonButton,"pentagon","Draw Polygon (Shift+P)"),(polylineButton,"point.topleft.down.to.point.bottomright.curvepath","Draw Polyline (Shift+N)"),(textButton,"textformat","Draw Text Box (T)"),(editTextButton,"square.and.pencil","Edit Text"),(deleteButton,"trash","Delete selected markup (Delete)"),(undoButton,"arrow.uturn.backward","Undo (⌘Z)"),(redoButton,"arrow.uturn.forward","Redo (⇧⌘Z)")] {
             button.bezelStyle = .texturedRounded; button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)
             button.imagePosition = .imageOnly; button.toolTip = name; button.setAccessibilityLabel(name)
-            if [selectButton,rectangleButton,ellipseButton,lineButton,arrowButton,polygonButton,polylineButton,textButton].contains(button) { button.setButtonType(.toggle) }
+            if button is MarkupToolButton {
+                button.setButtonType(.toggle)
+                button.isBordered = false
+                button.widthAnchor.constraint(equalToConstant: 30).isActive = true
+                button.heightAnchor.constraint(equalToConstant: 28).isActive = true
+            }
             addArrangedSubview(button)
         }
         colorPopup.addItems(withTitles: ["Red","Blue","Black","Orange","Green"])
@@ -77,6 +99,7 @@ extension MainViewController {
             button.isEnabled = enabled
             button.state = s.tool == tool ? .on : .off
             button.contentTintColor = s.tool == tool ? .systemBlue : .labelColor
+            button.needsDisplay = true
         }
         let polygonSelected = s.selected?.type == "Polygon"
         rectangleToolbar.fillPopup.isHidden = !(polygonSelected || s.tool == .polygon)

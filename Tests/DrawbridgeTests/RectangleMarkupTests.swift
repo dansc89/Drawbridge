@@ -314,6 +314,27 @@ final class RectangleMarkupTests: XCTestCase {
         }
     }
 
+    func testShallowTextBoxRetainsVisibleGlyphAppearanceAfterSave() throws {
+        let source = try fixture(rotation:0); defer { try? FileManager.default.removeItem(at:source) }
+        let doc = try XCTUnwrap(PDFDocument(url:source)), page = try XCTUnwrap(doc.page(at:0))
+        let session = RectangleMarkupController(); session.bind(to:doc)
+        _ = session.create(on:page,bounds:CGRect(x:120,y:60,width:194,height:20.53),kind:.text,text:"Preview verified")
+        let record = try XCTUnwrap(RectangleMarkupRecord.capture(doc).first)
+        XCTAssertTrue(TextMarkupAppearance.drawing(record).contains("f\n"), "A shallow box must contain painted glyphs")
+        let output = source.appendingPathExtension("saved.pdf")
+        defer { try? FileManager.default.removeItem(at:output) }
+        XCTAssertTrue(PDFRectangleWriter.write(document:doc,source:source,destination:output,pageLabels:[:],records:[record]))
+        let reopened = try XCTUnwrap(PDFDocument(url:output)), savedPage = try XCTUnwrap(reopened.page(at:0))
+        let original = page.thumbnail(of:NSSize(width:1040,height:660),for:.cropBox).tiffRepresentation
+        let saved = savedPage.thumbnail(of:NSSize(width:1040,height:660),for:.cropBox).tiffRepresentation
+        savedPage.annotations.filter { RectangleMarkupRecord.owns($0) }.forEach { savedPage.removeAnnotation($0) }
+        let withoutMarkup = savedPage.thumbnail(of:NSSize(width:1040,height:660),for:.cropBox).tiffRepresentation
+        XCTAssertNotEqual(saved,withoutMarkup, "Saved text must render visible pixels")
+        page.annotations.filter { RectangleMarkupRecord.owns($0) }.forEach { page.removeAnnotation($0) }
+        XCTAssertEqual(withoutMarkup,page.thumbnail(of:NSSize(width:1040,height:660),for:.cropBox).tiffRepresentation)
+        XCTAssertNotNil(original)
+    }
+
     func testTextSaveUnicodeMultilineAndEditingAtEveryRotation() throws {
         guard PDFTKBookmarkWriter.executableURL() != nil else { throw XCTSkip("qpdf required") }
         for rotation in [0,90,180,270] {
@@ -423,6 +444,25 @@ final class RectangleMarkupTests: XCTestCase {
                 XCTAssertEqual(reopened.page(at:n)?.bounds(for:.cropBox), doc.page(at:n)?.bounds(for:.cropBox))
             }
         }
+    }
+
+    func testActiveToolHighlightTracksEveryToolAndDisabledState() throws {
+        _ = NSApplication.shared
+        let controller = MainViewController()
+        _ = controller.view
+        controller.pdfView.rectangleMarkup.canEdit = { true }
+        let buttons = [controller.rectangleToolbar.selectButton, controller.rectangleToolbar.rectangleButton,
+                       controller.rectangleToolbar.ellipseButton, controller.rectangleToolbar.lineButton,
+                       controller.rectangleToolbar.arrowButton, controller.rectangleToolbar.polygonButton,
+                       controller.rectangleToolbar.polylineButton, controller.rectangleToolbar.textButton]
+        let tools: [RectangleMarkupController.Tool] = [.select,.rectangle,.ellipse,.line,.arrow,.polygon,.polyline,.text]
+        for (index, tool) in tools.enumerated() {
+            controller.pdfView.rectangleMarkup.tool = tool
+            XCTAssertEqual(buttons.enumerated().filter { $0.element.showsActiveTool }.map { $0.offset }, [index])
+        }
+        controller.pdfView.rectangleMarkup.canEdit = { false }
+        controller.refreshRectangleToolbar()
+        XCTAssertFalse(buttons.contains { $0.showsActiveTool })
     }
 
     func testMarkupControlsAreInstalledSeparatelyAndDisabledWithoutPDF() throws {
