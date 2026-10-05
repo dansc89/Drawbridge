@@ -6546,7 +6546,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func confirmDiscardUnsavedChangesIfNeeded() -> Bool {
-        guard !isPDFFileProcessingOperation else { return false }
+        // Do not close or replace the document while a background save owns it.
+        // This also prevents a second, modal save from racing the active save.
+        guard !isPDFProcessingBusy else { return false }
         guard hasUnsavedChanges() else {
             return true
         }

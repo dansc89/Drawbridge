@@ -81,6 +81,7 @@ extension MainViewController {
         }
         let output = canonicalDocumentURL(source)
         let cancellation = PDFProcessingCancellation()
+        let documentID = ObjectIdentifier(document)
         isPDFFileProcessingOperation = true
         beginBusyIndicator("Reducing File Size…", detail: "Preparing lossless compression…")
         setBusyCancelAction({ [weak self] in
@@ -100,7 +101,10 @@ extension MainViewController {
                 controller.endBusyIndicator()
                 switch result {
                 case .success(let report):
-                    if report.saved { controller.openDocument(at: output) }
+                    if report.saved, controller.pdfView.document.map(ObjectIdentifier.init) == documentID,
+                       !controller.hasUnsavedChanges() {
+                        controller.openDocument(at: output)
+                    }
                     let before = ByteCountFormatter.string(fromByteCount: Int64(report.originalBytes), countStyle: .file)
                     let after = ByteCountFormatter.string(fromByteCount: Int64(report.reducedBytes), countStyle: .file)
                     controller.runAlert(title: report.saved ? "PDF Reduced and Saved" : "PDF Already Compact", informativeText: report.saved

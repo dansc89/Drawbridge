@@ -165,6 +165,7 @@ final class RectangleMarkupController {
         sourceStamp = url.flatMap(PDFMarkupSourceStamp.read)
     }
     var onMutation: ((PDFPage) -> Void)?
+    var onDraftChanged: (() -> Void)?
     var onPresentationChanged: (() -> Void)?
     var canEdit: () -> Bool = { true }
     var tool: Tool = .select {
@@ -436,7 +437,9 @@ final class RectangleMarkupController {
         editor.onFinish = { [weak self] cancel in self?.finishTextEditing(cancel:cancel) }
         editor.onChange = { [weak self] in
             guard let self, let draft = self.inlineText else { return }
-            self.hasUnsavedChanges = true; self.onMutation?(draft.page)
+            self.hasUnsavedChanges = true
+            if let onDraftChanged = self.onDraftChanged { onDraftChanged() }
+            else { self.onMutation?(draft.page) }
         }
         view.addSubview(editor); positionTextEditor(); view.needsDisplay = true
         view.window?.makeFirstResponder(editor); editor.setSelectedRange(NSRange(location:editor.string.utf16.count,length:0))

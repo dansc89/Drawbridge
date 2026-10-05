@@ -17,6 +17,76 @@ private final class BackgroundPDFDocumentRead: @unchecked Sendable {
 
 @MainActor
 final class RectangleMarkupTests: XCTestCase {
+    func testDocumentReplacementIsBlockedThroughoutSavingAndProcessing() {
+        _ = NSApplication.shared
+        let controller = MainViewController(); _ = controller.view
+        XCTAssertTrue(controller.confirmDiscardUnsavedChangesIfNeeded())
+        controller.isSavingDocumentOperation = true
+        XCTAssertFalse(controller.confirmDiscardUnsavedChangesIfNeeded())
+        controller.isSavingDocumentOperation = false
+        controller.beginBusyIndicator("Checking", lockInteraction: false)
+        XCTAssertFalse(controller.confirmDiscardUnsavedChangesIfNeeded())
+        controller.endBusyIndicator()
+        XCTAssertTrue(controller.confirmDiscardUnsavedChangesIfNeeded())
+    }
+
+    func testAllMarkupToolsSurviveFlattenReduceUnflattenAndRepeatedSave() throws {
+        for rotation in [0, 90, 180, 270] {
+            let source = try fixture(rotation: rotation)
+            let output = source.appendingPathExtension("workflow.pdf")
+            defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
+            let originalBytes = try Data(contentsOf: source)
+            let doc = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(doc.page(at: 0))
+            let session = RectangleMarkupController(); session.bind(to: doc)
+            for kind in [RectangleMarkupRecord.Kind.rectangle, .ellipse, .text] {
+                _ = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 120,y: 150,width: 100,height: 70), kind: kind, text: "Architect review\nLevel 2"))
+            }
+            let a = CGPoint(x: 280,y: 180), b = CGPoint(x: 390,y: 290)
+            for kind in [RectangleMarkupRecord.Kind.line, .arrow] {
+                _ = try XCTUnwrap(session.create(on: page, bounds: RectangleMarkupController.lineBounds(a,b,width:2), kind: kind, endpoints: (a,b)))
+            }
+            let points = [CGPoint(x: 300,y: 100), CGPoint(x: 400,y: 140), CGPoint(x: 350,y: 220)]
+            _ = try XCTUnwrap(session.createPolyline(on: page, points: points))
+            session.fillColor = .orange
+            _ = try XCTUnwrap(session.createPolyline(on: page, points: points, closed: true))
+            let records = RectangleMarkupRecord.capture(doc)
+            XCTAssertEqual(records.count, 7)
+            XCTAssertTrue(PDFRectangleWriter.write(document: doc, source: source, destination: output, pageLabels: [:], records: records))
+            let flat = try PDFAnnotationFlattener.flatten(source: output, destination: output)
+            XCTAssertEqual(flat.flattened, 7)
+            let flattened = try XCTUnwrap(PDFDocument(url: output))
+            XCTAssertTrue(RectangleMarkupRecord.capture(flattened).isEmpty)
+            XCTAssertEqual(flattened.page(at: 0)?.annotations.filter { $0.type == "Link" }.count, 1)
+            _ = try PDFLosslessReducer.reduce(source: output)
+            XCTAssertTrue(PDFAnnotationFlattener.canUnflatten(try XCTUnwrap(PDFDocument(url: output))))
+            let recovery = try PDFAnnotationFlattener.unflatten(source: output)
+            XCTAssertEqual(recovery.restoredAnnotations, 7)
+            let restored = try XCTUnwrap(PDFDocument(url: output))
+            XCTAssertEqual(RectangleMarkupRecord.capture(restored), records)
+            for _ in 0..<3 {
+                XCTAssertTrue(PDFRectangleWriter.write(document: restored, source: output, destination: output, pageLabels: [:], records: records))
+            }
+            let final = try XCTUnwrap(PDFDocument(url: output)), finalPage = try XCTUnwrap(final.page(at: 0))
+            XCTAssertEqual(RectangleMarkupRecord.capture(final), records)
+            XCTAssertEqual(finalPage.rotation, rotation)
+            XCTAssertEqual(finalPage.bounds(for: .mediaBox), page.bounds(for: .mediaBox))
+            XCTAssertEqual(finalPage.bounds(for: .cropBox), page.bounds(for: .cropBox))
+            XCTAssertEqual(final.string, doc.string)
+            XCTAssertEqual(finalPage.annotations.filter { $0.type == "Link" }.count, 1)
+            XCTAssertEqual(finalPage.annotations.filter { $0.contents == "Imported CAD box" }.count, 1)
+            if let root = ProcessInfo.processInfo.environment["DRAWBRIDGE_WORKFLOW_QA"] {
+                let folder = URL(fileURLWithPath: root)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try Data(contentsOf: output).write(to: folder.appendingPathComponent("all-tools-\(rotation).pdf"))
+            }
+            finalPage.annotations.filter(RectangleMarkupRecord.owns).forEach(finalPage.removeAnnotation)
+            page.annotations.filter(RectangleMarkupRecord.owns).forEach(page.removeAnnotation)
+            XCTAssertEqual(finalPage.thumbnail(of: NSSize(width: 800,height: 800),for: .cropBox).tiffRepresentation,
+                           page.thumbnail(of: NSSize(width: 800,height: 800),for: .cropBox).tiffRepresentation)
+            XCTAssertEqual(try Data(contentsOf: source), originalBytes)
+        }
+    }
+
     private func fixture(rotation: Int, signed: Bool = false) throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("RectangleBase-\(UUID().uuidString).pdf")
         let drawing = "q 0.2 0.4 0.7 rg 110 90 200 100 re f Q\nBT /F1 18 Tf 80 260 Td (ORIGINAL CONTENT) Tj ET\n"
@@ -214,6 +284,30 @@ final class RectangleMarkupTests: XCTestCase {
         XCTAssertEqual(annotation.contents,"Committed before switching"); XCTAssertTrue(annotation.shouldDisplay)
         XCTAssertFalse(session.isEditingText)
         XCTAssertEqual(doc.string,"ORIGINAL CONTENT")
+    }
+
+    func testTypingMarksDraftDirtyWithoutReindexingPDFUntilCommit() throws {
+        let source = try fixture(rotation: 0)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let doc = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(doc.page(at: 0))
+        let view = PDFView(frame: CGRect(x: 0,y: 0,width: 800,height: 600)); view.document = doc
+        let session = RectangleMarkupController(); session.install(on: view); session.bind(to: doc)
+        var drafts = 0, mutations = 0
+        session.onDraftChanged = { drafts += 1 }
+        session.onMutation = { _ in mutations += 1 }
+        session.beginTextEditing(on: page, bounds: CGRect(x: 140,y: 140,width: 180,height: 80))
+        let editor = try XCTUnwrap(view.subviews.compactMap { $0 as? MarkupInlineTextView }.first)
+        for n in 1...50 {
+            editor.string = "Architect note \(n)"
+            editor.textDidChange(Notification(name: NSText.didChangeNotification, object: editor))
+        }
+        XCTAssertTrue(session.hasUnsavedChanges)
+        XCTAssertEqual(drafts, 50)
+        XCTAssertEqual(mutations, 0)
+        XCTAssertTrue(RectangleMarkupRecord.capture(doc).isEmpty)
+        session.finishTextEditing()
+        XCTAssertEqual(mutations, 1)
+        XCTAssertEqual(RectangleMarkupRecord.capture(doc).first?.text, "Architect note 50")
     }
 
     func testPathSelectionAndNodeEditingAtEveryRotation() throws {

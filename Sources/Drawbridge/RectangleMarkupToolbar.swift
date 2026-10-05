@@ -85,6 +85,12 @@ extension MainViewController {
             self.updateStatusBar()
             self.updatePDFContentsSummary()
         }
+        // Typing changes the editor draft, not the PDF annotation collection.
+        // Keep the unsaved indicator current without rescanning the entire set
+        // (potentially tens of thousands of consultant markups) on each key.
+        session.onDraftChanged = { [weak self] in
+            self?.markMarkupChanged()
+        }
         session.onPresentationChanged = { [weak self] in self?.refreshRectangleToolbar() }
         for (control, action) in [(rectangleToolbar.selectButton, #selector(rectangleSelect(_:))), (rectangleToolbar.rectangleButton, #selector(rectangleDraw(_:))), (rectangleToolbar.ellipseButton, #selector(ellipseDraw(_:))), (rectangleToolbar.lineButton, #selector(lineDraw(_:))), (rectangleToolbar.arrowButton, #selector(arrowDraw(_:))), (rectangleToolbar.polygonButton, #selector(polygonDraw(_:))), (rectangleToolbar.fillPopup, #selector(polygonFill(_:))), (rectangleToolbar.polylineButton, #selector(polylineDraw(_:))), (rectangleToolbar.textButton, #selector(textDraw(_:))), (rectangleToolbar.editTextButton, #selector(editMarkupText(_:))), (rectangleToolbar.fontPopup, #selector(markupFontSize(_:))), (rectangleToolbar.deleteButton, #selector(rectangleDelete(_:))), (rectangleToolbar.undoButton, #selector(rectangleUndo(_:))), (rectangleToolbar.redoButton, #selector(rectangleRedo(_:))), (rectangleToolbar.colorPopup, #selector(rectangleStyle(_:))), (rectangleToolbar.widthPopup, #selector(rectangleStyle(_:)))] as [(NSControl, Selector)] {
             control.target = self; control.action = action
