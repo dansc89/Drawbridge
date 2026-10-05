@@ -735,19 +735,26 @@ final class RectangleMarkupTests: XCTestCase {
         controller.pdfView.setMarkupDocument(doc)
         let page = try XCTUnwrap(doc.page(at: 0))
         let originalCount = RectangleMarkupRecord.capture(doc).count
-        _ = try XCTUnwrap(controller.pdfView.rectangleMarkup.create(on: page, bounds: CGRect(x: 100,y: 100,width: 80,height: 60)))
-        let start = Date()
-        let saved = await withCheckedContinuation { continuation in
-            controller.persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…") { saved in
-                continuation.resume(returning: saved)
+        let originalSize = try Data(contentsOf: source).count
+        for pass in 1...3 {
+            _ = try XCTUnwrap(controller.pdfView.rectangleMarkup.create(on: page, bounds: CGRect(x: 100 + pass * 10,y: 100,width: 80,height: 60)))
+            let expected = RectangleMarkupRecord.capture(doc)
+            let start = Date()
+            let saved = await withCheckedContinuation { continuation in
+                controller.persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…") { saved in
+                    continuation.resume(returning: saved)
+                }
             }
+            XCTAssertTrue(saved)
+            XCTAssertFalse(controller.isSavingDocumentOperation)
+            XCTAssertFalse(controller.pdfView.rectangleMarkup.hasUnsavedChanges)
+            XCTAssertLessThan(Date().timeIntervalSince(start), 3)
+            print("APPLICATION SAVE COMPLETION (pass \(pass)): \(Date().timeIntervalSince(start))s")
+            let reopened = try XCTUnwrap(PDFDocument(url: source))
+            XCTAssertEqual(RectangleMarkupRecord.capture(reopened), expected)
+            XCTAssertEqual(expected.count, originalCount + pass)
+            XCTAssertLessThan(try Data(contentsOf: source).count, originalSize + 200_000)
         }
-        XCTAssertTrue(saved)
-        XCTAssertFalse(controller.isSavingDocumentOperation)
-        XCTAssertLessThan(Date().timeIntervalSince(start), 3)
-        print("APPLICATION SAVE COMPLETION: \(Date().timeIntervalSince(start))s")
-        let reopened = try XCTUnwrap(PDFDocument(url: source))
-        XCTAssertEqual(RectangleMarkupRecord.capture(reopened).count, originalCount + 1)
     }
 
     func testBackgroundMarkupSaveLatency() async throws {
