@@ -20,8 +20,10 @@ This pass builds on the annotation-save correction in `20c58ff`. Customer PDFs r
 
 ## Remaining validation limits
 
-The full suite does not enable every historical optional OCR/reduction/search corpus. Native computer-control intermittently failed with `noWindowsAvailable` when sending input to Preview; an existing architectural rectangle output could be visually inspected, but this pass did not complete manual entry of every tool and reopening that output in Preview. Programmatic interaction and independent rendering must not be described as complete manual UI certification.
+The full suite does not enable every historical optional OCR/reduction/search corpus.
+
+Native manual QA completed on the separate stability build: all seven tools were created through the viewer using their keyboard shortcuts, saved, and visually inspected in Apple Preview. Saving during inline text entry committed the text correctly; undo, redo and save retained it. Polygon selection displayed three vertex handles without a rectangular selection box, and dragging a vertex worked. The toolbar Flatten action flattened 14 visible markups in place, Unflatten restored all 14, and Reduce compressed the file from 68 KB to 20 KB. Independent rendering produced identical pixels before flattening, while flattened, and after recovery/reduction. Exact editable annotation records, original base-page pixels, page boxes, rotation, text and links matched after recovery. Only disposable local QA PDFs were modified.
 
 The latest available Drawbridge crash report is the previously investigated 4.3 PDFKit form-filling-queue crash. The inherited PDFView.document getter and its background-read regression check remain in place. No crash occurred in this test run; this does not rule out unreported interactive crashes.
 
-An ad-hoc signed local stability test build is prepared separately from the installed/public application. This pass does not publish or notarize a new release.
+An ad-hoc signed local stability test build is prepared separately from the installed/public application. The verified changes are prepared for the v4.7 notarized release; release status is confirmed separately by the signing workflow.
