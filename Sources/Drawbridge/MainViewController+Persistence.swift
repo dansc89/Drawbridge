@@ -132,6 +132,7 @@ extension MainViewController {
             completion?(false)
             return
         }
+        pdfView.rectangleMarkup.finishTextEditing()
         let startedMarkupVersion = markupChangeVersion
         let savingDocumentID = ObjectIdentifier(document)
         let canonicalTargetURL = canonicalDocumentURL(url)
@@ -163,6 +164,11 @@ extension MainViewController {
             return nil
         }()
         let startedAt = CFAbsoluteTimeGetCurrent()
+        let rectangleSourceStamp = pdfView.rectangleMarkup.sourceStamp
+        let capturedRectangles = RectangleMarkupRecord.capture(document)
+        let rectangleRecords: [RectangleMarkupRecord]? = (pdfView.rectangleMarkup.hasUnsavedChanges || !capturedRectangles.isEmpty) ? capturedRectangles : nil
+        pdfView.rectangleMarkup.cancelGesture()
+        refreshRectangleToolbar()
         let documentBox = PDFDocumentBox(document: document)
         let pageLabelsForEmbeddedSave = embeddedPageLabelsForSave(in: document)
         let destinationAlreadyExists = FileManager.default.fileExists(atPath: targetURL.path)
@@ -186,7 +192,9 @@ extension MainViewController {
                     documentBox.document,
                     to: localStagingURL,
                     pageLabels: pageLabelsForEmbeddedSave,
-                    navigationSourceURL: navigationSourceURL
+                    navigationSourceURL: navigationSourceURL,
+                    rectangleRecords: rectangleRecords,
+                    rectangleSourceStamp: rectangleSourceStamp
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
 
@@ -218,7 +226,9 @@ extension MainViewController {
                     documentBox.document,
                     to: targetURL,
                     pageLabels: pageLabelsForEmbeddedSave,
-                    navigationSourceURL: navigationSourceURL
+                    navigationSourceURL: navigationSourceURL,
+                    rectangleRecords: rectangleRecords,
+                    rectangleSourceStamp: rectangleSourceStamp
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - directWriteStartedAt
 
@@ -235,7 +245,9 @@ extension MainViewController {
                         documentBox.document,
                         to: stagingURL,
                         pageLabels: pageLabelsForEmbeddedSave,
-                        navigationSourceURL: navigationSourceURL
+                        navigationSourceURL: navigationSourceURL,
+                        rectangleRecords: rectangleRecords,
+                        rectangleSourceStamp: rectangleSourceStamp
                     )
                     writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
                     if success {
@@ -268,7 +280,9 @@ extension MainViewController {
                     documentBox.document,
                     to: stagingURL,
                     pageLabels: pageLabelsForEmbeddedSave,
-                    navigationSourceURL: navigationSourceURL
+                    navigationSourceURL: navigationSourceURL,
+                    rectangleRecords: rectangleRecords,
+                    rectangleSourceStamp: rectangleSourceStamp
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
                 if success {
@@ -290,7 +304,9 @@ extension MainViewController {
                     documentBox.document,
                     to: targetURL,
                     pageLabels: pageLabelsForEmbeddedSave,
-                    navigationSourceURL: navigationSourceURL
+                    navigationSourceURL: navigationSourceURL,
+                    rectangleRecords: rectangleRecords,
+                    rectangleSourceStamp: rectangleSourceStamp
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - writeStartedAt
             }
@@ -315,6 +331,7 @@ extension MainViewController {
                         self.endBusyIndicator()
                     }
                     self.isSavingDocumentOperation = false
+                    self.updateStatusBar()
                     self.persistenceCoordinator.endManualSave {
                         self.scheduleAutosave()
                         self.runQueuedFastEmbeddedSaveIfNeeded()
@@ -336,7 +353,7 @@ extension MainViewController {
                     if let errorDescription, !errorDescription.isEmpty {
                         informativeText = "Could not save \(targetURL.lastPathComponent).\n\n\(errorDescription)"
                     } else {
-                        informativeText = "Could not save \(targetURL.lastPathComponent)."
+                        informativeText = "Could not save \(targetURL.lastPathComponent)." + (rectangleRecords == nil ? "" : "\n\nThe annotation-only save could not be verified. Encrypted or signed PDFs are not supported for markup yet. No full-page rewrite was attempted; your edits remain open.")
                     }
                     self.runAlert(
                         title: "Failed to save PDF",
@@ -379,6 +396,7 @@ extension MainViewController {
                         self.lastEmbeddedSaveCompletedVersion = max(self.lastEmbeddedSaveCompletedVersion, startedMarkupVersion)
                     }
                     if self.markupChangeVersion <= startedMarkupVersion {
+                        self.pdfView.rectangleMarkup.markSaved(at: targetURL)
                         self.markDocumentClean(updateStatusBarValue: false)
                     } else {
                         self.lastAutosavedChangeVersion = max(self.lastAutosavedChangeVersion, startedMarkupVersion)
@@ -492,8 +510,14 @@ extension MainViewController {
         to url: URL,
         pageLabels: [Int: String],
         navigationSourceURL: URL? = nil,
+        rectangleRecords: [RectangleMarkupRecord]? = nil,
+        rectangleSourceStamp: PDFMarkupSourceStamp? = nil,
         options: [PDFDocumentWriteOption: Any]? = nil
     ) -> Bool {
+        if let rectangleRecords {
+            guard let source = navigationSourceURL ?? document.documentURL else { return false }
+            return PDFRectangleWriter.write(document: document, source: source, destination: url, pageLabels: pageLabels, records: rectangleRecords, expectedSourceStamp: rectangleSourceStamp)
+        }
         switch PDFTKBookmarkWriter.writeNavigation(
             in: document,
             sourceURL: navigationSourceURL,
@@ -544,6 +568,8 @@ extension MainViewController {
     }
 
     func scheduleAutosave() {
+        // A sidecar is not a saved PDF. New markup stays dirty until the verified PDF commit.
+        guard !pdfView.rectangleMarkup.hasUnsavedChanges else { return }
         persistenceCoordinator.scheduleAutosaveIfNeeded(
             canAutosave: hasPromptedForInitialMarkupSaveCopy
                 && (autosaveURL ?? openDocumentURL) != nil
@@ -555,6 +581,7 @@ extension MainViewController {
     }
 
     func performAutosaveNow() {
+        guard !pdfView.rectangleMarkup.hasUnsavedChanges else { return }
         guard let document = pdfView.document,
               let targetURL = autosaveURL ?? openDocumentURL,
               persistenceCoordinator.beginAutosaveRun(

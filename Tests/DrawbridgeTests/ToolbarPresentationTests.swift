@@ -4,6 +4,15 @@ import XCTest
 
 @MainActor
 final class ToolbarPresentationTests: XCTestCase {
+    func testMarkupPropertyMenusKeepTheirChoicesEnabled() {
+        _ = NSApplication.shared
+        let toolbar = RectangleMarkupToolbar(frame:.zero)
+        for popup in [toolbar.colorPopup,toolbar.widthPopup,toolbar.fontPopup] {
+            XCTAssertFalse(popup.menu?.autoenablesItems ?? true)
+            XCTAssertTrue(popup.itemArray.allSatisfy(\.isEnabled))
+        }
+    }
+
     func testBusyCancellationRemainsClickableWhileDocumentIsLocked() {
         _ = NSApplication.shared
         let controller = MainViewController()
@@ -17,6 +26,26 @@ final class ToolbarPresentationTests: XCTestCase {
         XCTAssertTrue(window.ignoresMouseEvents)
         controller.endBusyIndicator()
         XCTAssertFalse(window.ignoresMouseEvents)
+    }
+
+    func testPageNavigationButtonsAreSeparateFromHistoryAndDisabledWithoutDocument() throws {
+        _ = NSApplication.shared
+        let controller = MainViewController()
+        let window = NSWindow(contentRect:NSRect(x:0,y:0,width:1400,height:900),styleMask:[.titled],backing:.buffered,defer:false)
+        window.contentViewController = controller; window.layoutIfNeeded()
+        func buttons(_ view: NSView) -> [NSButton] {
+            (view as? NSButton).map { [$0] } ?? view.subviews.flatMap(buttons)
+        }
+        let all = buttons(controller.view)
+        let previous = try XCTUnwrap(all.first { $0.identifier?.rawValue == "drawbridgePreviousPage" })
+        let next = try XCTUnwrap(all.first { $0.identifier?.rawValue == "drawbridgeNextPage" })
+        let back = try XCTUnwrap(all.first { $0.identifier?.rawValue == "drawbridgeNavigateBack" })
+        XCTAssertEqual(previous.action,#selector(MainViewController.commandPreviousPage(_:)))
+        XCTAssertEqual(next.action,#selector(MainViewController.commandNextPage(_:)))
+        XCTAssertEqual(back.action,#selector(MainViewController.commandNavigateBack(_:)))
+        XCTAssertFalse(previous.isEnabled); XCTAssertFalse(next.isEnabled)
+        XCTAssertNotNil(previous.image); XCTAssertNotNil(next.image)
+        XCTAssertFalse(previous.superview === back.superview)
     }
 
     func testAppKitInstallsPrimaryCommandButtons() throws {

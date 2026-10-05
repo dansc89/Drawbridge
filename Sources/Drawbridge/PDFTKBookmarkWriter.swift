@@ -242,7 +242,7 @@ enum PDFTKBookmarkWriter {
             }
             let desiredLinks = linksByPage[pageIndex] ?? []
             var annotations = annotationReferences(from: pageValue["/Annots"], objects: objects)
-            let reusableRefs = annotations.filter { isGeneratedLinkReference($0, objects: objects) }
+            let reusableRefs = annotations.filter { isGeneratedLinkReference($0, objects: objects) }.compactMap { $0 as? String }
             annotations.removeAll { isGeneratedLinkReference($0, objects: objects) }
 
             for (index, link) in desiredLinks.enumerated() {
@@ -315,20 +315,20 @@ enum PDFTKBookmarkWriter {
         ]
     }
 
-    private static func annotationReferences(from rawValue: Any?, objects: [String: Any]) -> [String] {
+    private static func annotationReferences(from rawValue: Any?, objects: [String: Any]) -> [Any] {
         if let reference = rawValue as? String,
            let annotationObject = objects["obj:\(reference)"] as? [String: Any],
            let values = annotationObject["value"] as? [Any] {
-            return values.compactMap { $0 as? String }
+            return values
         }
-        return (rawValue as? [Any])?.compactMap { $0 as? String } ?? []
+        return rawValue as? [Any] ?? []
     }
 
-    private static func isGeneratedLinkReference(_ reference: String, objects: [String: Any]) -> Bool {
-        guard let annotationObject = objects["obj:\(reference)"] as? [String: Any],
-              let value = annotationObject["value"] as? [String: Any] else {
-            return false
-        }
+    private static func isGeneratedLinkReference(_ reference: Any, objects: [String: Any]) -> Bool {
+        let value: [String: Any]
+        if let ref = reference as? String, let annotationObject = objects["obj:\(ref)"] as? [String: Any], let dict = annotationObject["value"] as? [String: Any] { value = dict }
+        else if let dict = reference as? [String: Any] { value = dict }
+        else { return false }
         return [value["/Contents"], value["/T"]].compactMap { $0 as? String }.contains {
             $0.contains(generatedLinkMarker)
         }

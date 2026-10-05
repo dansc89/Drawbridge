@@ -147,6 +147,11 @@ extension MainViewController {
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField {
                 return event
             }
+            if pdfView.rectangleMarkup.handleToolShortcut(event) {
+                view.window?.makeFirstResponder(pdfView)
+                return nil
+            }
+            if [36,76].contains(event.keyCode), pdfView.rectangleMarkup.finishPolyline() { return nil }
             switch event.keyCode {
             case 123, 126: // Left / Up
                 lastUserInteractionAt = Date()
@@ -159,6 +164,12 @@ extension MainViewController {
             default:
                 break
             }
+        }
+
+        if modifiers.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "z",
+           view.window?.firstResponder === pdfView {
+            if modifiers.contains(.shift) { rectangleRedo(nil) } else { rectangleUndo(nil) }
+            return nil
         }
 
         let forbidden: NSEvent.ModifierFlags = [.command, .option, .control]
@@ -175,6 +186,7 @@ extension MainViewController {
                 deleteBookmarkFromSidebar()
                 return nil
             }
+            if view.window?.firstResponder === pdfView { rectangleDelete(nil) }
             return nil
         }
 
@@ -196,6 +208,7 @@ extension MainViewController {
     }
 
     func handleEscapePress() {
+        pdfView.rectangleMarkup.escape()
         cancelPendingMarkupInteractions()
         if pdfView.toolMode != .select {
             setTool(.select)

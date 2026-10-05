@@ -46,13 +46,13 @@ jobs:
       - name: Install PDF test helper
         run: brew install qpdf
 
-      - name: Validate navigation, flattening and toolbar
-        run: swift test --filter 'HyperlinkRegressionTests|CivilLinkBoundsTests|OCRNumericFormatTests|PDFAnnotationFlattenerTests|PDFLosslessReducerTests|ToolbarPresentationTests|ViewerWorkflowTests'
+      - name: Validate markup, navigation, flattening and toolbar
+        run: swift test --filter 'HyperlinkRegressionTests|CivilLinkBoundsTests|OCRNumericFormatTests|PDFAnnotationFlattenerTests|PDFLosslessReducerTests|ToolbarPresentationTests|ViewerWorkflowTests|RectangleMarkupTests|NavigationOnlyInteractionTests'
 
       - name: Build app bundle
         env:
           DRAWBRIDGE_VERSION_TAG: ${{ github.ref_name }}
-          DRAWBRIDGE_BUILD_NUMBER: "138"
+          DRAWBRIDGE_BUILD_NUMBER: "139"
         run: ./Scripts/package-app.sh
 
       - name: Notarize app before packaging

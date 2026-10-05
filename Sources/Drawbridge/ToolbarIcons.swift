@@ -4,6 +4,7 @@ import AppKit
 enum ToolbarIcons {
     /// Template C-clamp: fixed jaw, frame and screw pressing inward.
     static func compressionClamp() -> NSImage {
+        if let existing = NSImage(named: "DrawbridgeCompressionClamp") { return existing }
         let image = NSImage(size: NSSize(width: 24, height: 24), flipped: false) { _ in
             NSColor.black.setStroke()
             let frame = NSBezierPath()

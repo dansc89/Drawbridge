@@ -146,6 +146,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let autoNameSheetsButton = NSButton(title: "", target: nil, action: nil)
     private let batchLinkSheetsButton = NSButton(title: "", target: nil, action: nil)
     private let flattenPDFButton = NSButton(title: "", target: nil, action: nil)
+    private let previousPageButton = NSButton(title: "", target: nil, action: nil)
+    private let nextPageButton = NSButton(title: "", target: nil, action: nil)
     private let navigationBackButton = NSButton(title: "", target: nil, action: nil)
     private let navigationForwardButton = NSButton(title: "", target: nil, action: nil)
     private let goToSheetButton = NSButton(title: "", target: nil, action: nil)
@@ -262,11 +264,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var keyEventMonitor: Any?
     private var markupFilterText = ""
     var pendingCalibrationDistanceInPoints: CGFloat?
+    let rectangleToolbar = RectangleMarkupToolbar()
+
     var isPDFProcessingBusy: Bool { busyOperationDepth > 0 || isSavingDocumentOperation }
     private var busyOperationDepth = 0
     var markupChangeVersion = 0
     var lastAutosavedChangeVersion = 0
-    var openDocumentURL: URL?
+    var openDocumentURL: URL? { didSet { pdfView.rectangleMarkup.rememberSource(openDocumentURL) } }
     var sessionDocumentURLs: [URL] = []
     var autosaveURL: URL?
     lazy var persistenceCoordinator = DocumentPersistenceCoordinator(autosaveInterval: autosaveIntervalSeconds)
@@ -542,7 +546,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfView.translatesAutoresizingMaskIntoConstraints = false
         pdfCanvasContainer.translatesAutoresizingMaskIntoConstraints = false
         statusBar.translatesAutoresizingMaskIntoConstraints = false
-        configureStatusBar()
         configurePDFCanvasContainer()
         configureCollapsedSidebarRevealButton()
 
@@ -570,6 +573,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             guard self.confirmDiscardUnsavedChangesIfNeeded() else { return }
             self.openDocument(at: url)
         }
+        configureRectangleMarkup()
         pdfView.onViewportChanged = { [weak self] in
             self?.lastUserInteractionAt = Date()
             self?.requestChromeRefresh()
@@ -608,6 +612,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         view.addSubview(splitView)
         view.addSubview(documentTabsBar)
         view.addSubview(statusBar)
+        configureStatusBar()
         view.addSubview(busyOverlayView)
         view.addSubview(captureToastView)
         view.addSubview(collapsedSidebarRevealButton)
@@ -1303,8 +1308,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
 
         for (button, symbol, name, action, identifier) in [
-            (navigationBackButton, "chevron.left", "Back to previous view (⌥←)", #selector(commandNavigateBack(_:)), "drawbridgeNavigateBack"),
-            (navigationForwardButton, "chevron.right", "Forward to next view (⌥→)", #selector(commandNavigateForward(_:)), "drawbridgeNavigateForward")
+            (navigationBackButton, "arrow.uturn.backward", "Back to previous view (⌥←)", #selector(commandNavigateBack(_:)), "drawbridgeNavigateBack"),
+            (navigationForwardButton, "arrow.uturn.forward", "Forward to next view (⌥→)", #selector(commandNavigateForward(_:)), "drawbridgeNavigateForward"),
+            (previousPageButton, "arrowtriangle.left.fill", "Previous Page", #selector(commandPreviousPage(_:)), "drawbridgePreviousPage"),
+            (nextPageButton, "arrowtriangle.right.fill", "Next Page", #selector(commandNextPage(_:)), "drawbridgeNextPage")
         ] {
             button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)
             button.imagePosition = .imageOnly; button.bezelStyle = .texturedRounded; button.controlSize = .small
@@ -1315,18 +1322,26 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         statusPageLabel.lineBreakMode = .byTruncatingMiddle
         statusPageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let stack = NSStackView(views: [navigationBackButton, navigationForwardButton] + labels)
-        stack.orientation = .horizontal
-        stack.spacing = 14
-        stack.edgeInsets = NSEdgeInsets(top: 4, left: 10, bottom: 4, right: 8)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        statusBar.addSubview(stack)
+        func group(_ title: String, _ buttons: [NSButton]) -> NSStackView {
+            let label = NSTextField(labelWithString:title)
+            label.font = .systemFont(ofSize:10,weight:.medium); label.textColor = .secondaryLabelColor
+            let stack = NSStackView(views:[label] + buttons)
+            stack.orientation = .horizontal; stack.spacing = 5; stack.alignment = .centerY
+            return stack
+        }
+        let history = group("History",[navigationBackButton,navigationForwardButton])
+        let pages = group("Pages",[previousPageButton,nextPageButton])
+        let details = NSStackView(views: [history,pages] + labels)
+        details.orientation = .horizontal
+        details.spacing = 14
+        details.translatesAutoresizingMaskIntoConstraints = false
+        statusBar.addSubview(details)
 
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: statusBar.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: statusBar.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor)
+            details.centerXAnchor.constraint(equalTo: statusBar.centerXAnchor),
+            details.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
+            details.leadingAnchor.constraint(greaterThanOrEqualTo: statusBar.leadingAnchor, constant: 10),
+            details.trailingAnchor.constraint(lessThanOrEqualTo: statusBar.trailingAnchor, constant: -10)
         ])
     }
 
@@ -1409,6 +1424,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func beginBusyIndicator(_ message: String, detail: String? = nil, lockInteraction: Bool = true) {
+        pdfView.rectangleMarkup.cancelGesture()
         if textSearch.isSearching { resetSearchState() }
         busyOperationDepth += 1
         refreshFlattenButtonState()
@@ -2165,7 +2181,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.drawbridgePrimaryControls, .flexibleSpace, .space]
+        [.drawbridgePrimaryControls, .drawbridgeMarkupControls, .flexibleSpace, .space]
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
@@ -2183,7 +2199,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.drawbridgePrimaryControls, .flexibleSpace]
+        [.drawbridgePrimaryControls, .flexibleSpace, .drawbridgeMarkupControls, .flexibleSpace]
     }
 
     func toolbar(
@@ -2192,6 +2208,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
         let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+        if itemIdentifier == .drawbridgeMarkupControls {
+            item.label = "Markup"; item.view = rectangleToolbar; return item
+        }
         if itemIdentifier == .drawbridgePrimaryControls {
             item.label = "Drawing Set Tools and Navigation"
             item.view = toolbarControlsStack
@@ -2212,6 +2231,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private func activateTool(_ requestedMode: ToolMode) {
         // Only text selection is supported; stale shortcuts cannot enable editing.
         cancelPendingMarkupInteractions()
+        pdfView.rectangleMarkup.escape()
         pdfView.toolMode = .select
         refreshToolSegmentIcons()
         refreshTakeoffSegmentIcons()
@@ -2523,7 +2543,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 adoptAsPrimaryDocument: false,
                 busyMessage: "Saving PDF…",
                 document: document,
-                showBusyOverlay: false
+                showBusyOverlay: pdfView.rectangleMarkup.hasUnsavedChanges
             )
         } else {
             saveDocumentAsProject(document: document)
@@ -4533,6 +4553,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func refreshFlattenButtonState() {
+        refreshRectangleToolbar()
         goToSheetButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
         fitPageButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
         reduceFileSizeButton.isEnabled = pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy
@@ -4547,7 +4568,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         refreshFlattenButtonState()
         navigationBackButton.isEnabled = !isPDFProcessingBusy && pdfView.canNavigateBackInHistory
         navigationForwardButton.isEnabled = !isPDFProcessingBusy && pdfView.canNavigateForwardInHistory
-        statusToolLabel.stringValue = "Tool: \(currentToolName())"
+        let pageIndex = pdfView.currentPage.flatMap { page in pdfView.document.map { $0.index(for:page) } }
+        previousPageButton.isEnabled = !isPDFProcessingBusy && (pageIndex ?? 0) > 0
+        nextPageButton.isEnabled = !isPDFProcessingBusy && pageIndex != nil && pageIndex! < (pdfView.document?.pageCount ?? 0)-1
+        statusToolLabel.stringValue = "Tool: \(pdfView.rectangleMarkup.tool)"
         applyScaleLockForCurrentPageIfNeeded()
 
         if let document = pdfView.document,

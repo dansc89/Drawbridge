@@ -729,6 +729,7 @@ Existing PDF annotations are displayed without editing tools.
     }
 
     private func navigatePage(delta: Int) {
+        guard !isPDFProcessingBusy else { return }
         guard let document = pdfView.document else { return }
         let current = pdfView.currentPage.map { document.index(for: $0) } ?? 0
         let anchor = currentPageNavigationAnchor()

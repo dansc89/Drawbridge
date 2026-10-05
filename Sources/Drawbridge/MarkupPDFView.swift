@@ -52,6 +52,9 @@ private final class PDFOverscrollClipView: NSClipView {
 }
 
 final class MarkupPDFView: PDFView, NSTextFieldDelegate {
+    let rectangleMarkup = RectangleMarkupController()
+    override var document: PDFDocument? { didSet { rectangleMarkup.bind(to: document) } }
+
     enum ReorderAction {
         case sendToBack
         case bringForward
@@ -453,6 +456,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         refreshAppearanceColors()
         registerForDraggedTypes([.fileURL])
         installViewportObserversIfNeeded()
+        rectangleMarkup.install(on: self)
     }
 
     required init?(coder: NSCoder) {
@@ -534,6 +538,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         installClipViewObserverIfNeeded()
         updateGridOverlayIfNeeded()
         updateHyperlinkOverlayIfNeeded()
+        rectangleMarkup.refresh()
     }
 
     func setGridVisible(_ visible: Bool) {
@@ -548,6 +553,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     func refreshHyperlinkHighlights() {
         updateHyperlinkOverlayIfNeeded()
+        rectangleMarkup.refresh()
     }
 
     func setOrthoSnapEnabled(_ enabled: Bool) {
@@ -605,11 +611,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     @objc private func handlePDFViewportChangedNotification(_ notification: Notification) {
         _ = notification
         updateHyperlinkOverlayIfNeeded()
+        rectangleMarkup.refresh()
     }
 
     @objc private func handleClipViewBoundsDidChange(_ notification: Notification) {
         _ = notification
         updateHyperlinkOverlayIfNeeded()
+        rectangleMarkup.refresh()
     }
 
     private func updateHyperlinkOverlayIfNeeded(forceHideWhenDisabled: Bool = false) {
@@ -816,6 +824,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseMoved(with event: NSEvent) {
+        rectangleMarkup.pointerMoved(at:convert(event.locationInWindow,from:nil))
         lastPointerInView = convert(event.locationInWindow, from: nil)
         super.mouseMoved(with: event)
     }
@@ -846,6 +855,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             dragPreviewLayer.isHidden = false
             return
         }
+        if rectangleMarkup.pointerDown(at: location, clickCount:event.clickCount) { return }
         let point = convert(location, to: page)
         if event.clickCount == 1, let link = linkAnnotation(at: point, on: page) {
             if followLinkIfPossible(link) { return }
@@ -880,6 +890,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             dragPreviewLayer.path = CGPath(rect: normalizedRect(from: start, to: location), transform: nil)
             return
         }
+        if rectangleMarkup.pointerDragged(at: location) { return }
         guard let start = navigationSelectionStart else { return }
         let end = convert(location, to: start.page)
         setCurrentSelection(start.page.selection(from: start.point, to: end), animate: false)
@@ -887,6 +898,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     override func mouseUp(with event: NSEvent) {
         navigationSelectionStart = nil
+        if !isRegionCaptureModeEnabled, rectangleMarkup.pointerUp(at: convert(event.locationInWindow, from: nil)) { return }
         guard isRegionCaptureModeEnabled else { return }
         defer {
             regionCaptureStartInView = nil
@@ -2424,10 +2436,14 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard modifiers.isDisjoint(with: [.command, .option, .control]) else { return }
+        if rectangleMarkup.handleToolShortcut(event) { return }
         switch event.keyCode {
+        case 36, 76: _ = rectangleMarkup.finishPolyline()
         case 123, 126: onPageNavigationShortcut?(-1)
         case 124, 125: onPageNavigationShortcut?(1)
+        case 51, 117: rectangleMarkup.deleteSelected()
         case 53:
+            rectangleMarkup.escape()
             cancelRegionCaptureMode()
             setCurrentSelection(nil, animate: false)
         default:
@@ -2451,6 +2467,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             pendingInteractiveViewportFeedbackWorkItem = nil
             lastInteractiveViewportFeedbackAt = now
             updateGridOverlayIfNeeded()
+            rectangleMarkup.refresh()
             onViewportChanged?()
             return
         }
