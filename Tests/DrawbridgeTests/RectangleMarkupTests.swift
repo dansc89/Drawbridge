@@ -3,6 +3,13 @@ import PDFKit
 import XCTest
 @testable import Drawbridge
 
+/// PDFKit legitimately reads the inherited ObjC document property off the main thread.
+private final class BackgroundPDFDocumentRead: @unchecked Sendable {
+    let object: NSObject
+    let expected: PDFDocument
+    init(view: PDFView, document: PDFDocument) { object = view; expected = document }
+}
+
 @MainActor
 final class RectangleMarkupTests: XCTestCase {
     private func fixture(rotation: Int, signed: Bool = false) throws -> URL {
@@ -106,6 +113,26 @@ final class RectangleMarkupTests: XCTestCase {
             XCTAssertTrue(PDFRectangleWriter.write(document:reopened,source:output,destination:output,pageLabels:[:],records:[]))
             XCTAssertEqual(PDFDocument(url:output)?.page(at:0)?.annotations.count,2)
         }
+    }
+
+    func testPDFKitBackgroundDocumentGetterDoesNotEnterMainActor() async throws {
+        let source = try fixture(rotation:0); defer { try? FileManager.default.removeItem(at:source) }
+        let document = try XCTUnwrap(PDFDocument(url:source))
+        let view = MarkupPDFView(frame:.zero)
+        view.setMarkupDocument(document)
+        let reader = BackgroundPDFDocumentRead(view:view,document:document)
+        let completed = expectation(description:"PDFKit background document getter")
+        DispatchQueue(label:"PDFKit.PDFDocument.formFillingQueue.regression").async {
+            for _ in 0..<100 {
+                let value = reader.object.value(forKey:"document") as AnyObject?
+                XCTAssertTrue(value === reader.expected)
+            }
+            completed.fulfill()
+        }
+        await fulfillment(of:[completed],timeout:5)
+        XCTAssertNotNil(view.rectangleMarkup.create(on:document.page(at:0)!,bounds:CGRect(x:100,y:100,width:80,height:60)))
+        view.setMarkupDocument(nil)
+        XCTAssertNil(view.rectangleMarkup.selected)
     }
 
     func testBluebeamToolShortcutsRespectModifiersAndBusyState() throws {

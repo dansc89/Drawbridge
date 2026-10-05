@@ -53,7 +53,14 @@ private final class PDFOverscrollClipView: NSClipView {
 
 final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     let rectangleMarkup = RectangleMarkupController()
-    override var document: PDFDocument? { didSet { rectangleMarkup.bind(to: document) } }
+    // Keep PDFView.document inherited: PDFKit reads it from its formFillingQueue.
+    // Overriding it here gives the ObjC getter a main-actor assertion and crashes
+    // those legitimate framework callbacks on macOS 26.
+    func setMarkupDocument(_ document: PDFDocument?) {
+        rectangleMarkup.finishTextEditing()
+        self.document = document
+        rectangleMarkup.bind(to:document)
+    }
 
     enum ReorderAction {
         case sendToBack

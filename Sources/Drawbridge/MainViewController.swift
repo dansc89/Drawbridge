@@ -2493,7 +2493,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         let document = PDFDocument()
         document.insert(page, at: 0)
-        pdfView.document = document
+        pdfView.setMarkupDocument(document)
         clearMarkupCache()
         pageScaleLocks.removeAll(keepingCapacity: false)
         lastScaleLockAppliedPageIndex = -1
@@ -4201,7 +4201,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
         dominantDocumentPageSizeInInches = dominantPageSizeInInches(for: document)
-        pdfView.document = document
+        pdfView.setMarkupDocument(document)
         clearMarkupCache()
         pageScaleLocks.removeAll(keepingCapacity: false)
         lastScaleLockAppliedPageIndex = -1
@@ -4261,7 +4261,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     func clearToStartState() {
         cancelAutoNameCapture()
-        pdfView.document = nil
+        pdfView.setMarkupDocument(nil)
         clearMarkupCache()
         pageScaleLocks.removeAll(keepingCapacity: false)
         lastScaleLockAppliedPageIndex = -1
@@ -6521,7 +6521,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private func updateEmptyStateVisibility() {
         if let document = pdfView.document, document.pageCount == 0 {
             // A zero-page PDF object is not actionable in the UI; treat it as no document.
-            pdfView.document = nil
+            pdfView.setMarkupDocument(nil)
         }
         let hasDocument = (pdfView.document != nil)
         emptyStateView.isHidden = hasDocument
