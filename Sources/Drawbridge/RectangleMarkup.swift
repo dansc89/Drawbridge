@@ -167,6 +167,9 @@ final class RectangleMarkupController {
     static func shortcutTool(for event: NSEvent) -> Tool? {
         let modifiers = event.modifierFlags.intersection([.shift,.command,.option,.control])
         switch (event.charactersIgnoringModifiers?.lowercased(),modifiers) {
+        case ("v", []): return .select
+        case ("a", []): return .arrow
+        case ("t", []): return .text
         case ("e", []): return .ellipse
         case ("r", []): return .rectangle
         case ("l", []): return .line

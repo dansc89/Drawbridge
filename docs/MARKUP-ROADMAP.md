@@ -88,3 +88,8 @@ Do not assign dates or release numbers before the foundation establishes realist
 ### Polygon local milestone
 
 Polygon (Shift+P) is available in the local trial alongside Polyline (Shift+N). Closed polygons have independent fill colors or No Fill; polylines remain unfilled. Saved polygons use portable vector annotations and preserve the original page graph. Whole-shape movement and individual vertex dragging are supported. Selection follows the path with handles at each node; opacity remains future work. Cross-app acceptance and save-latency investigation remain release gates.
+
+
+## Complete tool shortcuts
+
+V selects markups, R draws rectangles, E draws ellipses, L draws lines, A draws arrows, T draws text boxes, Shift+N draws polylines, and Shift+P draws polygons. The letter keys require no Command modifier and do not intercept typing in text editors. Delete removes selected owned markup; Command+Z and Shift+Command+Z undo and redo.
