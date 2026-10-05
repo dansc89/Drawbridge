@@ -4218,6 +4218,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         isPresentingInitialMarkupSaveCopyPrompt = false
         loadSidecarSnapshotIfAvailable(for: url, document: document)
         openDocumentURL = url
+        // A replacement document can inherit a scroll offset beyond its last
+        // page. Establish a visible page before refreshing navigation/chrome.
+        if let firstPage = document.page(at: 0) {
+            pdfView.navigateToPageFittingWholePageWithHistory(firstPage, recordHistory: false)
+        }
         registerSessionDocument(url)
         configureAutosaveURL(for: url)
         resetSearchState(clearQuery: false)

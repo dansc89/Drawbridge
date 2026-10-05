@@ -30,6 +30,24 @@ final class ViewerWorkflowTests: XCTestCase {
         while !predicate(), Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
         XCTAssertTrue(predicate(), "Async operation must finish without blocking the run loop")
     }
+    func testOpeningSmallerDocumentEstablishesVisibleFirstPage() throws {
+        _ = NSApplication.shared
+        let controller = MainViewController(); _ = controller.view
+        let large = try document()
+        for _ in 0..<9 { large.insert(PDFPage(), at: large.pageCount) }
+        controller.pdfView.setMarkupDocument(large)
+        controller.pdfView.go(to: try XCTUnwrap(large.page(at: 10)))
+        let small = try document()
+        small.removePage(at: 1)
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent("ViewerSwitch-\(UUID().uuidString).pdf")
+        try XCTUnwrap(small.dataRepresentation()).write(to: source)
+        defer { try? FileManager.default.removeItem(at: source) }
+        controller.openDocument(at: source)
+        let opened = try XCTUnwrap(controller.pdfView.document)
+        XCTAssertEqual(opened.pageCount, 1)
+        XCTAssertTrue(controller.pdfView.currentPage === opened.page(at: 0))
+        XCTAssertFalse(controller.pdfView.canNavigateBackInHistory)
+    }
     func testSheetLookupRanksExactLabelsAndKeepsDuplicatePages() {
         let entries: [SheetNavigationEntry] = [
             .init(pageIndex: 0, label: "A1.10", titles: ["Étage FLOOR PLAN"]),

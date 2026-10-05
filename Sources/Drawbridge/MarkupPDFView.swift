@@ -1985,8 +1985,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     /// layout immediately after a page change. Let automatic scaling establish
     /// the target page first, then lock in and reassert the target page's fit
     /// scale over the next layout passes.
-    func navigateToPageFittingWholePageWithHistory(_ page: PDFPage) {
-        if !applyingHistoryNavigation {
+    func navigateToPageFittingWholePageWithHistory(_ page: PDFPage, recordHistory: Bool = true) {
+        if recordHistory && !applyingHistoryNavigation {
             pushBackHistoryCurrentLocation()
             navigationForwardStack.removeAll(keepingCapacity: true)
         }
