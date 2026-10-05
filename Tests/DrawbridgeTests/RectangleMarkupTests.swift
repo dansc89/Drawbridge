@@ -194,6 +194,7 @@ final class RectangleMarkupTests: XCTestCase {
                 let folder = URL(fileURLWithPath: root)
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
                 try Data(contentsOf: output).write(to: folder.appendingPathComponent("all-tools-\(rotation).pdf"))
+                try originalBytes.write(to: folder.appendingPathComponent("original-\(rotation).pdf"))
             }
             finalPage.annotations.filter(RectangleMarkupRecord.owns).forEach(finalPage.removeAnnotation)
             page.annotations.filter(RectangleMarkupRecord.owns).forEach(page.removeAnnotation)
@@ -755,6 +756,30 @@ final class RectangleMarkupTests: XCTestCase {
             XCTAssertEqual(expected.count, originalCount + pass)
             XCTAssertLessThan(try Data(contentsOf: source).count, originalSize + 200_000)
         }
+    }
+
+    func testVerifiedInspectionCacheRejectsExternallyReplacedPDF() throws {
+        let source = try fixture(rotation: 0), replacement = try fixture(rotation: 90)
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: replacement) }
+        let first = try XCTUnwrap(PDFDocument(url: source))
+        let session = RectangleMarkupController()
+        session.bind(to: first)
+        _ = try XCTUnwrap(session.create(on: first.page(at: 0)!, bounds: CGRect(x: 100,y: 100,width: 60,height: 40)))
+        XCTAssertTrue(PDFRectangleWriter.write(document: first, source: source, destination: source, pageLabels: [:], records: RectangleMarkupRecord.capture(first)))
+        // A prior successful save cached this URL. Replace its bytes externally
+        // before the next save; the old object graph must never be reused.
+        try Data(contentsOf: replacement).write(to: source)
+        let second = try XCTUnwrap(PDFDocument(url: source))
+        session.bind(to: second)
+        let page = try XCTUnwrap(second.page(at: 0))
+        _ = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 120,y: 120,width: 60,height: 40)))
+        let expected = RectangleMarkupRecord.capture(second)
+        XCTAssertTrue(PDFRectangleWriter.write(document: second, source: source, destination: source, pageLabels: [:], records: expected))
+        let reopened = try XCTUnwrap(PDFDocument(url: source))
+        XCTAssertEqual(reopened.page(at: 0)?.rotation, 90)
+        XCTAssertEqual(reopened.page(at: 0)?.bounds(for: .cropBox), page.bounds(for: .cropBox))
+        XCTAssertEqual(RectangleMarkupRecord.capture(reopened), expected)
+        XCTAssertEqual(reopened.string, second.string)
     }
 
     func testBackgroundMarkupSaveLatency() async throws {

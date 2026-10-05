@@ -4,6 +4,7 @@ import PDFKit
 /// New markup saves never invoke PDFKit's document renderer. Annotation appearances
 /// are portable Form XObjects; unchanged page content/resources are verified before commit.
 enum PDFRectangleWriter {
+    private static let inspectionCache = MarkupInspectionCache()
     static func write(document: PDFDocument, source: URL, destination: URL,
                       pageLabels: [Int: String], records: [RectangleMarkupRecord], expectedSourceStamp: PDFMarkupSourceStamp? = nil) -> Bool {
         guard let executable = PDFTKBookmarkWriter.executableURL(), records.allSatisfy(\.isValid),
@@ -28,7 +29,13 @@ enum PDFRectangleWriter {
                 return result
             }
             profile("source snapshot")
-            let inspected = try read(input, "input.json", decoded: false)
+            let inspected: [String: Any]
+            if let cached = inspectionCache.graph(for: source, bytes: original) {
+                inspected = cached
+                profile("reused verified inspection")
+            } else {
+                inspected = try read(input, "input.json", decoded: false)
+            }
             profile("inspection")
             guard (inspected["encrypt"] as? [String: Any])?["encrypted"] as? Bool != true else { return false }
             let table = try objectTable(inspected)
@@ -72,7 +79,11 @@ enum PDFRectangleWriter {
             let size = try candidate.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size > 0, size <= original.count + max(5 * 1024 * 1024, records.count * 4096) else { print("Rectangle writer: size limit \(size) vs \(original.count)"); return false }
             profile("candidate verification")
+            let jsonSize = try directory.appendingPathComponent("written.json").resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
+            let cachedBytes = size < MarkupInspectionCache.byteBudget && jsonSize < MarkupInspectionCache.byteBudget - size
+                ? try Data(contentsOf: candidate) : nil
             try MainViewController.commitStagedSave(from: candidate, to: destination)
+            inspectionCache.store(url: destination, bytes: cachedBytes, graph: written)
             profile("commit")
             return true
         } catch { print("Rectangle writer: \(error)"); return false }
@@ -94,10 +105,11 @@ enum PDFRectangleWriter {
         var next = (qpdf[0]["maxobjectid"] as? Int ?? 0) + 1
         let references = try pages(json)
         guard records.allSatisfy({ $0.pageIndex < references.count }) else { throw CocoaError(.fileReadCorruptFile) }
+        let recordsByPage = Dictionary(grouping: records, by: \.pageIndex)
         for (index, reference) in references.enumerated() {
             guard var object = objects["obj:\(reference)"] as? [String: Any], var page = object["value"] as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
             var entries = annotations(page["/Annots"], objects: objects).filter { !owned($0, objects: objects) }
-            for record in records where record.pageIndex == index {
+            for record in recordsByPage[index] ?? [] {
                 let annotationRef = "\(next) 0 R"; next += 1
                 let appearanceRef = "\(next) 0 R"; next += 1
                 let b = record.bounds
@@ -172,13 +184,14 @@ enum PDFRectangleWriter {
 
     private static func ownedRecordsMatch(_ json: [String: Any], records: [RectangleMarkupRecord]) throws -> Bool {
         let objects = try objectTable(json); let references = try pages(json)
+        let recordsByID = Dictionary(uniqueKeysWithValues: records.map { ("u:" + $0.id, $0) })
         var found = Set<String>()
         for (index, reference) in references.enumerated() {
             let page = (objects["obj:\(reference)"] as? [String: Any])?["value"] as? [String: Any] ?? [:]
             for entry in annotations(page["/Annots"], objects: objects) where owned(entry, objects: objects) {
                 let value = dictionary(entry, objects: objects)
                 guard let id = value["/T"] as? String,
-                      let expected = records.first(where: { "u:" + $0.id == id && $0.pageIndex == index }),
+                      let expected = recordsByID[id], expected.pageIndex == index,
                       value["/Subtype"] as? String == subtype(expected.kind),
                       let rect = value["/Rect"] as? [Double], rect.count == 4,
                       zip(rect, [expected.bounds.minX,expected.bounds.minY,expected.bounds.maxX,expected.bounds.maxY]).allSatisfy({ abs($0.0 - $0.1) < 0.0001 }),
@@ -223,5 +236,38 @@ enum PDFRectangleWriter {
     private static func owned(_ entry: Any, objects: [String:Any]) -> Bool {
         let d = dictionary(entry, objects: objects)
         return ["/Square","/Circle","/Line","/FreeText","/Ink","/Polygon"].contains(d["/Subtype"] as? String ?? "") && (d["/T"] as? String)?.hasPrefix("u:" + RectangleMarkupRecord.prefix) == true
+    }
+}
+
+/// One short-lived verified snapshot, bounded by combined PDF/JSON size. Cache
+/// hits require exact source bytes, so external edits cannot bypass inspection.
+private final class MarkupInspectionCache: @unchecked Sendable {
+    static let byteBudget = 96 * 1024 * 1024
+    private struct Entry {
+        let url: URL
+        let bytes: Data
+        let graph: [String: Any]
+        let token: UUID
+    }
+    private let lock = NSLock()
+    private var entry: Entry?
+
+    func graph(for url: URL, bytes: Data) -> [String: Any]? {
+        lock.lock(); defer { lock.unlock() }
+        guard let entry, entry.url == url.standardizedFileURL, entry.bytes == bytes else { return nil }
+        return entry.graph
+    }
+
+    func store(url: URL, bytes: Data?, graph: [String: Any]) {
+        let token = UUID()
+        lock.lock()
+        entry = bytes.map { Entry(url: url.standardizedFileURL, bytes: $0, graph: graph, token: token) }
+        lock.unlock()
+        guard bytes != nil else { return }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 60) { [weak self] in
+            guard let self else { return }
+            self.lock.lock(); defer { self.lock.unlock() }
+            if self.entry?.token == token { self.entry = nil }
+        }
     }
 }
