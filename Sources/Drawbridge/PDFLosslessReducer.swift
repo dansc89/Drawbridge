@@ -102,6 +102,50 @@ enum PDFLosslessReducer {
         }
         return try digest(["root": trailer["/Root"] ?? NSNull(), "info": trailer["/Info"] ?? NSNull()], visiting: [])
     }
+
+    /// Compare reachable objects directly, allowing qpdf to renumber references.
+    /// Streams stay encoded: exact byte comparison avoids serializing and hashing
+    /// large base64 image strings twice on every annotation save.
+    static func semanticGraphsMatch(_ before: [String: Any], _ after: [String: Any]) throws -> Bool {
+        let left = try objects(before), right = try objects(after)
+        struct Pair: Hashable { let left: String; let right: String }
+        var visited = Set<Pair>()
+        let a = (left["trailer"] as? [String: Any])?["value"] as? [String: Any] ?? [:]
+        let b = (right["trailer"] as? [String: Any])?["value"] as? [String: Any] ?? [:]
+        var pending: [(Any, Any)] = [(a["/Root"] ?? NSNull(), b["/Root"] ?? NSNull()),
+                                      (a["/Info"] ?? NSNull(), b["/Info"] ?? NSNull())]
+        let ignored = Set(["/Length", "/FlattenedDrawingHash"])
+        // PDF parent/child and annotation links form deep cyclic graphs. Keep
+        // traversal on an explicit work list rather than the worker thread stack.
+        while let (a, b) = pending.popLast() {
+            if let a = a as? String, let b = b as? String {
+                let first = left["obj:\(a)"] as? [String: Any]
+                let second = right["obj:\(b)"] as? [String: Any]
+                if let first, let second {
+                    if visited.insert(Pair(left: a, right: b)).inserted {
+                        pending.append((first["value"] ?? first["stream"] ?? NSNull(), second["value"] ?? second["stream"] ?? NSNull()))
+                    }
+                } else if first != nil || second != nil || a != b { return false }
+            } else if let a = a as? [String: Any], let b = b as? [String: Any] {
+                let keys = Set(a.keys).subtracting(ignored)
+                guard keys == Set(b.keys).subtracting(ignored) else { return false }
+                for key in keys { pending.append((a[key]!, b[key]!)) }
+            } else if let a = a as? [Any], let b = b as? [Any] {
+                guard a.count == b.count else { return false }
+                pending.append(contentsOf: zip(a, b))
+            } else if let a = a as? NSNumber, let b = b as? NSNumber {
+                // JSON booleans must not compare equal to numeric 0 or 1.
+                guard (CFGetTypeID(a) == CFBooleanGetTypeID()) == (CFGetTypeID(b) == CFBooleanGetTypeID()) else { return false }
+                if a != b {
+                    // Foundation may parse the same JSON number as a decimal or
+                    // binary NSNumber. Compare their canonical JSON spelling;
+                    // do not use a tolerance that could conceal a content change.
+                    guard try JSONSerialization.data(withJSONObject: a, options: .fragmentsAllowed) == JSONSerialization.data(withJSONObject: b, options: .fragmentsAllowed) else { return false }
+                }
+            } else if !(a is NSNull && b is NSNull) { return false }
+        }
+        return true
+    }
 }
 
 /// Cross-thread cancellation without reading AppKit state from worker queues.

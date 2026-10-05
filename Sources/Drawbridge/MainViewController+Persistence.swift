@@ -353,7 +353,7 @@ extension MainViewController {
                     if let errorDescription, !errorDescription.isEmpty {
                         informativeText = "Could not save \(targetURL.lastPathComponent).\n\n\(errorDescription)"
                     } else {
-                        informativeText = "Could not save \(targetURL.lastPathComponent)." + (rectangleRecords == nil ? "" : "\n\nThe annotation-only save could not be verified. Encrypted or signed PDFs are not supported for markup yet. No full-page rewrite was attempted; your edits remain open.")
+                        informativeText = "Could not save \(targetURL.lastPathComponent)." + (rectangleRecords == nil ? "" : "\n\nThe annotation-only save could not be verified. No full-page rewrite was attempted; your edits remain open.")
                     }
                     self.runAlert(
                         title: "Failed to save PDF",

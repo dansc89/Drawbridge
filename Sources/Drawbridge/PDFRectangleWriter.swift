@@ -41,8 +41,8 @@ enum PDFRectangleWriter {
             // Preserve encoded streams exactly; verification includes their bytes.
             var json = inspected
             guard PDFTKBookmarkWriter.updateNavigationJSON(&json, from: document, pageLabels: pageLabels) else { return false }
-            let originalHash = try PDFLosslessReducer.semanticHash(removingOwnedRectangles(json))
-            profile("baseline verification hash")
+            let originalGraph = try removingOwnedRectangles(json)
+            profile("baseline verification graph")
             try update(&json, records: records)
             let patch = directory.appendingPathComponent("rectangles.json")
             // Keep original streams in qpdf's input; supply data only for our new appearances.
@@ -60,13 +60,15 @@ enum PDFRectangleWriter {
             try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]).write(to: patch)
             profile("appearance patch")
             let candidate = directory.appendingPathComponent("candidate.pdf")
-            guard PDFTKBookmarkWriter.run(executable, arguments: [input.path, "--stream-data=preserve", "--update-from-json=\(patch.path)", candidate.path]),
-                  PDFTKBookmarkWriter.run(executable, arguments: ["--check", candidate.path]) else { return false }
-            profile("candidate write/check")
+            guard PDFTKBookmarkWriter.run(executable, arguments: [input.path, "--stream-data=preserve", "--update-from-json=\(patch.path)", candidate.path]) else { return false }
+            profile("candidate write")
+            // Reparse the complete output and verify the original graph, including
+            // encoded stream bytes, below. Decoding every unchanged image again
+            // with --check adds seconds without validating page appearance.
             let written = try read(candidate, "written.json", decoded: false)
-            guard try PDFLosslessReducer.semanticHash(removingOwnedRectangles(written)) == originalHash,
-                  try ownedRecordsMatch(written, records: records),
-                  try Data(contentsOf: source, options: .mappedIfSafe) == original else { print("Rectangle writer: verification failed"); return false }
+            guard try PDFLosslessReducer.semanticGraphsMatch(originalGraph, removingOwnedRectangles(written)) else { print("Rectangle writer: original content verification failed"); return false }
+            guard try ownedRecordsMatch(written, records: records) else { print("Rectangle writer: markup verification failed"); return false }
+            guard try Data(contentsOf: source, options: .mappedIfSafe) == original else { print("Rectangle writer: source changed during save"); return false }
             let size = try candidate.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size > 0, size <= original.count + max(5 * 1024 * 1024, records.count * 4096) else { print("Rectangle writer: size limit \(size) vs \(original.count)"); return false }
             profile("candidate verification")

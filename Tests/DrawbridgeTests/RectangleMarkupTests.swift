@@ -430,6 +430,65 @@ final class RectangleMarkupTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf:source),updated)
     }
 
+    func testCopiedMarkupIdentifiersAreRepairedAndEveryMarkupIsSaved() throws {
+        let source = try fixture(rotation: 90)
+        let output = source.deletingLastPathComponent().appendingPathComponent("DuplicateMarkup-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
+        let doc = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(doc.page(at: 0))
+        let session = RectangleMarkupController(); session.bind(to: doc)
+        let first = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 100,y: 110,width: 80,height: 60)))
+        let second = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 250,y: 180,width: 90,height: 70)))
+        second.setValue(try XCTUnwrap(first.userName), forAnnotationKey: PDFAnnotationKey(rawValue: "/T"))
+        let original = try Data(contentsOf: source)
+        let records = RectangleMarkupRecord.capture(doc)
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(Set(records.map(\.id)).count, 2)
+        XCTAssertEqual(RectangleMarkupRecord.capture(doc), records, "Repair must be stable across captures")
+        XCTAssertTrue(PDFRectangleWriter.write(document: doc, source: source, destination: output, pageLabels: [:], records: records))
+        let reopened = try XCTUnwrap(PDFDocument(url: output))
+        XCTAssertEqual(RectangleMarkupRecord.capture(reopened), records)
+        XCTAssertEqual(reopened.page(at: 0)?.rotation, 90)
+        XCTAssertEqual(reopened.page(at: 0)?.bounds(for: .cropBox), page.bounds(for: .cropBox))
+        XCTAssertEqual(try Data(contentsOf: source), original)
+    }
+
+    func testFastGraphVerificationDetectsContentChangesAndHandlesRenumberedCycles() throws {
+        func graph(_ root: String, _ page: String, _ stream: String, bytes: String = "original", rotation: Int = 90) -> [String: Any] {
+            ["qpdf": [["maxobjectid": 30], [
+                "trailer": ["value": ["/Root": root]],
+                "obj:\(root)": ["value": ["/Pages": page]],
+                "obj:\(page)": ["value": ["/Parent": root, "/Contents": stream, "/Rotate": rotation, "/MediaBox": [0,0,600,400]]],
+                "obj:\(stream)": ["stream": ["dict": ["/Length": bytes.count], "data": bytes]]
+            ]]]
+        }
+        let original = graph("1 0 R", "2 0 R", "3 0 R")
+        XCTAssertTrue(try PDFLosslessReducer.semanticGraphsMatch(original, graph("20 0 R", "21 0 R", "22 0 R")))
+        XCTAssertFalse(try PDFLosslessReducer.semanticGraphsMatch(original, graph("20 0 R", "21 0 R", "22 0 R", bytes: "changed")))
+        XCTAssertFalse(try PDFLosslessReducer.semanticGraphsMatch(original, graph("20 0 R", "21 0 R", "22 0 R", rotation: 0)))
+    }
+
+    func testFastGraphVerificationHandlesDeepAnnotationChains() throws {
+        var objects: [String: Any] = ["trailer": ["value": ["/Root": "1 0 R"]]]
+        for index in 1...10000 {
+            objects["obj:\(index) 0 R"] = ["value": ["/Next": "\(index == 10000 ? 1 : index + 1) 0 R", "/Value": index]]
+        }
+        let original: [String: Any] = ["qpdf": [["maxobjectid": 10000], objects]]
+        XCTAssertTrue(try PDFLosslessReducer.semanticGraphsMatch(original, original))
+        objects["obj:10000 0 R"] = ["value": ["/Next": "1 0 R", "/Value": -1]]
+        XCTAssertFalse(try PDFLosslessReducer.semanticGraphsMatch(original, ["qpdf": [["maxobjectid": 10000], objects]]))
+    }
+
+    func testFastGraphVerificationAcceptsCanonicalJSONNumbersWithoutRoundingTolerance() throws {
+        let number = try JSONSerialization.jsonObject(with: Data("0.001157407".utf8), options: .fragmentsAllowed)
+        let roundTrip = try JSONSerialization.jsonObject(with: JSONSerialization.data(withJSONObject: number, options: .fragmentsAllowed), options: .fragmentsAllowed)
+        func graph(_ value: Any) -> [String: Any] {
+            ["qpdf": [["maxobjectid": 1], ["trailer": ["value": ["/Root": "1 0 R"]], "obj:1 0 R": ["value": ["/Matrix": [value]]]]]]
+        }
+        XCTAssertTrue(try PDFLosslessReducer.semanticGraphsMatch(graph(number), graph(roundTrip)))
+        XCTAssertFalse(try PDFLosslessReducer.semanticGraphsMatch(graph(number), graph(0.001157408)))
+        XCTAssertFalse(try PDFLosslessReducer.semanticGraphsMatch(graph(true), graph(1)))
+    }
+
     func testArchitecturalCorpusPreservation() throws {
         guard let root = ProcessInfo.processInfo.environment["DRAWBRIDGE_RECTANGLE_CORPUS"] else { throw XCTSkip("Optional architectural corpus") }
         for name in ["architectural-mech", "civil-marked"] {
@@ -437,13 +496,14 @@ final class RectangleMarkupTests: XCTestCase {
             let doc = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(doc.page(at: 0))
             let crop = page.bounds(for: .cropBox)
             let record = RectangleMarkupRecord(id: RectangleMarkupRecord.prefix + name, pageIndex: 0, bounds: CGRect(x: crop.midX, y: crop.midY, width: 80, height: 60), red: 1, green: 0, blue: 0, lineWidth: 2)
+            let records = RectangleMarkupRecord.capture(doc) + [record]
             let destination = URL(fileURLWithPath: root).appendingPathComponent(name + "-rectangle.pdf")
             let start = Date()
-            XCTAssertTrue(PDFRectangleWriter.write(document: doc, source: source, destination: destination, pageLabels: [:], records: [record]))
+            XCTAssertTrue(PDFRectangleWriter.write(document: doc, source: source, destination: destination, pageLabels: [:], records: records))
             print("Rectangle corpus \(name): \(Date().timeIntervalSince(start))s")
             let reopened = try XCTUnwrap(PDFDocument(url: destination))
             XCTAssertEqual(reopened.pageCount, doc.pageCount)
-            XCTAssertEqual(RectangleMarkupRecord.capture(reopened), [record])
+            XCTAssertEqual(RectangleMarkupRecord.capture(reopened), records)
             for n in 0..<doc.pageCount {
                 XCTAssertEqual(reopened.page(at:n)?.rotation, doc.page(at:n)?.rotation)
                 XCTAssertEqual(reopened.page(at:n)?.bounds(for:.cropBox), doc.page(at:n)?.bounds(for:.cropBox))
@@ -464,7 +524,8 @@ final class RectangleMarkupTests: XCTestCase {
         controller.openDocumentURL = source
         controller.pdfView.setMarkupDocument(doc)
         let page = try XCTUnwrap(doc.page(at: 0))
-        _ = controller.pdfView.rectangleMarkup.create(on: page, bounds: CGRect(x: 100,y: 100,width: 80,height: 60))
+        let originalCount = RectangleMarkupRecord.capture(doc).count
+        _ = try XCTUnwrap(controller.pdfView.rectangleMarkup.create(on: page, bounds: CGRect(x: 100,y: 100,width: 80,height: 60)))
         let start = Date()
         let saved = await withCheckedContinuation { continuation in
             controller.persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…") { saved in
@@ -476,7 +537,7 @@ final class RectangleMarkupTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 3)
         print("APPLICATION SAVE COMPLETION: \(Date().timeIntervalSince(start))s")
         let reopened = try XCTUnwrap(PDFDocument(url: source))
-        XCTAssertEqual(RectangleMarkupRecord.capture(reopened).count, 1)
+        XCTAssertEqual(RectangleMarkupRecord.capture(reopened).count, originalCount + 1)
     }
 
     func testBackgroundMarkupSaveLatency() async throws {

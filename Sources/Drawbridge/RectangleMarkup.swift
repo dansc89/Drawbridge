@@ -78,7 +78,21 @@ struct RectangleMarkupRecord: Sendable, Equatable {
     }
 
     static func capture(_ document: PDFDocument) -> [Self] {
-        (0..<document.pageCount).flatMap { index in
+        // PDF editors may preserve /T when duplicating a markup. Give each owned
+        // annotation its own identity without changing its appearance or geometry.
+        var seen = Set<String>()
+        for index in 0..<document.pageCount {
+            for annotation in document.page(at: index)?.annotations ?? [] where owns(annotation) {
+                guard let identifier = annotation.userName else { continue }
+                if !seen.insert(identifier).inserted {
+                    let replacement = prefix + UUID().uuidString
+                    annotation.setValue(replacement, forAnnotationKey: PDFAnnotationKey(rawValue: "/T"))
+                    annotation.setValue(replacement, forAnnotationKey: PDFAnnotationKey(rawValue: "/NM"))
+                    seen.insert(replacement)
+                }
+            }
+        }
+        return (0..<document.pageCount).flatMap { index in
             document.page(at: index)?.annotations.compactMap { annotation -> Self? in
                 guard owns(annotation), let id = annotation.userName,
                       let rgb = markupColor(annotation).usingColorSpace(.deviceRGB) else { return nil }
