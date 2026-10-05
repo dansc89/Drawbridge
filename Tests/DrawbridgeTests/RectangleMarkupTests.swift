@@ -4,6 +4,11 @@ import XCTest
 @testable import Drawbridge
 
 /// PDFKit legitimately reads the inherited ObjC document property off the main thread.
+private final class SaveBenchmarkDocument: @unchecked Sendable {
+    let document: PDFDocument
+    init(document: PDFDocument) { self.document = document }
+}
+
 private final class BackgroundPDFDocumentRead: @unchecked Sendable {
     let object: NSObject
     let expected: PDFDocument
@@ -444,6 +449,52 @@ final class RectangleMarkupTests: XCTestCase {
                 XCTAssertEqual(reopened.page(at:n)?.bounds(for:.cropBox), doc.page(at:n)?.bounds(for:.cropBox))
             }
         }
+    }
+
+    func testApplicationMarkupSaveCompletionLatency() async throws {
+        _ = NSApplication.shared
+        let controller = MainViewController(); _ = controller.view
+        let source = try fixture(rotation: 0)
+        defer { try? FileManager.default.removeItem(at: source) }
+        if let root = ProcessInfo.processInfo.environment["DRAWBRIDGE_RECTANGLE_CORPUS"] {
+            let corpus = URL(fileURLWithPath: root).appendingPathComponent("architectural-mech.pdf")
+            try Data(contentsOf: corpus).write(to: source)
+        }
+        let doc = try XCTUnwrap(PDFDocument(url: source))
+        controller.openDocumentURL = source
+        controller.pdfView.setMarkupDocument(doc)
+        let page = try XCTUnwrap(doc.page(at: 0))
+        _ = controller.pdfView.rectangleMarkup.create(on: page, bounds: CGRect(x: 100,y: 100,width: 80,height: 60))
+        let start = Date()
+        let saved = await withCheckedContinuation { continuation in
+            controller.persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…") { saved in
+                continuation.resume(returning: saved)
+            }
+        }
+        XCTAssertTrue(saved)
+        XCTAssertFalse(controller.isSavingDocumentOperation)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 3)
+        print("APPLICATION SAVE COMPLETION: \(Date().timeIntervalSince(start))s")
+        let reopened = try XCTUnwrap(PDFDocument(url: source))
+        XCTAssertEqual(RectangleMarkupRecord.capture(reopened).count, 1)
+    }
+
+    func testBackgroundMarkupSaveLatency() async throws {
+        let source = try fixture(rotation: 0)
+        let output = source.deletingLastPathComponent().appendingPathComponent("BackgroundMarkup-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
+        let doc = try XCTUnwrap(PDFDocument(url: source))
+        let box = SaveBenchmarkDocument(document: doc)
+        let record = RectangleMarkupRecord(id: RectangleMarkupRecord.prefix + UUID().uuidString, pageIndex: 0, bounds: CGRect(x: 100,y: 100,width: 80,height: 60), red: 1,green: 0,blue: 0,lineWidth: 2)
+        let start = Date()
+        let success = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: PDFRectangleWriter.write(document: box.document, source: source, destination: output, pageLabels: [:], records: [record]))
+            }
+        }
+        XCTAssertTrue(success)
+        print("BACKGROUND MARKUP SAVE: \(Date().timeIntervalSince(start))s")
+        XCTAssertLessThan(Date().timeIntervalSince(start), 3)
     }
 
     func testActiveToolHighlightTracksEveryToolAndDisabledState() throws {

@@ -75,6 +75,7 @@ enum PDFLosslessReducer {
         let table = try objects(json)
         let trailer = (table["trailer"] as? [String: Any])?["value"] as? [String: Any] ?? [:]
         var cache: [String: String] = [:]
+        let hex = Array("0123456789abcdef".utf8)
         func digest(_ value: Any, visiting: Set<String>) throws -> String {
             if let ref = value as? String, let entry = table["obj:\(ref)"] as? [String: Any] {
                 if visiting.contains(ref) { return "cycle" }
@@ -93,7 +94,11 @@ enum PDFLosslessReducer {
                 normalized = result
             } else if let array = value as? [Any] { normalized = try array.map { try digest($0, visiting: visiting) } }
             else { normalized = value }
-            return SHA256.hash(data: try JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys, .fragmentsAllowed])).map { String(format: "%02x", $0) }.joined()
+            let bytes = SHA256.hash(data: try JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys, .fragmentsAllowed]))
+            // Avoid 32 locale-aware format calls for every value in the PDF graph.
+            var encoded = [UInt8](); encoded.reserveCapacity(64)
+            for byte in bytes { encoded.append(hex[Int(byte >> 4)]); encoded.append(hex[Int(byte & 15)]) }
+            return String(decoding: encoded, as: UTF8.self)
         }
         return try digest(["root": trailer["/Root"] ?? NSNull(), "info": trailer["/Info"] ?? NSNull()], visiting: [])
     }

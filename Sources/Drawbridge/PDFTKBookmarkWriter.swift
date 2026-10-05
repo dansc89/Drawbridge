@@ -97,7 +97,7 @@ enum PDFTKBookmarkWriter {
         }
     }
 
-    private static func updateNavigationJSON(
+    static func updateNavigationJSON(
         _ json: inout [String: Any],
         from document: PDFDocument,
         pageLabels: [Int: String]
@@ -169,6 +169,7 @@ enum PDFTKBookmarkWriter {
             }
             if !nums.isEmpty {
                 objects["obj:\(labelsObjectID) 0 R"] = ["value": ["/Nums": nums]]
+                nextObjectID += 1
                 catalog["/PageLabels"] = "\(labelsObjectID) 0 R"
             }
         }

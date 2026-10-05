@@ -442,22 +442,13 @@ extension MainViewController {
             }
         }
         try synchronizePersistedFile(at: destinationURL)
-        try synchronizeDirectory(containing: destinationURL)
+        // Flush the committed file without reopening its parent directory.
+        // Opening protected folders from the app can block on macOS privacy
+        // checks even after the replacement and file flush have succeeded.
     }
 
     nonisolated static func synchronizePersistedFile(at url: URL) throws {
         let descriptor = open(url.path, O_RDONLY)
-        guard descriptor >= 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-        defer { close(descriptor) }
-        guard fsync(descriptor) == 0 else {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-    }
-
-    nonisolated private static func synchronizeDirectory(containing url: URL) throws {
-        let descriptor = open(url.deletingLastPathComponent().path, O_RDONLY)
         guard descriptor >= 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }

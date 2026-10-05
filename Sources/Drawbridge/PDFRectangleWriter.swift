@@ -11,6 +11,11 @@ enum PDFRectangleWriter {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeRectangleSave-\(UUID().uuidString)")
         do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) } catch { return false }
         defer { try? FileManager.default.removeItem(at: directory) }
+        let profilingStart = Date()
+        func profile(_ phase: String) {
+            guard ProcessInfo.processInfo.environment["DRAWBRIDGE_PROFILE_SAVE"] == "1" else { return }
+            print("Markup save \(phase): \(Date().timeIntervalSince(profilingStart))s")
+        }
         do {
             if let expectedSourceStamp, PDFMarkupSourceStamp.read(source) != expectedSourceStamp { return false }
             let original = try Data(contentsOf: source)
@@ -22,18 +27,22 @@ enum PDFRectangleWriter {
                       let result = try JSONSerialization.jsonObject(with: Data(contentsOf: json)) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
                 return result
             }
-            let inspected = try read(input, "input.json")
+            profile("source snapshot")
+            let inspected = try read(input, "input.json", decoded: false)
+            profile("inspection")
             guard (inspected["encrypt"] as? [String: Any])?["encrypted"] as? Bool != true else { return false }
             let table = try objectTable(inspected)
             guard !table.values.contains(where: { entry in
                 let value = (entry as? [String: Any])?["value"] as? [String: Any]
                 return value?["/FT"] as? String == "/Sig" || value?["/Type"] as? String == "/Sig"
             }) else { return false }
-            let navigation = directory.appendingPathComponent("navigation.pdf")
-            guard PDFTKBookmarkWriter.writeNavigation(in: document, sourceURL: input, to: navigation, pageLabels: pageLabels) == .saved else { print("Rectangle writer: navigation failed"); return false }
-            let baseline = try read(navigation, "navigation.json")
-            let originalHash = try PDFLosslessReducer.semanticHash(removingOwnedRectangles(baseline))
-            var json = try read(navigation, "encoded-navigation.json", decoded: false)
+            // Apply navigation and markups in one object patch. Previously this
+            // saved a whole intermediate PDF and read its streams twice again.
+            // Preserve encoded streams exactly; verification includes their bytes.
+            var json = inspected
+            guard PDFTKBookmarkWriter.updateNavigationJSON(&json, from: document, pageLabels: pageLabels) else { return false }
+            let originalHash = try PDFLosslessReducer.semanticHash(removingOwnedRectangles(json))
+            profile("baseline verification hash")
             try update(&json, records: records)
             let patch = directory.appendingPathComponent("rectangles.json")
             // Keep original streams in qpdf's input; supply data only for our new appearances.
@@ -49,16 +58,20 @@ enum PDFRectangleWriter {
                 qpdf[qpdf.count - 1] = objects; metadata["qpdf"] = qpdf
             }
             try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]).write(to: patch)
+            profile("appearance patch")
             let candidate = directory.appendingPathComponent("candidate.pdf")
-            guard PDFTKBookmarkWriter.run(executable, arguments: [navigation.path, "--stream-data=preserve", "--update-from-json=\(patch.path)", candidate.path]),
+            guard PDFTKBookmarkWriter.run(executable, arguments: [input.path, "--stream-data=preserve", "--update-from-json=\(patch.path)", candidate.path]),
                   PDFTKBookmarkWriter.run(executable, arguments: ["--check", candidate.path]) else { return false }
-            let written = try read(candidate, "written.json")
+            profile("candidate write/check")
+            let written = try read(candidate, "written.json", decoded: false)
             guard try PDFLosslessReducer.semanticHash(removingOwnedRectangles(written)) == originalHash,
                   try ownedRecordsMatch(written, records: records),
                   try Data(contentsOf: source, options: .mappedIfSafe) == original else { print("Rectangle writer: verification failed"); return false }
             let size = try candidate.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size > 0, size <= original.count + max(5 * 1024 * 1024, records.count * 4096) else { print("Rectangle writer: size limit \(size) vs \(original.count)"); return false }
+            profile("candidate verification")
             try MainViewController.commitStagedSave(from: candidate, to: destination)
+            profile("commit")
             return true
         } catch { print("Rectangle writer: \(error)"); return false }
     }
