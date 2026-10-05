@@ -144,7 +144,7 @@ final class RectangleMarkupController {
     weak var view: PDFView?
     private weak var boundDocument: PDFDocument?
     private let fallbackUndo = UndoManager()
-    var undo: UndoManager { view?.window?.undoManager ?? fallbackUndo }
+    var undo: UndoManager { inlineText?.editor.undoManager ?? view?.window?.undoManager ?? fallbackUndo }
     private(set) var selected: PDFAnnotation?
     private var gesture: Gesture?
     private var preview: (PDFPage, CGRect)?
@@ -166,6 +166,8 @@ final class RectangleMarkupController {
     }
     var onMutation: ((PDFPage) -> Void)?
     var onDraftChanged: (() -> Void)?
+    var onDraftBegan: (() -> Void)?
+    var onDraftEnded: (() -> Void)?
     var onPresentationChanged: (() -> Void)?
     var canEdit: () -> Bool = { true }
     var tool: Tool = .select {
@@ -424,6 +426,7 @@ final class RectangleMarkupController {
         let editor = MarkupInlineTextView(frame:.zero,textContainer:container)
         editor.retainedStorage = storage
         editor.isRichText = false; editor.drawsBackground = false; editor.textContainerInset = .zero
+        editor.allowsUndo = true
         editor.textContainer?.lineFragmentPadding = 0; editor.isVerticallyResizable = false; editor.isHorizontallyResizable = false
         editor.textContainer?.widthTracksTextView = true; editor.textContainer?.heightTracksTextView = true
         editor.font = NSFont(name:"Helvetica",size:(annotation?.font?.pointSize ?? fontSize)*view.scaleFactor)
@@ -433,6 +436,7 @@ final class RectangleMarkupController {
         editor.setAccessibilityLabel("Edit text on PDF page")
         editor.wantsLayer = true; editor.layer?.borderColor = NSColor.controlAccentColor.cgColor; editor.layer?.borderWidth = 1
         inlineText = (page,bounds,annotation,editor,hasUnsavedChanges)
+        onDraftBegan?()
         annotation?.shouldDisplay = false
         editor.onFinish = { [weak self] cancel in self?.finishTextEditing(cancel:cancel) }
         editor.onChange = { [weak self] in
@@ -440,6 +444,7 @@ final class RectangleMarkupController {
             self.hasUnsavedChanges = true
             if let onDraftChanged = self.onDraftChanged { onDraftChanged() }
             else { self.onMutation?(draft.page) }
+            self.refresh()
         }
         view.addSubview(editor); positionTextEditor(); view.needsDisplay = true
         view.window?.makeFirstResponder(editor); editor.setSelectedRange(NSRange(location:editor.string.utf16.count,length:0))
@@ -454,6 +459,7 @@ final class RectangleMarkupController {
         editor.frame = CGRect(x:rect.midX-draft.bounds.width*scale/2,y:rect.midY-draft.bounds.height*scale/2,width:draft.bounds.width*scale,height:draft.bounds.height*scale)
         editor.frameCenterRotation = CGFloat(-draft.page.rotation)
         editor.font = NSFont(name:"Helvetica",size:(draft.annotation?.font?.pointSize ?? fontSize)*scale)
+        editor.textColor = draft.annotation.map(RectangleMarkupRecord.markupColor) ?? strokeColor
     }
     func finishTextEditing(cancel:Bool = false) {
         guard let draft = inlineText else { return }
@@ -466,13 +472,13 @@ final class RectangleMarkupController {
             if let annotation = draft.annotation { selected = annotation; editSelectedText(text,size:annotation.font?.pointSize ?? fontSize) }
             else { _ = create(on:draft.page,bounds:draft.bounds,kind:.text,text:text) }
         }
-        if cancel, draft.annotation != nil { onMutation?(draft.page) }
         if wasFirstResponder { view?.window?.makeFirstResponder(view) }
         view?.needsDisplay = true; refresh()
+        onDraftEnded?()
     }
 
     func deleteSelected() {
-        guard canEdit(), let selected, RectangleMarkupRecord.owns(selected), let page = selected.page else { return }
+        guard canEdit(), let selected, RectangleMarkupRecord.owns(selected), !selected.isReadOnly, let page = selected.page else { return }
         cancelGesture(); setPresence(false, annotation: selected, page: page, action: "Delete Markup")
     }
 
@@ -484,12 +490,14 @@ final class RectangleMarkupController {
     private func setFill(_ color: NSColor?, on annotation: PDFAnnotation, page: PDFPage) {
         guard canEdit(), page.document === boundDocument, RectangleMarkupRecord.owns(annotation) else { return }
         let old = RectangleMarkupRecord.polygonFill(annotation)
+        guard old != color else { return }
         undo.registerUndo(withTarget:self) { target in target.setFill(old,on:annotation,page:page) }; undo.setActionName("Polygon Fill")
         RectangleMarkupRecord.setPolygonFill(color,on:annotation); selected = annotation; changed(page)
     }
 
     func styleSelected(color: NSColor, width: CGFloat) {
         strokeColor = color; lineWidth = min(max(width, 0.25), 12)
+        refresh()
         guard canEdit(), let selected, !selected.isReadOnly, let page = selected.page else { return }
         setStyle(selected, page: page, color: strokeColor, width: lineWidth)
     }
@@ -497,6 +505,7 @@ final class RectangleMarkupController {
     private func setStyle(_ annotation: PDFAnnotation, page: PDFPage, color: NSColor, width: CGFloat) {
         guard canEdit(), page.document === boundDocument, RectangleMarkupRecord.owns(annotation) else { return }
         let oldColor = RectangleMarkupRecord.markupColor(annotation); let oldWidth = annotation.border?.lineWidth ?? 2
+        guard oldColor != color || (annotation.type != "FreeText" && oldWidth != width) else { return }
         undo.registerUndo(withTarget: self) { target in target.setStyle(annotation, page: page, color: oldColor, width: oldWidth) }
         undo.setActionName("Style Markup")
         if annotation.type == "Line" {
@@ -528,14 +537,17 @@ final class RectangleMarkupController {
         setGeometry(bounds, endpoints:nil, of:annotation, on:page, action:action)
     }
     func setGeometry(_ bounds: CGRect, endpoints: (CGPoint,CGPoint)?, of annotation: PDFAnnotation, on page: PDFPage, action: String) {
-        guard canEdit(), page.document === boundDocument, RectangleMarkupRecord.owns(annotation), bounds.width >= 2, bounds.height >= 2, [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy({ $0.isFinite }) else { return }
+        guard canEdit(), page.document === boundDocument, RectangleMarkupRecord.owns(annotation), !annotation.isReadOnly, bounds.width >= 2, bounds.height >= 2, [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy({ $0.isFinite }) else { return }
         if let (a,b) = endpoints {
             guard [a.x,a.y,b.x,b.y].allSatisfy({ $0.isFinite }), bounds.contains(a), bounds.contains(b), hypot(a.x-b.x,a.y-b.y) >= 2 else { return }
         }
         let previous = annotation.bounds
         let oldVertices = RectangleMarkupRecord.vertices(annotation)
         let oldEndpoints: (CGPoint,CGPoint)? = annotation.type == "Line" ? (handlePoint(.lowerLeft,annotation:annotation),handlePoint(.upperRight,annotation:annotation)) : nil
-        if previous == bounds, let a = oldEndpoints, let b = endpoints, a.0 == b.0 && a.1 == b.1 { return }
+        if previous == bounds {
+            if endpoints == nil { return }
+            if let a = oldEndpoints, let b = endpoints, a.0 == b.0 && a.1 == b.1 { return }
+        }
         undo.registerUndo(withTarget: self) { target in target.setGeometry(previous,endpoints:oldEndpoints,of:annotation,on:page,action:action) }
         undo.setActionName(action)
         annotation.bounds = bounds
@@ -564,6 +576,20 @@ final class RectangleMarkupController {
 
     static func hitTest(_ annotation: PDFAnnotation, at point: CGPoint, tolerance: CGFloat) -> Bool {
         let points = RectangleMarkupRecord.vertices(annotation)
+        let radius = max(tolerance,(annotation.border?.lineWidth ?? 2)/2)
+        if annotation.type == "Line" {
+            let origin = annotation.bounds.origin
+            let a = CGPoint(x:origin.x+annotation.startPoint.x,y:origin.y+annotation.startPoint.y)
+            let b = CGPoint(x:origin.x+annotation.endPoint.x,y:origin.y+annotation.endPoint.y)
+            return distanceFromSegment(point, a, b) <= radius
+        }
+        if annotation.type == "Circle" {
+            let bounds = annotation.bounds
+            guard bounds.width > 0, bounds.height > 0 else { return false }
+            let x = (point.x-bounds.midX)/(bounds.width/2+radius)
+            let y = (point.y-bounds.midY)/(bounds.height/2+radius)
+            return x*x+y*y <= 1
+        }
         guard let first = points.first, points.count >= 2 else { return annotation.bounds.contains(point) }
         let closed = annotation.type == "Polygon"
         let path = CGMutablePath(); path.move(to:first)
@@ -572,13 +598,14 @@ final class RectangleMarkupController {
             path.closeSubpath()
             if RectangleMarkupRecord.polygonFill(annotation) != nil && path.contains(point) { return true }
         }
-        let radius = max(tolerance,(annotation.border?.lineWidth ?? 2)/2)
         let edges = Array(zip(points,points.dropFirst())) + (closed ? [(points.last!,first)] : [])
-        return edges.contains { a,b in
-            let dx = b.x-a.x, dy = b.y-a.y, length = dx*dx+dy*dy
-            let t = length > 0 ? min(1,max(0,((point.x-a.x)*dx+(point.y-a.y)*dy)/length)) : 0
-            return hypot(point.x-a.x-t*dx,point.y-a.y-t*dy) <= radius
-        }
+        return edges.contains { a,b in distanceFromSegment(point,a,b) <= radius }
+    }
+
+    private static func distanceFromSegment(_ point: CGPoint, _ a: CGPoint, _ b: CGPoint) -> CGFloat {
+        let dx = b.x-a.x, dy = b.y-a.y, length = dx*dx+dy*dy
+        let t = length > 0 ? min(1,max(0,((point.x-a.x)*dx+(point.y-a.y)*dy)/length)) : 0
+        return hypot(point.x-a.x-t*dx,point.y-a.y-t*dy)
     }
 
     private func setPresence(_ exists: Bool, annotation: PDFAnnotation, page: PDFPage, action: String) {
@@ -590,6 +617,8 @@ final class RectangleMarkupController {
     }
 
     private func changed(_ page: PDFPage) {
+        // A real style mutation during drafting survives cancellation of the text.
+        if var draft = inlineText { draft.wasDirty = true; inlineText = draft }
         hasUnsavedChanges = true; view?.needsDisplay = true; refresh(); onMutation?(page)
     }
 
@@ -676,6 +705,17 @@ final class DrawbridgePolygonAnnotation: PDFAnnotation {
 /// A transient page overlay; typing never modifies original PDF content.
 @MainActor
 final class MarkupInlineTextView: NSTextView, NSTextViewDelegate {
+    // Draft typing has its own history. Removing the transient editor must not
+    // leave text-system undo actions mixed into the document's markup history.
+    private let editingUndo = UndoManager()
+    override var undoManager: UndoManager? { editingUndo }
+    @objc func undo(_ sender: Any?) { editingUndo.undo() }
+    @objc func redo(_ sender: Any?) { editingUndo.redo() }
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(undo(_:)) { return editingUndo.canUndo }
+        if item.action == #selector(redo(_:)) { return editingUndo.canRedo }
+        return super.validateUserInterfaceItem(item)
+    }
     var retainedStorage: NSTextStorage?
     var onFinish: ((Bool)->Void)?
     var onChange: (()->Void)?

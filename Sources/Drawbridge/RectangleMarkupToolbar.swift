@@ -91,6 +91,12 @@ extension MainViewController {
         session.onDraftChanged = { [weak self] in
             self?.markMarkupChanged()
         }
+        var dirtyBeforeDraft = false
+        session.onDraftBegan = { [weak self] in dirtyBeforeDraft = self?.hasUnsavedChanges() ?? false }
+        session.onDraftEnded = { [weak self] in
+            guard let self, !self.pdfView.rectangleMarkup.hasUnsavedChanges else { return }
+            self.view.window?.isDocumentEdited = dirtyBeforeDraft
+        }
         session.onPresentationChanged = { [weak self] in self?.refreshRectangleToolbar() }
         for (control, action) in [(rectangleToolbar.selectButton, #selector(rectangleSelect(_:))), (rectangleToolbar.rectangleButton, #selector(rectangleDraw(_:))), (rectangleToolbar.ellipseButton, #selector(ellipseDraw(_:))), (rectangleToolbar.lineButton, #selector(lineDraw(_:))), (rectangleToolbar.arrowButton, #selector(arrowDraw(_:))), (rectangleToolbar.polygonButton, #selector(polygonDraw(_:))), (rectangleToolbar.fillPopup, #selector(polygonFill(_:))), (rectangleToolbar.polylineButton, #selector(polylineDraw(_:))), (rectangleToolbar.textButton, #selector(textDraw(_:))), (rectangleToolbar.editTextButton, #selector(editMarkupText(_:))), (rectangleToolbar.fontPopup, #selector(markupFontSize(_:))), (rectangleToolbar.deleteButton, #selector(rectangleDelete(_:))), (rectangleToolbar.undoButton, #selector(rectangleUndo(_:))), (rectangleToolbar.redoButton, #selector(rectangleRedo(_:))), (rectangleToolbar.colorPopup, #selector(rectangleStyle(_:))), (rectangleToolbar.widthPopup, #selector(rectangleStyle(_:)))] as [(NSControl, Selector)] {
             control.target = self; control.action = action
@@ -131,6 +137,12 @@ extension MainViewController {
                 return abs(a.redComponent-b.redComponent) < 0.01 && abs(a.greenComponent-b.greenComponent) < 0.01 && abs(a.blueComponent-b.blueComponent) < 0.01
             }) { rectangleToolbar.colorPopup.selectItem(at:index) }
             if let index = rectangleToolbar.widths.firstIndex(of:selected.border?.lineWidth ?? 2) { rectangleToolbar.widthPopup.selectItem(at:index) }
+        } else {
+            // Selection styles do not change drawing defaults. Show the actual
+            // defaults again when the next authoring tool is chosen.
+            if let index = rectangleToolbar.colors.firstIndex(of:s.strokeColor) { rectangleToolbar.colorPopup.selectItem(at:index) }
+            if let index = rectangleToolbar.widths.firstIndex(of:s.lineWidth) { rectangleToolbar.widthPopup.selectItem(at:index) }
+            if let index = rectangleToolbar.fontSizes.firstIndex(of:s.fontSize) { rectangleToolbar.fontPopup.selectItem(at:index) }
         }
     }
     @objc func rectangleSelect(_ sender: Any?) { pdfView.rectangleMarkup.tool = .select; view.window?.makeFirstResponder(pdfView) }
@@ -163,6 +175,7 @@ extension MainViewController {
         guard s.canEdit(), rectangleToolbar.fontSizes.indices.contains(i) else { return }
         s.fontSize = rectangleToolbar.fontSizes[i]
         if let selected = s.selected, selected.type == "FreeText" { s.editSelectedText(selected.contents ?? "",size:s.fontSize) }
+        s.refresh()
     }
     @objc func rectangleDelete(_ sender:Any?) { pdfView.rectangleMarkup.deleteSelected() }
     @objc func rectangleUndo(_ sender: Any?) { guard pdfView.rectangleMarkup.canEdit() else { return }; pdfView.rectangleMarkup.undo.undo(); refreshRectangleToolbar() }

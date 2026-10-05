@@ -17,6 +17,122 @@ private final class BackgroundPDFDocumentRead: @unchecked Sendable {
 
 @MainActor
 final class RectangleMarkupTests: XCTestCase {
+    func testShapeHitTestingRejectsEmptyBoundingBoxSpace() throws {
+        let source = try fixture(rotation:0); defer { try? FileManager.default.removeItem(at:source) }
+        let doc = try XCTUnwrap(PDFDocument(url:source)), page = try XCTUnwrap(doc.page(at:0))
+        let s = RectangleMarkupController(); s.bind(to:doc)
+        let a = CGPoint(x:100,y:100), b = CGPoint(x:300,y:300)
+        let line = try XCTUnwrap(s.create(on:page,bounds:RectangleMarkupController.lineBounds(a,b,width:2),kind:.line,endpoints:(a,b)))
+        XCTAssertTrue(RectangleMarkupController.hitTest(line,at:CGPoint(x:200,y:203),tolerance:4))
+        XCTAssertFalse(RectangleMarkupController.hitTest(line,at:CGPoint(x:110,y:290),tolerance:4))
+        let ellipse = try XCTUnwrap(s.create(on:page,bounds:CGRect(x:100,y:100,width:200,height:100),kind:.ellipse))
+        XCTAssertFalse(RectangleMarkupController.hitTest(ellipse,at:CGPoint(x:102,y:198),tolerance:4))
+        XCTAssertTrue(RectangleMarkupController.hitTest(ellipse,at:CGPoint(x:200,y:150),tolerance:4))
+    }
+
+    func testUnchangedSelectionAndStyleDoNotDirtyPDFOrConsumeUndo() throws {
+        let source = try fixture(rotation:0); defer { try? FileManager.default.removeItem(at:source) }
+        let doc = try XCTUnwrap(PDFDocument(url:source)), page = try XCTUnwrap(doc.page(at:0))
+        let s = RectangleMarkupController(); s.bind(to:doc)
+        let annotation = try XCTUnwrap(s.create(on:page,bounds:CGRect(x:100,y:100,width:100,height:80)))
+        s.undo.removeAllActions(); s.markSaved(at:source)
+        var mutations = 0; s.onMutation = { _ in mutations += 1 }
+        s.setBounds(annotation.bounds,of:annotation,on:page,action:"Move Markup")
+        s.styleSelected(color:annotation.color,width:annotation.border!.lineWidth)
+        XCTAssertFalse(s.undo.canUndo); XCTAssertFalse(s.hasUnsavedChanges); XCTAssertEqual(mutations,0)
+        annotation.isReadOnly = true
+        s.setBounds(annotation.bounds.offsetBy(dx:10,dy:10),of:annotation,on:page,action:"Move Markup")
+        s.deleteSelected()
+        XCTAssertTrue(annotation.page === page); XCTAssertFalse(s.undo.canUndo)
+    }
+
+    func testAuthoringToolbarRestoresDrawingDefaultsAfterSelection() throws {
+        _ = NSApplication.shared
+        let source = try fixture(rotation:0); defer { try? FileManager.default.removeItem(at:source) }
+        let doc = try XCTUnwrap(PDFDocument(url:source)), page = try XCTUnwrap(doc.page(at:0))
+        let c = MainViewController(); _ = c.view
+        c.pdfView.setMarkupDocument(doc)
+        let s = c.pdfView.rectangleMarkup; s.canEdit = { true }
+        _ = try XCTUnwrap(s.create(on:page,bounds:CGRect(x:100,y:100,width:100,height:80)))
+        s.strokeColor = .blue; s.lineWidth = 8; s.fontSize = 36
+        c.refreshRectangleToolbar()
+        XCTAssertEqual(c.rectangleToolbar.colorPopup.titleOfSelectedItem,"Red")
+        s.tool = .text
+        XCTAssertEqual(c.rectangleToolbar.colorPopup.titleOfSelectedItem,"Blue")
+        XCTAssertEqual(c.rectangleToolbar.widthPopup.titleOfSelectedItem,"8 pt")
+        XCTAssertEqual(c.rectangleToolbar.fontPopup.titleOfSelectedItem,"36 pt")
+    }
+
+    func testInlineTextStylePreviewMatchesCommittedAnnotation() throws {
+        let source = try fixture(rotation:0); defer { try? FileManager.default.removeItem(at:source) }
+        let doc = try XCTUnwrap(PDFDocument(url:source)), page = try XCTUnwrap(doc.page(at:0))
+        let view = PDFView(frame:CGRect(x:0,y:0,width:800,height:600)); view.document = doc
+        let s = RectangleMarkupController(); s.install(on:view); s.bind(to:doc)
+        s.beginTextEditing(on:page,bounds:CGRect(x:140,y:140,width:180,height:80))
+        let editor = try XCTUnwrap(view.subviews.compactMap { $0 as? MarkupInlineTextView }.first)
+        editor.string = "Visible style"
+        s.styleSelected(color:.blue,width:2); s.fontSize = 36; s.refresh()
+        XCTAssertEqual(editor.textColor,.blue)
+        XCTAssertEqual(editor.font!.pointSize,36*view.scaleFactor,accuracy:0.01)
+        s.finishTextEditing()
+        let annotation = try XCTUnwrap(s.selected)
+        XCTAssertEqual(RectangleMarkupRecord.markupColor(annotation).usingColorSpace(.deviceRGB),NSColor.blue.usingColorSpace(.deviceRGB))
+        XCTAssertEqual(annotation.font?.pointSize,36)
+    }
+
+    func testInlineTextUndoIsIsolatedFromMarkupHistory() throws {
+        let source = try fixture(rotation:0); defer { try? FileManager.default.removeItem(at:source) }
+        let doc = try XCTUnwrap(PDFDocument(url:source)), page = try XCTUnwrap(doc.page(at:0))
+        let view = PDFView(frame:CGRect(x:0,y:0,width:800,height:600)); view.document = doc
+        let s = RectangleMarkupController(); s.install(on:view); s.bind(to:doc)
+        let markupUndo = s.undo; markupUndo.groupsByEvent = false
+        markupUndo.beginUndoGrouping()
+        let shape = try XCTUnwrap(s.create(on:page,bounds:CGRect(x:100,y:100,width:80,height:60)))
+        markupUndo.endUndoGrouping()
+        s.beginTextEditing(on:page,bounds:CGRect(x:140,y:140,width:180,height:80))
+        let editor = try XCTUnwrap(view.subviews.compactMap { $0 as? MarkupInlineTextView }.first)
+        XCTAssertFalse(s.undo === markupUndo)
+        XCTAssertTrue(editor.allowsUndo)
+        s.undo.groupsByEvent = false; s.undo.beginUndoGrouping()
+        editor.insertText("Draft",replacementRange:NSRange(location:0,length:0))
+        s.undo.endUndoGrouping()
+        XCTAssertEqual(editor.string,"Draft")
+        XCTAssertTrue(editor.responds(to:#selector(MarkupInlineTextView.undo(_:))))
+        editor.undo(nil); XCTAssertEqual(editor.string,""); XCTAssertTrue(shape.page === page)
+        editor.redo(nil); XCTAssertEqual(editor.string,"Draft")
+        s.finishTextEditing(cancel:true)
+        XCTAssertTrue(s.undo === markupUndo)
+        markupUndo.undo(); XCTAssertNil(shape.page)
+    }
+
+    func testCancellingTextDraftRestoresDirtyIndicatorWithoutDiscardingOtherEdits() throws {
+        _ = NSApplication.shared
+        let source = try fixture(rotation:0); defer { try? FileManager.default.removeItem(at:source) }
+        let doc = try XCTUnwrap(PDFDocument(url:source)), page = try XCTUnwrap(doc.page(at:0))
+        let c = MainViewController()
+        let window = NSWindow(contentRect:NSRect(x:0,y:0,width:1000,height:700),styleMask:[.titled],backing:.buffered,defer:false)
+        window.contentViewController = c; c.pdfView.setMarkupDocument(doc)
+        let s = c.pdfView.rectangleMarkup; s.canEdit = { true }
+        for wasDirty in [false,true] {
+            window.isDocumentEdited = wasDirty
+            s.beginTextEditing(on:page,bounds:CGRect(x:140,y:140,width:180,height:80))
+            let editor = try XCTUnwrap(c.pdfView.subviews.compactMap { $0 as? MarkupInlineTextView }.first)
+            editor.string = "Cancelled draft"; editor.textDidChange(Notification(name:NSText.didChangeNotification))
+            XCTAssertTrue(window.isDocumentEdited)
+            s.finishTextEditing(cancel:true)
+            XCTAssertEqual(window.isDocumentEdited,wasDirty)
+            XCTAssertTrue(RectangleMarkupRecord.capture(doc).isEmpty)
+        }
+        window.isDocumentEdited = false
+        let shape = try XCTUnwrap(s.create(on:page,bounds:CGRect(x:100,y:100,width:80,height:60)))
+        s.markSaved(at:source); window.isDocumentEdited = false
+        s.beginTextEditing(on:page,bounds:CGRect(x:140,y:140,width:180,height:80))
+        s.styleSelected(color:.blue,width:4)
+        s.finishTextEditing(cancel:true)
+        XCTAssertTrue(s.hasUnsavedChanges); XCTAssertTrue(window.isDocumentEdited)
+        XCTAssertEqual(shape.color,.blue)
+    }
+
     func testDocumentReplacementIsBlockedThroughoutSavingAndProcessing() {
         _ = NSApplication.shared
         let controller = MainViewController(); _ = controller.view
