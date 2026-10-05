@@ -2184,7 +2184,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             desiredWindowPoint: desiredWindowPoint,
             targetScale: scaleFactor,
             generation: generation,
-            remainingPasses: 3
+            remainingPasses: 3,
+            trackViewportCenter: true
         )
         onViewportChanged?()
     }
@@ -2549,22 +2550,27 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         desiredWindowPoint: NSPoint,
         targetScale: CGFloat,
         generation: UInt,
-        remainingPasses: Int
+        remainingPasses: Int,
+        trackViewportCenter: Bool = false
     ) {
         guard remainingPasses > 0 else { return }
         // PDFKit may relayout its document view over several main-loop turns.
         // Reassert the anchor after each pass; a newer wheel event invalidates
         // this chain through zoomAnchorGeneration.
-        DispatchQueue.main.async { [weak self, weak page] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + (trackViewportCenter ? 1.0 / 60.0 : 0)) { [weak self, weak page] in
             guard let self,
                   let page,
                   self.zoomAnchorGeneration == generation,
                   abs(self.scaleFactor - targetScale) < 0.000_001 else { return }
             self.forceZoomLayout()
+            var resolvedWindowPoint = desiredWindowPoint
+            if trackViewportCenter, let clip = self.contentClipView {
+                resolvedWindowPoint = clip.convert(NSPoint(x: clip.bounds.midX, y: clip.bounds.midY), to: nil)
+            }
             self.correctZoomAnchor(
                 page: page,
                 pagePoint: pagePoint,
-                desiredWindowPoint: desiredWindowPoint
+                desiredWindowPoint: resolvedWindowPoint
             )
             self.scheduleZoomAnchorCorrection(
                 page: page,
@@ -2572,7 +2578,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 desiredWindowPoint: desiredWindowPoint,
                 targetScale: targetScale,
                 generation: generation,
-                remainingPasses: remainingPasses - 1
+                remainingPasses: remainingPasses - 1,
+                trackViewportCenter: trackViewportCenter
             )
             self.emitInteractiveViewportFeedback()
         }
