@@ -219,6 +219,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: "Flatten PDF…", action: #selector(MainViewController.commandFlattenPDF(_:)), keyEquivalent: "").target = controller
         fileMenu.addItem(withTitle: "Reduce File Size…", action: #selector(MainViewController.commandReduceFileSize(_:)), keyEquivalent: "").target = controller
+        fileMenu.addItem(NSMenuItem.separator())
+        fileMenu.addItem(withTitle: "Print…", action: #selector(MainViewController.commandPrint(_:)), keyEquivalent: "p").target = controller
+        fileMenu.addItem(withTitle: "Print Current Sheet…", action: #selector(MainViewController.commandPrintCurrentSheet(_:)), keyEquivalent: "").target = controller
         fileItem.submenu = fileMenu
 
         let editItem = NSMenuItem()
@@ -314,7 +317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 Drawbridge
 Version \(version) (\(build))
 
-Drawbridge is a native macOS PDF viewer for architects, designers, and engineers, focused on sheet bookmarks and hyperlinks.
+Drawbridge is a native macOS PDF viewer for architects, designers, and engineers, with sheet bookmarks, hyperlinks, and editable vector markups.
 
 System Requirements:
 • Apple Silicon Mac (M1 or newer)

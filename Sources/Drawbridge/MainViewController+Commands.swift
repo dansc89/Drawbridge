@@ -643,6 +643,8 @@ extension MainViewController {
             return sessionDocumentURLs.count > 1
         case #selector(commandCloseDocument(_:)):
             return hasDocument || !sessionDocumentURLs.isEmpty
+        case #selector(commandPrint(_:)), #selector(commandPrintCurrentSheet(_:)):
+            return PDFPrinting.canPrint(pdfView.document)
         case #selector(commandReduceFileSize(_:)):
             return hasDocument && openDocumentURL != nil && !isPDFProcessingBusy
         case #selector(commandFlattenPDF(_:)):
@@ -685,7 +687,7 @@ extension MainViewController {
         alert.informativeText = "Open a PDF to generate bookmarks, link sheet references, flatten markups, or reduce file size."
         alert.alertStyle = .informational
 
-        let guide = NSTextView(frame: NSRect(x: 0, y: 0, width: 440, height: 210))
+        let guide = NSTextView(frame: NSRect(x: 0, y: 0, width: 480, height: 300))
         guide.isEditable = false
         guide.drawsBackground = false
         guide.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -698,8 +700,17 @@ extension MainViewController {
 5) Go to Sheet with ⌘L; fit the entire page with ⌘9.
 6) Rename/delete bookmarks by right-clicking; Shift-click selects a range.
 7) Save with ⌘S; Save As PDF with ⌘⇧S.
+8) Mark up with R (rectangle), E (ellipse), L (line), A (arrow),
+   ⇧P (polygon), ⇧N (polyline), or T (text). V selects markups.
+   Lines/arrows: click the start, then click the end.
+   Text: draw a box and type directly on the page.
+9) Undo with ⌘Z; redo with ⌘⇧Z. Escape cancels drawing.
+10) Print with ⌘P, or choose File > Print Current Sheet.
+    Printing defaults to actual size; check paper and scale.
 
-Existing PDF annotations are displayed without editing tools.
+Invert changes the screen only, not saved PDFs or printing.
+Imported annotations are displayed; editing currently supports
+markups created in Drawbridge.
 """
         alert.accessoryView = guide
         alert.addButton(withTitle: "Done")

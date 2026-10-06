@@ -1,6 +1,6 @@
 # Drawbridge User Manual
 
-Drawbridge is a macOS PDF viewer for architectural drawing sets, focused on bookmarks and hyperlinks.
+Drawbridge is a macOS PDF viewer for architectural drawing sets, with sheet bookmarks, hyperlinks, and editable vector markups.
 
 ## Open and Navigate
 
@@ -24,11 +24,21 @@ Click a hyperlink to follow it. Use **View > Show Hyperlink Highlights** to show
 
 ## Save
 
-- **File > Save** (`Cmd+S`) saves bookmark and hyperlink changes.
+- **File > Save** (`Cmd+S`) saves bookmark, hyperlink, and markup changes.
 - **File > Save As PDF...** (`Cmd+Shift+S`) saves a separate PDF copy.
 - **File > Close** (`Cmd+W`) closes the current document.
 
-Markup, drawing, measurement, snapshot pasting, page-combining, and page-conversion tools are not available. Existing PDF content remains visible; removing the tools does not remove annotations already stored in a PDF.
+## Markups
+
+The separate markup toolbar supports rectangle (`R`), ellipse (`E`), line (`L`), arrow (`A`), polygon (`Shift+P`), polyline (`Shift+N`), and text (`T`). The active tool is highlighted. `V` returns to selection; Escape cancels an unfinished drawing. Click a line or arrow's start and then its end. Draw a text box and type on the page; double-click an existing Drawbridge text annotation to edit it.
+
+Select Drawbridge markups to move them, change their color or line weight, or delete them. Polygon and polyline handles follow their vertices. Polygons support fill; polylines remain open lines. Use `Cmd+Z` to undo and `Shift+Cmd+Z` to redo. Imported annotations are displayed and preserved but are not editable through these tools. Measurement, snapshot pasting, page-combining, and page-conversion tools are not yet available.
+
+## Print (next build)
+
+Choose **File > Print…** (`Cmd+P`) for the document, or **File > Print Current Sheet…** to start with the displayed sheet's page range. The native macOS dialog lets you change the range, paper size, orientation, and scale and save print output as a PDF.
+
+Printing starts at **100% actual size**, without automatic rotation or resizing. Check the dialog preview and choose sufficiently large paper or adjust scaling for smaller paper. Print output includes annotations marked for printing, including unsaved Drawbridge markups. It does not save or change the open PDF. **View > Invert** changes only the on-screen colors; printing uses the original colors.
 
 ## Flatten Existing Markups
 

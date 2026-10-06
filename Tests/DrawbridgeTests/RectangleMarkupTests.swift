@@ -320,33 +320,42 @@ final class RectangleMarkupTests: XCTestCase {
             }
             finalPage.annotations.filter(RectangleMarkupRecord.owns).forEach(finalPage.removeAnnotation)
             page.annotations.filter(RectangleMarkupRecord.owns).forEach(page.removeAnnotation)
-            XCTAssertEqual(try thumbnailPixels(finalPage, size: NSSize(width: 800, height: 800)),
-                           try thumbnailPixels(page, size: NSSize(width: 800, height: 800)))
+            XCTAssertEqual(try renderedPixels(finalPage, size: NSSize(width: 800, height: 800)),
+                           try renderedPixels(page, size: NSSize(width: 800, height: 800)))
             XCTAssertEqual(try Data(contentsOf: source), originalBytes)
         }
     }
 
-    private struct ThumbnailPixels: Equatable {
+    private struct RenderedPixels: Equatable {
         let width: Int
         let height: Int
         let bytes: Data
     }
 
-    private func thumbnailPixels(_ page: PDFPage, size: NSSize) throws -> ThumbnailPixels {
-        let image = try XCTUnwrap(page.thumbnail(of: size, for: .cropBox).cgImage(forProposedRect: nil, context: nil, hints: nil))
-        var bytes = Data(count: image.width * image.height * 4)
+    private func renderedPixels(_ page: PDFPage, size: NSSize) throws -> RenderedPixels {
+        let bounds = page.bounds(for: .cropBox)
+        let sideways = page.rotation % 180 != 0
+        let pageWidth = sideways ? bounds.height : bounds.width
+        let pageHeight = sideways ? bounds.width : bounds.height
+        let scale = min(size.width / pageWidth, size.height / pageHeight)
+        let width = Int(ceil(pageWidth * scale)), height = Int(ceil(pageHeight * scale))
+        var bytes = Data(count: width * height * 4)
         let drawn = bytes.withUnsafeMutableBytes { storage -> Bool in
-            guard let context = CGContext(data: storage.baseAddress, width: image.width, height: image.height,
-                                          bitsPerComponent: 8, bytesPerRow: image.width * 4,
+            guard let context = CGContext(data: storage.baseAddress, width: width, height: height,
+                                          bitsPerComponent: 8, bytesPerRow: width * 4,
                                           space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                           bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            context.setFillColor(CGColor(gray: 1, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            context.scaleBy(x: scale, y: scale)
+            // Render current annotation state into a fresh, explicit sRGB context.
+            // Avoid PDFKit thumbnail caching and implicit image color profiles.
+            page.draw(with: .cropBox, to: context)
             return true
         }
         XCTAssertTrue(drawn)
-        // Compare dimensions and rendered pixels, excluding TIFF metadata and
-        // color-profile container differences. No pixel tolerance is allowed.
-        return ThumbnailPixels(width: image.width, height: image.height, bytes: bytes)
+        // Exact dimensions and pixels: no tolerance for moved content.
+        return RenderedPixels(width: width, height: height, bytes: bytes)
     }
 
     private func fixture(rotation: Int, signed: Bool = false, tinyNumber: Bool = false) throws -> URL {
@@ -709,13 +718,13 @@ final class RectangleMarkupTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at:output) }
         XCTAssertTrue(PDFRectangleWriter.write(document:doc,source:source,destination:output,pageLabels:[:],records:[record]))
         let reopened = try XCTUnwrap(PDFDocument(url:output)), savedPage = try XCTUnwrap(reopened.page(at:0))
-        let original = try thumbnailPixels(page, size: NSSize(width:1040, height:660))
-        let saved = try thumbnailPixels(savedPage, size: NSSize(width:1040, height:660))
+        let original = try renderedPixels(page, size: NSSize(width:1040, height:660))
+        let saved = try renderedPixels(savedPage, size: NSSize(width:1040, height:660))
         savedPage.annotations.filter { RectangleMarkupRecord.owns($0) }.forEach { savedPage.removeAnnotation($0) }
-        let withoutMarkup = try thumbnailPixels(savedPage, size: NSSize(width:1040, height:660))
+        let withoutMarkup = try renderedPixels(savedPage, size: NSSize(width:1040, height:660))
         XCTAssertNotEqual(saved,withoutMarkup, "Saved text must render visible pixels")
         page.annotations.filter { RectangleMarkupRecord.owns($0) }.forEach { page.removeAnnotation($0) }
-        XCTAssertEqual(withoutMarkup,try thumbnailPixels(page, size: NSSize(width:1040, height:660)))
+        XCTAssertEqual(withoutMarkup,try renderedPixels(page, size: NSSize(width:1040, height:660)))
         XCTAssertEqual(original.width, saved.width)
     }
 
