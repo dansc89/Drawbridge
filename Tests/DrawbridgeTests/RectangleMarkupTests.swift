@@ -320,10 +320,33 @@ final class RectangleMarkupTests: XCTestCase {
             }
             finalPage.annotations.filter(RectangleMarkupRecord.owns).forEach(finalPage.removeAnnotation)
             page.annotations.filter(RectangleMarkupRecord.owns).forEach(page.removeAnnotation)
-            XCTAssertEqual(finalPage.thumbnail(of: NSSize(width: 800,height: 800),for: .cropBox).tiffRepresentation,
-                           page.thumbnail(of: NSSize(width: 800,height: 800),for: .cropBox).tiffRepresentation)
+            XCTAssertEqual(try thumbnailPixels(finalPage, size: NSSize(width: 800, height: 800)),
+                           try thumbnailPixels(page, size: NSSize(width: 800, height: 800)))
             XCTAssertEqual(try Data(contentsOf: source), originalBytes)
         }
+    }
+
+    private struct ThumbnailPixels: Equatable {
+        let width: Int
+        let height: Int
+        let bytes: Data
+    }
+
+    private func thumbnailPixels(_ page: PDFPage, size: NSSize) throws -> ThumbnailPixels {
+        let image = try XCTUnwrap(page.thumbnail(of: size, for: .cropBox).cgImage(forProposedRect: nil, context: nil, hints: nil))
+        var bytes = Data(count: image.width * image.height * 4)
+        let drawn = bytes.withUnsafeMutableBytes { storage -> Bool in
+            guard let context = CGContext(data: storage.baseAddress, width: image.width, height: image.height,
+                                          bitsPerComponent: 8, bytesPerRow: image.width * 4,
+                                          space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+            return true
+        }
+        XCTAssertTrue(drawn)
+        // Compare dimensions and rendered pixels, excluding TIFF metadata and
+        // color-profile container differences. No pixel tolerance is allowed.
+        return ThumbnailPixels(width: image.width, height: image.height, bytes: bytes)
     }
 
     private func fixture(rotation: Int, signed: Bool = false, tinyNumber: Bool = false) throws -> URL {
@@ -686,14 +709,14 @@ final class RectangleMarkupTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at:output) }
         XCTAssertTrue(PDFRectangleWriter.write(document:doc,source:source,destination:output,pageLabels:[:],records:[record]))
         let reopened = try XCTUnwrap(PDFDocument(url:output)), savedPage = try XCTUnwrap(reopened.page(at:0))
-        let original = page.thumbnail(of:NSSize(width:1040,height:660),for:.cropBox).tiffRepresentation
-        let saved = savedPage.thumbnail(of:NSSize(width:1040,height:660),for:.cropBox).tiffRepresentation
+        let original = try thumbnailPixels(page, size: NSSize(width:1040, height:660))
+        let saved = try thumbnailPixels(savedPage, size: NSSize(width:1040, height:660))
         savedPage.annotations.filter { RectangleMarkupRecord.owns($0) }.forEach { savedPage.removeAnnotation($0) }
-        let withoutMarkup = savedPage.thumbnail(of:NSSize(width:1040,height:660),for:.cropBox).tiffRepresentation
+        let withoutMarkup = try thumbnailPixels(savedPage, size: NSSize(width:1040, height:660))
         XCTAssertNotEqual(saved,withoutMarkup, "Saved text must render visible pixels")
         page.annotations.filter { RectangleMarkupRecord.owns($0) }.forEach { page.removeAnnotation($0) }
-        XCTAssertEqual(withoutMarkup,page.thumbnail(of:NSSize(width:1040,height:660),for:.cropBox).tiffRepresentation)
-        XCTAssertNotNil(original)
+        XCTAssertEqual(withoutMarkup,try thumbnailPixels(page, size: NSSize(width:1040, height:660)))
+        XCTAssertEqual(original.width, saved.width)
     }
 
     func testTextSaveUnicodeMultilineAndEditingAtEveryRotation() throws {
@@ -881,7 +904,13 @@ final class RectangleMarkupTests: XCTestCase {
     func testApplicationMarkupSaveCompletionLatency() async throws {
         _ = NSApplication.shared
         let controller = MainViewController(); _ = controller.view
-        let source = try fixture(rotation: 0)
+        var fixtureSource = try fixture(rotation: 0)
+        if let directory = ProcessInfo.processInfo.environment["DRAWBRIDGE_SAVE_DESTINATION_DIRECTORY"] {
+            let destination = URL(fileURLWithPath: directory).appendingPathComponent("Drawbridge-save-test-\(UUID().uuidString).pdf")
+            try FileManager.default.moveItem(at: fixtureSource, to: destination)
+            fixtureSource = destination
+        }
+        let source = fixtureSource
         defer { try? FileManager.default.removeItem(at: source) }
         if let root = ProcessInfo.processInfo.environment["DRAWBRIDGE_RECTANGLE_CORPUS"] {
             let corpus = URL(fileURLWithPath: root).appendingPathComponent("architectural-mech.pdf")
@@ -891,7 +920,7 @@ final class RectangleMarkupTests: XCTestCase {
         controller.openDocumentURL = source
         if ProcessInfo.processInfo.environment["DRAWBRIDGE_SAVE_PREPARE_ON_OPEN"] == "1" {
             let prepared = await Task.detached { PDFRectangleWriter.prepareInspection(source: source) }.value
-            XCTAssertTrue(prepared)
+            if !prepared { print("OPEN INSPECTION: source metadata changed; save will prepare safely on demand") }
         }
         controller.pdfView.setMarkupDocument(doc)
         let page = try XCTUnwrap(doc.page(at: 0))

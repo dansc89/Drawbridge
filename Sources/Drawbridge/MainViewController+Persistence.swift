@@ -186,7 +186,22 @@ extension MainViewController {
             var writeElapsed: Double = 0
             var commitElapsed: Double = 0
 
-            if destinationIsFileProvider {
+            if rectangleRecords != nil {
+                // The annotation writer already creates and verifies a local
+                // candidate, then atomically commits it. A second outer stage
+                // duplicated that work and cached inspection under a deleted
+                // temporary URL, making subsequent provider saves cold again.
+                let writeStartedAt = CFAbsoluteTimeGetCurrent()
+                success = Self.writePDFDocument(
+                    documentBox.document,
+                    to: targetURL,
+                    pageLabels: pageLabelsForEmbeddedSave,
+                    navigationSourceURL: navigationSourceURL,
+                    rectangleRecords: rectangleRecords,
+                    rectangleSourceStamp: rectangleSourceStamp
+                )
+                writeElapsed = CFAbsoluteTimeGetCurrent() - writeStartedAt
+            } else if destinationIsFileProvider {
                 // File-provider volumes (iCloud/CloudStorage/Drive) are often very slow when PDFKit writes directly.
                 // Render locally first, then do a single commit to the destination path.
                 let localStagingURL = Self.temporaryLocalSaveURL(for: targetURL)
