@@ -17,6 +17,80 @@ private final class BackgroundPDFDocumentRead: @unchecked Sendable {
 
 @MainActor
 final class RectangleMarkupTests: XCTestCase {
+    func testQueuedSavePersistsEditsMadeAfterFirstSaveSnapshot() async throws {
+        _ = NSApplication.shared
+        let source = try fixture(rotation: 0)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source))
+        let page = try XCTUnwrap(document.page(at: 0))
+        let controller = MainViewController(); _ = controller.view
+        controller.openDocumentURL = source
+        controller.pdfView.setMarkupDocument(document)
+        let session = controller.pdfView.rectangleMarkup
+        // Model an edit arriving after capture, independent of UI lock timing.
+        session.canEdit = { true }
+        _ = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 100, y: 100, width: 40, height: 40)))
+        let saved = await withCheckedContinuation { continuation in
+            controller.persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…", showBusyOverlay: false) {
+                continuation.resume(returning: $0)
+            }
+            _ = session.create(on: page, bounds: CGRect(x: 200, y: 100, width: 40, height: 40))
+            controller.persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…", showBusyOverlay: false)
+            XCTAssertTrue(controller.queuedFastEmbeddedSave)
+        }
+        XCTAssertTrue(saved)
+        let deadline = Date().addingTimeInterval(5)
+        while controller.isSavingDocumentOperation, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(controller.isSavingDocumentOperation)
+        XCTAssertFalse(controller.queuedFastEmbeddedSave)
+        XCTAssertFalse(session.hasUnsavedChanges)
+        let reopened = try XCTUnwrap(PDFDocument(url: source))
+        XCTAssertEqual(RectangleMarkupRecord.capture(reopened), RectangleMarkupRecord.capture(document))
+        XCTAssertEqual(RectangleMarkupRecord.capture(reopened).count, 2)
+    }
+
+    func testPointerPreviewsDoNotRefreshToolbarUntilCommit() throws {
+        _ = NSApplication.shared
+        let source = try fixture(rotation: 0)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source))
+        let page = try XCTUnwrap(document.page(at: 0))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = MarkupPDFView(frame: window.contentView!.bounds)
+        window.contentView?.addSubview(view)
+        view.document = document
+        window.layoutIfNeeded(); view.layoutSubtreeIfNeeded()
+        let session = view.rectangleMarkup
+        session.bind(to: document)
+        let crop = page.bounds(for: view.displayBox)
+        let start = view.convert(CGPoint(x: crop.midX - 50, y: crop.midY - 40), from: page)
+        let end = view.convert(CGPoint(x: crop.midX + 50, y: crop.midY + 40), from: page)
+        var toolbarRefreshes = 0
+        session.onPresentationChanged = { toolbarRefreshes += 1 }
+        for tool in [RectangleMarkupController.Tool.line, .arrow, .rectangle, .ellipse, .polyline, .polygon] {
+            session.tool = tool
+            XCTAssertTrue(session.pointerDown(at: start))
+            toolbarRefreshes = 0
+            for _ in 0..<100 {
+                if tool == .rectangle || tool == .ellipse {
+                    XCTAssertTrue(session.pointerDragged(at: end))
+                } else { session.pointerMoved(at: end) }
+            }
+            XCTAssertEqual(toolbarRefreshes, 0, "Geometry-only previews should not redraw toolbar controls")
+            if tool == .line || tool == .arrow {
+                XCTAssertTrue(session.pointerDown(at: end))
+                XCTAssertGreaterThan(toolbarRefreshes, 0)
+                XCTAssertEqual(session.tool, .select)
+            } else if tool == .rectangle || tool == .ellipse {
+                XCTAssertTrue(session.pointerUp(at: end))
+                XCTAssertGreaterThan(toolbarRefreshes, 0)
+            }
+            session.escape()
+        }
+    }
+
     func testLineAndArrowUseTwoClicksAndEscapeCancelsDraft() throws {
         _ = NSApplication.shared
         for rotation in [0, 90, 180, 270] {

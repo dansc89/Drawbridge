@@ -91,21 +91,16 @@ struct RectangleMarkupRecord: Sendable, Equatable {
         // PDF editors may preserve /T when duplicating a markup. Give each owned
         // annotation its own identity without changing its appearance or geometry.
         var seen = Set<String>()
-        for index in 0..<document.pageCount {
-            for annotation in document.page(at: index)?.annotations ?? [] where owns(annotation) {
-                guard let identifier = annotation.userName else { continue }
-                if !seen.insert(identifier).inserted {
-                    let replacement = prefix + UUID().uuidString
-                    annotation.setValue(replacement, forAnnotationKey: PDFAnnotationKey(rawValue: "/T"))
-                    annotation.setValue(replacement, forAnnotationKey: PDFAnnotationKey(rawValue: "/NM"))
-                    seen.insert(replacement)
-                }
-            }
-        }
         return (0..<document.pageCount).flatMap { index in
             document.page(at: index)?.annotations.compactMap { annotation -> Self? in
-                guard owns(annotation), let id = annotation.userName,
-                      let rgb = markupColor(annotation).usingColorSpace(.deviceRGB) else { return nil }
+                guard owns(annotation), var id = annotation.userName else { return nil }
+                if !seen.insert(id).inserted {
+                    id = prefix + UUID().uuidString
+                    annotation.setValue(id, forAnnotationKey: PDFAnnotationKey(rawValue: "/T"))
+                    annotation.setValue(id, forAnnotationKey: PDFAnnotationKey(rawValue: "/NM"))
+                    seen.insert(id)
+                }
+                guard let rgb = markupColor(annotation).usingColorSpace(.deviceRGB) else { return nil }
                 var record = Self(id: id, pageIndex: index, bounds: annotation.bounds,
                             red: Double(rgb.redComponent), green: Double(rgb.greenComponent), blue: Double(rgb.blueComponent),
                             lineWidth: Double(annotation.border?.lineWidth ?? 2))
@@ -330,10 +325,10 @@ final class RectangleMarkupController {
             let end = Self.clamped(view.convert(location, to: draft.page), to: draft.page.bounds(for: view.displayBox))
             previewEndpoints = (draft.start, end)
             preview = (draft.page, Self.lineBounds(draft.start, end, width: lineWidth))
-            refresh(); return
+            refresh(presentationChanged: false); return
         }
         guard let view, let page = polylinePage else { return }
-        polylineHover = Self.clamped(view.convert(location,to:page),to:page.bounds(for:view.displayBox)); refresh()
+        polylineHover = Self.clamped(view.convert(location,to:page),to:page.bounds(for:view.displayBox)); refresh(presentationChanged: false)
     }
     @discardableResult
     func finishPolyline() -> Bool {
@@ -399,7 +394,7 @@ final class RectangleMarkupController {
                 preview = (page, original.offsetBy(dx: dx, dy: dy))
             }
         }
-        refresh(); return true
+        refresh(presentationChanged: false); return true
     }
 
     func pointerUp(at location: CGPoint) -> Bool {
@@ -664,7 +659,7 @@ final class RectangleMarkupController {
 
     func cancelGesture() { pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
     func escape() { cancelGesture(); selected = nil; tool = .select; refresh() }
-    func refresh() {
+    func refresh(presentationChanged: Bool = true) {
         positionTextEditor()
         CATransaction.begin(); CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
@@ -707,7 +702,10 @@ final class RectangleMarkupController {
             }
             if tool == .polygon { path.closeSubpath() }
         }
-        overlay.path = path; onPresentationChanged?()
+        overlay.path = path
+        // Pointer previews change geometry only. Toolbar state changes on tool,
+        // selection, style, and committed edits, rather than every mouse event.
+        if presentationChanged { onPresentationChanged?() }
     }
 
     private func handlePoint(_ corner: Corner, annotation: PDFAnnotation) -> CGPoint {

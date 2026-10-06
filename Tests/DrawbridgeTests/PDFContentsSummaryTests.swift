@@ -13,6 +13,30 @@ private final class SummaryCountingPage: PDFPage {
 
 @MainActor
 final class PDFContentsSummaryTests: XCTestCase {
+    func testSaveCaptureReadsEachPageOnceAndRepairsDuplicateMarkupIdentities() throws {
+        let document = PDFDocument()
+        var pages: [SummaryCountingPage] = []
+        for index in 0..<80 {
+            let page = SummaryCountingPage()
+            for _ in 0..<100 {
+                page.addAnnotation(PDFAnnotation(bounds: CGRect(x: 10, y: 10, width: 20, height: 20), forType: .square, withProperties: nil))
+            }
+            let owned = PDFAnnotation(bounds: CGRect(x: 30, y: 30, width: 20, height: 20), forType: .square, withProperties: nil)
+            owned.userName = RectangleMarkupRecord.prefix + "duplicate"
+            page.addAnnotation(owned)
+            document.insert(page, at: index)
+            page.annotationReads = 0
+            pages.append(page)
+        }
+        let records = RectangleMarkupRecord.capture(document)
+        XCTAssertEqual(records.count, 80)
+        XCTAssertEqual(Set(records.map(\.id)).count, 80)
+        XCTAssertEqual(records.map(\.pageIndex), Array(0..<80))
+        XCTAssertTrue(pages.allSatisfy { $0.annotationReads == 1 })
+        XCTAssertEqual(RectangleMarkupRecord.capture(document), records)
+        XCTAssertTrue(pages.allSatisfy { $0.annotations.count == 101 })
+    }
+
     private func summary(in view: NSView) -> String? {
         if let text = view as? NSTextField, text.stringValue.hasPrefix("Pages:") { return text.stringValue }
         return view.subviews.lazy.compactMap { self.summary(in: $0) }.first

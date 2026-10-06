@@ -132,6 +132,7 @@ extension MainViewController {
             completion?(false)
             return
         }
+        let saveSpan = PerformanceMetrics.begin("save_pdf", thresholdMs: 150)
         pdfView.rectangleMarkup.finishTextEditing()
         let startedMarkupVersion = markupChangeVersion
         let savingDocumentID = ObjectIdentifier(document)
@@ -165,7 +166,9 @@ extension MainViewController {
         }()
         let startedAt = CFAbsoluteTimeGetCurrent()
         let rectangleSourceStamp = pdfView.rectangleMarkup.sourceStamp
+        let captureStartedAt = CFAbsoluteTimeGetCurrent()
         let capturedRectangles = RectangleMarkupRecord.capture(document)
+        let captureElapsed = CFAbsoluteTimeGetCurrent() - captureStartedAt
         let rectangleRecords: [RectangleMarkupRecord]? = (pdfView.rectangleMarkup.hasUnsavedChanges || !capturedRectangles.isEmpty) ? capturedRectangles : nil
         pdfView.rectangleMarkup.cancelGesture()
         refreshRectangleToolbar()
@@ -200,8 +203,9 @@ extension MainViewController {
 
                 if success {
                     if showBusyOverlay {
+                        let completedWriteElapsed = writeElapsed
                         Task { @MainActor [weak self] in
-                            self?.saveGenerateElapsed = writeElapsed
+                            self?.saveGenerateElapsed = completedWriteElapsed
                             self?.updateSaveProgressPhase("Committing")
                         }
                     }
@@ -252,8 +256,9 @@ extension MainViewController {
                     writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
                     if success {
                         if showBusyOverlay {
+                            let completedWriteElapsed = writeElapsed
                             Task { @MainActor [weak self] in
-                                self?.saveGenerateElapsed = writeElapsed
+                                self?.saveGenerateElapsed = completedWriteElapsed
                                 self?.updateSaveProgressPhase("Committing")
                             }
                         }
@@ -326,6 +331,14 @@ extension MainViewController {
                 let currentURL = self.openDocumentURL.map { self.canonicalDocumentURL($0) }
                 let saveContextStillActive = (currentDocumentID == savingDocumentID) && (currentURL == canonicalTargetURL)
                 defer {
+                    PerformanceMetrics.end(saveSpan, extra: [
+                        "result": success ? "ok" : "failed",
+                        "capture_ms": String(format: "%.2f", captureElapsed * 1000),
+                        "write_ms": String(format: "%.2f", writeElapsed * 1000),
+                        "commit_ms": String(format: "%.2f", commitElapsed * 1000),
+                        "markups": "\(capturedRectangles.count)",
+                        "file_provider": destinationIsFileProvider ? "1" : "0"
+                    ])
                     if showBusyOverlay {
                         self.stopSaveProgressTracking()
                         self.endBusyIndicator()
@@ -334,8 +347,10 @@ extension MainViewController {
                     self.updateStatusBar()
                     self.persistenceCoordinator.endManualSave {
                         self.scheduleAutosave()
-                        self.runQueuedFastEmbeddedSaveIfNeeded()
                     }
+                    // Explicit Save requests must drain even when no sidecar
+                    // autosave was queued (new vector markup skips sidecars).
+                    self.runQueuedFastEmbeddedSaveIfNeeded()
                 }
 
                 self.saveGenerateElapsed = writeElapsed
@@ -691,6 +706,8 @@ extension MainViewController {
     private func runQueuedFastEmbeddedSaveIfNeeded() {
         guard queuedFastEmbeddedSave else { return }
         queuedFastEmbeddedSave = false
+        // Repeated Cmd+S with no later edits needs no second PDF write.
+        guard pdfView.rectangleMarkup.hasUnsavedChanges || markupChangeVersion > 0 else { return }
         guard let document = pdfView.document,
               let sourceURL = openDocumentURL else { return }
         persistDocument(
