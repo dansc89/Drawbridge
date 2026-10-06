@@ -2019,6 +2019,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
+        toolbar.centeredItemIdentifiers = [.drawbridgeMarkupControls]
         return toolbar
     }
 
