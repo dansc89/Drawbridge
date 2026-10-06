@@ -41,7 +41,7 @@ enum PDFTKBookmarkWriter {
                   JSONSerialization.isValidJSONObject(json) else {
                 return .unavailable
             }
-            try JSONSerialization.data(withJSONObject: json).write(to: jsonURL, options: .atomic)
+            try PDFJSONPatchEncoder.data(withJSONObject: json).write(to: jsonURL, options: .atomic)
             guard run(executable, arguments: [sourceURL.path, "--stream-data=preserve", "--update-from-json=\(jsonURL.path)", outputURL.path]),
                   FileManager.default.fileExists(atPath: outputURL.path) else {
                 return .unavailable

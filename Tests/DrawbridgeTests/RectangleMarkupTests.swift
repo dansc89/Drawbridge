@@ -148,7 +148,7 @@ final class RectangleMarkupTests: XCTestCase {
 
     func testAllMarkupToolsSurviveFlattenReduceUnflattenAndRepeatedSave() throws {
         for rotation in [0, 90, 180, 270] {
-            let source = try fixture(rotation: rotation)
+            let source = try fixture(rotation: rotation, tinyNumber: true)
             let output = source.appendingPathExtension("workflow.pdf")
             defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
             let originalBytes = try Data(contentsOf: source)
@@ -204,11 +204,11 @@ final class RectangleMarkupTests: XCTestCase {
         }
     }
 
-    private func fixture(rotation: Int, signed: Bool = false) throws -> URL {
+    private func fixture(rotation: Int, signed: Bool = false, tinyNumber: Bool = false) throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("RectangleBase-\(UUID().uuidString).pdf")
         let drawing = "q 0.2 0.4 0.7 rg 110 90 200 100 re f Q\nBT /F1 18 Tf 80 260 Td (ORIGINAL CONTENT) Tj ET\n"
         let objects = [
-            "<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /P (A1.00) >>] >> >>",
+            "<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /P (A1.00) >>] >> \(tinyNumber ? "/DrawbridgePrecisionProbe -0.0000000000000099" : "") >>",
             "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
             "<< /Type /Page /Parent 2 0 R /MediaBox [10 20 610 420] /CropBox [40 50 560 380] /Rotate \(rotation) /Resources << /Font << /F1 6 0 R >> >> /Contents 4 0 R /Annots [5 0 R << /Type /Annot /Subtype /Square /Rect [410 100 450 140] /C [0 0 0] /F 4 /Contents (Imported CAD box) >>] >>",
             "<< /Length \(drawing.utf8.count) >>\nstream\n\(drawing)endstream",

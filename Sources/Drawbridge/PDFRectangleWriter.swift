@@ -64,7 +64,7 @@ enum PDFRectangleWriter {
                 }
                 qpdf[qpdf.count - 1] = objects; metadata["qpdf"] = qpdf
             }
-            try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys]).write(to: patch)
+            try PDFJSONPatchEncoder.data(withJSONObject: metadata, options: [.sortedKeys]).write(to: patch)
             profile("appearance patch")
             let candidate = directory.appendingPathComponent("candidate.pdf")
             guard PDFTKBookmarkWriter.run(executable, arguments: [input.path, "--stream-data=preserve", "--update-from-json=\(patch.path)", candidate.path]) else { return false }

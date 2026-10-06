@@ -44,7 +44,7 @@ enum PDFLosslessReducer {
         var after = try read(output, decoded: false, name: "after.json")
         if try PDFAnnotationFlattener.refreshRecoveryAfterLosslessCompression(before: original, after: &after) {
             let metadata = directory.appendingPathComponent("recovery.json")
-            try JSONSerialization.data(withJSONObject: PDFAnnotationFlattener.metadataJSON(after), options: [.sortedKeys, .withoutEscapingSlashes]).write(to: metadata)
+            try PDFJSONPatchEncoder.data(withJSONObject: PDFAnnotationFlattener.metadataJSON(after), options: [.sortedKeys, .withoutEscapingSlashes]).write(to: metadata)
             let recovered = directory.appendingPathComponent("with-recovery.pdf")
             try run([output.path, "--stream-data=preserve", "--update-from-json=\(metadata.path)", recovered.path])
             try FileManager.default.removeItem(at: output)
