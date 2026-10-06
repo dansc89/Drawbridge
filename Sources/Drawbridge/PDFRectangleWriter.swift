@@ -1,5 +1,6 @@
 import Foundation
 import PDFKit
+import CommonCrypto
 
 /// New markup saves never invoke PDFKit's document renderer. Annotation appearances
 /// are portable Form XObjects; unchanged page content/resources are verified before commit.
@@ -25,7 +26,7 @@ enum PDFRectangleWriter {
             func read(_ url: URL, _ name: String, decoded: Bool = true) throws -> [String: Any] {
                 let json = directory.appendingPathComponent(name)
                 guard PDFTKBookmarkWriter.run(executable, arguments: ["--json=2", "--json-stream-data=inline", "--decode-level=\(decoded ? "generalized" : "none")", url.path, json.path]),
-                      let result = try JSONSerialization.jsonObject(with: Data(contentsOf: json)) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
+                      let result = try JSONSerialization.jsonObject(with: Self.compactStreamJSON(Data(contentsOf: json))) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
                 return result
             }
             profile("source snapshot")
@@ -56,11 +57,20 @@ enum PDFRectangleWriter {
             var metadata = PDFAnnotationFlattener.metadataJSON(json)
             if var qpdf = metadata["qpdf"] as? [[String: Any]], var objects = qpdf.last,
                let originalObjects = (json["qpdf"] as? [[String: Any]])?.last {
+                let sourceObjects = try objectTable(inspected)
                 for (key, entry) in originalObjects {
-                    if let stream = (entry as? [String: Any])?["stream"] as? [String: Any],
+                    if sourceObjects[key] == nil, let stream = (entry as? [String: Any])?["stream"] as? [String: Any],
                        let dict = stream["dict"] as? [String: Any], dict["/DrawbridgeRectangleAppearance"] as? Bool == true {
                         objects[key] = entry
                     }
+                }
+                // qpdf accepts a partial object patch. Do not serialize thousands
+                // of untouched page/resource objects for a handful of markups.
+                let baseline = PDFAnnotationFlattener.metadataJSON(inspected)
+                let baselineObjects = (baseline["qpdf"] as? [[String: Any]])?.last ?? [:]
+                objects = objects.filter { key, value in
+                    guard let old = baselineObjects[key] as? NSDictionary, let new = value as? NSDictionary else { return true }
+                    return !old.isEqual(new)
                 }
                 qpdf[qpdf.count - 1] = objects; metadata["qpdf"] = qpdf
             }
@@ -73,20 +83,54 @@ enum PDFRectangleWriter {
             // encoded stream bytes, below. Decoding every unchanged image again
             // with --check adds seconds without validating page appearance.
             let written = try read(candidate, "written.json", decoded: false)
+            profile("candidate inspection")
             guard try PDFLosslessReducer.semanticGraphsMatch(originalGraph, removingOwnedRectangles(written)) else { print("Rectangle writer: original content verification failed"); return false }
             guard try ownedRecordsMatch(written, records: records) else { print("Rectangle writer: markup verification failed"); return false }
             guard try Data(contentsOf: source, options: .mappedIfSafe) == original else { print("Rectangle writer: source changed during save"); return false }
             let size = try candidate.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size > 0, size <= original.count + max(5 * 1024 * 1024, records.count * 4096) else { print("Rectangle writer: size limit \(size) vs \(original.count)"); return false }
             profile("candidate verification")
-            let jsonSize = try directory.appendingPathComponent("written.json").resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
-            let cachedBytes = size < MarkupInspectionCache.byteBudget && jsonSize < MarkupInspectionCache.byteBudget - size
-                ? try Data(contentsOf: candidate) : nil
+            let cachedBytes = try Data(contentsOf: candidate, options: .mappedIfSafe)
             try MainViewController.commitStagedSave(from: candidate, to: destination)
             inspectionCache.store(url: destination, bytes: cachedBytes, graph: written)
             profile("commit")
             return true
         } catch { print("Rectangle writer: \(error)"); return false }
+    }
+
+    /// qpdf emits stream payloads as single-line base64 strings. Replace those
+    /// payloads before Foundation parses JSON, so raster bytes never become huge
+    /// bridged strings. PDF dictionary keys begin with /, unlike this qpdf key.
+    static func compactStreamJSON(_ input: Data) throws -> Data {
+        let marker = Data("          \"data\": \"".utf8)
+        let quote = Data([34])
+        var output = Data(), cursor = input.startIndex
+        while let match = input.range(of: marker, in: cursor..<input.endIndex) {
+            let start = match.upperBound
+            guard let end = input.range(of: quote, in: start..<input.endIndex)?.lowerBound,
+                  let bytes = Data(base64Encoded: input.subdata(in: start..<end)) else { throw CocoaError(.fileReadCorruptFile) }
+            output.append(input[cursor..<start])
+            output.append(Data(("sha256:" + streamDigest(bytes)).utf8))
+            cursor = end
+        }
+        output.append(input[cursor..<input.endIndex])
+        return output
+    }
+
+    static func streamDigest(_ bytes: Data) -> String {
+        var context = CC_SHA256_CTX()
+        CC_SHA256_Init(&context)
+        bytes.withUnsafeBytes { buffer in
+            var offset = 0
+            while offset < bytes.count {
+                let count = min(bytes.count - offset, 1024 * 1024)
+                CC_SHA256_Update(&context, buffer.baseAddress!.advanced(by: offset), CC_LONG(count))
+                offset += count
+            }
+        }
+        var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+        CC_SHA256_Final(&digest, &context)
+        return Data(digest).base64EncodedString()
     }
 
     static func removingOwnedRectangles(_ source: [String: Any]) throws -> [String: Any] {
@@ -245,7 +289,7 @@ private final class MarkupInspectionCache: @unchecked Sendable {
     static let byteBudget = 96 * 1024 * 1024
     private struct Entry {
         let url: URL
-        let bytes: Data
+        let digest: String
         let graph: [String: Any]
         let token: UUID
     }
@@ -254,16 +298,18 @@ private final class MarkupInspectionCache: @unchecked Sendable {
 
     func graph(for url: URL, bytes: Data) -> [String: Any]? {
         lock.lock(); defer { lock.unlock() }
-        guard let entry, entry.url == url.standardizedFileURL, entry.bytes == bytes else { return nil }
+        guard let entry, entry.url == url.standardizedFileURL, entry.digest == PDFRectangleWriter.streamDigest(bytes) else { return nil }
         return entry.graph
     }
 
     func store(url: URL, bytes: Data?, graph: [String: Any]) {
         let token = UUID()
+        let retainedBytes = (try? JSONSerialization.data(withJSONObject: graph).count) ?? Int.max
+        let cacheableBytes = retainedBytes <= Self.byteBudget ? bytes : nil
         lock.lock()
-        entry = bytes.map { Entry(url: url.standardizedFileURL, bytes: $0, graph: graph, token: token) }
+        entry = cacheableBytes.map { Entry(url: url.standardizedFileURL, digest: PDFRectangleWriter.streamDigest($0), graph: graph, token: token) }
         lock.unlock()
-        guard bytes != nil else { return }
+        guard cacheableBytes != nil else { return }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 60) { [weak self] in
             guard let self else { return }
             self.lock.lock(); defer { self.lock.unlock() }

@@ -748,6 +748,17 @@ final class RectangleMarkupTests: XCTestCase {
         XCTAssertFalse(try PDFLosslessReducer.semanticGraphsMatch(graph(true), graph(1)))
     }
 
+    func testCompactStreamVerificationDetectsChangedBytes() throws {
+        func compact(_ bytes: Data) throws -> [String: Any] {
+            let json = "{\"qpdf\":[{}, {\"trailer\":{\"value\":{\"/Root\":\"1 0 R\"}},\"obj:1 0 R\":{\"stream\":{\"dict\":{},\n          \"data\": \"" + bytes.base64EncodedString() + "\"}}}]}"
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: PDFRectangleWriter.compactStreamJSON(Data(json.utf8))) as? [String: Any])
+        }
+        let source = try compact(Data([0, 1, 2, 255]))
+        XCTAssertTrue(try PDFLosslessReducer.semanticGraphsMatch(source, compact(Data([0, 1, 2, 255]))))
+        XCTAssertFalse(try PDFLosslessReducer.semanticGraphsMatch(source, compact(Data([0, 1, 3, 255]))))
+        XCTAssertThrowsError(try PDFRectangleWriter.compactStreamJSON(Data("{\n          \"data\": \"invalid!\"}".utf8)))
+    }
+
     func testArchitecturalCorpusPreservation() throws {
         guard let root = ProcessInfo.processInfo.environment["DRAWBRIDGE_RECTANGLE_CORPUS"] else { throw XCTSkip("Optional architectural corpus") }
         for name in ["architectural-mech", "civil-marked"] {
@@ -785,8 +796,11 @@ final class RectangleMarkupTests: XCTestCase {
         let page = try XCTUnwrap(doc.page(at: 0))
         let originalCount = RectangleMarkupRecord.capture(doc).count
         let originalSize = try Data(contentsOf: source).count
+        let additionsPerPass = ProcessInfo.processInfo.environment["DRAWBRIDGE_SAVE_SIX_MARKUPS"] == "1" ? 6 : 1
         for pass in 1...3 {
-            _ = try XCTUnwrap(controller.pdfView.rectangleMarkup.create(on: page, bounds: CGRect(x: 100 + pass * 10,y: 100,width: 80,height: 60)))
+            for addition in 0..<additionsPerPass {
+                _ = try XCTUnwrap(controller.pdfView.rectangleMarkup.create(on: page, bounds: CGRect(x: 100 + pass * 10 + addition,y: 100,width: 80,height: 60)))
+            }
             let expected = RectangleMarkupRecord.capture(doc)
             let start = Date()
             let saved = await withCheckedContinuation { continuation in
@@ -801,8 +815,11 @@ final class RectangleMarkupTests: XCTestCase {
             print("APPLICATION SAVE COMPLETION (pass \(pass)): \(Date().timeIntervalSince(start))s")
             let reopened = try XCTUnwrap(PDFDocument(url: source))
             XCTAssertEqual(RectangleMarkupRecord.capture(reopened), expected)
-            XCTAssertEqual(expected.count, originalCount + pass)
+            XCTAssertEqual(expected.count, originalCount + pass * additionsPerPass)
             XCTAssertLessThan(try Data(contentsOf: source).count, originalSize + 200_000)
+        }
+        if let root = ProcessInfo.processInfo.environment["DRAWBRIDGE_RECTANGLE_CORPUS"] {
+            try Data(contentsOf: source).write(to: URL(fileURLWithPath: root).appendingPathComponent("six-markup-saved.pdf"))
         }
     }
 
