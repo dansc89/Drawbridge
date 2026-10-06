@@ -271,6 +271,28 @@ final class RectangleMarkupTests: XCTestCase {
         try data.write(to: url); return url
     }
 
+    func testIncrementalSaveOfCompressedObjectPDFReopensInAppleReader() throws {
+        guard let executable = PDFTKBookmarkWriter.executableURL() else { throw XCTSkip("qpdf required") }
+        let fixture = try fixture(rotation: 90)
+        let source = fixture.deletingLastPathComponent().appendingPathComponent("Compressed-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: fixture); try? FileManager.default.removeItem(at: source) }
+        XCTAssertTrue(PDFTKBookmarkWriter.run(executable, arguments: ["--object-streams=generate", fixture.path, source.path]))
+        let original = try Data(contentsOf: source)
+        let document = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(document.page(at: 0))
+        let session = RectangleMarkupController(); session.bind(to: document)
+        _ = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 120,y: 150,width: 100,height: 70), kind: .text, text: "Café — 检查尺寸"))
+        let records = RectangleMarkupRecord.capture(document)
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: source, pageLabels: [:], records: records))
+        let firstSave = try Data(contentsOf: source)
+        XCTAssertEqual(firstSave.prefix(original.count), original)
+        let reopened = try XCTUnwrap(PDFDocument(url: source))
+        XCTAssertEqual(RectangleMarkupRecord.capture(reopened), records)
+        XCTAssertEqual(reopened.page(at: 0)?.rotation, 90)
+        XCTAssertEqual(reopened.string, document.string)
+        XCTAssertTrue(PDFRectangleWriter.write(document: reopened, source: source, destination: source, pageLabels: [:], records: records))
+        XCTAssertEqual(try Data(contentsOf: source), firstSave, "Saving unchanged markups must not grow the PDF")
+    }
+
     func testAnnotationOnlySavePreservesGeometryTextLinksAndImportedDirectAnnotations() throws {
         guard PDFTKBookmarkWriter.executableURL() != nil else { throw XCTSkip("qpdf required") }
         for rotation in [0,90,180,270] {
@@ -286,6 +308,7 @@ final class RectangleMarkupTests: XCTestCase {
             defer { try? FileManager.default.removeItem(at:output) }
             XCTAssertTrue(MainViewController.writePDFDocument(doc,to:output,pageLabels:[0:"A1.00"],navigationSourceURL:source,rectangleRecords:records))
             XCTAssertEqual(try Data(contentsOf:source),original)
+            XCTAssertEqual(try Data(contentsOf: output).prefix(original.count), original)
             let reopened = try XCTUnwrap(PDFDocument(url:output)); let writtenPage = try XCTUnwrap(reopened.page(at:0))
             XCTAssertEqual(writtenPage.rotation,rotation)
             XCTAssertEqual(writtenPage.bounds(for:.mediaBox),page.bounds(for:.mediaBox))

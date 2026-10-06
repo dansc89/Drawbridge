@@ -25,8 +25,8 @@ enum PDFRectangleWriter {
             try original.write(to: input)
             func read(_ url: URL, _ name: String, decoded: Bool = true) throws -> [String: Any] {
                 let json = directory.appendingPathComponent(name)
-                guard PDFTKBookmarkWriter.run(executable, arguments: ["--json=2", "--json-stream-data=inline", "--decode-level=\(decoded ? "generalized" : "none")", url.path, json.path]),
-                      let result = try JSONSerialization.jsonObject(with: Self.compactStreamJSON(Data(contentsOf: json))) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
+                guard PDFTKBookmarkWriter.run(executable, arguments: ["--json=2", "--json-stream-data=none", "--decode-level=\(decoded ? "generalized" : "none")", url.path, json.path]),
+                      let result = try JSONSerialization.jsonObject(with: Data(contentsOf: json)) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
                 return result
             }
             profile("source snapshot")
@@ -46,56 +46,57 @@ enum PDFRectangleWriter {
             }) else { return false }
             // Apply navigation and markups in one object patch. Previously this
             // saved a whole intermediate PDF and read its streams twice again.
-            // Preserve encoded streams exactly; verification includes their bytes.
+            // Preserve the entire original byte prefix, including every stream.
             var json = inspected
             guard PDFTKBookmarkWriter.updateNavigationJSON(&json, from: document, pageLabels: pageLabels) else { return false }
             let originalGraph = try removingOwnedRectangles(json)
             profile("baseline verification graph")
             try update(&json, records: records)
-            let patch = directory.appendingPathComponent("rectangles.json")
-            // Keep original streams in qpdf's input; supply data only for our new appearances.
-            var metadata = PDFAnnotationFlattener.metadataJSON(json)
-            if var qpdf = metadata["qpdf"] as? [[String: Any]], var objects = qpdf.last,
-               let originalObjects = (json["qpdf"] as? [[String: Any]])?.last {
-                let sourceObjects = try objectTable(inspected)
-                for (key, entry) in originalObjects {
-                    if sourceObjects[key] == nil, let stream = (entry as? [String: Any])?["stream"] as? [String: Any],
-                       let dict = stream["dict"] as? [String: Any], dict["/DrawbridgeRectangleAppearance"] as? Bool == true {
-                        objects[key] = entry
-                    }
+            if try ownedRecordsMatch(inspected, records: records),
+               try PDFLosslessReducer.semanticGraphsMatch(inspected, withoutNewStreamData(json)) {
+                guard try Data(contentsOf: source, options: .mappedIfSafe) == original else { return false }
+                if source.standardizedFileURL != destination.standardizedFileURL {
+                    let unchanged = directory.appendingPathComponent("unchanged.pdf")
+                    try original.write(to: unchanged)
+                    try MainViewController.commitStagedSave(from: unchanged, to: destination)
                 }
-                // qpdf accepts a partial object patch. Do not serialize thousands
-                // of untouched page/resource objects for a handful of markups.
-                let baseline = PDFAnnotationFlattener.metadataJSON(inspected)
-                let baselineObjects = (baseline["qpdf"] as? [[String: Any]])?.last ?? [:]
-                objects = objects.filter { key, value in
-                    guard let old = baselineObjects[key] as? NSDictionary, let new = value as? NSDictionary else { return true }
-                    return !old.isEqual(new)
-                }
-                qpdf[qpdf.count - 1] = objects; metadata["qpdf"] = qpdf
+                inspectionCache.store(url: destination, bytes: original, graph: inspected)
+                return true
             }
-            try PDFJSONPatchEncoder.data(withJSONObject: metadata, options: [.sortedKeys]).write(to: patch)
-            profile("appearance patch")
             let candidate = directory.appendingPathComponent("candidate.pdf")
-            guard PDFTKBookmarkWriter.run(executable, arguments: [input.path, "--stream-data=preserve", "--update-from-json=\(patch.path)", candidate.path]) else { return false }
+            try PDFIncrementalMarkupPatch.append(original: original, baseline: inspected, updated: json, to: candidate)
             profile("candidate write")
-            // Reparse the complete output and verify the original graph, including
-            // encoded stream bytes, below. Decoding every unchanged image again
-            // with --check adds seconds without validating page appearance.
+            // Check object relationships without decoding the original images.
             let written = try read(candidate, "written.json", decoded: false)
             profile("candidate inspection")
+            let candidateBytes = try Data(contentsOf: candidate, options: .mappedIfSafe)
+            guard candidateBytes.count >= original.count, candidateBytes.prefix(original.count) == original else { return false }
             guard try PDFLosslessReducer.semanticGraphsMatch(originalGraph, removingOwnedRectangles(written)) else { print("Rectangle writer: original content verification failed"); return false }
             guard try ownedRecordsMatch(written, records: records) else { print("Rectangle writer: markup verification failed"); return false }
+            guard let readable = PDFDocument(url: candidate), readable.pageCount == document.pageCount else {
+                print("Rectangle writer: Apple PDF reader rejected candidate"); return false
+            }
             guard try Data(contentsOf: source, options: .mappedIfSafe) == original else { print("Rectangle writer: source changed during save"); return false }
             let size = try candidate.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size > 0, size <= original.count + max(5 * 1024 * 1024, records.count * 4096) else { print("Rectangle writer: size limit \(size) vs \(original.count)"); return false }
             profile("candidate verification")
-            let cachedBytes = try Data(contentsOf: candidate, options: .mappedIfSafe)
+            let cachedBytes = candidateBytes
             try MainViewController.commitStagedSave(from: candidate, to: destination)
             inspectionCache.store(url: destination, bytes: cachedBytes, graph: written)
             profile("commit")
             return true
         } catch { print("Rectangle writer: \(error)"); return false }
+    }
+
+    private static func withoutNewStreamData(_ source: [String: Any]) -> [String: Any] {
+        var result = source
+        guard var tables = result["qpdf"] as? [[String: Any]], tables.count > 1 else { return result }
+        for key in tables[1].keys {
+            guard var object = tables[1][key] as? [String: Any], var stream = object["stream"] as? [String: Any] else { continue }
+            stream.removeValue(forKey: "data"); object["stream"] = stream; tables[1][key] = object
+        }
+        result["qpdf"] = tables
+        return result
     }
 
     /// qpdf emits stream payloads as single-line base64 strings. Replace those
