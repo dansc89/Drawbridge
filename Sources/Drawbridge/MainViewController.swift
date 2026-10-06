@@ -94,9 +94,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     private let autosaveIntervalSeconds: TimeInterval = 120
     let snapshotStore = ProjectSnapshotStore()
-    private let chromeBackgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1.0)
-    private let panelBackgroundColor = NSColor(calibratedWhite: 0.12, alpha: 1.0)
-    private let sidebarBackgroundColor = NSColor(calibratedWhite: 0.14, alpha: 1.0)
+    private let chromeBackgroundColor = AppAppearance.chrome
+    private let panelBackgroundColor = AppAppearance.panel
+    private let sidebarBackgroundColor = AppAppearance.sidebar
 
     static let defaultsAdaptiveIndexCapEnabledKey = "DrawbridgeAdaptiveIndexCapEnabled"
     static let defaultsIndexCapKey = "DrawbridgeIndexCap"
@@ -516,7 +516,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func setupUI() {
-        view.appearance = NSAppearance(named: .darkAqua)
         view.wantsLayer = true
 
         openButton.title = "Open"
@@ -667,22 +666,28 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func applyAppearanceColors() {
-        if let rootDropView = view as? StartupDropView {
-            rootDropView.wantsLayer = true
-            rootDropView.layer?.backgroundColor = chromeBackgroundColor.cgColor
+        view.effectiveAppearance.performAsCurrentDrawingAppearance {
+            if let rootDropView = view as? StartupDropView {
+                rootDropView.wantsLayer = true
+                rootDropView.layer?.backgroundColor = chromeBackgroundColor.cgColor
+            }
+            view.layer?.backgroundColor = chromeBackgroundColor.cgColor
+            pdfCanvasContainer.layer?.backgroundColor = chromeBackgroundColor.cgColor
+            bookmarksContainer.layer?.backgroundColor = sidebarBackgroundColor.cgColor
+            pagesTableView.backgroundColor = sidebarBackgroundColor
+            bookmarksOutlineView.backgroundColor = sidebarBackgroundColor
+            statusBar.layer?.backgroundColor = panelBackgroundColor.cgColor
+            busyOverlayView.layer?.backgroundColor = panelBackgroundColor.cgColor
+            captureToastView.layer?.backgroundColor = panelBackgroundColor.cgColor
+            emptyStateView.layer?.backgroundColor = panelBackgroundColor.cgColor
+            collapsedSidebarRevealButton.layer?.backgroundColor = panelBackgroundColor.cgColor
+            documentTabsBar.layer?.backgroundColor = panelBackgroundColor.cgColor
+            pdfView.refreshAppearanceColors()
+            view.window?.backgroundColor = chromeBackgroundColor
+            bookmarksContainer.layer?.borderColor = NSColor.separatorColor.cgColor
+            documentTabsBar.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+            refreshRectangleToolbar()
         }
-        view.layer?.backgroundColor = chromeBackgroundColor.cgColor
-        pdfCanvasContainer.layer?.backgroundColor = chromeBackgroundColor.cgColor
-        bookmarksContainer.layer?.backgroundColor = sidebarBackgroundColor.cgColor
-        pagesTableView.backgroundColor = sidebarBackgroundColor
-        bookmarksOutlineView.backgroundColor = sidebarBackgroundColor
-        statusBar.layer?.backgroundColor = panelBackgroundColor.cgColor
-        busyOverlayView.layer?.backgroundColor = panelBackgroundColor.cgColor
-        captureToastView.layer?.backgroundColor = panelBackgroundColor.cgColor
-        emptyStateView.layer?.backgroundColor = panelBackgroundColor.cgColor
-        collapsedSidebarRevealButton.layer?.backgroundColor = panelBackgroundColor.cgColor
-        documentTabsBar.layer?.backgroundColor = panelBackgroundColor.cgColor
-        pdfView.refreshAppearanceColors()
     }
 
     private func applySplitLayoutIfPossible(force: Bool) {

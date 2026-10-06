@@ -349,6 +349,94 @@ final class RectangleMarkupTests: XCTestCase {
         return ThumbnailPixels(width: image.width, height: image.height, bytes: bytes)
     }
 
+    func testFreehandPenGesturePersistenceDeletionUndoAndCancellationAtAllRotations() throws {
+        for rotation in [0, 90, 180, 270] {
+            let source = try fixture(rotation: rotation)
+            defer { try? FileManager.default.removeItem(at: source) }
+            let doc = try XCTUnwrap(PDFDocument(url: source))
+            let page = try XCTUnwrap(doc.page(at: 0))
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+            let view = MarkupPDFView(frame: window.contentView!.bounds)
+            window.contentView?.addSubview(view); view.setMarkupDocument(doc)
+            window.layoutIfNeeded(); view.layoutSubtreeIfNeeded()
+            let session = view.rectangleMarkup
+            session.undo.groupsByEvent = false
+            session.strokeColor = .blue; session.lineWidth = 4; session.tool = .pen
+            let points = [CGPoint(x: 150, y: 150), CGPoint(x: 200, y: 230), CGPoint(x: 270, y: 170)]
+            session.undo.beginUndoGrouping()
+            XCTAssertTrue(session.pointerDown(at: view.convert(points[0], from: page)))
+            XCTAssertTrue(session.pointerDragged(at: view.convert(points[1], from: page)))
+            XCTAssertTrue(session.pointerUp(at: view.convert(points[2], from: page)))
+            session.undo.endUndoGrouping()
+            let ink = try XCTUnwrap(page.annotations.first(where: { RectangleMarkupRecord.owns($0) }))
+            XCTAssertEqual(ink.type, "Ink"); XCTAssertEqual(ink.border?.lineWidth, 4)
+            XCTAssertEqual(RectangleMarkupRecord.vertices(ink).count, 3)
+            XCTAssertEqual(session.tool, .pen)
+            let records = RectangleMarkupRecord.capture(doc)
+            let output = source.deletingLastPathComponent().appendingPathComponent("Pen-\(UUID().uuidString).pdf")
+            defer { try? FileManager.default.removeItem(at: output) }
+            XCTAssertTrue(PDFRectangleWriter.write(document: doc, source: source, destination: output, pageLabels: [:], records: records))
+            let reopened = try XCTUnwrap(PDFDocument(url: output))
+            XCTAssertEqual(RectangleMarkupRecord.capture(reopened), records)
+            XCTAssertEqual(reopened.page(at: 0)?.rotation, rotation)
+            session.tool = .select
+            XCTAssertTrue(session.pointerDown(at: view.convert(points[1], from: page)))
+            _ = session.pointerUp(at: view.convert(points[1], from: page))
+            view.documentView?.needsDisplay = false
+            session.undo.beginUndoGrouping(); session.deleteSelected(); session.undo.endUndoGrouping()
+            XCTAssertTrue(RectangleMarkupRecord.capture(doc).isEmpty)
+            session.undo.undo(); XCTAssertEqual(RectangleMarkupRecord.capture(doc), records)
+            session.undo.redo(); XCTAssertTrue(RectangleMarkupRecord.capture(doc).isEmpty)
+            session.tool = .pen
+            _ = session.pointerDown(at: view.convert(points[0], from: page))
+            _ = session.pointerDragged(at: view.convert(points[1], from: page))
+            session.escape()
+            _ = session.pointerUp(at: view.convert(points[2], from: page))
+            XCTAssertTrue(RectangleMarkupRecord.capture(doc).isEmpty)
+            XCTAssertEqual(page.annotations.count, 2) // imported CAD box and link
+        }
+    }
+
+    func testFreehandPenDenseFractionalStrokeSaves() throws {
+        let source = try fixture(rotation: 0); defer { try? FileManager.default.removeItem(at: source) }
+        let doc = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(doc.page(at: 0))
+        let session = RectangleMarkupController(); session.bind(to: doc)
+        let points = (0..<250).map { CGPoint(x: 100.123456789 + Double($0) * 0.53123456789, y: 200 + sin(Double($0) / 10) * 30.123456789) }
+        _ = try XCTUnwrap(session.createPolyline(on: page, points: points))
+        let out = source.deletingLastPathComponent().appendingPathComponent("DensePen-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: out) }
+        XCTAssertTrue(PDFRectangleWriter.write(document: doc, source: source, destination: out, pageLabels: [:], records: RectangleMarkupRecord.capture(doc)))
+    }
+
+    func testPenSaveOnMinimalPDFWithoutExistingAnnotations() throws {
+        let source = FileManager.default.temporaryDirectory.appendingPathComponent("MinimalPen-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: source) }
+        try Data(base64Encoded: "JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3ggWzAgMCA2MTIgNzkyXSAvUmVzb3VyY2VzIDw8IC9Gb250IDw8IC9GMSA1IDAgUiA+PiA+PiAvQ29udGVudHMgNCAwIFIgPj4KZW5kb2JqCjQgMCBvYmoKPDwgL0xlbmd0aCA5NiA+PgpzdHJlYW0KQlQgL0YxIDI0IFRmIDYwIDcyMCBUZCAoRHJhd2JyaWRnZSB2NS4yIFVzYWJpbGl0eSBUZXN0KSBUaiBFVAowLjggMC44IDAuOCBSRyA1MCA4MCA1MDAgNjAwIHJlIFMKZW5kc3RyZWFtCmVuZG9iago1IDAgb2JqCjw8IC9UeXBlIC9Gb250IC9TdWJ0eXBlIC9UeXBlMSAvQmFzZUZvbnQgL0hlbHZldGljYSA+PgplbmRvYmoKeHJlZgowIDYKMDAwMDAwMDAwMCA2NTUzNSBmIAowMDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAwMDAgbiAKMDAwMDAwMDExNSAwMDAwMCBuIAowMDAwMDAwMjQxIDAwMDAwIG4gCjAwMDAwMDAzODYgMDAwMDAgbiAKdHJhaWxlcgo8PCAvU2l6ZSA2IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgo0NTYKJSVFT0YK")!.write(to: source)
+        let doc = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(doc.page(at: 0))
+        let session = RectangleMarkupController(); session.bind(to: doc)
+        _ = try XCTUnwrap(session.createPolyline(on: page, points: [CGPoint(x: 150, y: 150), CGPoint(x: 200, y: 220)]))
+        XCTAssertTrue(PDFRectangleWriter.write(document: doc, source: source, destination: source, pageLabels: [:], records: RectangleMarkupRecord.capture(doc)))
+    }
+
+    func testProductionPenWorkflowRepeatedBackgroundSaves() async throws {
+        let source = try fixture(rotation: 0); defer { try? FileManager.default.removeItem(at: source) }
+        let doc = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(doc.page(at: 0))
+        let controller = MainViewController(); _ = controller.view
+        controller.openDocumentURL = source; controller.pdfView.setMarkupDocument(doc)
+        let session = controller.pdfView.rectangleMarkup
+        session.rememberSource(source)
+        for iteration in 0..<5 {
+            let points = (0..<60).map { CGPoint(x: 120 + Double($0) * 2.345678901, y: 130 + Double(iteration) * 20 + sin(Double($0)/10) * 10) }
+            _ = try XCTUnwrap(session.createPolyline(on: page, points: points))
+            let saved = await withCheckedContinuation { continuation in
+                controller.persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…", showBusyOverlay: false) { continuation.resume(returning: $0) }
+            }
+            XCTAssertTrue(saved)
+            let reopened = try XCTUnwrap(PDFDocument(url: source))
+            XCTAssertEqual(RectangleMarkupRecord.capture(reopened), RectangleMarkupRecord.capture(doc))
+        }
+    }
+
     private func fixture(rotation: Int, signed: Bool = false, tinyNumber: Bool = false) throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("RectangleBase-\(UUID().uuidString).pdf")
         let drawing = "q 0.2 0.4 0.7 rg 110 90 200 100 re f Q\nBT /F1 18 Tf 80 260 Td (ORIGINAL CONTENT) Tj ET\n"

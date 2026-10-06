@@ -482,7 +482,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     func refreshAppearanceColors() {
         // Core Image inverts in linear light. Near-white becomes a dark surround.
-        backgroundColor = NSColor(calibratedWhite: isColorInverted ? 0.997 : 0.07, alpha: 1.0)
+        backgroundColor = isColorInverted ? NSColor(calibratedWhite: 0.997, alpha: 1.0) : AppAppearance.canvas
     }
 
     /// A screen-only filter. Never mutate a PDF page, annotation, or save payload.
@@ -497,6 +497,29 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         contentFilters = inverted ? [filter!] : []
         refreshAppearanceColors()
         needsDisplay = true
+    }
+
+    /// PDFKit draws pages in nested views/layers; invalidating only PDFView can
+    /// leave a cached annotation image visible after the annotation is removed.
+    func refreshAnnotationRendering(on page: PDFPage) {
+        annotationsChanged(on: page)
+        guard currentPage === page || visiblePages.contains(where: { $0 === page }) else { return }
+        let pageRect = convert(page.bounds(for: displayBox), from: page).insetBy(dx: -4, dy: -4)
+        guard !pageRect.isEmpty, !pageRect.isNull,
+              pageRect.origin.x.isFinite, pageRect.origin.y.isFinite,
+              pageRect.width.isFinite, pageRect.height.isFinite else {
+            needsDisplay = true
+            documentView?.needsDisplay = true
+            return
+        }
+        func invalidate(_ target: NSView) {
+            let localRect = target.convert(pageRect, from: self).intersection(target.bounds)
+            guard !localRect.isEmpty, !localRect.isNull else { return }
+            target.setNeedsDisplay(localRect)
+            target.layer?.setNeedsDisplay(localRect)
+            for child in target.subviews { invalidate(child) }
+        }
+        invalidate(self)
     }
 
     private func installOverscrollClipViewIfNeeded() {

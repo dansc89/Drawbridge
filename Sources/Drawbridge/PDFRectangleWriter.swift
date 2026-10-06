@@ -29,6 +29,9 @@ enum PDFRectangleWriter {
             return true
         } catch { return false }
     }
+    // Keep this verification boundary intact: the packaged production pen-save
+    // workflow regresses when the optimizer folds the writer into its caller.
+    @inline(never)
     static func write(document: PDFDocument, source: URL, destination: URL,
                       pageLabels: [Int: String], records: [RectangleMarkupRecord], expectedSourceStamp: PDFMarkupSourceStamp? = nil) -> Bool {
         guard let executable = PDFTKBookmarkWriter.executableURL(), records.allSatisfy(\.isValid),
