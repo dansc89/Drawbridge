@@ -147,6 +147,7 @@ final class RectangleMarkupController {
     var undo: UndoManager { inlineText?.editor.undoManager ?? view?.window?.undoManager ?? fallbackUndo }
     private(set) var selected: PDFAnnotation?
     private var gesture: Gesture?
+    private var pendingLine: (page: PDFPage, start: CGPoint)?
     private var preview: (PDFPage, CGRect)?
     private var polylinePage: PDFPage?
     private var polylinePoints: [CGPoint] = []
@@ -249,6 +250,23 @@ final class RectangleMarkupController {
         guard let view, canEdit(), let page = view.page(for: location, nearest: false) else { return false }
         bind(to: view.document)
         let point = view.convert(location, to: page)
+        if tool == .line || tool == .arrow {
+            view.setCurrentSelection(nil, animate: false)
+            let endpoint = Self.clamped(point, to: page.bounds(for: view.displayBox))
+            if let draft = pendingLine {
+                guard draft.page === page else { return true }
+                guard hypot(draft.start.x-endpoint.x, draft.start.y-endpoint.y) >= 2 else { return true }
+                let kind: RectangleMarkupRecord.Kind = tool == .arrow ? .arrow : .line
+                if create(on: page, bounds: Self.lineBounds(draft.start, endpoint, width: lineWidth), kind: kind, endpoints: (draft.start, endpoint)) != nil {
+                    tool = .select
+                }
+            } else {
+                pendingLine = (page, endpoint)
+                previewEndpoints = (endpoint, endpoint)
+                preview = (page, Self.lineBounds(endpoint, endpoint, width: lineWidth))
+            }
+            refresh(); return true
+        }
         if tool == .polyline || tool == .polygon {
             view.setCurrentSelection(nil, animate:false)
             guard polylinePage == nil || polylinePage === page else { return true }
@@ -294,6 +312,13 @@ final class RectangleMarkupController {
     }
 
     func pointerMoved(at location: CGPoint) {
+        if let draft = pendingLine, let view {
+            guard view.page(for: location, nearest: false) === draft.page else { return }
+            let end = Self.clamped(view.convert(location, to: draft.page), to: draft.page.bounds(for: view.displayBox))
+            previewEndpoints = (draft.start, end)
+            preview = (draft.page, Self.lineBounds(draft.start, end, width: lineWidth))
+            refresh(); return
+        }
         guard let view, let page = polylinePage else { return }
         polylineHover = Self.clamped(view.convert(location,to:page),to:page.bounds(for:view.displayBox)); refresh()
     }
@@ -319,6 +344,7 @@ final class RectangleMarkupController {
 
     @discardableResult
     func pointerDragged(at location: CGPoint) -> Bool {
+        if pendingLine != nil { pointerMoved(at: location); return true }
         guard let view, let gesture else { return false }
         switch gesture {
         case .vertex(let page, let annotation, let index):
@@ -364,6 +390,7 @@ final class RectangleMarkupController {
     }
 
     func pointerUp(at location: CGPoint) -> Bool {
+        if pendingLine != nil { return true }
         if tool == .polyline || tool == .polygon { return true }
         guard let gesture else { return false }
         _ = pointerDragged(at: location)
@@ -622,7 +649,7 @@ final class RectangleMarkupController {
         hasUnsavedChanges = true; view?.needsDisplay = true; refresh(); onMutation?(page)
     }
 
-    func cancelGesture() { polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
+    func cancelGesture() { pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
     func escape() { cancelGesture(); selected = nil; tool = .select; refresh() }
     func refresh() {
         positionTextEditor()

@@ -846,6 +846,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         mouseTrackingArea = tracking
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
+    }
+
     override func mouseMoved(with event: NSEvent) {
         rectangleMarkup.pointerMoved(at:convert(event.locationInWindow,from:nil))
         lastPointerInView = convert(event.locationInWindow, from: nil)

@@ -17,6 +17,54 @@ private final class BackgroundPDFDocumentRead: @unchecked Sendable {
 
 @MainActor
 final class RectangleMarkupTests: XCTestCase {
+    func testLineAndArrowUseTwoClicksAndEscapeCancelsDraft() throws {
+        _ = NSApplication.shared
+        for rotation in [0, 90, 180, 270] {
+            let source = try fixture(rotation: rotation)
+            defer { try? FileManager.default.removeItem(at: source) }
+            let document = try XCTUnwrap(PDFDocument(url: source))
+            let page = try XCTUnwrap(document.page(at: 0))
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+            let view = MarkupPDFView(frame: window.contentView!.bounds)
+            window.contentView?.addSubview(view)
+            view.document = document; window.layoutIfNeeded(); view.layoutSubtreeIfNeeded()
+            let session = view.rectangleMarkup
+            session.bind(to: document)
+            let crop = page.bounds(for: view.displayBox)
+            let a = CGPoint(x: crop.midX-50, y: crop.midY-40)
+            let b = CGPoint(x: crop.midX+50, y: crop.midY+40)
+            let start = view.convert(a, from: page), end = view.convert(b, from: page)
+            for (key, tool) in [("l", RectangleMarkupController.Tool.line), ("a", .arrow)] {
+                let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: key, charactersIgnoringModifiers: key, isARepeat: false, keyCode: 0))
+                XCTAssertTrue(session.handleToolShortcut(event)); XCTAssertEqual(session.tool, tool)
+                let count = page.annotations.count
+                XCTAssertTrue(session.pointerDown(at: start))
+                XCTAssertTrue(session.pointerUp(at: start))
+                session.pointerMoved(at: end)
+                XCTAssertTrue(session.pointerDragged(at: end))
+                XCTAssertTrue(session.pointerUp(at: end))
+                XCTAssertEqual(page.annotations.count, count, "Releasing the mouse must not finish the draft")
+                XCTAssertTrue(session.pointerDown(at: start))
+                XCTAssertEqual(page.annotations.count, count, "A zero-length second click must not create a markup")
+                XCTAssertTrue(session.pointerDown(at: end))
+                _ = session.pointerUp(at: end)
+                XCTAssertEqual(page.annotations.count, count+1)
+                XCTAssertEqual(session.tool, .select)
+                let annotation = try XCTUnwrap(page.annotations.last)
+                XCTAssertEqual(annotation.endLineStyle, tool == .arrow ? .openArrow : .none)
+                XCTAssertEqual(annotation.bounds.minX+annotation.startPoint.x, a.x, accuracy: 0.001)
+                XCTAssertEqual(annotation.bounds.minY+annotation.startPoint.y, a.y, accuracy: 0.001)
+                XCTAssertEqual(annotation.bounds.minX+annotation.endPoint.x, b.x, accuracy: 0.001)
+                XCTAssertEqual(annotation.bounds.minY+annotation.endPoint.y, b.y, accuracy: 0.001)
+            }
+            session.tool = .line
+            XCTAssertTrue(session.pointerDown(at: start)); _ = session.pointerUp(at: start)
+            let count = page.annotations.count
+            session.escape(); session.pointerMoved(at: end); _ = session.pointerUp(at: end)
+            XCTAssertEqual(session.tool, .select); XCTAssertEqual(page.annotations.count, count)
+        }
+    }
+
     func testShapeHitTestingRejectsEmptyBoundingBoxSpace() throws {
         let source = try fixture(rotation:0); defer { try? FileManager.default.removeItem(at:source) }
         let doc = try XCTUnwrap(PDFDocument(url:source)), page = try XCTUnwrap(doc.page(at:0))
