@@ -815,6 +815,10 @@ final class RectangleMarkupTests: XCTestCase {
         }
         let doc = try XCTUnwrap(PDFDocument(url: source))
         controller.openDocumentURL = source
+        if ProcessInfo.processInfo.environment["DRAWBRIDGE_SAVE_PREPARE_ON_OPEN"] == "1" {
+            let prepared = await Task.detached { PDFRectangleWriter.prepareInspection(source: source) }.value
+            XCTAssertTrue(prepared)
+        }
         controller.pdfView.setMarkupDocument(doc)
         let page = try XCTUnwrap(doc.page(at: 0))
         let originalCount = RectangleMarkupRecord.capture(doc).count
@@ -834,7 +838,9 @@ final class RectangleMarkupTests: XCTestCase {
             XCTAssertTrue(saved)
             XCTAssertFalse(controller.isSavingDocumentOperation)
             XCTAssertFalse(controller.pdfView.rectangleMarkup.hasUnsavedChanges)
-            XCTAssertLessThan(Date().timeIntervalSince(start), 3)
+            let limit = Double(ProcessInfo.processInfo.environment["DRAWBRIDGE_SAVE_LATENCY_LIMIT"] ?? "3") ?? 3
+            let firstLimit = Double(ProcessInfo.processInfo.environment["DRAWBRIDGE_SAVE_INITIAL_LATENCY_LIMIT"] ?? "") ?? limit
+            XCTAssertLessThan(Date().timeIntervalSince(start), pass == 1 ? firstLimit : limit)
             print("APPLICATION SAVE COMPLETION (pass \(pass)): \(Date().timeIntervalSince(start))s")
             let reopened = try XCTUnwrap(PDFDocument(url: source))
             XCTAssertEqual(RectangleMarkupRecord.capture(reopened), expected)
@@ -868,6 +874,97 @@ final class RectangleMarkupTests: XCTestCase {
         XCTAssertEqual(reopened.page(at: 0)?.bounds(for: .cropBox), page.bounds(for: .cropBox))
         XCTAssertEqual(RectangleMarkupRecord.capture(reopened), expected)
         XCTAssertEqual(reopened.string, second.string)
+    }
+
+    func testInspectionCacheRejectsSameSizeInPlaceEditWithRestoredModificationDate() throws {
+        let source = try fixture(rotation: 180)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source)), session = RectangleMarkupController()
+        session.bind(to: document)
+        _ = try XCTUnwrap(session.create(on: document.page(at: 0)!, bounds: CGRect(x: 120,y: 150,width: 80,height: 60)))
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: source, pageLabels: [:], records: RectangleMarkupRecord.capture(document)))
+        // Alter the original page dictionary without replacing the inode or
+        // changing the file size, then restore mtime as some external editors do.
+        let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
+        let sourceStamp = try XCTUnwrap(PDFMarkupSourceStamp.read(source))
+        let bytes = try Data(contentsOf: source)
+        let old = Data("/Rotate 180".utf8), new = Data("/Rotate 270".utf8)
+        let location = try XCTUnwrap(bytes.range(of: old, options: .backwards))
+        let handle = try FileHandle(forWritingTo: source)
+        try handle.seek(toOffset: UInt64(location.lowerBound)); try handle.write(contentsOf: new); try handle.close()
+        try FileManager.default.setAttributes([.modificationDate: attributes[.modificationDate]!], ofItemAtPath: source.path)
+        XCTAssertEqual(try Data(contentsOf: source).count, bytes.count)
+        XCTAssertNotEqual(PDFMarkupSourceStamp.read(source), sourceStamp)
+        XCTAssertFalse(PDFRectangleWriter.write(document: document, source: source, destination: source, pageLabels: [:], records: RectangleMarkupRecord.capture(document), expectedSourceStamp: sourceStamp))
+        let changedDocument = try XCTUnwrap(PDFDocument(data: Data(contentsOf: source))); session.bind(to: changedDocument)
+        _ = try XCTUnwrap(session.create(on: changedDocument.page(at: 0)!, bounds: CGRect(x: 230,y: 180,width: 60,height: 40)))
+        XCTAssertTrue(PDFRectangleWriter.write(document: changedDocument, source: source, destination: source, pageLabels: [:], records: RectangleMarkupRecord.capture(changedDocument)))
+        XCTAssertEqual(PDFDocument(data: try Data(contentsOf: source))?.page(at: 0)?.rotation, 270)
+    }
+
+    func testSmallSaveReusesHundredsOfExistingTextAppearances() throws {
+        let source = try fixture(rotation: 0)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source))
+        var records = (0..<200).map { index -> RectangleMarkupRecord in
+            var record = RectangleMarkupRecord(id: RectangleMarkupRecord.prefix + "existing-\(index)", pageIndex: 0, bounds: CGRect(x: 100,y: 100,width: 120,height: 50), red: 1, green: 0, blue: 0, lineWidth: 2)
+            record.kind = .text; record.text = "Review wall \(index)"
+            return record
+        }
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: source, pageLabels: [:], records: records))
+        let original = try Data(contentsOf: source)
+        let reopened = try XCTUnwrap(PDFDocument(url: source))
+        for index in 0..<6 {
+            records.append(RectangleMarkupRecord(id: RectangleMarkupRecord.prefix + "new-\(index)", pageIndex: 0, bounds: CGRect(x: 250,y: 180,width: 80,height: 60), red: 1, green: 0, blue: 0, lineWidth: 2))
+        }
+        let start = Date()
+        XCTAssertTrue(PDFRectangleWriter.write(document: reopened, source: source, destination: source, pageLabels: [:], records: records))
+        print("SIX NEW MARKUPS WITH 200 EXISTING TEXT MARKUPS: \(Date().timeIntervalSince(start))s")
+        let saved = try Data(contentsOf: source)
+        XCTAssertEqual(saved.prefix(original.count), original)
+        // Rebuilding the 200 text appearances would append hundreds of KB.
+        XCTAssertLessThan(saved.count - original.count, 20_000)
+        func trailerSize(_ bytes: Data) throws -> Int {
+            let text = String(decoding: bytes, as: UTF8.self) as NSString
+            let regex = try NSRegularExpression(pattern: "/Size ([0-9]+)")
+            let last = try XCTUnwrap(regex.matches(in: text as String, range: NSRange(location: 0,length: text.length)).last)
+            return try XCTUnwrap(Int(text.substring(with: last.range(at: 1))))
+        }
+        XCTAssertLessThanOrEqual(try trailerSize(saved) - trailerSize(original), 14, "Unchanged markups must not allocate new object IDs")
+        XCTAssertEqual(RectangleMarkupRecord.capture(try XCTUnwrap(PDFDocument(url: source))), records)
+    }
+
+    func testSaveCompletionAdvancesSourceVersionWithoutDiscardingNewerEdits() throws {
+        let source = try fixture(rotation: 0)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source)), session = RectangleMarkupController()
+        session.bind(to: document)
+        let page = try XCTUnwrap(document.page(at: 0))
+        _ = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 120,y: 150,width: 80,height: 60)))
+        let stamp = try XCTUnwrap(session.sourceStamp), snapshot = RectangleMarkupRecord.capture(document)
+        _ = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 230,y: 180,width: 60,height: 40)))
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: source, pageLabels: [:], records: snapshot, expectedSourceStamp: stamp))
+        session.acceptPersistedSource(at: source)
+        XCTAssertTrue(session.hasUnsavedChanges)
+        XCTAssertNotEqual(session.sourceStamp, stamp)
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: source, pageLabels: [:], records: RectangleMarkupRecord.capture(document), expectedSourceStamp: session.sourceStamp))
+        XCTAssertEqual(RectangleMarkupRecord.capture(try XCTUnwrap(PDFDocument(url: source))).count, 2)
+    }
+
+    func testIncrementalMutationBoundaryRejectsDrawingAndImportedMarkupChanges() throws {
+        let page: [String: Any] = ["/Type": "/Page", "/Contents": "4 0 R", "/Resources": ["/Font": "6 0 R"], "/Rotate": 0, "/MediaBox": [0,0,600,400], "/Annots": ["5 0 R"]]
+        let objects: [String: Any] = ["trailer": ["value": ["/Root": "1 0 R"]], "obj:1 0 R": ["value": ["/Type": "/Catalog", "/Pages": "2 0 R"]], "obj:3 0 R": ["value": page], "obj:4 0 R": ["stream": ["dict": [:], "data": "original"]], "obj:5 0 R": ["value": ["/Subtype": "/Square", "/Contents": "u:Consultant"]]]
+        func graph(_ table: [String: Any]) -> [String: Any] { ["pages": [["object": "3 0 R"]], "qpdf": [["maxobjectid": 6], table]] }
+        let baseline = graph(objects)
+        for (field, value) in [("/Rotate", 90 as Any), ("/Contents", "7 0 R" as Any), ("/Resources", [String: Any]() as Any), ("/MediaBox", [0,0,400,600] as Any), ("/Annots", [Any]() as Any)] {
+            var modified = objects, changedPage = page; changedPage[field] = value
+            modified["obj:3 0 R"] = ["value": changedPage]
+            XCTAssertFalse(try PDFRectangleWriter.preservesOriginalObjects(baseline: baseline, updated: graph(modified), changed: ["obj:3 0 R"]), field)
+        }
+        for key in ["obj:4 0 R", "obj:5 0 R"] {
+            var modified = objects; modified[key] = ["value": ["/Contents": "u:Changed"]]
+            XCTAssertFalse(try PDFRectangleWriter.preservesOriginalObjects(baseline: baseline, updated: graph(modified), changed: [key]))
+        }
     }
 
     func testBackgroundMarkupSaveLatency() async throws {

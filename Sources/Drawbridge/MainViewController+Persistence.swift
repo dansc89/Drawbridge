@@ -390,6 +390,7 @@ extension MainViewController {
                 }
 
                 if saveContextStillActive || adoptAsPrimaryDocument {
+                    self.pdfView.rectangleMarkup.acceptPersistedSource(at: targetURL)
                     if embeddedSaveToken > 0 {
                         self.lastEmbeddedSaveCompletedVersion = max(self.lastEmbeddedSaveCompletedVersion, embeddedSaveToken)
                     } else {

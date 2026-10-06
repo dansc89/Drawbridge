@@ -4230,6 +4230,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         isPresentingInitialMarkupSaveCopyPrompt = false
         loadSidecarSnapshotIfAvailable(for: url, document: document)
         openDocumentURL = url
+        DispatchQueue.global(qos: .utility).async {
+            PDFRectangleWriter.prepareInspection(source: url)
+        }
         // A replacement document can inherit a scroll offset beyond its last
         // page. Establish a visible page before refreshing navigation/chrome.
         if let firstPage = document.page(at: 0) {

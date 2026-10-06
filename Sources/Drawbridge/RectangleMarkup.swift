@@ -1,14 +1,24 @@
 import AppKit
 import PDFKit
+import Darwin
 
 /// Only annotations created by this new authoring path are editable. Imported CAD
 /// squares and consultant annotations never match this ownership marker.
 struct PDFMarkupSourceStamp: Sendable, Equatable {
     let size: Int
     let modified: Date
+    let device: UInt64
+    let inode: UInt64
+    let modifiedNanoseconds: Int64
+    let changedSeconds: Int64
+    let changedNanoseconds: Int64
     static func read(_ url: URL) -> Self? {
-        guard let values = try? FileManager.default.attributesOfItem(atPath: url.path), let size = values[.size] as? NSNumber, let date = values[.modificationDate] as? Date else { return nil }
-        return Self(size: size.intValue, modified: date)
+        var info = stat()
+        guard stat(url.path, &info) == 0 else { return nil }
+        return Self(size: Int(info.st_size), modified: Date(timeIntervalSince1970: Double(info.st_mtimespec.tv_sec)),
+                    device: UInt64(bitPattern: Int64(info.st_dev)), inode: UInt64(info.st_ino),
+                    modifiedNanoseconds: Int64(info.st_mtimespec.tv_nsec),
+                    changedSeconds: Int64(info.st_ctimespec.tv_sec), changedNanoseconds: Int64(info.st_ctimespec.tv_nsec))
     }
 }
 
@@ -244,6 +254,9 @@ final class RectangleMarkupController {
     }
 
     func markSaved(at url: URL) { hasUnsavedChanges = false; rememberSource(url) }
+    /// A save can finish after another markup was added. Advance the known file
+    /// version without marking those newer edits clean.
+    func acceptPersistedSource(at url: URL) { sourceStamp = PDFMarkupSourceStamp.read(url) }
 
     func pointerDown(at location: CGPoint, clickCount: Int = 1) -> Bool {
         finishTextEditing()

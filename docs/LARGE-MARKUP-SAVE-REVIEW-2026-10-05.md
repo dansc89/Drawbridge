@@ -1,28 +1,34 @@
 # Large drawing-set markup save review
 
-Reproduction used private copies of XX.pdf: 124 pages, approximately 155 MB, 17,998 objects and 6,376 streams. The user's original was never modified.
+Reproduction uses private copies of XX.pdf: 124 pages, approximately 155 MB, 17,998 objects and 6,376 streams. The user's original remains untouched.
 
 ## Root cause
 
-Small markup changes still went through a whole-document qpdf rewrite. Inspection also transported raster streams as large inline base64 strings and parsed/compared them through Foundation. The original verification cache discarded this document because its bytes exceeded the 96 MB cache limit. Baseline application saves took 8.05, 7.48 and 7.21 seconds. The first optimization reduced production times to 5.04, 3.13 and 3.09 seconds, but still failed the three-second target.
+Small changes previously rebuilt the complete PDF and transported raster streams as large base64 JSON strings. Initial improvements reduced that overhead, but still performed a complete object inspection, graph comparison, file hashing, and regeneration of all existing markup appearances on each save. This imposed a fixed cost based on the entire drawing set even when only six vector annotations changed.
 
-## Final change
+## Final save path
 
-Annotation saves now append a PDF revision to a staged copy of the original bytes. Only changed dictionaries and new vector appearance streams are serialized. Original content, image and font streams cannot be replaced by this writer. Cross-reference streams remain streams when the source uses them; writing a classic cross-reference revision after this source's stream passed qpdf but was rejected by Apple's reader, so compatibility is explicitly checked before committing.
+- Inspect object metadata once in the background when the document opens. Retain one bounded inspected file version; the 96 MB budget measures inspection data and new deltas, without repeatedly serializing the entire cache. There is no timer that discards an otherwise valid open-file inspection.
+- Identify the source with its device, inode, size, and nanosecond modification/change times. Cache reuse and the authoring session both reject external edits, including same-size edits that restore the old modification date.
+- Create an immutable staged snapshot using APFS cloning. When cloning is unavailable, retain a safe copy fallback; those volumes can still incur file-size-dependent I/O.
+- Reuse unchanged markup objects and their appearance streams. Generate vector appearances and allocate object IDs only for new or changed markups. Preserve equivalent existing outline and label objects.
+- Append a PDF revision to a clone of the snapshot, seeking only to the verified original end offset. The serializer rejects replacement of existing streams.
+- Enforce the mutation boundary before writing: original page content, resources, geometry, rotation, catalog page-tree reference, and imported annotations cannot change. Only owned annotations, their page annotation lists, and navigation metadata may be updated.
+- Reparse and compare the changed objects and new appearance bytes, rather than inspecting thousands of untouched objects. Original references compare by identity. Confirm the candidate opens through Apple's PDF reader and has the expected page count.
+- Recheck the source file version and atomically replace the destination with the validated candidate. Unchanged saves remain no-ops.
+- Advance the known source version after a successful snapshot save without clearing any newer unsaved markups. This prevents a later save from mistaking our own completed save for an external modification.
 
-Inspection excludes raster payloads. The bounded verification cache retains a compact object graph and a whole-file fingerprint, rather than retaining the large original PDF. Source changes invalidate the cache and changes during saving prevent replacement. Every candidate must retain the exact original byte prefix, preserve the reachable original content graph, contain the expected markups, and reopen with the expected page count in Apple's PDF reader. Commits retain the existing atomic replacement path.
-
-Saving unchanged markup/navigation is a no-op and does not accumulate revisions. Actual edits append small vector objects; old revisions remain in the PDF. This favors safe fast annotation saves over whole-document compaction.
-
-The application delegate is also explicitly kept alive throughout the event loop because NSApplication's delegate reference is weak. This prevents optimized code from shortening the window owner's lifetime; it is not the measured cause of save latency.
+Existing cross-reference streams remain streams in incremental revisions for Apple reader compatibility. Original bytes stay intact through staged cloning and append-only writing; regression tests independently compare complete original byte prefixes. Original content is neither rasterized nor redrawn. Old incremental revisions remain in the PDF; this path does not compact them during ordinary markup saves.
 
 ## Validation
 
-- Full regression suite: 131 tests, 15 optional tests skipped, zero failures. Coverage includes all seven markup kinds, page rotations, text, links, imported annotations, deletion, flatten/reduce/unflatten, external changes, and repeated saving.
-- Added compressed-object/xref-stream regression: Unicode text saves and reopens through PDFKit, original bytes remain an exact prefix, and an unchanged second save leaves the entire file identical.
-- Production application benchmark on the 155 MB PDF, adding six rectangles per pass: **2.23 seconds initial, 1.74 and 1.68 seconds subsequent**. All three saves passed the strict three-second assertion and reopened with the expected records.
-- Independent MuPDF comparison: all 124 original raw page content streams, page boxes and rotations remained identical. Original-content pixels matched on pages 1, 61 and 124 with annotations excluded. Eighteen additional annotations across three saves added approximately 149 KB.
-- Visually opened the resulting large PDF in Apple Preview: original cover content and saved red markups rendered correctly.
-- Packaged-app interaction testing was limited by computer-use accessibility timeouts after opening PDFs. The production application persistence benchmark drives the real view controller/PDF view, but does not replace a full packaged UI interaction review.
+- Full regression suite: 135 tests, 15 optional tests skipped, zero failures. Coverage includes all seven markup kinds, rotated/cropped pages, Unicode text, links, imported annotations, deletion, flatten/reduce/unflatten, external changes, and repeated saving.
+- On the 155 MB set, the earlier whole-file path took 8.05, 7.48, and 7.21 seconds. The initial incremental implementation still took 2.23, 1.74, and 1.68 seconds.
+- The change-specific path, with inspection prepared during opening, passes a strict one-second application save-completion assertion for six new markups per pass. Final production measurements are 0.56, 0.54, and 0.47 seconds. A separate prepared run measured 0.53, 0.50, and 0.51 seconds.
+- Without preparation, initial inspection of this large set took the first save to 1.36 seconds; subsequent saves were approximately 0.48 seconds. If the user saves before background preparation finishes or after external changes invalidate it, this initial inspection is still required.
+- Six new markups with 200 existing text markups saved in approximately 0.17 seconds on a small fixture. The test verifies the old appearances remain intact, the revision adds under 20 KB, and unchanged annotations allocate no new object IDs.
+- Independent MuPDF comparison: the original bytes remain an exact prefix; all 124 raw page content streams, page boxes and rotations remain identical. Original-content pixels match on pages 1, 61 and 124 with annotations excluded. Eighteen additions across three saves add approximately 20.5 KB. qpdf reports no syntax or stream encoding errors.
+- Added mutation-boundary tests reject changes to original page contents/resources/rotation/boxes and imported annotations. Cache tests cover atomic external replacement and same-size in-place editing with restored mtime.
+- The production benchmark exercises the application view controller and PDF view, including save completion and dirty-state cleanup. The earlier incremental output was also visually verified in Apple Preview. This does not certify every file-provider or network-volume latency.
 
-No public GitHub release or replacement of the installed application was made during this review.
+The installed application has not been replaced and no public GitHub release was issued during this review.

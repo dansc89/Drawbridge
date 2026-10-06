@@ -1,11 +1,34 @@
 import Foundation
 import PDFKit
 import CommonCrypto
+import Darwin
 
 /// New markup saves never invoke PDFKit's document renderer. Annotation appearances
 /// are portable Form XObjects; unchanged page content/resources are verified before commit.
 enum PDFRectangleWriter {
     private static let inspectionCache = MarkupInspectionCache()
+    /// Inspect once while the drawing opens, so the first small markup save does
+    /// not have to discover every PDF object. Called on a background queue.
+    @discardableResult
+    static func prepareInspection(source: URL) -> Bool {
+        guard let executable = PDFTKBookmarkWriter.executableURL() else { return false }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeMarkupInspection-\(UUID().uuidString)")
+        do {
+            let version = try MarkupFileVersion.read(source)
+            if inspectionCache.snapshot(for: source, version: version) != nil { return true }
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let snapshot = directory.appendingPathComponent("input.pdf"), output = directory.appendingPathComponent("input.json")
+            if clonefile(source.path, snapshot.path, 0) != 0 { try FileManager.default.copyItem(at: source, to: snapshot) }
+            guard try MarkupFileVersion.read(source) == version,
+                  PDFTKBookmarkWriter.run(executable, arguments: ["--json=2", "--json-stream-data=none", "--decode-level=none", snapshot.path, output.path]) else { return false }
+            let data = try Data(contentsOf: output)
+            guard let graph = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  try MarkupFileVersion.read(source) == version else { return false }
+            try inspectionCache.store(url: source, graph: graph, cost: data.count, expectedVersion: version)
+            return true
+        } catch { return false }
+    }
     static func write(document: PDFDocument, source: URL, destination: URL,
                       pageLabels: [Int: String], records: [RectangleMarkupRecord], expectedSourceStamp: PDFMarkupSourceStamp? = nil) -> Bool {
         guard let executable = PDFTKBookmarkWriter.executableURL(), records.allSatisfy(\.isValid),
@@ -19,10 +42,12 @@ enum PDFRectangleWriter {
             print("Markup save \(phase): \(Date().timeIntervalSince(profilingStart))s")
         }
         do {
+            let sourceVersion = try MarkupFileVersion.read(source)
             if let expectedSourceStamp, PDFMarkupSourceStamp.read(source) != expectedSourceStamp { return false }
-            let original = try Data(contentsOf: source)
             let input = directory.appendingPathComponent("input.pdf")
-            try original.write(to: input)
+            if clonefile(source.path, input.path, 0) != 0 { try FileManager.default.copyItem(at: source, to: input) }
+            guard try MarkupFileVersion.read(source) == sourceVersion else { return false }
+            let original = try Data(contentsOf: input, options: .mappedIfSafe)
             func read(_ url: URL, _ name: String, decoded: Bool = true) throws -> [String: Any] {
                 let json = directory.appendingPathComponent(name)
                 guard PDFTKBookmarkWriter.run(executable, arguments: ["--json=2", "--json-stream-data=none", "--decode-level=\(decoded ? "generalized" : "none")", url.path, json.path]),
@@ -31,11 +56,14 @@ enum PDFRectangleWriter {
             }
             profile("source snapshot")
             let inspected: [String: Any]
-            if let cached = inspectionCache.graph(for: source, bytes: original) {
-                inspected = cached
+            let inspectionCost: Int
+            if let cached = inspectionCache.snapshot(for: source, version: sourceVersion) {
+                inspected = cached.graph
+                inspectionCost = cached.cost
                 profile("reused verified inspection")
             } else {
                 inspected = try read(input, "input.json", decoded: false)
+                inspectionCost = try directory.appendingPathComponent("input.json").resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
             }
             profile("inspection")
             guard (inspected["encrypt"] as? [String: Any])?["encrypted"] as? Bool != true else { return false }
@@ -49,54 +77,156 @@ enum PDFRectangleWriter {
             // Preserve the entire original byte prefix, including every stream.
             var json = inspected
             guard PDFTKBookmarkWriter.updateNavigationJSON(&json, from: document, pageLabels: pageLabels) else { return false }
-            let originalGraph = try removingOwnedRectangles(json)
-            profile("baseline verification graph")
+            try reuseUnchangedNavigation(baseline: inspected, updated: &json)
+            profile("navigation changes")
             try update(&json, records: records)
-            if try ownedRecordsMatch(inspected, records: records),
-               try PDFLosslessReducer.semanticGraphsMatch(inspected, withoutNewStreamData(json)) {
-                guard try Data(contentsOf: source, options: .mappedIfSafe) == original else { return false }
+            if try changedObjects(baseline: inspected, updated: json).isEmpty {
+                guard try MarkupFileVersion.read(source) == sourceVersion else { return false }
                 if source.standardizedFileURL != destination.standardizedFileURL {
                     let unchanged = directory.appendingPathComponent("unchanged.pdf")
                     try original.write(to: unchanged)
                     try MainViewController.commitStagedSave(from: unchanged, to: destination)
                 }
-                inspectionCache.store(url: destination, bytes: original, graph: inspected)
+                try inspectionCache.store(url: destination, graph: inspected, cost: inspectionCost)
                 return true
             }
             let candidate = directory.appendingPathComponent("candidate.pdf")
-            try PDFIncrementalMarkupPatch.append(original: original, baseline: inspected, updated: json, to: candidate)
+            let changed = try changedObjects(baseline: inspected, updated: json)
+            guard try preservesOriginalObjects(baseline: inspected, updated: json, changed: changed) else { return false }
+            try PDFIncrementalMarkupPatch.append(original: original, baseline: inspected, updated: json, snapshot: input, to: candidate)
             profile("candidate write")
             // Check object relationships without decoding the original images.
-            let written = try read(candidate, "written.json", decoded: false)
+            let verificationURL = directory.appendingPathComponent("changed.json")
+            let selectors = changed.map { "--json-object=" + $0.dropFirst(4).split(separator: " ").prefix(2).joined(separator: ",") }
+            guard PDFTKBookmarkWriter.run(executable, arguments: ["--json=2", "--json-key=qpdf", "--json-stream-data=inline", "--decode-level=none", "--json-object=trailer"] + selectors + [candidate.path, verificationURL.path]),
+                  let delta = try JSONSerialization.jsonObject(with: Data(contentsOf: verificationURL)) as? [String: Any],
+                  try changedObjectsMatch(expected: json, written: delta, keys: changed) else { return false }
+            let written = try mergingVerifiedChanges(baseline: inspected, delta: delta)
             profile("candidate inspection")
-            let candidateBytes = try Data(contentsOf: candidate, options: .mappedIfSafe)
-            guard candidateBytes.count >= original.count, candidateBytes.prefix(original.count) == original else { return false }
-            guard try PDFLosslessReducer.semanticGraphsMatch(originalGraph, removingOwnedRectangles(written)) else { print("Rectangle writer: original content verification failed"); return false }
             guard try ownedRecordsMatch(written, records: records) else { print("Rectangle writer: markup verification failed"); return false }
-            guard let readable = PDFDocument(url: candidate), readable.pageCount == document.pageCount else {
+            guard let readable = PDFDocument(url: candidate), readable.pageCount == (try pages(inspected).count) else {
                 print("Rectangle writer: Apple PDF reader rejected candidate"); return false
             }
-            guard try Data(contentsOf: source, options: .mappedIfSafe) == original else { print("Rectangle writer: source changed during save"); return false }
+            guard try MarkupFileVersion.read(source) == sourceVersion else { print("Rectangle writer: source changed during save"); return false }
             let size = try candidate.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size > 0, size <= original.count + max(5 * 1024 * 1024, records.count * 4096) else { print("Rectangle writer: size limit \(size) vs \(original.count)"); return false }
             profile("candidate verification")
-            let cachedBytes = candidateBytes
             try MainViewController.commitStagedSave(from: candidate, to: destination)
-            inspectionCache.store(url: destination, bytes: cachedBytes, graph: written)
+            try inspectionCache.store(url: destination, graph: written, cost: inspectionCost + (try verificationURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0))
             profile("commit")
             return true
         } catch { print("Rectangle writer: \(error)"); return false }
     }
 
-    private static func withoutNewStreamData(_ source: [String: Any]) -> [String: Any] {
-        var result = source
-        guard var tables = result["qpdf"] as? [[String: Any]], tables.count > 1 else { return result }
-        for key in tables[1].keys {
-            guard var object = tables[1][key] as? [String: Any], var stream = object["stream"] as? [String: Any] else { continue }
-            stream.removeValue(forKey: "data"); object["stream"] = stream; tables[1][key] = object
+    static func changedObjects(baseline: [String: Any], updated: [String: Any]) throws -> [String] {
+        let before = try objectTable(baseline), after = try objectTable(updated)
+        return after.keys.filter { key in
+            guard key.hasPrefix("obj:"), let value = after[key] as? [String: Any] else { return false }
+            return !((before[key] as? NSDictionary)?.isEqual(to: value) ?? false)
+        }.sorted()
+    }
+
+    /// Check the mutation boundary before serializing. Only navigation, annotation
+    /// arrays and owned annotations may change; base page dictionaries and all
+    /// original streams/resources stay immutable.
+    static func preservesOriginalObjects(baseline: [String: Any], updated: [String: Any], changed: [String]) throws -> Bool {
+        let before = try objectTable(baseline), after = try objectTable(updated)
+        let pageRefs = try pages(baseline)
+        let pageKeys = Set(pageRefs.map { "obj:" + $0 })
+        let catalog = ((before["trailer"] as? [String: Any])?["value"] as? [String: Any])?["/Root"] as? String ?? ""
+        let arrays = Set(pageRefs.compactMap { ref in ((before["obj:" + ref] as? [String: Any])?["value"] as? [String: Any])?["/Annots"] as? String }.map { "obj:" + $0 })
+        func generated(_ entry: Any, _ objects: [String: Any]) -> Bool {
+            let d = dictionary(entry, objects: objects)
+            return [d["/Contents"], d["/T"]].compactMap { $0 as? String }.contains { $0.contains("DrawbridgeAutoSheetLink") }
+        }
+        for key in changed {
+            guard let old = before[key] as? [String: Any] else { continue }
+            guard old["stream"] == nil, let new = after[key] as? [String: Any] else { return false }
+            if pageKeys.contains(key) || key == "obj:" + catalog {
+                guard var a = old["value"] as? [String: Any], var b = new["value"] as? [String: Any] else { return false }
+                let allowed = pageKeys.contains(key) ? ["/Annots"] : ["/Outlines", "/PageLabels"]
+                for field in allowed { a.removeValue(forKey: field); b.removeValue(forKey: field) }
+                guard NSDictionary(dictionary: a).isEqual(to: b) else { return false }
+                if pageKeys.contains(key) {
+                    let a = old["value"] as! [String: Any], b = new["value"] as! [String: Any]
+                    let importedBefore = annotations(a["/Annots"], objects: before).filter { !owned($0, objects: before) && !generated($0, before) }
+                    let importedAfter = annotations(b["/Annots"], objects: after).filter { !owned($0, objects: after) && !generated($0, after) }
+                    guard NSArray(array: importedBefore).isEqual(to: importedAfter) else { return false }
+                }
+            } else if arrays.contains(key) {
+                guard let a = old["value"] as? [Any], let b = new["value"] as? [Any] else { return false }
+                let importedBefore = a.filter { !owned($0, objects: before) && !generated($0, before) }
+                let importedAfter = b.filter { !owned($0, objects: after) && !generated($0, after) }
+                guard NSArray(array: importedBefore).isEqual(to: importedAfter) else { return false }
+            } else if owned(String(key.dropFirst(4)), objects: before) || generated(String(key.dropFirst(4)), before) {
+                guard new["value"] is [String: Any] else { return false }
+            } else { return false }
+        }
+        return true
+    }
+
+    private static func comparisonGraph(_ values: [Any]) -> [String: Any] {
+        ["qpdf": [["maxobjectid": 1], ["trailer": ["value": ["/Root": "verification-root"]], "obj:verification-root": ["value": values]]]]
+    }
+
+    private static func changedObjectsMatch(expected: [String: Any], written: [String: Any], keys: [String]) throws -> Bool {
+        let a = try objectTable(expected), b = try objectTable(written)
+        guard keys.allSatisfy({ a[$0] != nil && b[$0] != nil }) else { return false }
+        // References compare literally here. The untouched referenced objects
+        // retain their original bytes and cross-reference entries.
+        return try PDFLosslessReducer.semanticGraphsMatch(comparisonGraph(keys.map { a[$0]! }), comparisonGraph(keys.map { b[$0]! }))
+    }
+
+    private static func mergingVerifiedChanges(baseline: [String: Any], delta: [String: Any]) throws -> [String: Any] {
+        var result = baseline, tables = try tableArray(baseline)
+        let changed = try tableArray(delta)
+        tables[0] = changed[0]
+        for (key, value) in changed[1] {
+            if var object = value as? [String: Any], var stream = object["stream"] as? [String: Any] {
+                stream.removeValue(forKey: "data"); object["stream"] = stream; tables[1][key] = object
+            } else { tables[1][key] = value }
         }
         result["qpdf"] = tables
         return result
+    }
+
+    private static func reuseUnchangedNavigation(baseline: [String: Any], updated: inout [String: Any]) throws {
+        let before = try objectTable(baseline)
+        let pageReferences = try pages(baseline)
+        var tables = try tableArray(updated), after = tables[1]
+        guard let catalogRef = ((before["trailer"] as? [String: Any])?["value"] as? [String: Any])?["/Root"] as? String,
+              let oldCatalog = (before["obj:" + catalogRef] as? [String: Any])?["value"] as? [String: Any],
+              var newObject = after["obj:" + catalogRef] as? [String: Any], var newCatalog = newObject["value"] as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
+        for field in ["/Outlines", "/PageLabels"] {
+            func graph(_ table: [String: Any], _ root: Any?) -> [String: Any] {
+                var t = table
+                // Destinations refer to existing pages by identity. Following
+                // them would turn an outline check into a whole-PDF traversal.
+                for ref in pageReferences { t.removeValue(forKey: "obj:" + ref) }
+                t["trailer"] = ["value": ["/Root": root ?? NSNull()]]
+                return ["qpdf": [["maxobjectid": 0], t]]
+            }
+            if try PDFLosslessReducer.semanticGraphsMatch(graph(before, oldCatalog[field]), graph(after, newCatalog[field])) {
+                // Discard the unused new outline/label tree, without visiting
+                // pages referenced by outline destinations.
+                var pending = [newCatalog[field]], seen = Set<String>()
+                while let value = pending.popLast() {
+                    if let ref = value as? String, before["obj:" + ref] == nil, let object = after["obj:" + ref] as? [String: Any], seen.insert(ref).inserted {
+                        pending.append(object["value"]); after.removeValue(forKey: "obj:" + ref)
+                    } else if let dict = value as? [String: Any] { pending.append(contentsOf: dict.values.map { Optional($0) }) }
+                    else if let array = value as? [Any] { pending.append(contentsOf: array.map { Optional($0) }) }
+                }
+                newCatalog[field] = oldCatalog[field]
+            }
+        }
+        newObject["value"] = newCatalog; after["obj:" + catalogRef] = newObject
+        let originalMaximum = try tableArray(baseline)[0]["maxobjectid"] as? Int ?? 0
+        let retainedMaximum = after.keys.compactMap { key -> Int? in
+            guard key.hasPrefix("obj:") else { return nil }
+            return Int(key.dropFirst(4).split(separator: " ").first ?? "")
+        }.max() ?? 0
+        tables[0]["maxobjectid"] = max(originalMaximum, retainedMaximum)
+        tables[1] = after; updated["qpdf"] = tables
     }
 
     /// qpdf emits stream payloads as single-line base64 strings. Replace those
@@ -153,13 +283,18 @@ enum PDFRectangleWriter {
         let recordsByPage = Dictionary(grouping: records, by: \.pageIndex)
         for (index, reference) in references.enumerated() {
             guard var object = objects["obj:\(reference)"] as? [String: Any], var page = object["value"] as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
-            var entries = annotations(page["/Annots"], objects: objects).filter { !owned($0, objects: objects) }
+            let existing = annotations(page["/Annots"], objects: objects)
+            let existingByID = Dictionary(existing.compactMap { entry -> (String, String)? in
+                guard owned(entry, objects: objects), let reference = entry as? String,
+                      let id = dictionary(entry, objects: objects)["/T"] as? String else { return nil }
+                return (id, reference)
+            }, uniquingKeysWith: { first, _ in first })
+            var entries = existing.filter { !owned($0, objects: objects) }
             for record in recordsByPage[index] ?? [] {
-                let annotationRef = "\(next) 0 R"; next += 1
+                let oldReference = existingByID["u:" + record.id]
+                let annotationRef = oldReference ?? "\(next) 0 R"; if oldReference == nil { next += 1 }
                 let appearanceRef = "\(next) 0 R"; next += 1
                 let b = record.bounds
-                let drawing = appearanceDrawing(record)
-                objects["obj:\(appearanceRef)"] = ["stream": ["dict": ["/Type": "/XObject", "/Subtype": "/Form", "/BBox": [0,0,b.width,b.height], "/Resources": [String:Any](), "/DrawbridgeRectangleAppearance": true], "data": Data(drawing.utf8).base64EncodedString()]]
                 var annotation: [String:Any] = ["/Type": "/Annot", "/Subtype": subtype(record.kind), "/Rect": [b.minX,b.minY,b.maxX,b.maxY], "/T": "u:\(record.id)", "/NM": "u:\(record.id)", "/Contents": "u:\(record.kind.rawValue.capitalized)", "/F": 4, "/C": [record.red,record.green,record.blue], "/BS": ["/W":record.lineWidth,"/S":"/S"], "/AP": ["/N":appearanceRef]]
                 if let a = record.start, let z = record.end {
                     annotation["/L"] = [a.x,a.y,z.x,z.y]
@@ -184,6 +319,17 @@ enum PDFRectangleWriter {
                     annotation["/DR"] = ["/Font":["/Helv":["/Type":"/Font","/Subtype":"/Type1","/BaseFont":"/Helvetica"]]]
                     annotation["/BS"] = ["/W":0]; annotation["/Q"] = 0
                 }
+                if let oldReference {
+                    var old = dictionary(oldReference, objects: objects), desired = annotation
+                    old.removeValue(forKey: "/AP"); desired.removeValue(forKey: "/AP")
+                    if NSDictionary(dictionary: old).isEqual(to: desired) {
+                        next -= 1 // No new appearance object is needed.
+                        entries.append(oldReference)
+                        continue
+                    }
+                }
+                let drawing = appearanceDrawing(record)
+                objects["obj:\(appearanceRef)"] = ["stream": ["dict": ["/Type": "/XObject", "/Subtype": "/Form", "/BBox": [0,0,b.width,b.height], "/Resources": [String:Any](), "/DrawbridgeRectangleAppearance": true], "data": Data(drawing.utf8).base64EncodedString()]]
                 objects["obj:\(annotationRef)"] = ["value": annotation]
                 entries.append(annotationRef)
             }
@@ -284,37 +430,52 @@ enum PDFRectangleWriter {
     }
 }
 
-/// One short-lived verified snapshot, bounded by combined PDF/JSON size. Cache
-/// hits require exact source bytes, so external edits cannot bypass inspection.
+/// A file identity/version changes for both in-place writes and atomic replacement.
+/// Nanosecond ctime also catches an external editor restoring the original mtime.
+private struct MarkupFileVersion: Equatable {
+    let device: UInt64
+    let inode: UInt64
+    let size: Int64
+    let modifiedSeconds: Int64
+    let modifiedNanoseconds: Int64
+    let changedSeconds: Int64
+    let changedNanoseconds: Int64
+
+    static func read(_ url: URL) throws -> Self {
+        var info = stat()
+        guard stat(url.path, &info) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        return Self(device: UInt64(bitPattern: Int64(info.st_dev)), inode: UInt64(info.st_ino), size: info.st_size,
+                    modifiedSeconds: Int64(info.st_mtimespec.tv_sec), modifiedNanoseconds: Int64(info.st_mtimespec.tv_nsec),
+                    changedSeconds: Int64(info.st_ctimespec.tv_sec), changedNanoseconds: Int64(info.st_ctimespec.tv_nsec))
+    }
+}
+
+/// One bounded inspected version. Each save clones a frozen source snapshot;
+/// metadata identity/version checks invalidate it after any external write.
 private final class MarkupInspectionCache: @unchecked Sendable {
     static let byteBudget = 96 * 1024 * 1024
+    struct Snapshot {
+        let graph: [String: Any]
+        let cost: Int
+    }
     private struct Entry {
         let url: URL
-        let digest: String
-        let graph: [String: Any]
-        let token: UUID
+        let version: MarkupFileVersion
+        let snapshot: Snapshot
     }
     private let lock = NSLock()
     private var entry: Entry?
 
-    func graph(for url: URL, bytes: Data) -> [String: Any]? {
+    func snapshot(for url: URL, version: MarkupFileVersion) -> Snapshot? {
         lock.lock(); defer { lock.unlock() }
-        guard let entry, entry.url == url.standardizedFileURL, entry.digest == PDFRectangleWriter.streamDigest(bytes) else { return nil }
-        return entry.graph
+        guard let entry, entry.url == url.standardizedFileURL, entry.version == version else { return nil }
+        return entry.snapshot
     }
 
-    func store(url: URL, bytes: Data?, graph: [String: Any]) {
-        let token = UUID()
-        let retainedBytes = (try? JSONSerialization.data(withJSONObject: graph).count) ?? Int.max
-        let cacheableBytes = retainedBytes <= Self.byteBudget ? bytes : nil
-        lock.lock()
-        entry = cacheableBytes.map { Entry(url: url.standardizedFileURL, digest: PDFRectangleWriter.streamDigest($0), graph: graph, token: token) }
-        lock.unlock()
-        guard cacheableBytes != nil else { return }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 60) { [weak self] in
-            guard let self else { return }
-            self.lock.lock(); defer { self.lock.unlock() }
-            if self.entry?.token == token { self.entry = nil }
-        }
+    func store(url: URL, graph: [String: Any], cost: Int, expectedVersion: MarkupFileVersion? = nil) throws {
+        let version = try MarkupFileVersion.read(url)
+        guard expectedVersion == nil || expectedVersion == version else { return }
+        lock.lock(); defer { lock.unlock() }
+        entry = cost <= Self.byteBudget ? Entry(url: url.standardizedFileURL, version: version, snapshot: Snapshot(graph: graph, cost: cost)) : nil
     }
 }
