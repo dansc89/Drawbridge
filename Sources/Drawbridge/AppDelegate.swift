@@ -36,10 +36,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.titlebarAppearsTransparent = false
         window.titleVisibility = .hidden
         window.toolbarStyle = .unifiedCompact
-        window.appearance = NSAppearance(named: .darkAqua)
         window.isOpaque = true
         window.alphaValue = 1.0
-        window.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1.0)
+        window.backgroundColor = AppAppearance.chrome
         window.isMovableByWindowBackground = false
         let mainViewController = MainViewController()
         loadRecentFiles()
@@ -54,9 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.toolbar = mainViewController.makeToolbar()
         window.toolbar?.showsBaselineSeparator = true
         window.contentView?.wantsLayer = true
-        window.contentView?.layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1.0).cgColor
         window.contentView?.superview?.wantsLayer = true
-        window.contentView?.superview?.layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1.0).cgColor
         window.delegate = self
         window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
         window.minSize = NSSize(width: 1360, height: 700)

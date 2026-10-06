@@ -20,6 +20,7 @@ final class MarkupToolButton: NSButton {
 /// The first completed tools live in their own toolbar group, away from indexing.
 @MainActor
 final class RectangleMarkupToolbar: NSStackView {
+    let penButton = MarkupToolButton(title: "", target: nil, action: nil)
     let selectButton = MarkupToolButton(title: "Select", target: nil, action: nil)
     let rectangleButton = MarkupToolButton(title: "Rectangle", target: nil, action: nil)
     let ellipseButton = MarkupToolButton(title: "Ellipse", target: nil, action: nil)
@@ -45,7 +46,7 @@ final class RectangleMarkupToolbar: NSStackView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         orientation = .horizontal; spacing = 6; alignment = .centerY
-        for (button, symbol, name) in [(selectButton,"cursorarrow","Select markups (V)"),(rectangleButton,"rectangle","Draw Rectangle (R)"),(ellipseButton,"circle","Draw Ellipse (E)"),(lineButton,"line.diagonal","Draw Line (L)"),(arrowButton,"arrow.up.right","Draw Arrow (A)"),(polygonButton,"pentagon","Draw Polygon (Shift+P)"),(polylineButton,"point.topleft.down.to.point.bottomright.curvepath","Draw Polyline (Shift+N)"),(textButton,"textformat","Draw Text Box (T)"),(editTextButton,"square.and.pencil","Edit Text"),(deleteButton,"trash","Delete selected markup (Delete)"),(undoButton,"arrow.uturn.backward","Undo (⌘Z)"),(redoButton,"arrow.uturn.forward","Redo (⇧⌘Z)")] {
+        for (button, symbol, name) in [(selectButton,"cursorarrow","Select markups (V)"),(penButton,"pencil","Pen (P)"),(rectangleButton,"rectangle","Draw Rectangle (R)"),(ellipseButton,"circle","Draw Ellipse (E)"),(lineButton,"line.diagonal","Draw Line (L)"),(arrowButton,"arrow.up.right","Draw Arrow (A)"),(polygonButton,"pentagon","Draw Polygon (Shift+P)"),(polylineButton,"point.topleft.down.to.point.bottomright.curvepath","Draw Polyline (Shift+N)"),(textButton,"textformat","Draw Text Box (T)"),(editTextButton,"square.and.pencil","Edit Text"),(deleteButton,"trash","Delete selected markup (Delete)"),(undoButton,"arrow.uturn.backward","Undo (⌘Z)"),(redoButton,"arrow.uturn.forward","Redo (⇧⌘Z)")] {
             button.bezelStyle = .texturedRounded; button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)
             button.imagePosition = .imageOnly; button.toolTip = name; button.setAccessibilityLabel(name)
             if button is MarkupToolButton {
@@ -111,7 +112,7 @@ extension MainViewController {
         rectangleToolbar.propertiesController.session = session
         rectangleToolbar.propertiesButton.target = self
         rectangleToolbar.propertiesButton.action = #selector(showMarkupProperties(_:))
-        for (control, action) in [(rectangleToolbar.selectButton, #selector(rectangleSelect(_:))), (rectangleToolbar.rectangleButton, #selector(rectangleDraw(_:))), (rectangleToolbar.ellipseButton, #selector(ellipseDraw(_:))), (rectangleToolbar.lineButton, #selector(lineDraw(_:))), (rectangleToolbar.arrowButton, #selector(arrowDraw(_:))), (rectangleToolbar.polygonButton, #selector(polygonDraw(_:))), (rectangleToolbar.fillPopup, #selector(polygonFill(_:))), (rectangleToolbar.polylineButton, #selector(polylineDraw(_:))), (rectangleToolbar.textButton, #selector(textDraw(_:))), (rectangleToolbar.editTextButton, #selector(editMarkupText(_:))), (rectangleToolbar.fontPopup, #selector(markupFontSize(_:))), (rectangleToolbar.deleteButton, #selector(rectangleDelete(_:))), (rectangleToolbar.undoButton, #selector(rectangleUndo(_:))), (rectangleToolbar.redoButton, #selector(rectangleRedo(_:))), (rectangleToolbar.colorPopup, #selector(rectangleStyle(_:))), (rectangleToolbar.widthPopup, #selector(rectangleStyle(_:)))] as [(NSControl, Selector)] {
+        for (control, action) in [(rectangleToolbar.penButton, #selector(penDraw(_:))), (rectangleToolbar.selectButton, #selector(rectangleSelect(_:))), (rectangleToolbar.rectangleButton, #selector(rectangleDraw(_:))), (rectangleToolbar.ellipseButton, #selector(ellipseDraw(_:))), (rectangleToolbar.lineButton, #selector(lineDraw(_:))), (rectangleToolbar.arrowButton, #selector(arrowDraw(_:))), (rectangleToolbar.polygonButton, #selector(polygonDraw(_:))), (rectangleToolbar.fillPopup, #selector(polygonFill(_:))), (rectangleToolbar.polylineButton, #selector(polylineDraw(_:))), (rectangleToolbar.textButton, #selector(textDraw(_:))), (rectangleToolbar.editTextButton, #selector(editMarkupText(_:))), (rectangleToolbar.fontPopup, #selector(markupFontSize(_:))), (rectangleToolbar.deleteButton, #selector(rectangleDelete(_:))), (rectangleToolbar.undoButton, #selector(rectangleUndo(_:))), (rectangleToolbar.redoButton, #selector(rectangleRedo(_:))), (rectangleToolbar.colorPopup, #selector(rectangleStyle(_:))), (rectangleToolbar.widthPopup, #selector(rectangleStyle(_:)))] as [(NSControl, Selector)] {
             control.target = self; control.action = action
         }
         for (index,item) in rectangleToolbar.fillPopup.itemArray.enumerated() { item.tag = index; item.target = self; item.action = #selector(polygonFill(_:)) }
@@ -122,7 +123,7 @@ extension MainViewController {
         let enabled = s.canEdit()
         rectangleToolbar.propertiesButton.isEnabled = enabled && s.selected?.isReadOnly != true
         if rectangleToolbar.propertiesPopover.isShown { rectangleToolbar.propertiesController.refresh() }
-        for (button, tool) in [(rectangleToolbar.selectButton, RectangleMarkupController.Tool.select), (rectangleToolbar.rectangleButton, .rectangle), (rectangleToolbar.ellipseButton, .ellipse), (rectangleToolbar.lineButton, .line), (rectangleToolbar.arrowButton, .arrow), (rectangleToolbar.polygonButton, .polygon), (rectangleToolbar.polylineButton, .polyline), (rectangleToolbar.textButton, .text)] {
+        for (button, tool) in [(rectangleToolbar.penButton, RectangleMarkupController.Tool.pen), (rectangleToolbar.selectButton, RectangleMarkupController.Tool.select), (rectangleToolbar.rectangleButton, .rectangle), (rectangleToolbar.ellipseButton, .ellipse), (rectangleToolbar.lineButton, .line), (rectangleToolbar.arrowButton, .arrow), (rectangleToolbar.polygonButton, .polygon), (rectangleToolbar.polylineButton, .polyline), (rectangleToolbar.textButton, .text)] {
             button.isEnabled = enabled
             button.state = s.tool == tool ? .on : .off
             button.contentTintColor = s.tool == tool ? .systemBlue : .labelColor
@@ -176,6 +177,7 @@ extension MainViewController {
         guard pdfView.rectangleMarkup.canEdit() else { return }
         pdfView.rectangleMarkup.tool = tool; view.window?.makeFirstResponder(pdfView)
     }
+    @objc func penDraw(_ sender: Any?) { chooseShape(.pen) }
     @objc func ellipseDraw(_ sender: Any?) { chooseShape(.ellipse) }
     @objc func lineDraw(_ sender: Any?) { chooseShape(.line) }
     @objc func arrowDraw(_ sender: Any?) { chooseShape(.arrow) }

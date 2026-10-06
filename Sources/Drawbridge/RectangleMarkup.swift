@@ -155,7 +155,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
 /// New annotation interaction state; deliberately independent of legacy ToolMode.
 @MainActor
 final class RectangleMarkupController {
-    enum Tool { case select, rectangle, ellipse, line, arrow, text, polyline, polygon }
+    enum Tool { case select, pen, rectangle, ellipse, line, arrow, text, polyline, polygon }
     enum Corner: CaseIterable { case lowerLeft, lowerRight, upperLeft, upperRight }
     private enum Gesture {
         case create(PDFPage, CGPoint)
@@ -207,6 +207,7 @@ final class RectangleMarkupController {
         let modifiers = event.modifierFlags.intersection([.shift,.command,.option,.control])
         switch (event.charactersIgnoringModifiers?.lowercased(),modifiers) {
         case ("v", []): return .select
+        case ("p", []): return .pen
         case ("a", []): return .arrow
         case ("t", []): return .text
         case ("e", []): return .ellipse
@@ -280,6 +281,15 @@ final class RectangleMarkupController {
         guard let view, canEdit(), let page = view.page(for: location, nearest: false) else { return false }
         bind(to: view.document)
         let point = view.convert(location, to: page)
+        if tool == .pen {
+            selected = nil
+            view.setCurrentSelection(nil, animate: false)
+            polylinePage = page
+            polylinePoints = [Self.clamped(point, to: page.bounds(for: view.displayBox))]
+            polylineHover = nil
+            refresh(presentationChanged: false)
+            return true
+        }
         if tool == .line || tool == .arrow {
             view.setCurrentSelection(nil, animate: false)
             let endpoint = Self.clamped(point, to: page.bounds(for: view.displayBox))
@@ -374,6 +384,14 @@ final class RectangleMarkupController {
 
     @discardableResult
     func pointerDragged(at location: CGPoint) -> Bool {
+        if tool == .pen, let view, let page = polylinePage {
+            let point = Self.clamped(view.convert(location, to: page), to: page.bounds(for: view.displayBox))
+            if let last = polylinePoints.last, hypot(last.x-point.x, last.y-point.y) >= 0.25 / max(view.scaleFactor, 0.01), polylinePoints.count < 10000 {
+                polylinePoints.append(point)
+            }
+            refresh(presentationChanged: false)
+            return true
+        }
         if pendingLine != nil { pointerMoved(at: location); return true }
         guard let view, let gesture else { return false }
         switch gesture {
@@ -420,6 +438,15 @@ final class RectangleMarkupController {
     }
 
     func pointerUp(at location: CGPoint) -> Bool {
+        if tool == .pen, let page = polylinePage {
+            _ = pointerDragged(at: location)
+            let points = polylinePoints
+            polylinePage = nil; polylinePoints = []; polylineHover = nil
+            _ = createPolyline(on: page, points: points)
+            selected = nil
+            refresh()
+            return true
+        }
         if pendingLine != nil { return true }
         if tool == .polyline || tool == .polygon { return true }
         guard let gesture else { return false }
@@ -687,7 +714,7 @@ final class RectangleMarkupController {
     private func changed(_ page: PDFPage) {
         // A real style mutation during drafting survives cancellation of the text.
         if var draft = inlineText { draft.wasDirty = true; inlineText = draft }
-        hasUnsavedChanges = true; view?.needsDisplay = true; refresh(); onMutation?(page)
+        hasUnsavedChanges = true; (view as? MarkupPDFView)?.refreshAnnotationRendering(on: page); refresh(); onMutation?(page)
     }
 
     func cancelGesture() { pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
@@ -735,6 +762,9 @@ final class RectangleMarkupController {
             }
             if tool == .polygon { path.closeSubpath() }
         }
+        overlay.strokeColor = (tool == .pen && polylinePage != nil ? strokeColor : NSColor.systemBlue).cgColor
+        overlay.lineWidth = tool == .pen && polylinePage != nil ? lineWidth * (view?.scaleFactor ?? 1) : 2
+        overlay.lineCap = .round; overlay.lineJoin = .round
         overlay.path = path
         // Pointer previews change geometry only. Toolbar state changes on tool,
         // selection, style, and committed edits, rather than every mouse event.
