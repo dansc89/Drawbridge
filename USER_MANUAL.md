@@ -34,6 +34,18 @@ The separate markup toolbar supports rectangle (`R`), ellipse (`E`), line (`L`),
 
 Select Drawbridge markups to move them, change their color or line weight, or delete them. Polygon and polyline handles follow their vertices. Polygons support fill; polylines remain open lines. Use `Cmd+Z` to undo and `Shift+Cmd+Z` to redo. Imported annotations are displayed and preserved but are not editable through these tools. Measurement, snapshot pasting, page-combining, and page-conversion tools are not yet available.
 
+## Markup Properties (next build)
+
+Click the sliders button in the markup toolbar to open a compact, nonmodal inspector. Choose a custom color, enter a line weight from 0.25 to 12 points, or enter a text size from 6 to 144 points. Polygon fill can be switched off or given a custom color. Fractional text sizes are retained through save and reopen. The current writer supports opaque colors; opacity and font-family controls are not part of this pass.
+
+When a markup is selected, these changes edit it and support Undo. When nothing is selected, they set defaults for your next markup. Editing a selection does not silently change drawing defaults. The toolbar displays custom values accurately instead of showing the nearest preset.
+
+## Switching Tabs (next build)
+
+Click a document tab, or cycle using the existing next/previous document commands. Tab order remains stable. Returning to a document restores its page, zoom, navigation history, and search query. Saved inactive PDFs are cached with a limit of two documents and 256 MiB of source-file sizes; larger or evicted files reload while retaining their viewing position. External changes invalidate cached copies.
+
+Unsaved changes still require Save, Discard Changes, or Cancel before switching. Discarded edits are never reused from the cache. Markup Undo history is cleared when switching documents; retaining independent Undo stacks and unsaved sessions per tab remains future work.
+
 ## Print (next build)
 
 Choose **File > Print…** (`Cmd+P`) for the document, or **File > Print Current Sheet…** to start with the displayed sheet's page range. The native macOS dialog lets you change the range, paper size, orientation, and scale and save print output as a PDF.

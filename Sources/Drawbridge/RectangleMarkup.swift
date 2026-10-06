@@ -71,6 +71,12 @@ struct RectangleMarkupRecord: Sendable, Equatable {
     }
 
     static let textColorKey = PDFAnnotationKey(rawValue: "DrawbridgeTextColor")
+    static let textFontSizeKey = PDFAnnotationKey(rawValue: "DrawbridgeTextFontSize")
+    static func textFontSize(_ annotation: PDFAnnotation) -> CGFloat {
+        if let size = annotation.value(forAnnotationKey: textFontSizeKey) as? NSNumber,
+           size.doubleValue.isFinite, (6...144).contains(size.doubleValue) { return CGFloat(size.doubleValue) }
+        return annotation.font?.pointSize ?? 18
+    }
     static func markupColor(_ annotation: PDFAnnotation) -> NSColor {
         if annotation.type == "FreeText" {
             if let values = annotation.value(forAnnotationKey: textColorKey) as? [Double], values.count == 3 {
@@ -82,9 +88,19 @@ struct RectangleMarkupRecord: Sendable, Equatable {
     }
     static func setTextColor(_ color: NSColor, on annotation: PDFAnnotation) {
         guard let rgb = color.usingColorSpace(.deviceRGB) else { return }
+        let size = textFontSize(annotation)
         annotation.setValue([Double(rgb.redComponent),Double(rgb.greenComponent),Double(rgb.blueComponent)], forAnnotationKey: textColorKey)
         annotation.fontColor = color
         annotation.color = .clear
+        setTextFontSize(size, on: annotation)
+    }
+    static func setTextFontSize(_ size: CGFloat, on annotation: PDFAnnotation) {
+        annotation.setValue(Double(size), forAnnotationKey: textFontSizeKey)
+        annotation.font = NSFont(name: "Helvetica", size: size)
+        guard let rgb = markupColor(annotation).usingColorSpace(.deviceRGB) else { return }
+        // PDFKit's font setter truncates fractional sizes in /DA. Preserve the
+        // exact size using the standard PDF default-appearance declaration.
+        annotation.setValue("/Helvetica \(size) Tf \(rgb.redComponent) \(rgb.greenComponent) \(rgb.blueComponent) rg", forAnnotationKey: .defaultAppearance)
     }
 
     static func capture(_ document: PDFDocument) -> [Self] {
@@ -105,7 +121,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
                             red: Double(rgb.redComponent), green: Double(rgb.greenComponent), blue: Double(rgb.blueComponent),
                             lineWidth: Double(annotation.border?.lineWidth ?? 2))
                 if annotation.type == "FreeText" {
-                    record.kind = .text; record.text = annotation.contents ?? ""; record.fontSize = Double(annotation.font?.pointSize ?? 18)
+                    record.kind = .text; record.text = annotation.contents ?? ""; record.fontSize = Double(textFontSize(annotation))
                     record.lineWidth = 2
                 }
                 if annotation.type == "Ink" || annotation.type == "Polygon" {
@@ -217,10 +233,16 @@ final class RectangleMarkupController {
         undo.removeAllActions(withTarget: self)
         fallbackUndo.removeAllActions()
         boundDocument = document
-        if let document {
+        if let document, documentStates.object(forKey: document) == nil {
             for index in 0..<document.pageCount {
                 guard let page = document.page(at:index) else { continue }
-                for original in page.annotations where original.type == "Polygon" && RectangleMarkupRecord.owns(original) && !(original is DrawbridgePolygonAnnotation) {
+                for original in page.annotations where RectangleMarkupRecord.owns(original) {
+                    if original.type == "FreeText" {
+                        let size = RectangleMarkupRecord.textFontSize(original)
+                        if size != original.font?.pointSize { RectangleMarkupRecord.setTextFontSize(size, on: original) }
+                        continue
+                    }
+                    guard original.type == "Polygon", !(original is DrawbridgePolygonAnnotation) else { continue }
                     let polygon = DrawbridgePolygonAnnotation(bounds:original.bounds,forType:PDFAnnotationSubtype(rawValue:"/Polygon"),withProperties:nil)
                     polygon.setValue(original.userName ?? "",forAnnotationKey:PDFAnnotationKey(rawValue:"/T")); polygon.contents = original.contents; polygon.color = original.color; polygon.border = original.border
                     polygon.shouldDisplay = original.shouldDisplay; polygon.shouldPrint = original.shouldPrint; polygon.isReadOnly = original.isReadOnly
@@ -442,7 +464,7 @@ final class RectangleMarkupController {
         annotation.setValue(RectangleMarkupRecord.prefix + UUID().uuidString,forAnnotationKey:PDFAnnotationKey(rawValue:"/T"))
         annotation.contents = kind == .text ? text : kind.rawValue.capitalized
         if kind == .text { annotation.font = NSFont(name:"Helvetica",size:fontSize); annotation.fontColor = strokeColor; annotation.alignment = .left }
-        if kind == .text { RectangleMarkupRecord.setTextColor(strokeColor,on:annotation) } else { annotation.color = strokeColor }
+        if kind == .text { RectangleMarkupRecord.setTextColor(strokeColor,on:annotation); RectangleMarkupRecord.setTextFontSize(fontSize,on:annotation) } else { annotation.color = strokeColor }
         let border = PDFBorder(); border.lineWidth = kind == .text ? 0 : lineWidth; annotation.border = border
         if kind == .polyline || kind == .polygon { RectangleMarkupRecord.setVertices(vertices,on:annotation) }
         if kind == .polygon { RectangleMarkupRecord.setPolygonFill(fillColor,on:annotation) }
@@ -518,8 +540,9 @@ final class RectangleMarkupController {
     }
 
     func fillSelected(_ color: NSColor?) {
-        fillColor = color
-        guard canEdit(), let annotation = selected, annotation.type == "Polygon", !annotation.isReadOnly, let page = annotation.page else { return }
+        guard canEdit() else { return }
+        guard let annotation = selected else { fillColor = color; refresh(); return }
+        guard annotation.type == "Polygon", !annotation.isReadOnly, let page = annotation.page else { return }
         setFill(color,on:annotation,page:page)
     }
     private func setFill(_ color: NSColor?, on annotation: PDFAnnotation, page: PDFPage) {
@@ -531,10 +554,20 @@ final class RectangleMarkupController {
     }
 
     func styleSelected(color: NSColor, width: CGFloat) {
-        strokeColor = color; lineWidth = min(max(width, 0.25), 12)
-        refresh()
-        guard canEdit(), let selected, !selected.isReadOnly, let page = selected.page else { return }
-        setStyle(selected, page: page, color: strokeColor, width: lineWidth)
+        guard canEdit(), width.isFinite, color.usingColorSpace(.deviceRGB) != nil else { return }
+        let opaque = color.withAlphaComponent(1)
+        let width = min(max(width, 0.25), 12)
+        guard let selected else { strokeColor = opaque; lineWidth = width; refresh(); return }
+        guard !selected.isReadOnly, let page = selected.page else { return }
+        setStyle(selected, page: page, color: opaque, width: width)
+    }
+
+    func setFontSize(_ size: CGFloat) {
+        guard canEdit(), size.isFinite, (6...144).contains(size) else { return }
+        if let selected {
+            guard selected.type == "FreeText" else { return }
+            editSelectedText(selected.contents ?? "", size: size)
+        } else { fontSize = size; refresh() }
     }
 
     private func setStyle(_ annotation: PDFAnnotation, page: PDFPage, color: NSColor, width: CGFloat) {
@@ -557,11 +590,11 @@ final class RectangleMarkupController {
     func editSelectedText(_ text: String, size: CGFloat) {
         guard canEdit(), let annotation = selected, annotation.type == "FreeText", RectangleMarkupRecord.owns(annotation), let page = annotation.page,
               !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty, text.utf8.count <= 100000, size.isFinite, (6...144).contains(size) else { return }
-        let oldText = annotation.contents ?? "", oldSize = annotation.font?.pointSize ?? 18
+        let oldText = annotation.contents ?? "", oldSize = RectangleMarkupRecord.textFontSize(annotation)
         guard oldText != text || oldSize != size else { return }
         undo.registerUndo(withTarget:self) { target in target.editSelectedTextAnnotation(annotation,page:page,text:oldText,size:oldSize) }
         undo.setActionName("Edit Text")
-        annotation.contents = text; annotation.font = NSFont(name:"Helvetica",size:size); changed(page)
+        annotation.contents = text; RectangleMarkupRecord.setTextFontSize(size,on:annotation); changed(page)
     }
     private func editSelectedTextAnnotation(_ annotation: PDFAnnotation, page: PDFPage, text: String, size: CGFloat) {
         guard page.document === boundDocument else { return }

@@ -398,12 +398,12 @@ extension MainViewController {
         }
 
         if let current = openDocumentURL.map({ canonicalDocumentURL($0) }) {
-            sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == current }
+            unregisterSessionDocument(current)
         }
 
         while let fallback = sessionDocumentURLs.last {
             guard FileManager.default.fileExists(atPath: fallback.path) else {
-                sessionDocumentURLs.removeLast()
+                unregisterSessionDocument(fallback)
                 continue
             }
             openDocument(at: fallback)

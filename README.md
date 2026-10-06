@@ -43,6 +43,10 @@ Drawbridge can edit its own markups; imported annotations remain visible and pre
 
 Native printing is available in the next build: **File > Print… (Cmd+P)** or **Print Current Sheet…**. The macOS dialog offers paper size, orientation, scale, and page ranges. Output starts at **100% actual size**; select paper large enough for your drawing, or adjust the scale in the print dialog.
 
+The next build also adds **Markup Properties** (the sliders button) for custom colors, exact line weights, font sizes, and polygon fill. With a markup selected, it edits that markup; with no selection, it edits new-markup defaults.
+
+Tab switching in the next build keeps tab order, page, zoom, navigation history, and each document's search query. Saved PDFs can be reused from a small cache; files changed externally reload from disk. Unsaved changes still use the Save/Discard/Cancel prompt.
+
 ## Support
 
 If you hit an issue, open a GitHub issue with:

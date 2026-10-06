@@ -109,7 +109,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let tickAngle: CGFloat
         let labelOffset: CGFloat
     }
-    private struct ViewportHistoryEntry {
+    struct ViewportHistoryEntry {
         let pageIndex: Int
         let point: NSPoint
         let scale: CGFloat
@@ -259,6 +259,25 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var navigationForwardStack: [ViewportHistoryEntry] = []
     private var applyingHistoryNavigation = false
     private let navigationHistoryLimit = 300
+    struct TabViewState {
+        let current: ViewportHistoryEntry
+        let back: [ViewportHistoryEntry]
+        let forward: [ViewportHistoryEntry]
+        let autoScales: Bool
+    }
+    func captureTabViewState() -> TabViewState? {
+        resetNavigationHistoryIfNeeded()
+        guard let current = currentViewportHistoryEntry() else { return nil }
+        return TabViewState(current: current, back: navigationBackStack, forward: navigationForwardStack, autoScales: autoScales)
+    }
+    @discardableResult func restoreTabViewState(_ state: TabViewState) -> Bool {
+        resetNavigationHistoryIfNeeded()
+        guard applyHistoryEntry(state.current) else { return false }
+        navigationBackStack = state.back.filter { $0.pageIndex < (document?.pageCount ?? 0) }
+        navigationForwardStack = state.forward.filter { $0.pageIndex < (document?.pageCount ?? 0) }
+        autoScales = state.autoScales
+        return true
+    }
     private var navigationHistoryDocumentID: ObjectIdentifier?
     private var pendingCalloutPage: PDFPage?
     private var pendingCalloutTipInPage: NSPoint?

@@ -280,12 +280,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var pendingCalibrationDistanceInPoints: CGFloat?
     let rectangleToolbar = RectangleMarkupToolbar()
 
-    var isPDFProcessingBusy: Bool { busyOperationDepth > 0 || isSavingDocumentOperation }
+    var isPDFProcessingBusy: Bool { busyOperationDepth > 0 || isSavingDocumentOperation || isSwitchingDocument }
+    private var isSwitchingDocument = false
     private var busyOperationDepth = 0
     var markupChangeVersion = 0
     var lastAutosavedChangeVersion = 0
     var openDocumentURL: URL? { didSet { pdfView.rectangleMarkup.rememberSource(openDocumentURL) } }
     var sessionDocumentURLs: [URL] = []
+    let documentTabCache = DocumentTabCache()
+    private var tabViewStates: [URL: MarkupPDFView.TabViewState] = [:]
+    private var tabSearchQueries: [URL: String] = [:]
     var autosaveURL: URL?
     lazy var persistenceCoordinator = DocumentPersistenceCoordinator(autosaveInterval: autosaveIntervalSeconds)
     var pendingMarkupsRefreshWorkItem: DispatchWorkItem?
@@ -4238,15 +4242,28 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func openDocument(at url: URL) {
+        guard !isSwitchingDocument else { return }
         let openSpan = PerformanceMetrics.begin(
             "open_document",
             thresholdMs: 250,
             fields: ["file": url.lastPathComponent]
         )
         cancelAutoNameCapture()
-        beginBusyIndicator("Loading PDF…")
-        defer { endBusyIndicator() }
-        guard let document = PDFDocument(url: url) else {
+        rectangleToolbar.propertiesPopover.close()
+        pdfView.rectangleMarkup.finishTextEditing()
+        let departingViewState = pdfView.captureTabViewState()
+        let departingSearchQuery = toolbarSearchField.stringValue
+        isSwitchingDocument = true
+        defer {
+            isSwitchingDocument = false
+            refreshRectangleToolbar()
+            requestChromeRefresh()
+        }
+        let normalizedURL = canonicalDocumentURL(url)
+        let cached = documentTabCache.take(normalizedURL)
+        if cached == nil { beginBusyIndicator("Loading PDF…") }
+        defer { if cached == nil { endBusyIndicator() } }
+        guard let document = cached?.document ?? PDFDocument(url: url) else {
             PerformanceMetrics.end(openSpan, extra: ["result": "invalid_pdf"])
             runAlert(
                 title: "Unable to open PDF",
@@ -4254,6 +4271,21 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 style: .critical
             )
             return
+        }
+        // Capture before replacing the viewer. Dirty documents are deliberately
+        // excluded even when the caller has just chosen Discard Changes.
+        if let previousURL = openDocumentURL.map(canonicalDocumentURL),
+           previousURL != normalizedURL, sessionDocumentURLs.contains(previousURL),
+           let previousDocument = pdfView.document {
+            tabViewStates[previousURL] = departingViewState
+            tabSearchQueries[previousURL] = departingSearchQuery
+            if !hasUnsavedChanges(), !pdfView.rectangleMarkup.hasUnsavedChanges,
+               let stamp = PDFMarkupSourceStamp.read(previousURL),
+               pdfView.rectangleMarkup.sourceStamp == stamp {
+                documentTabCache.store(.init(document: previousDocument, stamp: stamp,
+                    labels: pageLabelOverrides, suppressedLabels: suppressedEmbeddedPageLabelIndexes,
+                    scaleLocks: pageScaleLocks), for: previousURL)
+            } else { documentTabCache.remove(previousURL) }
         }
         dominantDocumentPageSizeInInches = dominantPageSizeInInches(for: document)
         pdfView.setMarkupDocument(document)
@@ -4271,19 +4303,29 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         suppressedEmbeddedPageLabelIndexes.removeAll()
         hasPromptedForInitialMarkupSaveCopy = false
         isPresentingInitialMarkupSaveCopyPrompt = false
-        loadSidecarSnapshotIfAvailable(for: url, document: document)
+        if let cached {
+            pageLabelOverrides = cached.labels
+            suppressedEmbeddedPageLabelIndexes = cached.suppressedLabels
+            pageScaleLocks = cached.scaleLocks
+        } else { loadSidecarSnapshotIfAvailable(for: url, document: document) }
         openDocumentURL = url
-        DispatchQueue.global(qos: .utility).async {
-            PDFRectangleWriter.prepareInspection(source: url)
+        if cached == nil {
+            DispatchQueue.global(qos: .utility).async {
+                PDFRectangleWriter.prepareInspection(source: url)
+            }
         }
         // A replacement document can inherit a scroll offset beyond its last
         // page. Establish a visible page before refreshing navigation/chrome.
-        if let firstPage = document.page(at: 0) {
+        if let state = tabViewStates[normalizedURL], pdfView.restoreTabViewState(state) {
+            // Restoring directly avoids laying out and fitting the first sheet
+            // before immediately laying out the user's previous sheet again.
+        } else if let firstPage = document.page(at: 0) {
             pdfView.navigateToPageFittingWholePageWithHistory(firstPage, recordHistory: false)
         }
         registerSessionDocument(url)
         configureAutosaveURL(for: url)
         resetSearchState(clearQuery: false)
+        toolbarSearchField.stringValue = tabSearchQueries[normalizedURL] ?? ""
         refreshSearchIfNeeded()
         if let snapshot = loadMarkupIndexSnapshot(for: url), snapshot.pageCount == document.pageCount {
             markupsCountLabel.stringValue = "Indexed \(snapshot.totalAnnotations) (refreshing…)"
@@ -4307,14 +4349,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     func registerSessionDocument(_ url: URL) {
         let normalized = canonicalDocumentURL(url)
-        sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == normalized }
-        sessionDocumentURLs.append(normalized)
+        if !sessionDocumentURLs.contains(normalized) { sessionDocumentURLs.append(normalized) }
         refreshDocumentTabs()
     }
 
     func unregisterSessionDocument(_ url: URL) {
         let normalized = canonicalDocumentURL(url)
         sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == normalized }
+        documentTabCache.remove(normalized)
+        tabViewStates.removeValue(forKey: normalized)
+        tabSearchQueries.removeValue(forKey: normalized)
         refreshDocumentTabs()
     }
 
@@ -4323,6 +4367,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func clearToStartState() {
+        rectangleToolbar.propertiesPopover.close()
+        documentTabCache.removeAll()
+        tabViewStates.removeAll()
+        tabSearchQueries.removeAll()
         cancelAutoNameCapture()
         pdfView.setMarkupDocument(nil)
         clearMarkupCache()

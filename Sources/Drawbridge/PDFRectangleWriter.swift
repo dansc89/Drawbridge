@@ -313,6 +313,7 @@ enum PDFRectangleWriter {
                 if record.kind == .text {
                     annotation.removeValue(forKey: "/C")
                     annotation["/DrawbridgeTextColor"] = [record.red,record.green,record.blue]
+                    annotation["/DrawbridgeTextFontSize"] = record.fontSize
                     annotation["/Contents"] = "u:" + record.text
                     annotation["/DA"] = "u:/Helv \(record.fontSize) Tf \(record.red) \(record.green) \(record.blue) rg"
                     annotation["/DS"] = "u:font: Helvetica \(record.fontSize)pt; color: rgb(\(Int(record.red*255)),\(Int(record.green*255)),\(Int(record.blue*255)))"

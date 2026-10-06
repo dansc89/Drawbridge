@@ -32,6 +32,9 @@ final class RectangleMarkupToolbar: NSStackView {
     let editTextButton = NSButton(title:"",target:nil,action:nil)
     let fontPopup = NSPopUpButton()
     let fontSizes: [CGFloat] = [8,10,12,14,18,24,36,48,72]
+    let propertiesButton = NSButton(title: "", target: nil, action: nil)
+    let propertiesPopover = NSPopover()
+    let propertiesController = MarkupPropertiesViewController()
     let colorPopup = NSPopUpButton()
     let widthPopup = NSPopUpButton()
     let deleteButton = NSButton(title: "", target: nil, action: nil)
@@ -65,6 +68,13 @@ final class RectangleMarkupToolbar: NSStackView {
         fillPopup.setAccessibilityLabel("Polygon fill"); fillPopup.toolTip = "Polygon fill color"
         insertArrangedSubview(fillPopup,at:10)
         for popup in [colorPopup,widthPopup,fontPopup,fillPopup] { popup.menu?.autoenablesItems = false }
+        propertiesButton.bezelStyle = .texturedRounded
+        propertiesButton.image = NSImage(systemSymbolName: "slider.horizontal.3", accessibilityDescription: "Markup Properties")
+        propertiesButton.toolTip = "Markup Properties"; propertiesButton.setAccessibilityLabel("Markup Properties")
+        insertArrangedSubview(propertiesButton, at: 10)
+        propertiesPopover.behavior = .transient
+        propertiesPopover.contentViewController = propertiesController
+        propertiesPopover.contentSize = NSSize(width: 260, height: 200)
         setHuggingPriority(.required, for: .horizontal)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -98,6 +108,9 @@ extension MainViewController {
             self.view.window?.isDocumentEdited = dirtyBeforeDraft
         }
         session.onPresentationChanged = { [weak self] in self?.refreshRectangleToolbar() }
+        rectangleToolbar.propertiesController.session = session
+        rectangleToolbar.propertiesButton.target = self
+        rectangleToolbar.propertiesButton.action = #selector(showMarkupProperties(_:))
         for (control, action) in [(rectangleToolbar.selectButton, #selector(rectangleSelect(_:))), (rectangleToolbar.rectangleButton, #selector(rectangleDraw(_:))), (rectangleToolbar.ellipseButton, #selector(ellipseDraw(_:))), (rectangleToolbar.lineButton, #selector(lineDraw(_:))), (rectangleToolbar.arrowButton, #selector(arrowDraw(_:))), (rectangleToolbar.polygonButton, #selector(polygonDraw(_:))), (rectangleToolbar.fillPopup, #selector(polygonFill(_:))), (rectangleToolbar.polylineButton, #selector(polylineDraw(_:))), (rectangleToolbar.textButton, #selector(textDraw(_:))), (rectangleToolbar.editTextButton, #selector(editMarkupText(_:))), (rectangleToolbar.fontPopup, #selector(markupFontSize(_:))), (rectangleToolbar.deleteButton, #selector(rectangleDelete(_:))), (rectangleToolbar.undoButton, #selector(rectangleUndo(_:))), (rectangleToolbar.redoButton, #selector(rectangleRedo(_:))), (rectangleToolbar.colorPopup, #selector(rectangleStyle(_:))), (rectangleToolbar.widthPopup, #selector(rectangleStyle(_:)))] as [(NSControl, Selector)] {
             control.target = self; control.action = action
         }
@@ -107,6 +120,8 @@ extension MainViewController {
     func refreshRectangleToolbar() {
         let s = pdfView.rectangleMarkup
         let enabled = s.canEdit()
+        rectangleToolbar.propertiesButton.isEnabled = enabled && s.selected?.isReadOnly != true
+        if rectangleToolbar.propertiesPopover.isShown { rectangleToolbar.propertiesController.refresh() }
         for (button, tool) in [(rectangleToolbar.selectButton, RectangleMarkupController.Tool.select), (rectangleToolbar.rectangleButton, .rectangle), (rectangleToolbar.ellipseButton, .ellipse), (rectangleToolbar.lineButton, .line), (rectangleToolbar.arrowButton, .arrow), (rectangleToolbar.polygonButton, .polygon), (rectangleToolbar.polylineButton, .polyline), (rectangleToolbar.textButton, .text)] {
             button.isEnabled = enabled
             button.state = s.tool == tool ? .on : .off
@@ -119,31 +134,38 @@ extension MainViewController {
         rectangleToolbar.fillPopup.menu?.autoenablesItems = false
         rectangleToolbar.fillPopup.itemArray.forEach { $0.isEnabled = enabled }
         let fill = polygonSelected ? RectangleMarkupRecord.polygonFill(s.selected!) : s.fillColor
-        if let fill, let index = rectangleToolbar.colors.firstIndex(where: { $0.usingColorSpace(.deviceRGB) == fill.usingColorSpace(.deviceRGB) }) { rectangleToolbar.fillPopup.selectItem(at:index+1) }
-        else if fill == nil { rectangleToolbar.fillPopup.selectItem(at:0) }
         let textSelected = s.selected?.type == "FreeText"
         rectangleToolbar.editTextButton.isEnabled = enabled && textSelected
         rectangleToolbar.fontPopup.isHidden = !(textSelected || s.tool == .text)
         rectangleToolbar.fontPopup.isEnabled = enabled
         rectangleToolbar.widthPopup.isHidden = textSelected || s.tool == .text
-        if let size = s.selected?.font?.pointSize, textSelected, let index = rectangleToolbar.fontSizes.firstIndex(of:size) { rectangleToolbar.fontPopup.selectItem(at:index) }
         rectangleToolbar.colorPopup.isEnabled = enabled; rectangleToolbar.widthPopup.isEnabled = enabled
         rectangleToolbar.deleteButton.isEnabled = enabled && s.selected != nil
         rectangleToolbar.undoButton.isEnabled = enabled && s.undo.canUndo
         rectangleToolbar.redoButton.isEnabled = enabled && s.undo.canRedo
-        if let selected = s.selected {
-            if let index = rectangleToolbar.colors.firstIndex(where: { color in
-                guard let a = color.usingColorSpace(.deviceRGB), let b = RectangleMarkupRecord.markupColor(selected).usingColorSpace(.deviceRGB) else { return false }
-                return abs(a.redComponent-b.redComponent) < 0.01 && abs(a.greenComponent-b.greenComponent) < 0.01 && abs(a.blueComponent-b.blueComponent) < 0.01
-            }) { rectangleToolbar.colorPopup.selectItem(at:index) }
-            if let index = rectangleToolbar.widths.firstIndex(of:selected.border?.lineWidth ?? 2) { rectangleToolbar.widthPopup.selectItem(at:index) }
-        } else {
-            // Selection styles do not change drawing defaults. Show the actual
-            // defaults again when the next authoring tool is chosen.
-            if let index = rectangleToolbar.colors.firstIndex(of:s.strokeColor) { rectangleToolbar.colorPopup.selectItem(at:index) }
-            if let index = rectangleToolbar.widths.firstIndex(of:s.lineWidth) { rectangleToolbar.widthPopup.selectItem(at:index) }
-            if let index = rectangleToolbar.fontSizes.firstIndex(of:s.fontSize) { rectangleToolbar.fontPopup.selectItem(at:index) }
+        // Custom values must never display an unrelated preset. The inspector
+        // edits arbitrary supported values; menus continue offering quick presets.
+        func display(_ popup: NSPopUpButton, titles: [String], index: Int?, custom: String) {
+            while popup.numberOfItems > titles.count { popup.removeItem(at: popup.numberOfItems - 1) }
+            if let index { popup.selectItem(at: index) }
+            else { popup.addItem(withTitle: custom); popup.lastItem?.isEnabled = false; popup.selectItem(at: titles.count) }
         }
+        let color = s.selected.map(RectangleMarkupRecord.markupColor) ?? s.strokeColor
+        let colorIndex = rectangleToolbar.colors.firstIndex { $0.usingColorSpace(.deviceRGB) == color.usingColorSpace(.deviceRGB) }
+        display(rectangleToolbar.colorPopup, titles: ["Red","Blue","Black","Orange","Green"], index: colorIndex, custom: "Custom")
+        let width = s.selected?.border?.lineWidth ?? s.lineWidth
+        display(rectangleToolbar.widthPopup, titles: rectangleToolbar.widths.map { "\($0) pt" }, index: rectangleToolbar.widths.firstIndex(of: width), custom: String(format: "%g pt", Double(width)))
+        let font = textSelected ? s.selected.map(RectangleMarkupRecord.textFontSize) ?? s.fontSize : s.fontSize
+        display(rectangleToolbar.fontPopup, titles: rectangleToolbar.fontSizes.map { "\(Int($0)) pt" }, index: rectangleToolbar.fontSizes.firstIndex(of: font), custom: String(format: "%g pt", Double(font)))
+        let fillIndex = fill.flatMap { color in rectangleToolbar.colors.firstIndex { $0.usingColorSpace(.deviceRGB) == color.usingColorSpace(.deviceRGB) }.map { $0 + 1 } } ?? (fill == nil ? 0 : nil)
+        display(rectangleToolbar.fillPopup, titles: ["No Fill","Fill Red","Fill Blue","Fill Black","Fill Orange","Fill Green"], index: fillIndex, custom: "Custom Fill")
+    }
+    @objc func showMarkupProperties(_ sender: NSButton) {
+        guard pdfView.rectangleMarkup.canEdit() else { return }
+        if rectangleToolbar.propertiesPopover.isShown { rectangleToolbar.propertiesPopover.close(); return }
+        pdfView.rectangleMarkup.finishTextEditing()
+        rectangleToolbar.propertiesController.refresh()
+        rectangleToolbar.propertiesPopover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
     }
     @objc func rectangleSelect(_ sender: Any?) { pdfView.rectangleMarkup.tool = .select; view.window?.makeFirstResponder(pdfView) }
     @objc func rectangleDraw(_ sender: Any?) {
@@ -173,16 +195,16 @@ extension MainViewController {
     @objc func markupFontSize(_ sender: Any?) {
         let s = pdfView.rectangleMarkup, i = rectangleToolbar.fontPopup.indexOfSelectedItem
         guard s.canEdit(), rectangleToolbar.fontSizes.indices.contains(i) else { return }
-        s.fontSize = rectangleToolbar.fontSizes[i]
-        if let selected = s.selected, selected.type == "FreeText" { s.editSelectedText(selected.contents ?? "",size:s.fontSize) }
-        s.refresh()
+        s.setFontSize(rectangleToolbar.fontSizes[i])
     }
     @objc func rectangleDelete(_ sender:Any?) { pdfView.rectangleMarkup.deleteSelected() }
     @objc func rectangleUndo(_ sender: Any?) { guard pdfView.rectangleMarkup.canEdit() else { return }; pdfView.rectangleMarkup.undo.undo(); refreshRectangleToolbar() }
     @objc func rectangleRedo(_ sender: Any?) { guard pdfView.rectangleMarkup.canEdit() else { return }; pdfView.rectangleMarkup.undo.redo(); refreshRectangleToolbar() }
     @objc func rectangleStyle(_ sender: Any?) {
         let c = rectangleToolbar.colorPopup.indexOfSelectedItem, w = rectangleToolbar.widthPopup.indexOfSelectedItem
-        guard rectangleToolbar.colors.indices.contains(c), rectangleToolbar.widths.indices.contains(w) else { return }
-        pdfView.rectangleMarkup.styleSelected(color: rectangleToolbar.colors[c], width: rectangleToolbar.widths[w])
+        let s = pdfView.rectangleMarkup
+        let color = rectangleToolbar.colors.indices.contains(c) ? rectangleToolbar.colors[c] : s.selected.map(RectangleMarkupRecord.markupColor) ?? s.strokeColor
+        let width = rectangleToolbar.widths.indices.contains(w) ? rectangleToolbar.widths[w] : s.selected?.border?.lineWidth ?? s.lineWidth
+        s.styleSelected(color: color, width: width)
     }
 }
