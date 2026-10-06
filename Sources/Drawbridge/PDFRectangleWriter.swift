@@ -32,7 +32,7 @@ enum PDFRectangleWriter {
     static func write(document: PDFDocument, source: URL, destination: URL,
                       pageLabels: [Int: String], records: [RectangleMarkupRecord], expectedSourceStamp: PDFMarkupSourceStamp? = nil) -> Bool {
         guard let executable = PDFTKBookmarkWriter.executableURL(), records.allSatisfy(\.isValid),
-              Set(records.map(\.id)).count == records.count else { return false }
+              Set(records.map(\.id)).count == records.count else { print("Rectangle writer: unavailable helper or invalid markup records"); return false }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeRectangleSave-\(UUID().uuidString)")
         do { try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true) } catch { return false }
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -43,7 +43,7 @@ enum PDFRectangleWriter {
         }
         do {
             let sourceVersion = try MarkupFileVersion.read(source)
-            if let expectedSourceStamp, PDFMarkupSourceStamp.read(source) != expectedSourceStamp { return false }
+            if let expectedSourceStamp, PDFMarkupSourceStamp.read(source) != expectedSourceStamp { print("Rectangle writer: source stamp changed before save"); return false }
             let input = directory.appendingPathComponent("input.pdf")
             if clonefile(source.path, input.path, 0) != 0 { try FileManager.default.copyItem(at: source, to: input) }
             guard try MarkupFileVersion.read(source) == sourceVersion else { return false }

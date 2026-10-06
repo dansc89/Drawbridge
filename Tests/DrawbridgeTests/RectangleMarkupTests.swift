@@ -829,6 +829,7 @@ final class RectangleMarkupTests: XCTestCase {
                 _ = try XCTUnwrap(controller.pdfView.rectangleMarkup.create(on: page, bounds: CGRect(x: 100 + pass * 10 + addition,y: 100,width: 80,height: 60)))
             }
             let expected = RectangleMarkupRecord.capture(doc)
+            for record in expected { XCTAssertTrue(record.isValid, "Invalid captured markup: \(record)") }
             let start = Date()
             let saved = await withCheckedContinuation { continuation in
                 controller.persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…") { saved in
