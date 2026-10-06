@@ -625,6 +625,12 @@ extension MainViewController {
         }
     }
 
+    @objc func commandToggleInvert(_ sender: Any?) {
+        guard pdfView.document != nil, !isPDFProcessingBusy else { return }
+        pdfView.setColorInverted(!pdfView.isColorInverted)
+        updateStatusBar()
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         guard let action = menuItem.action else { return true }
         guard !isPDFProcessingBusy else { return false }
@@ -663,6 +669,9 @@ extension MainViewController {
             return hasDocument && !searchHits.isEmpty
         case #selector(commandToggleHyperlinkHighlights(_:)):
             menuItem.state = isHyperlinkHighlightsVisible ? .on : .off
+            return hasDocument
+        case #selector(commandToggleInvert(_:)):
+            menuItem.state = pdfView.isColorInverted ? .on : .off
             return hasDocument
         default:
             // Legacy annotation selectors cannot be re-enabled by old menu state.

@@ -172,6 +172,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let documentTabsScrollView = NSScrollView(frame: .zero)
     private let documentTabsStack = NSStackView(frame: .zero)
     private let statusBar = NSView(frame: .zero)
+    private let invertColorsButton = NSButton(title: "Invert", target: nil, action: nil)
     private let busyOverlayView = NSView(frame: .zero)
     private let captureToastView = NSView(frame: .zero)
     private let captureToastLabel = NSTextField(labelWithString: "Captured")
@@ -1331,7 +1332,17 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         let history = group("History",[navigationBackButton,navigationForwardButton])
         let pages = group("Pages",[previousPageButton,nextPageButton])
-        let details = NSStackView(views: [history,pages] + labels)
+        invertColorsButton.image = NSImage(systemSymbolName: "circle.lefthalf.filled", accessibilityDescription: "Invert PDF colors")
+        invertColorsButton.imagePosition = .imageLeading
+        invertColorsButton.bezelStyle = .texturedRounded
+        invertColorsButton.controlSize = .small
+        invertColorsButton.setButtonType(.toggle)
+        invertColorsButton.target = self
+        invertColorsButton.action = #selector(commandToggleInvert(_:))
+        invertColorsButton.identifier = NSUserInterfaceItemIdentifier("drawbridgeInvertColors")
+        invertColorsButton.toolTip = "Invert PDF colors on screen. Saved and printed colors stay unchanged."
+        invertColorsButton.setAccessibilityLabel("Invert PDF colors")
+        let details = NSStackView(views: [history,pages] + labels + [invertColorsButton])
         details.orientation = .horizontal
         details.spacing = 14
         details.translatesAutoresizingMaskIntoConstraints = false
@@ -4571,6 +4582,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     func updateStatusBar() {
         refreshFlattenButtonState()
+        invertColorsButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
+        invertColorsButton.state = pdfView.isColorInverted ? .on : .off
+        invertColorsButton.contentTintColor = pdfView.isColorInverted ? .systemBlue : .secondaryLabelColor
         navigationBackButton.isEnabled = !isPDFProcessingBusy && pdfView.canNavigateBackInHistory
         navigationForwardButton.isEnabled = !isPDFProcessingBusy && pdfView.canNavigateForwardInHistory
         let pageIndex = pdfView.currentPage.flatMap { page in pdfView.document.map { $0.index(for:page) } }

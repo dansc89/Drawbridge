@@ -264,6 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         viewItem.title = "View"
         mainMenu.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(withTitle: "Invert", action: #selector(MainViewController.commandToggleInvert(_:)), keyEquivalent: "").target = controller
         viewMenu.addItem(withTitle: "Zoom In", action: #selector(MainViewController.commandZoomIn(_:)), keyEquivalent: "+").target = controller
         viewMenu.addItem(withTitle: "Zoom Out", action: #selector(MainViewController.commandZoomOut(_:)), keyEquivalent: "-").target = controller
         viewMenu.addItem(withTitle: "Actual Size", action: #selector(MainViewController.commandActualSize(_:)), keyEquivalent: "0").target = controller

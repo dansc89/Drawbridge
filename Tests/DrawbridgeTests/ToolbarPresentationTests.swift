@@ -1,9 +1,50 @@
 import AppKit
+import PDFKit
 import XCTest
 @testable import Drawbridge
 
 @MainActor
 final class ToolbarPresentationTests: XCTestCase {
+    func testInvertToggleDoesNotChangePDFOrMarkupState() throws {
+        _ = NSApplication.shared
+        let controller = MainViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = controller
+        func buttons(_ view: NSView) -> [NSButton] {
+            (view as? NSButton).map { [$0] } ?? view.subviews.flatMap(buttons)
+        }
+        let button = try XCTUnwrap(buttons(controller.view).first { $0.identifier?.rawValue == "drawbridgeInvertColors" })
+        XCTAssertFalse(button.isEnabled)
+        let image = NSImage(size: NSSize(width: 400, height: 300))
+        image.lockFocus(); NSColor.white.setFill(); NSRect(x: 0, y: 0, width: 400, height: 300).fill(); image.unlockFocus()
+        let page = try XCTUnwrap(PDFPage(image: image))
+        let document = PDFDocument(); document.insert(page, at: 0)
+        controller.pdfView.document = document
+        controller.updateStatusBar()
+        // PDFKit serializations generate fresh document IDs. Compare the actual
+        // page rendering and geometry instead of those nondeterministic IDs.
+        let before = page.thumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox).tiffRepresentation
+        let bounds = page.bounds(for: .mediaBox)
+        let scale = controller.pdfView.scaleFactor
+        XCTAssertTrue(button.isEnabled)
+        button.performClick(nil)
+        XCTAssertTrue(controller.pdfView.isColorInverted)
+        XCTAssertEqual(button.state, .on)
+        XCTAssertEqual(controller.pdfView.contentFilters.first?.name, "CIColorInvert")
+        XCTAssertEqual(page.thumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox).tiffRepresentation, before)
+        XCTAssertEqual(page.bounds(for: .mediaBox), bounds)
+        XCTAssertTrue(page.annotations.isEmpty)
+        XCTAssertFalse(controller.pdfView.rectangleMarkup.hasUnsavedChanges)
+        XCTAssertEqual(controller.pdfView.scaleFactor, scale)
+        let menu = NSMenuItem(title: "Invert", action: #selector(MainViewController.commandToggleInvert(_:)), keyEquivalent: "")
+        XCTAssertTrue(controller.validateMenuItem(menu)); XCTAssertEqual(menu.state, .on)
+        button.performClick(nil)
+        XCTAssertFalse(controller.pdfView.isColorInverted)
+        XCTAssertEqual(button.state, .off)
+        XCTAssertTrue(controller.pdfView.contentFilters.isEmpty)
+        XCTAssertEqual(page.thumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox).tiffRepresentation, before)
+    }
+
     func testMarkupPropertyMenusKeepTheirChoicesEnabled() {
         _ = NSApplication.shared
         let toolbar = RectangleMarkupToolbar(frame:.zero)

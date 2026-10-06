@@ -1,5 +1,6 @@
 import AppKit
 import PDFKit
+import CoreImage
 import UniformTypeIdentifiers
 
 private final class PDFOverscrollClipView: NSClipView {
@@ -480,7 +481,22 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     func refreshAppearanceColors() {
-        backgroundColor = NSColor(calibratedWhite: 0.07, alpha: 1.0)
+        // Core Image inverts in linear light. Near-white becomes a dark surround.
+        backgroundColor = NSColor(calibratedWhite: isColorInverted ? 0.997 : 0.07, alpha: 1.0)
+    }
+
+    /// A screen-only filter. Never mutate a PDF page, annotation, or save payload.
+    private(set) var isColorInverted = false
+
+    func setColorInverted(_ inverted: Bool) {
+        guard inverted != isColorInverted else { return }
+        let filter = CIFilter(name: "CIColorInvert")
+        guard !inverted || filter != nil else { return }
+        isColorInverted = inverted
+        layerUsesCoreImageFilters = true
+        contentFilters = inverted ? [filter!] : []
+        refreshAppearanceColors()
+        needsDisplay = true
     }
 
     private func installOverscrollClipViewIfNeeded() {
