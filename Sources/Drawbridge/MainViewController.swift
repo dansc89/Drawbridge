@@ -129,6 +129,19 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let pdfContentsTitleLabel = NSTextField(labelWithString: "PDF Contents")
     private weak var contentsSummaryDocument: PDFDocument?
     private var cachedContentsSummary: String?
+    // Keep only counts and short samples, never annotation/page objects. A
+    // markup mutation invalidates one page rather than recounting the full set.
+    private struct PageContentsSummary {
+        var annotations = 0
+        var extraneous = 0
+        var nonPrint = 0
+        var hidden = 0
+        var links = 0
+        var types: [String: Int] = [:]
+        var samples: [String] = []
+    }
+    private var contentsSummaryByPage: [Int: PageContentsSummary] = [:]
+    private var contentsSummaryPageCount = 0
     private let pdfContentsSummaryLabel = NSTextField(labelWithString: "No PDF loaded")
     private let splitView = NSSplitView(frame: .zero)
     private let emptyStateView = StartupDropView(frame: .zero)
@@ -1002,11 +1015,21 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     func updatePDFContentsSummary() {
         guard let document = pdfView.document else {
+            contentsSummaryDocument = nil
+            cachedContentsSummary = nil
+            contentsSummaryByPage.removeAll()
+            contentsSummaryPageCount = 0
             pdfContentsSummaryLabel.stringValue = "No PDF loaded"
             return
         }
 
-        if contentsSummaryDocument === document, let cachedContentsSummary {
+        if contentsSummaryDocument !== document || contentsSummaryPageCount != document.pageCount {
+            contentsSummaryByPage.removeAll()
+            cachedContentsSummary = nil
+            contentsSummaryDocument = document
+            contentsSummaryPageCount = document.pageCount
+        }
+        if let cachedContentsSummary {
             pdfContentsSummaryLabel.stringValue = cachedContentsSummary
             return
         }
@@ -1019,29 +1042,43 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         var shxSamples: [String] = []
 
         for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex) else { continue }
-            for annotation in page.annotations {
-                totalAnnotations += 1
-                let type = (annotation.type ?? "Unknown").trimmingCharacters(in: .whitespacesAndNewlines)
-                typeCounts[type.isEmpty ? "Unknown" : type, default: 0] += 1
-                if isExtraneousEmbeddedPDFAnnotation(annotation) {
-                    extraneousAnnotations += 1
-                    if shxSamples.count < 3,
-                       let contents = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines),
-                       !contents.isEmpty {
-                        shxSamples.append(contents)
+            var pageSummary: PageContentsSummary
+            if let cached = contentsSummaryByPage[pageIndex] {
+                pageSummary = cached
+            } else {
+                guard let page = document.page(at: pageIndex) else { continue }
+                pageSummary = PageContentsSummary()
+                for annotation in page.annotations {
+                    pageSummary.annotations += 1
+                    let type = (annotation.type ?? "Unknown").trimmingCharacters(in: .whitespacesAndNewlines)
+                    pageSummary.types[type.isEmpty ? "Unknown" : type, default: 0] += 1
+                    if isExtraneousEmbeddedPDFAnnotation(annotation) {
+                        pageSummary.extraneous += 1
+                        if pageSummary.samples.count < 3,
+                           let contents = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !contents.isEmpty {
+                            pageSummary.samples.append(contents)
+                        }
+                    }
+                    if !annotation.shouldPrint {
+                        pageSummary.nonPrint += 1
+                    }
+                    if !annotation.shouldDisplay {
+                        pageSummary.hidden += 1
+                    }
+                    if (annotation.type ?? "").localizedCaseInsensitiveContains("link") {
+                        pageSummary.links += 1
                     }
                 }
-                if !annotation.shouldPrint {
-                    nonPrintAnnotations += 1
-                }
-                if !annotation.shouldDisplay {
-                    hiddenAnnotations += 1
-                }
-                if (annotation.type ?? "").localizedCaseInsensitiveContains("link") {
-                    linkAnnotations += 1
-                }
+                contentsSummaryByPage[pageIndex] = pageSummary
             }
+            totalAnnotations += pageSummary.annotations
+            extraneousAnnotations += pageSummary.extraneous
+            nonPrintAnnotations += pageSummary.nonPrint
+            hiddenAnnotations += pageSummary.hidden
+            linkAnnotations += pageSummary.links
+            for (type, count) in pageSummary.types { typeCounts[type, default: 0] += count }
+            shxSamples.append(contentsOf: pageSummary.samples.prefix(max(0, 3 - shxSamples.count)))
         }
 
         let topTypes = typeCounts
@@ -2894,6 +2931,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private func clearMarkupCache() {
         contentsSummaryDocument = nil
         cachedContentsSummary = nil
+        contentsSummaryByPage.removeAll()
+        contentsSummaryPageCount = 0
         cancelSearchIndexWarmup()
         cachedMarkupDocumentID = nil
         pageMarkupCache.removeAll(keepingCapacity: false)
@@ -2910,10 +2949,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     func markPageMarkupCacheDirty(_ page: PDFPage?) {
         cachedContentsSummary = nil
-        guard let page, let document = pdfView.document else { return }
+        guard let page, let document = pdfView.document else {
+            contentsSummaryByPage.removeAll()
+            return
+        }
         ensureMarkupCacheDocumentIdentity(for: document)
         let pageIndex = document.index(for: page)
-        guard pageIndex >= 0 else { return }
+        guard pageIndex >= 0, pageIndex < document.pageCount else { return }
+        contentsSummaryByPage.removeValue(forKey: pageIndex)
         dirtyMarkupPageIndexes.insert(pageIndex)
         invalidateVisibleMarkupRendering(on: page)
     }
