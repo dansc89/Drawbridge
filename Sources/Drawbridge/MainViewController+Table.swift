@@ -10,13 +10,13 @@ extension MainViewController: NSTableViewDataSource, NSTableViewDelegate {
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         if tableView.identifier?.rawValue == "pagesTable" {
-            guard let pageLabel = sidebarPageLabel(at: row) else { return nil }
-            let indicator = isSidebarCurrentPage(row) ? "● " : "  "
-            let text = "\(indicator)Page \(pageLabel)"
-            let cell = NSTextField(labelWithString: text)
-            cell.lineBreakMode = .byTruncatingTail
-            cell.font = NSFont.systemFont(ofSize: 12)
-            cell.textColor = .labelColor
+            guard let pageLabel = sidebarPageLabel(at: row),
+                  let document = pdfView.document, let page = document.page(at: row) else { return nil }
+            pageThumbnailCache.bind(document)
+            let cell = tableView.makeView(withIdentifier: NSUserInterfaceItemIdentifier("pageThumbnail"), owner: self) as? PageThumbnailCell
+                ?? PageThumbnailCell(frame: .zero)
+            cell.configure(page: page, number: row + 1, label: pageLabel, current: isSidebarCurrentPage(row))
+            pageThumbnailCache.request(cell)
             return cell
         }
 

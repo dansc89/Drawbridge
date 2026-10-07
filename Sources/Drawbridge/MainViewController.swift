@@ -119,7 +119,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let navigationTitleLabel = NSTextField(labelWithString: "Navigation")
     private let navigationModeControl = NSSegmentedControl(labels: ["Pages", "Bookmarks"], trackingMode: .selectOne, target: nil, action: nil)
     private let addPageButton = NSButton(title: "", target: nil, action: nil)
-    private let pagesTableView = NSTableView(frame: .zero)
+    private let pagesTableView = PageThumbnailTableView(frame: .zero)
+    let pageThumbnailCache = PageThumbnailCache()
     private let thumbnailScrollView = NSScrollView(frame: .zero)
     private let thumbnailsEmptyLabel = NSTextField(labelWithString: "No Pages")
     private let bookmarksScrollView = NSScrollView(frame: .zero)
@@ -127,6 +128,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let bookmarksEmptyLabel = NSTextField(labelWithString: "No Bookmarks")
     private let bookmarksSelectionLabel = NSTextField(labelWithString: "")
     private let pdfContentsTitleLabel = NSTextField(labelWithString: "PDF Contents")
+    private let pdfContentsDisclosure = NSButton(title: "", target: nil, action: nil)
     private weak var contentsSummaryDocument: PDFDocument?
     private var cachedContentsSummary: String?
     // Keep only counts and short samples, never annotation/page objects. A
@@ -501,6 +503,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     override func viewDidLayout() {
         super.viewDidLayout()
         applySplitLayoutIfPossible(force: false)
+        let thumbnailWidth = thumbnailScrollView.contentSize.width
+        if thumbnailWidth > 0 {
+            if abs(pagesTableView.frame.width - thumbnailWidth) > 0.5 {
+                pagesTableView.setFrameSize(NSSize(width: thumbnailWidth, height: pagesTableView.frame.height))
+            }
+            let columnWidth = max(80, thumbnailWidth - pagesTableView.intercellSpacing.width)
+            if let column = pagesTableView.tableColumns.first, abs(column.width - columnWidth) > 0.5 {
+                column.width = columnWidth
+            }
+        }
     }
 
     override func viewWillDisappear() {
@@ -831,11 +843,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pagesColumn.width = 208
         pagesTableView.identifier = NSUserInterfaceItemIdentifier("pagesTable")
         pagesTableView.addTableColumn(pagesColumn)
+        pagesTableView.autoresizingMask = [.width]
         pagesTableView.headerView = nil
         pagesTableView.usesAlternatingRowBackgroundColors = false
-        pagesTableView.rowHeight = 24
+        pagesTableView.rowHeight = 164
         pagesTableView.focusRingType = .none
-        pagesTableView.style = .sourceList
+        pagesTableView.style = .fullWidth
         pagesTableView.selectionHighlightStyle = .none
         pagesTableView.allowsEmptySelection = true
         pagesTableView.allowsMultipleSelection = true
@@ -919,7 +932,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfContentsTitleLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         pdfContentsTitleLabel.textColor = .secondaryLabelColor
         pdfContentsTitleLabel.setContentCompressionResistancePriority(.required, for: .vertical)
-        pdfContentsSummaryLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        pdfContentsDisclosure.bezelStyle = .disclosure
+        pdfContentsDisclosure.setButtonType(.onOff)
+        pdfContentsDisclosure.controlSize = .small
+        pdfContentsDisclosure.state = .off
+        pdfContentsDisclosure.target = self
+        pdfContentsDisclosure.action = #selector(togglePDFContentsDetails)
+        pdfContentsDisclosure.setAccessibilityLabel("Show PDF contents details")
+        pdfContentsDisclosure.toolTip = "Show or hide PDF contents details"
+        pdfContentsSummaryLabel.isHidden = true
+        pdfContentsSummaryLabel.font = NSFont.systemFont(ofSize: 10)
         pdfContentsSummaryLabel.textColor = .tertiaryLabelColor
         pdfContentsSummaryLabel.maximumNumberOfLines = 0
         pdfContentsSummaryLabel.lineBreakMode = .byWordWrapping
@@ -929,9 +951,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         contentsSeparator.boxType = .separator
         contentsSeparator.translatesAutoresizingMaskIntoConstraints = false
 
+        let contentsHeader = NSStackView(views: [pdfContentsDisclosure, pdfContentsTitleLabel])
+        contentsHeader.orientation = .horizontal
+        contentsHeader.alignment = .centerY
+        contentsHeader.spacing = 4
         let pdfContentsStack = NSStackView(views: [
             contentsSeparator,
-            pdfContentsTitleLabel,
+            contentsHeader,
             pdfContentsSummaryLabel
         ])
         pdfContentsStack.orientation = .vertical
@@ -971,6 +997,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     @objc private func changeNavigationMode() {
         let showingPages = (navigationModeControl.selectedSegment != 1)
         thumbnailScrollView.isHidden = !showingPages
+        if showingPages {
+            let width = thumbnailScrollView.contentSize.width
+            if width > 0 {
+                pagesTableView.setFrameSize(NSSize(width: width, height: pagesTableView.frame.height))
+                pagesTableView.tableColumns.first?.width = max(80, width - pagesTableView.intercellSpacing.width)
+            }
+            pageThumbnailCache.bind(pdfView.document)
+            pagesTableView.reloadData()
+            if sidebarCurrentPageIndex >= 0, sidebarCurrentPageIndex < pagesTableView.numberOfRows {
+                pagesTableView.scrollRowToVisible(sidebarCurrentPageIndex)
+            }
+        }
         thumbnailsEmptyLabel.isHidden = !showingPages || (pdfView.document != nil)
         bookmarksScrollView.isHidden = showingPages
         bookmarksEmptyLabel.isHidden = showingPages || !(bookmarksOutlineView.numberOfRows == 0)
@@ -984,6 +1022,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func reloadBookmarks() {
+        pageThumbnailCache.bind(pdfView.document)
         pagesTableView.reloadData()
         updatePDFContentsSummary()
         if navigationModeControl.selectedSegment < 0 {
@@ -1020,6 +1059,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         bookmarksSelectionLabel.isHidden = !shouldShow
         guard shouldShow else { return }
         bookmarksSelectionLabel.stringValue = "(selectedCount) bookmarks selected • Delete to remove"
+    }
+
+    @objc private func togglePDFContentsDetails() {
+        let expanded = pdfContentsDisclosure.state == .on
+        pdfContentsSummaryLabel.isHidden = !expanded
+        pdfContentsDisclosure.setAccessibilityLabel(expanded ? "Hide PDF contents details" : "Show PDF contents details")
     }
 
     func updatePDFContentsSummary() {
@@ -2962,6 +3007,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         cachedContentsSummary = nil
         guard let page, let document = pdfView.document else {
             contentsSummaryByPage.removeAll()
+            pageThumbnailCache.invalidate(nil)
+            pagesTableView.reloadData()
             return
         }
         ensureMarkupCacheDocumentIdentity(for: document)
@@ -2969,6 +3016,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guard pageIndex >= 0, pageIndex < document.pageCount else { return }
         contentsSummaryByPage.removeValue(forKey: pageIndex)
         dirtyMarkupPageIndexes.insert(pageIndex)
+        pageThumbnailCache.invalidate(page)
+        if navigationModeControl.selectedSegment == 0 {
+            pagesTableView.reloadData(forRowIndexes: IndexSet(integer: pageIndex), columnIndexes: IndexSet(integer: 0))
+        }
         invalidateVisibleMarkupRendering(on: page)
     }
 
