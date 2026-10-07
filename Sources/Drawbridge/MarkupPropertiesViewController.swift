@@ -25,6 +25,7 @@ final class MarkupPropertiesViewController: NSViewController {
             field.formatter = formatter
             field.setAccessibilityLabel(label)
             field.widthAnchor.constraint(equalToConstant: 85).isActive = true
+            field.cell?.sendsActionOnEndEditing = true
             field.target = self; field.action = #selector(changeNumber(_:))
         }
         stroke.target = self; stroke.action = #selector(changeStroke(_:)); stroke.setAccessibilityLabel("Markup color")

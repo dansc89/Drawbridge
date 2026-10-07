@@ -1077,6 +1077,32 @@ final class RectangleMarkupTests: XCTestCase {
         XCTAssertEqual(reopened.string, second.string)
     }
 
+    func testMetadataOnlyChangesPermitSaveButContentChangesStillReject() throws {
+        let source = try fixture(rotation: 180)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source)), session = RectangleMarkupController()
+        session.bind(to: document)
+        let stamp = try XCTUnwrap(session.sourceStamp)
+        _ = try XCTUnwrap(session.create(on: document.page(at: 0)!, bounds: CGRect(x: 120,y: 150,width: 80,height: 60)))
+        let attrs = try FileManager.default.attributesOfItem(atPath: source.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: source.path)
+        XCTAssertTrue(stamp.matchesSource(source))
+        let bytes = try Data(contentsOf: source)
+        let location = try XCTUnwrap(bytes.range(of: Data("/Rotate 180".utf8)))
+        let handle = try FileHandle(forWritingTo: source)
+        try handle.seek(toOffset: UInt64(location.lowerBound)); try handle.write(contentsOf: Data("/Rotate 270".utf8)); try handle.close()
+        try FileManager.default.setAttributes([.modificationDate: attrs[.modificationDate]!], ofItemAtPath: source.path)
+        XCTAssertFalse(stamp.matchesSource(source))
+        XCTAssertFalse(PDFRectangleWriter.write(document: document, source: source, destination: source, pageLabels: [:], records: RectangleMarkupRecord.capture(document), expectedSourceStamp: stamp))
+        try bytes.write(to: source)
+        let reopened = try XCTUnwrap(PDFDocument(url: source))
+        session.bind(to: reopened)
+        _ = try XCTUnwrap(session.create(on: reopened.page(at: 0)!, bounds: CGRect(x: 120,y: 150,width: 80,height: 60)))
+        let cleanStamp = try XCTUnwrap(session.sourceStamp)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: source.path)
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: source, pageLabels: [:], records: RectangleMarkupRecord.capture(reopened), expectedSourceStamp: cleanStamp))
+    }
+
     func testInspectionCacheRejectsSameSizeInPlaceEditWithRestoredModificationDate() throws {
         let source = try fixture(rotation: 180)
         defer { try? FileManager.default.removeItem(at: source) }

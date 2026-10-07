@@ -2,6 +2,7 @@ import Foundation
 import PDFKit
 import CommonCrypto
 import Darwin
+import OSLog
 
 /// New markup saves never invoke PDFKit's document renderer. Annotation appearances
 /// are portable Form XObjects; unchanged page content/resources are verified before commit.
@@ -34,6 +35,11 @@ enum PDFRectangleWriter {
     @inline(never)
     static func write(document: PDFDocument, source: URL, destination: URL,
                       pageLabels: [Int: String], records: [RectangleMarkupRecord], expectedSourceStamp: PDFMarkupSourceStamp? = nil) -> Bool {
+        var stage = "record validation"
+        var succeeded = false
+        defer {
+            if !succeeded { Logger(subsystem: "com.drawbridge.app", category: "MarkupSave").error("Markup save rejected at \(stage, privacy: .public)") }
+        }
         guard let executable = PDFTKBookmarkWriter.executableURL(), records.allSatisfy(\.isValid),
               Set(records.map(\.id)).count == records.count else { print("Rectangle writer: unavailable helper or invalid markup records"); return false }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeRectangleSave-\(UUID().uuidString)")
@@ -45,8 +51,12 @@ enum PDFRectangleWriter {
             print("Markup save \(phase): \(Date().timeIntervalSince(profilingStart))s")
         }
         do {
+            stage = "source snapshot"
             let sourceVersion = try MarkupFileVersion.read(source)
-            if let expectedSourceStamp, PDFMarkupSourceStamp.read(source) != expectedSourceStamp { print("Rectangle writer: source stamp changed before save"); return false }
+            if let expectedSourceStamp, !expectedSourceStamp.matchesSource(source) {
+                stage = "source changed since opening"
+                return false
+            }
             let input = directory.appendingPathComponent("input.pdf")
             if clonefile(source.path, input.path, 0) != 0 { try FileManager.default.copyItem(at: source, to: input) }
             guard try MarkupFileVersion.read(source) == sourceVersion else { return false }
@@ -58,6 +68,7 @@ enum PDFRectangleWriter {
                 return result
             }
             profile("source snapshot")
+            stage = "source inspection"
             let inspected: [String: Any]
             let inspectionCost: Int
             if let cached = inspectionCache.snapshot(for: source, version: sourceVersion) {
@@ -69,6 +80,7 @@ enum PDFRectangleWriter {
                 inspectionCost = try directory.appendingPathComponent("input.json").resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
             }
             profile("inspection")
+            stage = "source permissions"
             guard (inspected["encrypt"] as? [String: Any])?["encrypted"] as? Bool != true else { return false }
             let table = try objectTable(inspected)
             guard !table.values.contains(where: { entry in
@@ -78,10 +90,12 @@ enum PDFRectangleWriter {
             // Apply navigation and markups in one object patch. Previously this
             // saved a whole intermediate PDF and read its streams twice again.
             // Preserve the entire original byte prefix, including every stream.
+            stage = "navigation update"
             var json = inspected
             guard PDFTKBookmarkWriter.updateNavigationJSON(&json, from: document, pageLabels: pageLabels) else { return false }
             try reuseUnchangedNavigation(baseline: inspected, updated: &json)
             profile("navigation changes")
+            stage = "annotation update"
             try update(&json, records: records)
             if try changedObjects(baseline: inspected, updated: json).isEmpty {
                 guard try MarkupFileVersion.read(source) == sourceVersion else { return false }
@@ -91,22 +105,28 @@ enum PDFRectangleWriter {
                     try MainViewController.commitStagedSave(from: unchanged, to: destination)
                 }
                 try inspectionCache.store(url: destination, graph: inspected, cost: inspectionCost)
+                succeeded = true
                 return true
             }
             let candidate = directory.appendingPathComponent("candidate.pdf")
             let changed = try changedObjects(baseline: inspected, updated: json)
+            stage = "original content verification"
             guard try preservesOriginalObjects(baseline: inspected, updated: json, changed: changed) else { return false }
+            stage = "incremental serialization"
             try PDFIncrementalMarkupPatch.append(original: original, baseline: inspected, updated: json, snapshot: input, to: candidate)
             profile("candidate write")
             // Check object relationships without decoding the original images.
             let verificationURL = directory.appendingPathComponent("changed.json")
             let selectors = changed.map { "--json-object=" + $0.dropFirst(4).split(separator: " ").prefix(2).joined(separator: ",") }
+            stage = "serialized object verification"
             guard PDFTKBookmarkWriter.run(executable, arguments: ["--json=2", "--json-key=qpdf", "--json-stream-data=inline", "--decode-level=none", "--json-object=trailer"] + selectors + [candidate.path, verificationURL.path]),
                   let delta = try JSONSerialization.jsonObject(with: Data(contentsOf: verificationURL)) as? [String: Any],
                   try changedObjectsMatch(expected: json, written: delta, keys: changed) else { return false }
             let written = try mergingVerifiedChanges(baseline: inspected, delta: delta)
             profile("candidate inspection")
+            stage = "annotation verification"
             guard try ownedRecordsMatch(written, records: records) else { print("Rectangle writer: markup verification failed"); return false }
+            stage = "Apple reader verification"
             guard let readable = PDFDocument(url: candidate), readable.pageCount == (try pages(inspected).count) else {
                 print("Rectangle writer: Apple PDF reader rejected candidate"); return false
             }
@@ -114,9 +134,11 @@ enum PDFRectangleWriter {
             let size = try candidate.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size > 0, size <= original.count + max(5 * 1024 * 1024, records.count * 4096) else { print("Rectangle writer: size limit \(size) vs \(original.count)"); return false }
             profile("candidate verification")
+            stage = "file replacement"
             try MainViewController.commitStagedSave(from: candidate, to: destination)
             try inspectionCache.store(url: destination, graph: written, cost: inspectionCost + (try verificationURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0))
             profile("commit")
+            succeeded = true
             return true
         } catch { print("Rectangle writer: \(error)"); return false }
     }

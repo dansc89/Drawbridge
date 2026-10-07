@@ -37,15 +37,15 @@ Processing dialogs show the current stage and page counts. Cancel stops at the n
 
 ## Marking up drawings
 
-Use the separate markup toolbar, or press **R** (rectangle), **E** (ellipse), **L** (line), **A** (arrow), **Shift+P** (polygon), **Shift+N** (polyline), or **T** (text). Press **V** to select a markup. Line and arrow tools use two clicks: start, then end. Text boxes let you type directly on the page. Use **Cmd+Z** to undo and **Shift+Cmd+Z** to redo.
+Use the separate markup toolbar, or press **P** (pen), **R** (rectangle), **E** (ellipse), **L** (line), **A** (arrow), **Shift+P** (polygon), **Shift+N** (polyline), or **T** (text). Press **V** to select a markup. Line and arrow tools use two clicks: start, then end. Text boxes let you type directly on the page. Use **Cmd+Z** to undo and **Shift+Cmd+Z** to redo.
 
 Drawbridge can edit its own markups; imported annotations remain visible and preserved. **Invert** changes the display only, leaving saved PDFs and print output unchanged.
 
-Native printing is available in the next build: **File > Print… (Cmd+P)** or **Print Current Sheet…**. The macOS dialog offers paper size, orientation, scale, and page ranges. Output starts at **100% actual size**; select paper large enough for your drawing, or adjust the scale in the print dialog.
+Native printing is available: **File > Print… (Cmd+P)** or **Print Current Sheet…**. The macOS dialog offers paper size, orientation, scale, and page ranges. Output starts at **100% actual size**; select paper large enough for your drawing, or adjust the scale in the print dialog.
 
-The next build also adds **Markup Properties** (the sliders button) for custom colors, exact line weights, font sizes, and polygon fill. With a markup selected, it edits that markup; with no selection, it edits new-markup defaults.
+Use **Markup Properties** (the sliders button) for custom colors, exact line weights, font sizes, and polygon fill. With a markup selected, it edits that markup; with no selection, it edits new-markup defaults.
 
-Tab switching in the next build keeps tab order, page, zoom, navigation history, and each document's search query. Saved PDFs can be reused from a small cache; files changed externally reload from disk. Unsaved changes still use the Save/Discard/Cancel prompt.
+Tab switching keeps tab order, page, zoom, navigation history, and each document's search query. Saved PDFs can be reused from a small cache; files changed externally reload from disk. Unsaved changes still use the Save/Discard/Cancel prompt.
 
 ## Support
 

@@ -12,6 +12,24 @@ struct PDFMarkupSourceStamp: Sendable, Equatable {
     let modifiedNanoseconds: Int64
     let changedSeconds: Int64
     let changedNanoseconds: Int64
+    private var baseline: PDFMarkupSourceBaseline? = nil
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.size == rhs.size && lhs.modified == rhs.modified && lhs.device == rhs.device && lhs.inode == rhs.inode && lhs.modifiedNanoseconds == rhs.modifiedNanoseconds && lhs.changedSeconds == rhs.changedSeconds && lhs.changedNanoseconds == rhs.changedNanoseconds
+    }
+    func matchesSource(_ url: URL) -> Bool {
+        guard let current = Self.read(url) else { return false }
+        if current == self { return true }
+        guard size == current.size, modified == current.modified, device == current.device, inode == current.inode, modifiedNanoseconds == current.modifiedNanoseconds else { return false }
+        // ctime also changes for macOS access grants and extended attributes.
+        // Accept it only after comparing a frozen opening snapshot byte for byte.
+        return baseline?.matches(url) == true && Self.read(url) == current
+    }
+    static func capture(_ url: URL) -> Self? {
+        guard var stamp = read(url) else { return nil }
+        stamp.baseline = PDFMarkupSourceBaseline(source: url)
+        guard read(url) == stamp else { return nil }
+        return stamp
+    }
     static func read(_ url: URL) -> Self? {
         var info = stat()
         guard stat(url.path, &info) == 0 else { return nil }
@@ -19,6 +37,22 @@ struct PDFMarkupSourceStamp: Sendable, Equatable {
                     device: UInt64(bitPattern: Int64(info.st_dev)), inode: UInt64(info.st_ino),
                     modifiedNanoseconds: Int64(info.st_mtimespec.tv_nsec),
                     changedSeconds: Int64(info.st_ctimespec.tv_sec), changedNanoseconds: Int64(info.st_ctimespec.tv_nsec))
+    }
+}
+
+/// APFS clones share unchanged storage and cost no full PDF serialization.
+private final class PDFMarkupSourceBaseline: @unchecked Sendable {
+    let url: URL
+    init?(source: URL) {
+        url = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeSource-\(UUID().uuidString).pdf")
+        // If cloning is unavailable, remain conservative on metadata changes.
+        guard clonefile(source.path, url.path, 0) == 0 else { return nil }
+    }
+    deinit { try? FileManager.default.removeItem(at: url) }
+    func matches(_ source: URL) -> Bool {
+        guard let original = try? Data(contentsOf: url, options: .mappedIfSafe),
+              let current = try? Data(contentsOf: source, options: .mappedIfSafe) else { return false }
+        return original == current
     }
 }
 
@@ -184,7 +218,7 @@ final class RectangleMarkupController {
     private(set) var sourceStamp: PDFMarkupSourceStamp?
     func rememberSource(_ url: URL?) {
         guard !hasUnsavedChanges || sourceStamp == nil else { return }
-        sourceStamp = url.flatMap(PDFMarkupSourceStamp.read)
+        sourceStamp = url.flatMap(PDFMarkupSourceStamp.capture)
     }
     var onMutation: ((PDFPage) -> Void)?
     var onDraftChanged: (() -> Void)?
@@ -254,7 +288,7 @@ final class RectangleMarkupController {
             }
         }
         selected = nil; hasUnsavedChanges = false; tool = .select
-        sourceStamp = document?.documentURL.flatMap(PDFMarkupSourceStamp.read)
+        sourceStamp = document?.documentURL.flatMap(PDFMarkupSourceStamp.capture)
         if let document, let state = documentStates.object(forKey: document) {
             hasUnsavedChanges = state.dirty; sourceStamp = state.stamp
         }
@@ -274,7 +308,7 @@ final class RectangleMarkupController {
     func markSaved(at url: URL) { hasUnsavedChanges = false; rememberSource(url) }
     /// A save can finish after another markup was added. Advance the known file
     /// version without marking those newer edits clean.
-    func acceptPersistedSource(at url: URL) { sourceStamp = PDFMarkupSourceStamp.read(url) }
+    func acceptPersistedSource(at url: URL) { sourceStamp = PDFMarkupSourceStamp.capture(url) }
 
     func pointerDown(at location: CGPoint, clickCount: Int = 1) -> Bool {
         finishTextEditing()
