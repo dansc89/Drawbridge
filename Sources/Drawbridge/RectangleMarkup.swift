@@ -13,23 +13,37 @@ struct PDFMarkupSourceStamp: Sendable, Equatable {
     let changedSeconds: Int64
     let changedNanoseconds: Int64
     private var baseline: PDFMarkupSourceBaseline? = nil
+    private var sourceBookmark: Data? = nil
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.size == rhs.size && lhs.modified == rhs.modified && lhs.device == rhs.device && lhs.inode == rhs.inode && lhs.modifiedNanoseconds == rhs.modifiedNanoseconds && lhs.changedSeconds == rhs.changedSeconds && lhs.changedNanoseconds == rhs.changedNanoseconds
     }
     func matchesSource(_ url: URL) -> Bool {
         guard let current = Self.read(url) else { return false }
         if current == self { return true }
-        guard size == current.size, modified == current.modified, device == current.device, inode == current.inode, modifiedNanoseconds == current.modifiedNanoseconds else { return false }
-        // ctime also changes for macOS access grants and extended attributes.
-        // Accept it only after comparing a frozen opening snapshot byte for byte.
+        guard size == current.size else { return false }
+        // File providers can replace an unchanged file with a new inode or
+        // timestamps. Accept any identity change only on exact byte equality.
         return baseline?.matches(url) == true && Self.read(url) == current
     }
     static func capture(_ url: URL) -> Self? {
         guard var stamp = read(url) else { return nil }
         stamp.baseline = PDFMarkupSourceBaseline(source: url)
+        stamp.sourceBookmark = try? url.bookmarkData(options: .minimalBookmark)
         guard read(url) == stamp else { return nil }
         return stamp
     }
+    /// Follow a renamed file/folder only when it is still the verified source.
+    /// Never substitute PDFKit's temporary backing URL for a missing original.
+    func resolvedSourceURL(preferred url: URL) -> URL? {
+        if FileManager.default.fileExists(atPath: url.path) { return url }
+        guard let sourceBookmark else { return nil }
+        var stale = false
+        guard let resolved = try? URL(resolvingBookmarkData: sourceBookmark,
+                options: [.withoutUI, .withoutMounting], bookmarkDataIsStale: &stale),
+              matchesSource(resolved) else { return nil }
+        return resolved
+    }
+    var recoverySourceURL: URL? { baseline?.url }
     static func read(_ url: URL) -> Self? {
         var info = stat()
         guard stat(url.path, &info) == 0 else { return nil }
@@ -45,8 +59,14 @@ private final class PDFMarkupSourceBaseline: @unchecked Sendable {
     let url: URL
     init?(source: URL) {
         url = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeSource-\(UUID().uuidString).pdf")
-        // If cloning is unavailable, remain conservative on metadata changes.
-        guard clonefile(source.path, url.path, 0) == 0 else { return nil }
+        if clonefile(source.path, url.path, 0) != 0 {
+            // Snapshot data only: copying permission/provider attributes can
+            // fail even when the readable PDF bytes are perfectly valid.
+            guard copyfile(source.path, url.path, nil, copyfile_flags_t(COPYFILE_DATA | COPYFILE_EXCL)) == 0 else {
+                try? FileManager.default.removeItem(at: url)
+                return nil
+            }
+        }
     }
     deinit { try? FileManager.default.removeItem(at: url) }
     func matches(_ source: URL) -> Bool {
@@ -214,6 +234,14 @@ final class RectangleMarkupController {
         init(dirty: Bool, stamp: PDFMarkupSourceStamp?) { self.dirty = dirty; self.stamp = stamp }
     }
     private let documentStates = NSMapTable<PDFDocument, DocumentState>.weakToStrongObjects()
+    private let readerSnapshots = NSMapTable<PDFDocument, DocumentState>.weakToStrongObjects()
+    func retainReaderSnapshot(_ stamp: PDFMarkupSourceStamp, for document: PDFDocument) {
+        // PDFKit may lazily load a page long after the next save replaced the
+        // source. Keep its immutable backing file for the document's lifetime.
+        if readerSnapshots.object(forKey: document) == nil {
+            readerSnapshots.setObject(DocumentState(dirty: false, stamp: stamp), forKey: document)
+        }
+    }
     private(set) var hasUnsavedChanges = false
     private(set) var sourceStamp: PDFMarkupSourceStamp?
     func rememberSource(_ url: URL?) {
@@ -305,10 +333,13 @@ final class RectangleMarkupController {
         view.layer?.addSublayer(overlay)
     }
 
-    func markSaved(at url: URL) { hasUnsavedChanges = false; rememberSource(url) }
+    func markSaved(at url: URL, stamp: PDFMarkupSourceStamp? = nil) {
+        hasUnsavedChanges = false
+        if let stamp { sourceStamp = stamp } else { rememberSource(url) }
+    }
     /// A save can finish after another markup was added. Advance the known file
     /// version without marking those newer edits clean.
-    func acceptPersistedSource(at url: URL) { sourceStamp = PDFMarkupSourceStamp.capture(url) }
+    func acceptPersistedSource(at url: URL, stamp: PDFMarkupSourceStamp? = nil) { sourceStamp = stamp ?? PDFMarkupSourceStamp.capture(url) }
 
     func pointerDown(at location: CGPoint, clickCount: Int = 1) -> Bool {
         finishTextEditing()

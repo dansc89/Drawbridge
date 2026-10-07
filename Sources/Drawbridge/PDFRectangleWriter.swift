@@ -7,6 +7,17 @@ import OSLog
 /// New markup saves never invoke PDFKit's document renderer. Annotation appearances
 /// are portable Form XObjects; unchanged page content/resources are verified before commit.
 enum PDFRectangleWriter {
+    struct SaveFailure: Sendable {
+        let stage: String
+        let errorCode: Int?
+        var isSourceConflict: Bool { stage.hasPrefix("source changed") || stage == "source snapshot" }
+        var explanation: String {
+            if isSourceConflict { return "The original PDF is unavailable or changed outside Drawbridge. Your edits remain open. Save a recovered copy to preserve the version you were editing." }
+            if stage == "source permissions" { return "This PDF is encrypted or digitally signed. Drawbridge cannot safely append markups to it. Your edits remain open." }
+            if stage == "file replacement" { return "The verified PDF could not be committed to this location. Check that the folder is writable and available, or save a copy elsewhere. Your edits remain open." }
+            return "Drawbridge could not verify the annotation-only save (\(stage)). The original page content was not rewritten; your edits remain open."
+        }
+    }
     private static let inspectionCache = MarkupInspectionCache()
     /// Inspect once while the drawing opens, so the first small markup save does
     /// not have to discover every PDF object. Called on a background queue.
@@ -34,11 +45,18 @@ enum PDFRectangleWriter {
     // workflow regresses when the optimizer folds the writer into its caller.
     @inline(never)
     static func write(document: PDFDocument, source: URL, destination: URL,
-                      pageLabels: [Int: String], records: [RectangleMarkupRecord], expectedSourceStamp: PDFMarkupSourceStamp? = nil) -> Bool {
+                      pageLabels: [Int: String], records: [RectangleMarkupRecord], expectedSourceStamp: PDFMarkupSourceStamp? = nil,
+                      navigationSnapshot: PDFTKBookmarkWriter.NavigationSnapshot? = nil,
+                      onCommitted: ((PDFMarkupSourceStamp) -> Void)? = nil,
+                      onFailure: ((SaveFailure) -> Void)? = nil) -> Bool {
         var stage = "record validation"
         var succeeded = false
+        var errorCode: Int?
         defer {
-            if !succeeded { Logger(subsystem: "com.drawbridge.app", category: "MarkupSave").error("Markup save rejected at \(stage, privacy: .public)") }
+            if !succeeded {
+                Logger(subsystem: "com.drawbridge.app", category: "MarkupSave").error("Markup save rejected at \(stage, privacy: .public), code \(errorCode ?? 0, privacy: .public)")
+                onFailure?(SaveFailure(stage: stage, errorCode: errorCode))
+            }
         }
         guard let executable = PDFTKBookmarkWriter.executableURL(), records.allSatisfy(\.isValid),
               Set(records.map(\.id)).count == records.count else { print("Rectangle writer: unavailable helper or invalid markup records"); return false }
@@ -58,7 +76,10 @@ enum PDFRectangleWriter {
                 return false
             }
             let input = directory.appendingPathComponent("input.pdf")
-            if clonefile(source.path, input.path, 0) != 0 { try FileManager.default.copyItem(at: source, to: input) }
+            if clonefile(source.path, input.path, 0) != 0,
+               copyfile(source.path, input.path, nil, copyfile_flags_t(COPYFILE_DATA | COPYFILE_EXCL)) != 0 {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
             guard try MarkupFileVersion.read(source) == sourceVersion else { return false }
             let original = try Data(contentsOf: input, options: .mappedIfSafe)
             func read(_ url: URL, _ name: String, decoded: Bool = true) throws -> [String: Any] {
@@ -92,20 +113,28 @@ enum PDFRectangleWriter {
             // Preserve the entire original byte prefix, including every stream.
             stage = "navigation update"
             var json = inspected
-            guard PDFTKBookmarkWriter.updateNavigationJSON(&json, from: document, pageLabels: pageLabels) else { return false }
+            let navigation = navigationSnapshot ?? PDFTKBookmarkWriter.captureNavigation(in: document)
+            guard PDFTKBookmarkWriter.updateNavigationJSON(&json, snapshot: navigation, pageLabels: pageLabels) else { return false }
             try reuseUnchangedNavigation(baseline: inspected, updated: &json)
             profile("navigation changes")
             stage = "annotation update"
             try update(&json, records: records)
             if try changedObjects(baseline: inspected, updated: json).isEmpty {
                 guard try MarkupFileVersion.read(source) == sourceVersion else { return false }
+                let verifiedInput = PDFMarkupSourceStamp.capture(input)
                 if source.standardizedFileURL != destination.standardizedFileURL {
                     let unchanged = directory.appendingPathComponent("unchanged.pdf")
                     try original.write(to: unchanged)
                     try MainViewController.commitStagedSave(from: unchanged, to: destination)
                 }
-                try inspectionCache.store(url: destination, graph: inspected, cost: inspectionCost)
+                stage = "source changed after save"
+                let committedVersion = try MarkupFileVersion.read(destination)
+                guard let committedStamp = PDFMarkupSourceStamp.capture(destination),
+                      let frozen = committedStamp.recoverySourceURL,
+                      verifiedInput?.matchesSource(frozen) == true else { return false }
+                try? inspectionCache.store(url: destination, graph: inspected, cost: inspectionCost, expectedVersion: committedVersion)
                 succeeded = true
+                onCommitted?(committedStamp)
                 return true
             }
             let candidate = directory.appendingPathComponent("candidate.pdf")
@@ -130,17 +159,28 @@ enum PDFRectangleWriter {
             guard let readable = PDFDocument(url: candidate), readable.pageCount == (try pages(inspected).count) else {
                 print("Rectangle writer: Apple PDF reader rejected candidate"); return false
             }
+            stage = "source changed during save"
             guard try MarkupFileVersion.read(source) == sourceVersion else { print("Rectangle writer: source changed during save"); return false }
+            stage = "candidate size verification"
             let size = try candidate.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             guard size > 0, size <= original.count + max(5 * 1024 * 1024, records.count * 4096) else { print("Rectangle writer: size limit \(size) vs \(original.count)"); return false }
             profile("candidate verification")
+            let verifiedCandidate = PDFMarkupSourceStamp.capture(candidate)
             stage = "file replacement"
             try MainViewController.commitStagedSave(from: candidate, to: destination)
-            try inspectionCache.store(url: destination, graph: written, cost: inspectionCost + (try verificationURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0))
+            stage = "source changed after save"
+            let committedVersion = try MarkupFileVersion.read(destination)
+            guard let committedStamp = PDFMarkupSourceStamp.capture(destination),
+                  let frozen = committedStamp.recoverySourceURL,
+                  verifiedCandidate?.matchesSource(frozen) == true else { return false }
+            // A cache failure must not report a verified, committed PDF as an
+            // unsuccessful save. The next save can simply inspect it again.
+            try? inspectionCache.store(url: destination, graph: written, cost: inspectionCost + (try verificationURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0), expectedVersion: committedVersion)
             profile("commit")
             succeeded = true
+            onCommitted?(committedStamp)
             return true
-        } catch { print("Rectangle writer: \(error)"); return false }
+        } catch { errorCode = (error as NSError).code; print("Rectangle writer: \(error)"); return false }
     }
 
     static func changedObjects(baseline: [String: Any], updated: [String: Any]) throws -> [String] {

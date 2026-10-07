@@ -123,20 +123,54 @@ extension MainViewController {
             completion?(false)
             return
         }
-        applyPageLabelOverridesToDocumentIfNeeded(document)
         if persistenceCoordinator.isManualSaveInFlight {
-            // Keep Save instant: coalesce repeated Cmd+S requests while a save is in flight.
-            if !adoptAsPrimaryDocument {
-                queuedFastEmbeddedSave = true
-            }
+            // Coalesce before resolving paths or showing recovery dialogs: an
+            // active save owns its source snapshot and may relocate the file.
+            if !adoptAsPrimaryDocument { queuedFastEmbeddedSave = true }
             completion?(false)
             return
         }
+        var resolvedTargetURL = url
+        var recoverySourceURL: URL?
+        // Save As represents the version being edited, even if another app
+        // replaced the original. Build the new copy from its frozen snapshot.
+        if adoptAsPrimaryDocument, let openedURL = openDocumentURL,
+           canonicalDocumentURL(url) != canonicalDocumentURL(openedURL) {
+            recoverySourceURL = pdfView.rectangleMarkup.sourceStamp?.recoverySourceURL
+        }
+        if let openedURL = openDocumentURL,
+           !FileManager.default.fileExists(atPath: openedURL.path) {
+            if let relocated = pdfView.rectangleMarkup.sourceStamp?.resolvedSourceURL(preferred: openedURL) {
+                if canonicalDocumentURL(url) == canonicalDocumentURL(openedURL) { resolvedTargetURL = relocated }
+                unregisterSessionDocument(openedURL)
+                openDocumentURL = relocated
+                registerSessionDocument(relocated)
+                configureAutosaveURL(for: relocated)
+                onDocumentOpened?(relocated)
+            } else if adoptAsPrimaryDocument, canonicalDocumentURL(url) != canonicalDocumentURL(openedURL),
+                      let frozenSource = pdfView.rectangleMarkup.sourceStamp?.recoverySourceURL,
+                      !FileManager.default.fileExists(atPath: url.path) {
+                // Recover into a NEW file from the opening snapshot. Never
+                // overwrite another version of the user's missing original.
+                recoverySourceURL = frozenSource
+            } else {
+                let canRecover = pdfView.rectangleMarkup.sourceStamp?.recoverySourceURL != nil
+                let response = runAlert(title: "PDF source file is unavailable",
+                         informativeText: canRecover
+                            ? "The original file was moved or removed outside Drawbridge. Your markups remain open. Save a recovered copy using a new filename to keep your work."
+                            : "The original file was moved or removed outside Drawbridge, and its recovery snapshot is unavailable. Your markups remain open. Restore the original file to its previous location before saving.", style: .warning,
+                         buttons: canRecover ? ["Save Recovered Copy…", "Cancel"] : ["OK"])
+                completion?(false)
+                if canRecover, response == .alertFirstButtonReturn { saveDocumentAsProject(document: document) }
+                return
+            }
+        }
+        applyPageLabelOverridesToDocumentIfNeeded(document)
         let saveSpan = PerformanceMetrics.begin("save_pdf", thresholdMs: 150)
         pdfView.rectangleMarkup.finishTextEditing()
         let startedMarkupVersion = markupChangeVersion
         let savingDocumentID = ObjectIdentifier(document)
-        let canonicalTargetURL = canonicalDocumentURL(url)
+        let canonicalTargetURL = canonicalDocumentURL(resolvedTargetURL)
         // Prevent expensive markup-list rebuild work from competing with save completion on main.
         pendingMarkupsRefreshWorkItem?.cancel()
         pendingMarkupsRefreshWorkItem = nil
@@ -147,13 +181,14 @@ extension MainViewController {
             beginBusyIndicator(busyMessage, detail: "Generating PDF…", lockInteraction: false)
             startSaveProgressTracking(phase: "Generating")
         }
-        let targetURL = url
+        let targetURL = resolvedTargetURL
         let originDocumentURLForAdoption = openDocumentURL.map { canonicalDocumentURL($0) }
         // PDFKit can report an opaque temporary URL for a document opened from a
         // file-provider volume.  That URL is often gone by the time Save runs,
         // which used to force the slow, full-PDFKit rewrite.  The opened file is
         // the authoritative pre-edit source for a metadata-only navigation save.
         let navigationSourceURL: URL? = {
+            if let recoverySourceURL { return recoverySourceURL }
             if let originDocumentURLForAdoption,
                FileManager.default.fileExists(atPath: originDocumentURLForAdoption.path) {
                 return originDocumentURLForAdoption
@@ -165,9 +200,12 @@ extension MainViewController {
             return nil
         }()
         let startedAt = CFAbsoluteTimeGetCurrent()
-        let rectangleSourceStamp = pdfView.rectangleMarkup.sourceStamp
+        let rectangleSourceStamp = recoverySourceURL.flatMap(PDFMarkupSourceStamp.capture) ?? pdfView.rectangleMarkup.sourceStamp
         let captureStartedAt = CFAbsoluteTimeGetCurrent()
         let capturedRectangles = RectangleMarkupRecord.capture(document)
+        // Freeze navigation beside markups on the UI thread. Saving must not
+        // enumerate the live PDFKit annotation arrays while the user edits.
+        let navigationSnapshot = PDFTKBookmarkWriter.captureNavigation(in: document)
         let captureElapsed = CFAbsoluteTimeGetCurrent() - captureStartedAt
         let rectangleRecords: [RectangleMarkupRecord]? = (pdfView.rectangleMarkup.hasUnsavedChanges || !capturedRectangles.isEmpty) ? capturedRectangles : nil
         pdfView.rectangleMarkup.cancelGesture()
@@ -183,6 +221,8 @@ extension MainViewController {
         DispatchQueue.global(qos: saveQoS).async { [weak self] in
             var success = false
             var errorDescription: String?
+            var markupSaveFailure: PDFRectangleWriter.SaveFailure?
+            var committedMarkupStamp: PDFMarkupSourceStamp?
             var writeElapsed: Double = 0
             var commitElapsed: Double = 0
 
@@ -198,7 +238,10 @@ extension MainViewController {
                     pageLabels: pageLabelsForEmbeddedSave,
                     navigationSourceURL: navigationSourceURL,
                     rectangleRecords: rectangleRecords,
-                    rectangleSourceStamp: rectangleSourceStamp
+                    rectangleSourceStamp: rectangleSourceStamp,
+                    navigationSnapshot: navigationSnapshot,
+                    onMarkupCommitted: { committedMarkupStamp = $0 },
+                    onMarkupSaveFailure: { markupSaveFailure = $0 }
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - writeStartedAt
             } else if destinationIsFileProvider {
@@ -331,6 +374,8 @@ extension MainViewController {
                 writeElapsed = CFAbsoluteTimeGetCurrent() - writeStartedAt
             }
             let elapsed = CFAbsoluteTimeGetCurrent() - startedAt
+            let completedMarkupFailure = markupSaveFailure
+            let completedMarkupStamp = committedMarkupStamp
 
             // The sidecar may contain edits made after this background PDF generation began.
             // Keep it authoritative on the next open even though the PDF was modified later.
@@ -380,17 +425,25 @@ extension MainViewController {
                         }
                     }
                     let informativeText: String
-                    if let errorDescription, !errorDescription.isEmpty {
+                    if let completedMarkupFailure {
+                        informativeText = "Could not save \(targetURL.lastPathComponent).\n\n\(completedMarkupFailure.explanation)"
+                    } else if let errorDescription, !errorDescription.isEmpty {
                         informativeText = "Could not save \(targetURL.lastPathComponent).\n\n\(errorDescription)"
                     } else {
                         informativeText = "Could not save \(targetURL.lastPathComponent)." + (rectangleRecords == nil ? "" : "\n\nThe annotation-only save could not be verified. No full-page rewrite was attempted; your edits remain open.")
                     }
-                    self.runAlert(
+                    let canRecover = completedMarkupFailure?.isSourceConflict == true && self.pdfView.rectangleMarkup.sourceStamp?.recoverySourceURL != nil && saveContextStillActive
+                    self.queuedFastEmbeddedSave = false
+                    let response = self.runAlert(
                         title: "Failed to save PDF",
                         informativeText: informativeText,
-                        style: .warning
+                        style: .warning,
+                        buttons: canRecover ? ["Save Recovered Copy…", "Cancel"] : ["OK"]
                     )
                     completion?(false)
+                    if canRecover, response == .alertFirstButtonReturn {
+                        DispatchQueue.main.async { [weak self] in self?.saveDocumentAsProject(document: documentBox.document) }
+                    }
                     return
                 }
 
@@ -420,14 +473,14 @@ extension MainViewController {
                 }
 
                 if saveContextStillActive || adoptAsPrimaryDocument {
-                    self.pdfView.rectangleMarkup.acceptPersistedSource(at: targetURL)
+                    self.pdfView.rectangleMarkup.acceptPersistedSource(at: targetURL, stamp: completedMarkupStamp)
                     if embeddedSaveToken > 0 {
                         self.lastEmbeddedSaveCompletedVersion = max(self.lastEmbeddedSaveCompletedVersion, embeddedSaveToken)
                     } else {
                         self.lastEmbeddedSaveCompletedVersion = max(self.lastEmbeddedSaveCompletedVersion, startedMarkupVersion)
                     }
                     if self.markupChangeVersion <= startedMarkupVersion {
-                        self.pdfView.rectangleMarkup.markSaved(at: targetURL)
+                        self.pdfView.rectangleMarkup.markSaved(at: targetURL, stamp: completedMarkupStamp)
                         self.markDocumentClean(updateStatusBarValue: false)
                     } else {
                         self.lastAutosavedChangeVersion = max(self.lastAutosavedChangeVersion, startedMarkupVersion)
@@ -534,17 +587,21 @@ extension MainViewController {
         navigationSourceURL: URL? = nil,
         rectangleRecords: [RectangleMarkupRecord]? = nil,
         rectangleSourceStamp: PDFMarkupSourceStamp? = nil,
+        navigationSnapshot: PDFTKBookmarkWriter.NavigationSnapshot? = nil,
+        onMarkupCommitted: ((PDFMarkupSourceStamp) -> Void)? = nil,
+        onMarkupSaveFailure: ((PDFRectangleWriter.SaveFailure) -> Void)? = nil,
         options: [PDFDocumentWriteOption: Any]? = nil
     ) -> Bool {
         if let rectangleRecords {
             guard let source = navigationSourceURL ?? document.documentURL else { return false }
-            return PDFRectangleWriter.write(document: document, source: source, destination: url, pageLabels: pageLabels, records: rectangleRecords, expectedSourceStamp: rectangleSourceStamp)
+            return PDFRectangleWriter.write(document: document, source: source, destination: url, pageLabels: pageLabels, records: rectangleRecords, expectedSourceStamp: rectangleSourceStamp, navigationSnapshot: navigationSnapshot, onCommitted: onMarkupCommitted, onFailure: onMarkupSaveFailure)
         }
         switch PDFTKBookmarkWriter.writeNavigation(
             in: document,
             sourceURL: navigationSourceURL,
             to: url,
-            pageLabels: pageLabels
+            pageLabels: pageLabels,
+            navigationSnapshot: navigationSnapshot
         ) {
         case .saved:
             return true

@@ -2595,6 +2595,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     @objc func saveDocument() {
         guard let document = pdfView.document else { beep(); return }
         if let url = openDocumentURL {
+            pdfView.rectangleMarkup.finishTextEditing()
+            guard hasUnsavedChanges() || pdfView.rectangleMarkup.hasUnsavedChanges else { return }
             // Bluebeam-style Save: persist changes into the PDF itself.
             persistDocument(
                 to: url,
@@ -4268,7 +4270,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let cached = documentTabCache.take(normalizedURL)
         if cached == nil { beginBusyIndicator("Loading PDF…") }
         defer { if cached == nil { endBusyIndicator() } }
-        guard let document = cached?.document ?? PDFDocument(url: url) else {
+        let openingStamp = cached == nil ? PDFMarkupSourceStamp.capture(url) : nil
+        // A provider/editor can replace the original while PDFKit is lazily
+        // reading it. View the exact frozen source used for safe markup saves.
+        let readerURL = openingStamp?.recoverySourceURL ?? url
+        guard let document = cached?.document ?? PDFDocument(url: readerURL) else {
             PerformanceMetrics.end(openSpan, extra: ["result": "invalid_pdf"])
             runAlert(
                 title: "Unable to open PDF",
@@ -4314,6 +4320,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             pageScaleLocks = cached.scaleLocks
         } else { loadSidecarSnapshotIfAvailable(for: url, document: document) }
         openDocumentURL = url
+        if let openingStamp {
+            pdfView.rectangleMarkup.retainReaderSnapshot(openingStamp, for: document)
+            pdfView.rectangleMarkup.acceptPersistedSource(at: url, stamp: openingStamp)
+        }
         if cached == nil {
             DispatchQueue.global(qos: .utility).async {
                 PDFRectangleWriter.prepareInspection(source: url)

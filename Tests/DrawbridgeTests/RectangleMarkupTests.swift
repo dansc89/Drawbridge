@@ -17,6 +17,262 @@ private final class BackgroundPDFDocumentRead: @unchecked Sendable {
 
 @MainActor
 final class RectangleMarkupTests: XCTestCase {
+    func testLargeRealDrawingSetsMixedMarkupSaves() async throws {
+        guard let manifest = ProcessInfo.processInfo.environment["DRAWBRIDGE_LARGE_SAVE_MANIFEST"] else { throw XCTSkip("Optional real drawing-set manifest") }
+        _ = NSApplication.shared
+        let paths = try JSONDecoder().decode([String].self, from: Data(contentsOf: URL(fileURLWithPath: manifest)))
+        let output = URL(fileURLWithPath: manifest).deletingLastPathComponent()
+        var results: [[String: Any]] = []
+        for (index, path) in paths.enumerated() {
+            let input = URL(fileURLWithPath: path)
+            let source = output.appendingPathComponent("case-\(index + 1)-saved.pdf")
+            if FileManager.default.fileExists(atPath: source.path) { try FileManager.default.removeItem(at: source) }
+            try FileManager.default.copyItem(at: input, to: source)
+            let original = try Data(contentsOf: source, options: .mappedIfSafe)
+            let controller = MainViewController(); _ = controller.view
+            controller.openDocument(at: source)
+            let document = try XCTUnwrap(controller.pdfView.document)
+            let session = controller.pdfView.rectangleMarkup; session.canEdit = { true }
+            let geometry = (0..<document.pageCount).map { document.page(at: $0)!.bounds(for: .cropBox) }
+            let rotations = (0..<document.pageCount).map { document.page(at: $0)!.rotation }
+            var timings: [Double] = []
+            for pass in 0..<3 {
+                let count = pass == 1 ? 100 : 6
+                for offset in 0..<count {
+                    let page = document.page(at: (offset * max(1, document.pageCount / count)) % document.pageCount)!
+                    let crop = page.bounds(for: .cropBox)
+                    let bounds = CGRect(x: crop.minX + 30 + CGFloat(offset % 4) * 50, y: crop.minY + 30 + CGFloat(pass) * 100, width: 100, height: 60)
+                    let a = CGPoint(x: bounds.minX + 5, y: bounds.minY + 5), b = CGPoint(x: bounds.maxX - 5, y: bounds.maxY - 5)
+                    let kinds: [RectangleMarkupRecord.Kind] = [.rectangle, .ellipse, .line, .arrow, .text, .polyline, .polygon]
+                    let kind = kinds[offset % kinds.count]
+                    session.fillColor = .orange
+                    _ = try XCTUnwrap(session.create(on: page, bounds: bounds, kind: kind,
+                        endpoints: kind == .line || kind == .arrow ? (a, b) : nil,
+                        text: "SAVE QA \(pass + 1)-\(offset + 1)",
+                        vertices: [a, CGPoint(x: bounds.midX, y: b.y), CGPoint(x: b.x, y: a.y)]))
+                }
+                let expected = RectangleMarkupRecord.capture(document)
+                let start = Date()
+                let saved = await withCheckedContinuation { continuation in
+                    controller.persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…", showBusyOverlay: false) { continuation.resume(returning: $0) }
+                }
+                let elapsed = Date().timeIntervalSince(start); timings.append(elapsed)
+                print("REAL DRAWING SAVE case=\(index + 1) pages=\(document.pageCount) MiB=\(original.count / 1048576) new=\(count) seconds=\(elapsed)")
+                XCTAssertTrue(saved, input.lastPathComponent)
+                XCTAssertFalse(session.hasUnsavedChanges)
+                XCTAssertEqual(try Data(contentsOf: source, options: .mappedIfSafe).prefix(original.count), original)
+                let reopened = try XCTUnwrap(PDFDocument(url: source))
+                XCTAssertEqual(RectangleMarkupRecord.capture(reopened), expected)
+                XCTAssertEqual((0..<reopened.pageCount).map { reopened.page(at: $0)!.bounds(for: .cropBox) }, geometry)
+                XCTAssertEqual((0..<reopened.pageCount).map { reopened.page(at: $0)!.rotation }, rotations)
+            }
+            results.append(["case": index + 1, "name": input.lastPathComponent, "pages": document.pageCount, "bytes": original.count, "save_seconds": timings, "output": source.path])
+        }
+        try JSONSerialization.data(withJSONObject: results, options: [.prettyPrinted, .sortedKeys]).write(to: output.appendingPathComponent("results.json"))
+    }
+
+    func testRepeatedSaveCoalescesBeforeMissingSourceRecovery() throws {
+        _ = NSApplication.shared
+        let source = try fixture(rotation: 0)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let controller = MainViewController(); _ = controller.view
+        controller.openDocument(at: source)
+        controller.persistenceCoordinator.beginManualSave()
+        try FileManager.default.removeItem(at: source)
+        var result: Bool?
+        controller.persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…", showBusyOverlay: false) { result = $0 }
+        XCTAssertEqual(result, false)
+        XCTAssertTrue(controller.queuedFastEmbeddedSave)
+        XCTAssertEqual(controller.openDocumentURL, source)
+    }
+
+    func testImmediateSaveAfterRealOpenThenRepeatedSaves() async throws {
+        guard let root = ProcessInfo.processInfo.environment["DRAWBRIDGE_RECTANGLE_CORPUS"] else { throw XCTSkip("Optional large drawing corpus") }
+        _ = NSApplication.shared
+        let source = try fixture(rotation: 0)
+        defer { try? FileManager.default.removeItem(at: source) }
+        try Data(contentsOf: URL(fileURLWithPath: root).appendingPathComponent("architectural-mech.pdf")).write(to: source)
+        let original = try Data(contentsOf: source)
+        let controller = MainViewController(); _ = controller.view
+        controller.openDocument(at: source)
+        let document = try XCTUnwrap(controller.pdfView.document), page = try XCTUnwrap(document.page(at: 0))
+        controller.pdfView.rectangleMarkup.canEdit = { true }
+        for pass in 1...3 {
+            for offset in 0..<6 {
+                _ = try XCTUnwrap(controller.pdfView.rectangleMarkup.create(on: page, bounds: CGRect(x: 100 + offset * 20,y: 100 + pass * 20,width: 40,height: 40)))
+            }
+            let started = Date()
+            let saved = await withCheckedContinuation { continuation in
+                controller.persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…", showBusyOverlay: false) { continuation.resume(returning: $0) }
+            }
+            let elapsed = Date().timeIntervalSince(started)
+            print("IMMEDIATE REAL-OPEN SAVE (pass \(pass)): \(elapsed)s")
+            XCTAssertTrue(saved)
+            XCTAssertLessThan(elapsed, pass == 1 ? 2 : 1)
+            XCTAssertEqual(try Data(contentsOf: source).prefix(original.count), original)
+        }
+    }
+
+    func testCommittedStampDoesNotAdoptExternalEditsAfterSave() throws {
+        let source = try fixture(rotation: 0), replacement = try fixture(rotation: 90)
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: replacement) }
+        let external = try Data(contentsOf: replacement)
+        let document = try XCTUnwrap(PDFDocument(url: source)), session = RectangleMarkupController()
+        session.bind(to: document)
+        _ = try XCTUnwrap(session.create(on: document.page(at: 0)!, bounds: CGRect(x: 100,y: 100,width: 80,height: 60)))
+        var committed: PDFMarkupSourceStamp?
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: source, pageLabels: [:], records: RectangleMarkupRecord.capture(document), expectedSourceStamp: session.sourceStamp, onCommitted: {
+            committed = $0
+            // Model a watcher replacing the PDF after the verified commit but
+            // before the UI gets its save-completion callback.
+            try? external.write(to: source, options: .atomic)
+        }))
+        session.acceptPersistedSource(at: source, stamp: try XCTUnwrap(committed))
+        session.markSaved(at: source, stamp: committed)
+        XCTAssertFalse(try XCTUnwrap(session.sourceStamp).matchesSource(source))
+        XCTAssertFalse(PDFRectangleWriter.write(document: document, source: source, destination: source, pageLabels: [:], records: RectangleMarkupRecord.capture(document), expectedSourceStamp: session.sourceStamp))
+        XCTAssertEqual(try Data(contentsOf: source), external)
+    }
+
+    func testMarkupSaveUsesFrozenNavigationWhileLiveDocumentChanges() throws {
+        let source = try fixture(rotation: 90)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(document.page(at: 0))
+        let root = PDFOutline(), child = PDFOutline()
+        child.label = "At save start"; child.destination = PDFDestination(page: page, at: .zero)
+        root.insertChild(child, at: 0); document.outlineRoot = root
+        let link = PDFAnnotation(bounds: CGRect(x: 100,y: 100,width: 40,height: 20), forType: .link, withProperties: nil)
+        link.contents = "DrawbridgeAutoSheetLink QA"; link.action = PDFActionGoTo(destination: PDFDestination(page: page, at: .zero))
+        page.addAnnotation(link)
+        let navigation = PDFTKBookmarkWriter.captureNavigation(in: document)
+        let session = RectangleMarkupController(); session.bind(to: document)
+        _ = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 120,y: 140,width: 80,height: 60)))
+        child.label = "Newer unsaved navigation"; page.removeAnnotation(link)
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: source, pageLabels: [:], records: RectangleMarkupRecord.capture(document), navigationSnapshot: navigation))
+        let saved = try XCTUnwrap(PDFDocument(url: source))
+        XCTAssertEqual(saved.outlineRoot?.child(at: 0)?.label, "At save start")
+        XCTAssertEqual(saved.page(at: 0)?.annotations.filter { $0.contents == "DrawbridgeAutoSheetLink QA" }.count, 1)
+        XCTAssertEqual(child.label, "Newer unsaved navigation")
+        XCTAssertFalse(page.annotations.contains(link))
+    }
+
+    func testIdenticalAtomicSourceReplacementStillSavesMarkups() throws {
+        let source = try fixture(rotation: 90)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let original = try Data(contentsOf: source)
+        let document = try XCTUnwrap(PDFDocument(url: source)), session = RectangleMarkupController()
+        session.bind(to: document)
+        let stamp = try XCTUnwrap(session.sourceStamp)
+        _ = try XCTUnwrap(session.create(on: document.page(at: 0)!, bounds: CGRect(x: 100,y: 100,width: 80,height: 60)))
+        try original.write(to: source, options: .atomic)
+        XCTAssertNotEqual(stamp, PDFMarkupSourceStamp.read(source))
+        XCTAssertTrue(stamp.matchesSource(source))
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: source, pageLabels: [:], records: RectangleMarkupRecord.capture(document), expectedSourceStamp: stamp))
+        XCTAssertEqual(try Data(contentsOf: source).prefix(original.count), original)
+    }
+
+    func testSaveAsUsesFrozenOriginalAfterExternalContentChange() async throws {
+        _ = NSApplication.shared
+        let source = try fixture(rotation: 0), replacement = try fixture(rotation: 90)
+        let copy = source.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".pdf")
+        defer { for url in [source, replacement, copy] { try? FileManager.default.removeItem(at: url) } }
+        let original = try Data(contentsOf: source), external = try Data(contentsOf: replacement)
+        let controller = MainViewController(); _ = controller.view
+        controller.openDocument(at: source)
+        let document = try XCTUnwrap(controller.pdfView.document), session = controller.pdfView.rectangleMarkup
+        session.canEdit = { true }
+        _ = try XCTUnwrap(session.create(on: document.page(at: 0)!, bounds: CGRect(x: 100,y: 100,width: 80,height: 60)))
+        try external.write(to: source, options: .atomic)
+        var failure: PDFRectangleWriter.SaveFailure?
+        XCTAssertFalse(PDFRectangleWriter.write(document: document, source: source, destination: source, pageLabels: [:], records: RectangleMarkupRecord.capture(document), expectedSourceStamp: session.sourceStamp, onFailure: { failure = $0 }))
+        XCTAssertEqual(failure?.stage, "source changed since opening")
+        let saved = await withCheckedContinuation { continuation in
+            controller.persistDocument(to: copy, adoptAsPrimaryDocument: true, busyMessage: "Saving PDF…", showBusyOverlay: false) { continuation.resume(returning: $0) }
+        }
+        XCTAssertTrue(saved)
+        XCTAssertEqual(try Data(contentsOf: source), external)
+        XCTAssertEqual(try Data(contentsOf: copy).prefix(original.count), original)
+        let reopened = try XCTUnwrap(PDFDocument(url: copy))
+        XCTAssertEqual(reopened.page(at: 0)?.rotation, 0)
+        XCTAssertEqual(RectangleMarkupRecord.capture(reopened).count, 1)
+    }
+
+    func testMarkupSaveFollowsRenamedFolderAfterNavigationSave() async throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let folder = root.appendingPathComponent("Original"), moved = root.appendingPathComponent("Renamed")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixtureURL = try fixture(rotation: 90)
+        defer { try? FileManager.default.removeItem(at: fixtureURL) }
+        let source = folder.appendingPathComponent("Plans.pdf")
+        let input = ProcessInfo.processInfo.environment["DRAWBRIDGE_RELOCATED_FIXTURE"].map(URL.init(fileURLWithPath:)) ?? fixtureURL
+        try FileManager.default.copyItem(at: input, to: source)
+        let controller = MainViewController(); _ = controller.view
+        controller.openDocument(at: source)
+        let document = try XCTUnwrap(controller.pdfView.document)
+        // Navigation saving replaces the file and leaves PDFKit with an open,
+        // deleted temporary backing file. Rebind the known committed source.
+        XCTAssertEqual(PDFTKBookmarkWriter.writeNavigation(in: document, sourceURL: source, to: source, pageLabels: [0: "S310"]), .saved)
+        controller.pdfView.rectangleMarkup.acceptPersistedSource(at: source)
+        let original = try Data(contentsOf: source)
+        try FileManager.default.moveItem(at: folder, to: moved)
+        let relocated = moved.appendingPathComponent("Plans.pdf")
+        let session = controller.pdfView.rectangleMarkup
+        session.canEdit = { true }
+        _ = try XCTUnwrap(session.create(on: document.page(at: 0)!, bounds: CGRect(x: 100,y: 100,width: 80,height: 60)))
+        let saved = await withCheckedContinuation { continuation in
+            controller.persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…", showBusyOverlay: false) { continuation.resume(returning: $0) }
+        }
+        XCTAssertTrue(saved)
+        XCTAssertEqual(controller.openDocumentURL?.standardizedFileURL, relocated.standardizedFileURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+        XCTAssertEqual(try Data(contentsOf: relocated).prefix(original.count), original)
+        XCTAssertEqual(RectangleMarkupRecord.capture(try XCTUnwrap(PDFDocument(url: relocated))).count, 1)
+        XCTAssertFalse(session.hasUnsavedChanges)
+    }
+
+    func testRelocatedSourceRejectsChangedContents() throws {
+        let source = try fixture(rotation: 180)
+        let moved = source.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".pdf")
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: moved) }
+        let stamp = try XCTUnwrap(PDFMarkupSourceStamp.capture(source))
+        try FileManager.default.moveItem(at: source, to: moved)
+        XCTAssertEqual(stamp.resolvedSourceURL(preferred: source)?.standardizedFileURL, moved.standardizedFileURL)
+        var bytes = try Data(contentsOf: moved)
+        let range = try XCTUnwrap(bytes.range(of: Data("/Rotate 180".utf8)))
+        bytes.replaceSubrange(range, with: Data("/Rotate 270".utf8))
+        try bytes.write(to: moved)
+        XCTAssertNil(stamp.resolvedSourceURL(preferred: source))
+    }
+
+    func testMissingOriginalRecoversMarkupsIntoNewCopyWithoutRewritingPages() async throws {
+        _ = NSApplication.shared
+        let source = try fixture(rotation: 180)
+        if let input = ProcessInfo.processInfo.environment["DRAWBRIDGE_RELOCATED_FIXTURE"] {
+            try Data(contentsOf: URL(fileURLWithPath: input)).write(to: source)
+        }
+        let recovered = source.deletingLastPathComponent().appendingPathComponent(UUID().uuidString + ".pdf")
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: recovered) }
+        let original = try Data(contentsOf: source)
+        let controller = MainViewController(); _ = controller.view
+        controller.openDocument(at: source)
+        let document = try XCTUnwrap(controller.pdfView.document)
+        let session = controller.pdfView.rectangleMarkup
+        session.canEdit = { true }
+        _ = try XCTUnwrap(session.create(on: document.page(at: 0)!, bounds: CGRect(x: 100,y: 100,width: 80,height: 60)))
+        try FileManager.default.removeItem(at: source)
+        let saved = await withCheckedContinuation { continuation in
+            controller.persistDocument(to: recovered, adoptAsPrimaryDocument: true, busyMessage: "Saving PDF…", showBusyOverlay: false) { continuation.resume(returning: $0) }
+        }
+        XCTAssertTrue(saved)
+        XCTAssertEqual(try Data(contentsOf: recovered).prefix(original.count), original)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: source.path))
+        XCTAssertEqual(RectangleMarkupRecord.capture(try XCTUnwrap(PDFDocument(url: recovered))).count, 1)
+        XCTAssertEqual(controller.openDocumentURL?.standardizedFileURL, recovered.standardizedFileURL)
+        XCTAssertFalse(session.hasUnsavedChanges)
+    }
+
     func testQueuedSavePersistsEditsMadeAfterFirstSaveSnapshot() async throws {
         _ = NSApplication.shared
         let source = try fixture(rotation: 0)

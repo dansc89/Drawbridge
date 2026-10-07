@@ -13,13 +13,35 @@ enum PDFTKBookmarkWriter {
         case unavailable
         case rejectedSizeGrowth
     }
+    struct NavigationSnapshot: Sendable {
+        let pageCount: Int
+        fileprivate let outlines: [OutlineSnapshot]
+        fileprivate let links: [Int: [GeneratedLink]]
+    }
+    fileprivate struct OutlineSnapshot: Sendable {
+        let title: String
+        let pageIndex: Int?
+        let isOpen: Bool
+        let children: [OutlineSnapshot]
+        var node: NavigationNode { NavigationNode(title: title, pageIndex: pageIndex, isOpen: isOpen, children: children.map(\.node)) }
+    }
+    static func captureNavigation(in document: PDFDocument) -> NavigationSnapshot {
+        func snapshot(_ node: NavigationNode) -> OutlineSnapshot {
+            OutlineSnapshot(title: node.title, pageIndex: node.pageIndex, isOpen: node.isOpen, children: node.children.map(snapshot))
+        }
+        return NavigationSnapshot(pageCount: document.pageCount,
+            outlines: navigationNodes(from: document.outlineRoot, document: document).map(snapshot),
+            links: generatedLinksByPage(in: document))
+    }
 
     static func writeNavigation(
         in document: PDFDocument,
         sourceURL explicitSourceURL: URL? = nil,
         to destinationURL: URL,
-        pageLabels: [Int: String]
+        pageLabels: [Int: String],
+        navigationSnapshot: NavigationSnapshot? = nil
     ) -> WriteResult {
+        let navigation = navigationSnapshot ?? captureNavigation(in: document)
         let sourceURL = explicitSourceURL ?? document.documentURL ?? destinationURL
         guard sourceURL.isFileURL,
               FileManager.default.fileExists(atPath: sourceURL.path),
@@ -37,7 +59,7 @@ enum PDFTKBookmarkWriter {
             try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
             guard run(executable, arguments: ["--json=2", sourceURL.path, jsonURL.path]),
                   var json = try JSONSerialization.jsonObject(with: Data(contentsOf: jsonURL)) as? [String: Any],
-                  updateNavigationJSON(&json, from: document, pageLabels: pageLabels),
+                  updateNavigationJSON(&json, snapshot: navigation, pageLabels: pageLabels),
                   JSONSerialization.isValidJSONObject(json) else {
                 return .unavailable
             }
@@ -51,12 +73,12 @@ enum PDFTKBookmarkWriter {
             let allowedSize = max(
                 sourceSize + maximumNavigationGrowthBytes,
                 max(Int64(Double(sourceSize) * maximumNavigationGrowthRatio),
-                    sourceSize + Int64(generatedLinksByPage(in: document).values.reduce(0) { $0 + $1.count }) * 512)
+                    sourceSize + Int64(navigation.links.values.reduce(0) { $0 + $1.count }) * 512)
             )
             guard outputSize <= allowedSize else {
                 return .rejectedSizeGrowth
             }
-            guard outlineMatches(document, writtenURL: outputURL) else { return .unavailable }
+            guard outlineMatches(navigation, writtenURL: outputURL) else { return .unavailable }
             try MainViewController.commitStagedSave(from: outputURL, to: destinationURL)
             return .saved
         } catch {
@@ -102,6 +124,9 @@ enum PDFTKBookmarkWriter {
         from document: PDFDocument,
         pageLabels: [Int: String]
     ) -> Bool {
+        updateNavigationJSON(&json, snapshot: captureNavigation(in: document), pageLabels: pageLabels)
+    }
+    static func updateNavigationJSON(_ json: inout [String: Any], snapshot: NavigationSnapshot, pageLabels: [Int: String]) -> Bool {
         guard var qpdf = json["qpdf"] as? [[String: Any]], qpdf.count >= 2,
               let maxObjectID = qpdf[0]["maxobjectid"] as? Int else {
             return false
@@ -117,13 +142,13 @@ enum PDFTKBookmarkWriter {
             return false
         }
         let pageReferences = pages.compactMap { $0["object"] as? String }
-        guard pageReferences.count == document.pageCount else { return false }
+        guard pageReferences.count == snapshot.pageCount else { return false }
 
         var nextObjectID = maxObjectID + 1
         guard updateGeneratedSheetLinks(
             in: &objects,
             pageReferences: pageReferences,
-            document: document,
+            linksByPage: snapshot.links,
             nextObjectID: &nextObjectID
         ) else {
             return false
@@ -132,7 +157,7 @@ enum PDFTKBookmarkWriter {
         let outlineRootID = nextObjectID
         nextObjectID += 1
         let rootReference = "\(outlineRootID) 0 R"
-        let nodes = navigationNodes(from: document.outlineRoot, document: document)
+        let nodes = snapshot.outlines.map(\.node)
         var assignedNodes: [NavigationNode] = []
         assignObjectIDs(to: nodes, parentReference: rootReference, nextObjectID: &nextObjectID, assignedNodes: &assignedNodes)
 
@@ -215,13 +240,13 @@ enum PDFTKBookmarkWriter {
         }
     }
 
-    private static func outlineMatches(_ expected: PDFDocument, writtenURL: URL) -> Bool {
+    private static func outlineMatches(_ expected: NavigationSnapshot, writtenURL: URL) -> Bool {
         guard let written = PDFDocument(url: writtenURL) else { return false }
         return written.pageCount == expected.pageCount
-            && (written.outlineRoot?.numberOfChildren ?? 0) == (expected.outlineRoot?.numberOfChildren ?? 0)
+            && (written.outlineRoot?.numberOfChildren ?? 0) == expected.outlines.count
     }
 
-    private struct GeneratedLink {
+    fileprivate struct GeneratedLink: Sendable {
         let marker: String
         let bounds: NSRect
         let destinationPageIndex: Int
@@ -232,10 +257,9 @@ enum PDFTKBookmarkWriter {
     private static func updateGeneratedSheetLinks(
         in objects: inout [String: Any],
         pageReferences: [String],
-        document: PDFDocument,
+        linksByPage: [Int: [GeneratedLink]],
         nextObjectID: inout Int
     ) -> Bool {
-        let linksByPage = generatedLinksByPage(in: document)
         for (pageIndex, pageReference) in pageReferences.enumerated() {
             guard var pageObject = objects["obj:\(pageReference)"] as? [String: Any],
                   var pageValue = pageObject["value"] as? [String: Any] else {
@@ -335,7 +359,7 @@ enum PDFTKBookmarkWriter {
         }
     }
 
-    private final class NavigationNode {
+    fileprivate final class NavigationNode {
         let title: String
         let pageIndex: Int?
         let isOpen: Bool
