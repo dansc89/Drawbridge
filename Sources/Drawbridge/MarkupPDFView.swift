@@ -2133,6 +2133,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
     }
 
+    func clearNavigationHistory() {
+        navigationBackStack.removeAll()
+        navigationForwardStack.removeAll()
+    }
+
     private func resetNavigationHistoryIfNeeded() {
         guard let document else {
             navigationBackStack.removeAll(keepingCapacity: true)

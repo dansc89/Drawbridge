@@ -211,7 +211,10 @@ enum PDFTKBookmarkWriter {
         return (0..<root.numberOfChildren).compactMap { root.child(at: $0) }.map { outline in
             NavigationNode(
                 title: outline.label ?? "Untitled",
-                pageIndex: outline.destination?.page.map(document.index(for:)),
+                pageIndex: outline.destination?.page.flatMap { page in
+                    let index = document.index(for: page)
+                    return index < document.pageCount ? index : nil
+                },
                 isOpen: outline.isOpen,
                 children: navigationNodes(from: outline, document: document)
             )

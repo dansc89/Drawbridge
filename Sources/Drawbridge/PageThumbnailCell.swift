@@ -3,6 +3,11 @@ import PDFKit
 
 @MainActor
 final class PageThumbnailTableView: NSTableView {
+    override func menu(for event: NSEvent) -> NSMenu? {
+        selectContextRow(in: self, event: event)
+        return super.menu(for: event)
+    }
+
     override func layout() {
         super.layout()
         guard let scrollView = enclosingScrollView, let column = tableColumns.first else { return }
@@ -121,5 +126,22 @@ final class PageThumbnailCache {
             break // Yield between pages so input and saving can run.
         }
         schedule()
+    }
+}
+
+@MainActor
+private func selectContextRow(in table: NSTableView, event: NSEvent) {
+    let row = table.row(at: table.convert(event.locationInWindow, from: nil))
+    if row >= 0, !table.selectedRowIndexes.contains(row) {
+        table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+    }
+    table.window?.makeFirstResponder(table)
+}
+
+@MainActor
+final class SidebarBookmarkOutlineView: NSOutlineView {
+    override func menu(for event: NSEvent) -> NSMenu? {
+        selectContextRow(in: self, event: event)
+        return super.menu(for: event)
     }
 }

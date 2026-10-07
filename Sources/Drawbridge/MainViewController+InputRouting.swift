@@ -167,6 +167,14 @@ extension MainViewController {
         }
 
         if modifiers.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "z",
+           view.window?.firstResponder === pagesTableView || view.window?.firstResponder === bookmarksOutlineView {
+            guard !isPDFProcessingBusy else { return nil }
+            if modifiers.contains(.shift) { view.window?.undoManager?.redo() }
+            else { view.window?.undoManager?.undo() }
+            return nil
+        }
+
+        if modifiers.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "z",
            view.window?.firstResponder === pdfView {
             if modifiers.contains(.shift) { rectangleRedo(nil) } else { rectangleUndo(nil) }
             return nil
@@ -182,12 +190,16 @@ extension MainViewController {
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField {
                 return event
             }
+            if view.window?.firstResponder === pagesTableView {
+                deletePagesFromSidebar()
+                return nil
+            }
             if view.window?.firstResponder === bookmarksOutlineView {
                 deleteBookmarkFromSidebar()
                 return nil
             }
-            if view.window?.firstResponder === pdfView { rectangleDelete(nil) }
-            return nil
+            if view.window?.firstResponder === pdfView { rectangleDelete(nil); return nil }
+            return event
         }
 
         if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField {

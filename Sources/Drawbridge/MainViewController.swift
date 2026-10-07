@@ -119,12 +119,21 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let navigationTitleLabel = NSTextField(labelWithString: "Navigation")
     private let navigationModeControl = NSSegmentedControl(labels: ["Pages", "Bookmarks"], trackingMode: .selectOne, target: nil, action: nil)
     private let addPageButton = NSButton(title: "", target: nil, action: nil)
-    private let pagesTableView = PageThumbnailTableView(frame: .zero)
+    let pagesTableView = PageThumbnailTableView(frame: .zero)
+    private let pageStructureStates = NSMapTable<PDFDocument, PDFPageStructureState>.weakToStrongObjects()
+    var pageStructureState: PDFPageStructureState? {
+        get { pdfView.document.flatMap { pageStructureStates.object(forKey: $0) } }
+        set {
+            guard let document = pdfView.document else { return }
+            if let newValue { pageStructureStates.setObject(newValue, forKey: document) }
+            else { pageStructureStates.removeObject(forKey: document) }
+        }
+    }
     let pageThumbnailCache = PageThumbnailCache()
     private let thumbnailScrollView = NSScrollView(frame: .zero)
     private let thumbnailsEmptyLabel = NSTextField(labelWithString: "No Pages")
     private let bookmarksScrollView = NSScrollView(frame: .zero)
-    let bookmarksOutlineView = NSOutlineView(frame: .zero)
+    let bookmarksOutlineView = SidebarBookmarkOutlineView(frame: .zero)
     private let bookmarksEmptyLabel = NSTextField(labelWithString: "No Bookmarks")
     private let bookmarksSelectionLabel = NSTextField(labelWithString: "")
     private let pdfContentsTitleLabel = NSTextField(labelWithString: "PDF Contents")
@@ -849,7 +858,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pagesTableView.rowHeight = 164
         pagesTableView.focusRingType = .none
         pagesTableView.style = .fullWidth
-        pagesTableView.selectionHighlightStyle = .none
+        pagesTableView.selectionHighlightStyle = .regular
         pagesTableView.allowsEmptySelection = true
         pagesTableView.allowsMultipleSelection = true
         pagesTableView.backgroundColor = sidebarBackgroundColor
@@ -864,6 +873,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let renamePageItem = NSMenuItem(title: "Rename Page Label…", action: #selector(renamePageLabelFromSidebar), keyEquivalent: "")
         renamePageItem.target = self
         pagesContextMenu.addItem(renamePageItem)
+        pagesContextMenu.addItem(.separator())
+        let deletePageItem = NSMenuItem(title: "Delete Selected Page(s)…", action: #selector(deletePagesFromSidebar), keyEquivalent: "")
+        deletePageItem.target = self
+        pagesContextMenu.addItem(deletePageItem)
         pagesTableView.menu = pagesContextMenu
 
         thumbnailScrollView.borderType = .noBorder
@@ -1004,7 +1017,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 pagesTableView.tableColumns.first?.width = max(80, width - pagesTableView.intercellSpacing.width)
             }
             pageThumbnailCache.bind(pdfView.document)
+            let selected = pagesTableView.selectedRowIndexes
             pagesTableView.reloadData()
+            pagesTableView.selectRowIndexes(selected, byExtendingSelection: false)
             if sidebarCurrentPageIndex >= 0, sidebarCurrentPageIndex < pagesTableView.numberOfRows {
                 pagesTableView.scrollRowToVisible(sidebarCurrentPageIndex)
             }
@@ -1022,6 +1037,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func reloadBookmarks() {
+        let selectedPages = pagesTableView.selectedRowIndexes
+        let selectedBookmarks = bookmarksOutlineView.selectedRowIndexes.compactMap { bookmarksOutlineView.item(atRow: $0) as? PDFOutline }
+        defer {
+            pagesTableView.selectRowIndexes(IndexSet(selectedPages.filter { $0 < pagesTableView.numberOfRows }), byExtendingSelection: false)
+            let rows = selectedBookmarks.map { bookmarksOutlineView.row(forItem: $0) }.filter { $0 >= 0 }
+            bookmarksOutlineView.selectRowIndexes(IndexSet(rows), byExtendingSelection: false)
+        }
         pageThumbnailCache.bind(pdfView.document)
         pagesTableView.reloadData()
         updatePDFContentsSummary()
@@ -1164,12 +1186,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc private func selectPageFromSidebar() {
+        guard pagesTableView.selectedRowIndexes.count == 1 else { return }
         let row = pagesTableView.selectedRow
         guard row >= 0, let document = pdfView.document, row < document.pageCount, let page = document.page(at: row) else {
             return
         }
         pdfView.navigateToPageWithHistory(page)
-        pagesTableView.deselectAll(nil)
+        view.window?.makeFirstResponder(pagesTableView)
         requestChromeRefresh(immediate: true)
     }
 
@@ -1182,10 +1205,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
         pdfView.navigateToDestinationWithHistory(destination)
+        view.window?.makeFirstResponder(bookmarksOutlineView)
         requestChromeRefresh(immediate: true)
     }
 
-    @objc private func renameBookmarkFromSidebar() {
+    @objc func renameBookmarkFromSidebar() {
         let row = bookmarksOutlineView.clickedRow >= 0 ? bookmarksOutlineView.clickedRow : bookmarksOutlineView.selectedRow
         guard row >= 0,
               let outline = bookmarksOutlineView.item(atRow: row) as? PDFOutline else { return }
@@ -1227,11 +1251,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         markMarkupChangedAndScheduleAutosave()
     }
 
-    @objc func deleteBookmarkFromSidebar() {
-        let clickedRow = bookmarksOutlineView.clickedRow
-        if clickedRow >= 0, !bookmarksOutlineView.selectedRowIndexes.contains(clickedRow) {
-            bookmarksOutlineView.selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
-        }
+    @objc func deleteBookmarkFromSidebar() { deleteSelectedBookmarks() }
+
+    func deleteSelectedBookmarks(confirm: Bool = true) {
+        guard !isPDFProcessingBusy else { return }
         let selectedOutlines = bookmarksOutlineView.selectedRowIndexes.compactMap {
             bookmarksOutlineView.item(atRow: $0) as? PDFOutline
         }
@@ -1257,12 +1280,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 : "Remove “\(title)”? The PDF page is unaffected."
         } else {
             alert.messageText = "Delete \(outlines.count) Bookmarks?"
-            alert.informativeText = "This also removes \(descendantCount) nested bookmark\(descendantCount == 1 ? "" : "s"). PDF pages are unaffected."
+            alert.informativeText = descendantCount > 0
+                ? "This also removes \(descendantCount) nested bookmark\(descendantCount == 1 ? "" : "s"). PDF pages are unaffected."
+                : "Remove the selected bookmarks? PDF pages are unaffected."
         }
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard !confirm || alert.runModal() == .alertFirstButtonReturn else { return }
 
         for outline in outlines {
             guard let parent = outline.parent else { continue }
@@ -1319,7 +1344,93 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         undo.setActionName(actionName)
     }
 
-    @objc private func renamePageLabelFromSidebar() {
+    @objc func deletePagesFromSidebar() {
+        guard !isPDFProcessingBusy, let document = pdfView.document else { return }
+        let indexes = pagesTableView.selectedRowIndexes
+        guard !indexes.isEmpty else { return }
+        guard indexes.count < document.pageCount else {
+            runAlert(title: "Keep at least one page", informativeText: "A PDF must contain at least one page. Select fewer pages to delete.", style: .informational)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = indexes.count == 1 ? "Delete Page?" : "Delete \(indexes.count) Pages?"
+        alert.informativeText = "The selected pages and their markups will be removed from this PDF. You can undo this change."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do { try deletePages(at: indexes) }
+        catch { runAlert(title: "Could not delete pages", informativeText: error.localizedDescription, style: .warning) }
+    }
+
+    /// The original page objects remain available to Undo, even after saving.
+    func deletePages(at indexes: IndexSet) throws {
+        guard !isPDFProcessingBusy, let document = pdfView.document,
+              !indexes.isEmpty, indexes.count < document.pageCount,
+              indexes.allSatisfy({ $0 < document.pageCount && $0 >= 0 }) else { return }
+        if pageStructureState?.document !== document {
+            guard let stamp = pdfView.rectangleMarkup.sourceStamp,
+                  let source = stamp.recoverySourceURL else {
+                throw NSError(domain: "Drawbridge", code: 1, userInfo: [NSLocalizedDescriptionKey: "Save this PDF before deleting pages so Drawbridge can preserve its original drawing content."])
+            }
+            pageStructureState = PDFPageStructureState(document: document, stamp: stamp, source: source)
+        }
+        pdfView.rectangleMarkup.finishTextEditing()
+        pdfView.rectangleMarkup.cancelGesture()
+        let removed = indexes.compactMap { index in document.page(at: index).map { (index, $0) } }
+        let labels = Dictionary(uniqueKeysWithValues: (0..<document.pageCount).map { ($0, displayPageLabel(forPageIndex: $0)) })
+        let scales = pageScaleLocks
+        let suppressed = suppressedEmbeddedPageLabelIndexes
+        let removedPages = removed.map { $0.1 }
+        var destinations: [(PDFOutline, PDFDestination)] = []
+        func detachDestinations(_ outline: PDFOutline) {
+            if let destination = outline.destination, let page = destination.page, removedPages.contains(where: { $0 === page }) {
+                destinations.append((outline, destination)); outline.destination = nil
+            }
+            for index in 0..<outline.numberOfChildren { if let child = outline.child(at: index) { detachDestinations(child) } }
+        }
+        if let root = document.outlineRoot { detachDestinations(root) }
+        for index in indexes.reversed() { document.removePage(at: index) }
+        func newIndex(_ old: Int) -> Int? { indexes.contains(old) ? nil : old - indexes.filter { $0 < old }.count }
+        pageLabelOverrides = Dictionary(uniqueKeysWithValues: labels.compactMap { key, value in newIndex(key).map { ($0, value) } })
+        pageScaleLocks = Dictionary(uniqueKeysWithValues: scales.compactMap { key, value in newIndex(key).map { ($0, value) } })
+        suppressedEmbeddedPageLabelIndexes = Set(suppressed.compactMap(newIndex))
+        registerPageDeletionUndo(document: document, removed: removed, labels: labels, scales: scales, suppressed: suppressed, destinations: destinations)
+        refreshAfterPageStructureChange(document: document, preferredIndex: min(indexes.first ?? 0, document.pageCount - 1))
+    }
+
+    private func registerPageDeletionUndo(document: PDFDocument, removed: [(Int, PDFPage)], labels: [Int: String], scales: [Int: PageScaleLock], suppressed: Set<Int>, destinations: [(PDFOutline, PDFDestination)]) {
+        let undo = view.window?.undoManager ?? undoManager
+        undo?.registerUndo(withTarget: self) { target in
+            guard target.pdfView.document === document, !target.isPDFProcessingBusy else { return }
+            for (index, page) in removed { document.insert(page, at: min(index, document.pageCount)) }
+            for (outline, destination) in destinations { outline.destination = destination }
+            target.pageLabelOverrides = labels
+            target.pageScaleLocks = scales
+            target.suppressedEmbeddedPageLabelIndexes = suppressed
+            target.refreshAfterPageStructureChange(document: document, preferredIndex: removed.first?.0 ?? 0)
+            (target.view.window?.undoManager ?? target.undoManager)?.registerUndo(withTarget: target) { owner in
+                do { try owner.deletePages(at: IndexSet(removed.map { $0.0 })) }
+                catch { owner.runAlert(title: "Could not delete pages", informativeText: error.localizedDescription, style: .warning) }
+            }
+        }
+        undo?.setActionName(removed.count == 1 ? "Delete Page" : "Delete Pages")
+    }
+
+    private func refreshAfterPageStructureChange(document: PDFDocument, preferredIndex: Int) {
+        pdfView.rectangleMarkup.cancelGesture()
+        pdfView.clearNavigationHistory()
+        clearMarkupCache()
+        sidebarCurrentPageIndex = -1
+        pagesTableView.deselectAll(nil)
+        reloadBookmarks()
+        if let page = document.page(at: preferredIndex) { pdfView.go(to: page) }
+        performRefreshMarkups(selecting: nil, forceImmediate: true)
+        markMarkupChangedAndScheduleAutosave()
+        view.window?.makeFirstResponder(pagesTableView)
+    }
+
+    @objc func renamePageLabelFromSidebar() {
         let row = pagesTableView.clickedRow >= 0 ? pagesTableView.clickedRow : pagesTableView.selectedRow
         guard row >= 0, row < sidebarPageCount() else { return }
         let existing = displayPageLabel(forPageIndex: row)
@@ -4764,8 +4875,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             pageJumpField.stringValue = label
             if sidebarCurrentPageIndex != index {
                 sidebarCurrentPageIndex = index
+                let selectedPages = pagesTableView.selectedRowIndexes
+                let selectedBookmarks = bookmarksOutlineView.selectedRowIndexes
                 pagesTableView.reloadData()
                 bookmarksOutlineView.reloadData()
+                pagesTableView.selectRowIndexes(selectedPages, byExtendingSelection: false)
+                bookmarksOutlineView.selectRowIndexes(selectedBookmarks, byExtendingSelection: false)
                 if navigationModeControl.selectedSegment == 0, pagesTableView.numberOfRows > index {
                     pagesTableView.scrollRowToVisible(index)
                 }
@@ -4782,7 +4897,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 pagesTableView.reloadData()
                 bookmarksOutlineView.reloadData()
             }
-            pagesTableView.deselectAll(nil)
+            if pdfView.document == nil { pagesTableView.deselectAll(nil) }
             pageJumpField.isEnabled = false
             autoNameSheetsButton.isEnabled = false
             batchLinkSheetsButton.isEnabled = false

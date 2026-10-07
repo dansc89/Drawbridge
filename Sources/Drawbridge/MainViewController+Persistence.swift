@@ -203,6 +203,9 @@ extension MainViewController {
         let rectangleSourceStamp = recoverySourceURL.flatMap(PDFMarkupSourceStamp.capture) ?? pdfView.rectangleMarkup.sourceStamp
         let captureStartedAt = CFAbsoluteTimeGetCurrent()
         let capturedRectangles = RectangleMarkupRecord.capture(document)
+        let structureState = pageStructureState?.document === document ? pageStructureState : nil
+        let structurePlan = structureState?.plan(for: document)
+        let savedPageIdentities = (0..<document.pageCount).compactMap(document.page(at:)).map(ObjectIdentifier.init)
         // Freeze navigation beside markups on the UI thread. Saving must not
         // enumerate the live PDFKit annotation arrays while the user edits.
         let navigationSnapshot = PDFTKBookmarkWriter.captureNavigation(in: document)
@@ -226,7 +229,12 @@ extension MainViewController {
             var writeElapsed: Double = 0
             var commitElapsed: Double = 0
 
-            if rectangleRecords != nil {
+            if let structurePlan, let navigationSourceURL {
+                let writeStartedAt = CFAbsoluteTimeGetCurrent()
+                success = structurePlan.write(document: documentBox.document, currentSource: navigationSourceURL, destination: targetURL, expectedStamp: rectangleSourceStamp, labels: pageLabelsForEmbeddedSave, records: capturedRectangles, navigation: navigationSnapshot, onCommitted: { committedMarkupStamp = $0 })
+                if !success { errorDescription = "The page deletion could not be verified. Your original PDF is unchanged and your edits remain open." }
+                writeElapsed = CFAbsoluteTimeGetCurrent() - writeStartedAt
+            } else if rectangleRecords != nil {
                 // The annotation writer already creates and verifies a local
                 // candidate, then atomically commits it. A second outer stage
                 // duplicated that work and cached inspection under a deleted
@@ -473,6 +481,7 @@ extension MainViewController {
                 }
 
                 if saveContextStillActive || adoptAsPrimaryDocument {
+                    if structurePlan != nil { structureState?.savedPages = savedPageIdentities }
                     self.pdfView.rectangleMarkup.acceptPersistedSource(at: targetURL, stamp: completedMarkupStamp)
                     if embeddedSaveToken > 0 {
                         self.lastEmbeddedSaveCompletedVersion = max(self.lastEmbeddedSaveCompletedVersion, embeddedSaveToken)

@@ -467,6 +467,8 @@ extension MainViewController {
             textView.selectAll(nil)
             return
         }
+        if view.window?.firstResponder === pagesTableView { pagesTableView.selectAll(sender); return }
+        if view.window?.firstResponder === bookmarksOutlineView { bookmarksOutlineView.selectAll(sender); return }
         pdfView.selectAll(sender)
     }
     @objc func commandEditMarkup(_ sender: Any?) { editSelectedMarkupText() }
@@ -650,6 +652,12 @@ extension MainViewController {
         case #selector(commandFlattenPDF(_:)):
             menuItem.title = pdfView.document.map(PDFAnnotationFlattener.canUnflatten) == true ? "Unflatten PDF…" : "Flatten PDF…"
             return hasDocument && openDocumentURL != nil && !isPDFProcessingBusy
+        case #selector(renamePageLabelFromSidebar):
+            return hasDocument && pagesTableView.selectedRowIndexes.count == 1
+        case #selector(renameBookmarkFromSidebar):
+            return hasDocument && bookmarksOutlineView.selectedRowIndexes.count == 1
+        case #selector(deletePagesFromSidebar):
+            return hasDocument && !pagesTableView.selectedRowIndexes.isEmpty
         case #selector(deleteBookmarkFromSidebar):
             return hasDocument && !bookmarksOutlineView.selectedRowIndexes.isEmpty
         case #selector(commandCopy(_:)), #selector(commandPaste(_:)), #selector(commandSelectAll(_:)):
@@ -698,7 +706,8 @@ extension MainViewController {
 4) Navigate with the Pages/Bookmarks sidebar or arrow keys.
    Mouse wheel zooms at the pointer; middle mouse drag pans.
 5) Go to Sheet with ⌘L; fit the entire page with ⌘9.
-6) Rename/delete bookmarks by right-clicking; Shift-click selects a range.
+6) Right-click pages/bookmarks to rename or delete. Shift-click selects a
+   range; Command-click selects individual items. Delete asks for confirmation.
 7) Save with ⌘S; Save As PDF with ⌘⇧S.
 8) Mark up with R (rectangle), E (ellipse), L (line), A (arrow),
    ⇧P (polygon), ⇧N (polyline), or T (text). V selects markups.
