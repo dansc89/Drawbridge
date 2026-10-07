@@ -676,7 +676,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 rootDropView.layer?.backgroundColor = chromeBackgroundColor.cgColor
             }
             view.layer?.backgroundColor = chromeBackgroundColor.cgColor
-            pdfCanvasContainer.layer?.backgroundColor = chromeBackgroundColor.cgColor
+            pdfCanvasContainer.layer?.backgroundColor = AppAppearance.canvas.cgColor
             bookmarksContainer.layer?.backgroundColor = sidebarBackgroundColor.cgColor
             pagesTableView.backgroundColor = sidebarBackgroundColor
             bookmarksOutlineView.backgroundColor = sidebarBackgroundColor
@@ -735,7 +735,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             bookmarksContainer.isHidden = true
         }
         pdfCanvasContainer.wantsLayer = true
-        pdfCanvasContainer.layer?.backgroundColor = chromeBackgroundColor.cgColor
+        pdfCanvasContainer.layer?.backgroundColor = AppAppearance.canvas.cgColor
         bookmarksContainer.translatesAutoresizingMaskIntoConstraints = false
         navigationResizeHandle.translatesAutoresizingMaskIntoConstraints = false
 
@@ -764,7 +764,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         bookmarksWidthConstraint = bookmarksWidth
 
         navigationResizeHandle.wantsLayer = true
-        navigationResizeHandle.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.4).cgColor
+        navigationResizeHandle.layer?.backgroundColor = NSColor.clear.cgColor
         navigationResizeHandle.layer?.cornerRadius = 1
         let resizePan = NSPanGestureRecognizer(target: self, action: #selector(handleNavigationResizePan(_:)))
         navigationResizeHandle.addGestureRecognizer(resizePan)
@@ -794,7 +794,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
 
         bookmarksContainer.wantsLayer = true
-        bookmarksContainer.layer?.borderWidth = 1
+        bookmarksContainer.layer?.borderWidth = 0.5
         bookmarksContainer.layer?.borderColor = NSColor.separatorColor.cgColor
         bookmarksContainer.layer?.backgroundColor = sidebarBackgroundColor.cgColor
 
@@ -1956,7 +1956,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     private func configureDocumentTabsBar() {
         documentTabsBar.wantsLayer = true
-        documentTabsBar.layer?.borderWidth = 1
+        documentTabsBar.layer?.borderWidth = 0.5
         documentTabsBar.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
         documentTabsBar.layer?.backgroundColor = panelBackgroundColor.cgColor
         documentTabsBar.translatesAutoresizingMaskIntoConstraints = false
