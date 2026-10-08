@@ -8,6 +8,11 @@ import Vision
 private final class NavigationResizeHandleView: NSView {
     private var trackingAreaRef: NSTrackingArea?
 
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .resizeLeftRight)
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let trackingAreaRef {
@@ -15,7 +20,7 @@ private final class NavigationResizeHandleView: NSView {
         }
         let tracking = NSTrackingArea(
             rect: bounds,
-            options: [.activeInKeyWindow, .inVisibleRect, .cursorUpdate],
+            options: [.activeAlways, .inVisibleRect, .cursorUpdate, .mouseEnteredAndExited, .mouseMoved, .enabledDuringMouseDrag],
             owner: self,
             userInfo: nil
         )
@@ -24,6 +29,14 @@ private final class NavigationResizeHandleView: NSView {
     }
 
     override func cursorUpdate(with event: NSEvent) {
+        NSCursor.resizeLeftRight.set()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        NSCursor.resizeLeftRight.set()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
         NSCursor.resizeLeftRight.set()
     }
 }
