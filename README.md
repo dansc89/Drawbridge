@@ -54,6 +54,8 @@ The [user manual](USER_MANUAL.md) covers navigation, page/bookmark deletion, sav
 | Text box | T |
 | Undo / Redo | Cmd+Z / Shift+Cmd+Z |
 
+The Pen tool displays a pen cursor over the PDF, with the nib aligned to the drawing point.
+
 Line and arrow tools use two clicks: start, then end. Text boxes let you type directly on the page. Escape cancels an unfinished drawing. Shortcuts do not activate drawing tools while you are typing text.
 
 ## Current limits
