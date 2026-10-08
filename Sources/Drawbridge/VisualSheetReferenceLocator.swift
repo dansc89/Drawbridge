@@ -69,7 +69,7 @@ enum VisualSheetReferenceLocator {
             for observation in request.results ?? [] {
                 for candidate in observation.topCandidates(3) {
                     observedText?(candidate.string)
-                    for match in exactWordBounds(in: candidate, knownTokens: localTokens) {
+                    for match in wordBounds(in: candidate, knownTokens: localTokens, allowOCRDigitConfusion: true) {
                         let box = match.bounds
                         let visible = CGRect(x: region.minX + box.minX * CGFloat(width) / scale,
                                              y: region.minY + box.minY * CGFloat(height) / scale,
@@ -87,15 +87,30 @@ enum VisualSheetReferenceLocator {
     }
 
     static func exactWordBounds(in candidate: VNRecognizedText, knownTokens: Set<String>) -> [Hit] {
+        wordBounds(in: candidate, knownTokens: knownTokens, allowOCRDigitConfusion: false)
+    }
+
+    /// These tokens come from literal selectable text at nearby positions, not
+    /// inferred destinations. Vision may read the printed digit 0 as O (or 1 as
+    /// I/L); tolerate that only while locating an already confirmed reference.
+    static func wordBounds(in candidate: VNRecognizedText, knownTokens: Set<String>, allowOCRDigitConfusion: Bool) -> [Hit] {
         let text = candidate.string
         let nsText = text as NSString
         var hits: [Hit] = []
         for token in knownTokens.sorted() {
-            guard let regex = try? NSRegularExpression(pattern: NSRegularExpression.escapedPattern(for: token), options: .caseInsensitive) else { continue }
+            let pattern = token.map { character -> String in
+                if allowOCRDigitConfusion && character == "0" { return "[0O]" }
+                if allowOCRDigitConfusion && character == "1" { return "[1IL]" }
+                return NSRegularExpression.escapedPattern(for: String(character))
+            }.joined()
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
             for match in regex.matches(in: text, range: NSRange(location: 0, length: nsText.length)) {
                 guard SheetReferencePolicy.isWholeToken(match.range, in: nsText),
                       let range = Range(match.range, in: text),
                       let box = try? candidate.boundingBox(for: range) else { continue }
+                let literal = nsText.substring(with: match.range).uppercased()
+                // Never reinterpret a different known literal sheet identifier.
+                if literal != token.uppercased() && knownTokens.contains(literal) { continue }
                 hits.append((token.uppercased(), box.boundingBox))
             }
         }
