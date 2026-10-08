@@ -1,4 +1,4 @@
-# Drawbridge User Manual
+# Drawbridge 5.7 User Manual
 
 Drawbridge is a macOS PDF viewer for architectural drawing sets, with sheet bookmarks, hyperlinks, and editable vector markups.
 
@@ -9,6 +9,16 @@ Drawbridge is a macOS PDF viewer for architectural drawing sets, with sheet book
 3. Scroll over the PDF to zoom around the pointer. Use **View > Zoom In**, **Zoom Out**, **Actual Size**, or **Fit Width** for additional zoom controls.
 4. Use the arrow keys to move between pages, or hold Control while scrolling. Use `Option+Left` and `Option+Right` to move backward and forward through navigation history.
 5. Use **Edit > Find…** (`Cmd+F`) to search the document. Select and copy PDF text with `Cmd+C`.
+
+## Manage Pages and Bookmarks
+
+In **Pages**, click a thumbnail to open a sheet. The highlighted thumbnail follows the current page, and thumbnails refresh after markup changes. PDF Contents details can be expanded when needed.
+
+Use **Shift-click** for a range or **Command-click** for separate selections in either sidebar. With the sidebar focused, **Cmd+A** selects all entries. Press **Backspace/Delete**, or right-click and choose **Delete Selected Page(s)…** or **Delete Selected Bookmark(s)…**. Confirm the deletion, or cancel to retain the selection.
+
+Deleting pages removes those sheets and their annotations; at least one page must remain. Deleting bookmarks removes navigation entries, not pages. Removing a bookmark group also removes its children. **Cmd+Z** undoes deletion and **Shift+Cmd+Z** redoes it, including after saving while the same document remains open. Save to persist the change. Closing the document clears Undo history.
+
+Right-click a single page to rename its label, or a single bookmark to rename it and optionally update the matching page label.
 
 ## Generate and Manage Bookmarks
 
@@ -27,6 +37,8 @@ Click a hyperlink to follow it. Use **View > Show Hyperlink Highlights** to show
 - **File > Save** (`Cmd+S`) saves bookmark, hyperlink, and markup changes.
 - **File > Save As PDF...** (`Cmd+Shift+S`) saves a separate PDF copy.
 - **File > Close** (`Cmd+W`) closes the current document.
+
+Markup saving appends annotation changes without rasterizing the drawing pages. Encrypted or digitally signed PDFs are not supported for this save path. If a save fails, edits remain open; inspect the reported error before closing the document.
 
 ## Markups
 
@@ -59,6 +71,10 @@ Click the **Flatten PDF** toolbar button beside the hyperlink button, or choose 
 Drawbridge preserves vector drawing content, page size/crop/rotation, bookmarks, page labels, clickable links, and form fields. Markups with missing or unsupported appearance streams and hidden items remain unchanged; the completion message reports them. Redundant AutoCAD SHX text comments with no appearance and an explicit zero-width border are removed; the actual drawing text remains in the page content. Other unsupported annotations are retained. Flattening does not guarantee a smaller file.
 
 Encrypted PDFs and PDFs with signature fields are not supported. Redaction annotations are retained: this command is not a secure redaction tool.
+
+## Reduce File Size
+
+Choose **File > Reduce File Size…** or the clamp toolbar button. Compression is lossless: image resolution, vectors, text, and supported interactive content are preserved. Drawbridge verifies the result and replaces the open file only when the result is smaller. Already-compressed images may provide little or no reduction. There is no lossy image-quality or downsampling control.
 
 ## Settings
 

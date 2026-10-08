@@ -1,61 +1,69 @@
+# Drawbridge
+
+A native macOS PDF viewer and markup editor for architectural drawing sets. Navigate sheets, generate bookmarks and hyperlinks, and add editable vector markups while preserving the original drawing content.
+
 <p align="center">
-  <img src="Assets/readme/drawbridge-hero-v017.png" alt="Drawbridge" width="100%" />
+  <img src="Assets/readme/drawbridge-hero-v57-pages.png" alt="Drawbridge showing architectural drawings with page thumbnails and a separate markup toolbar" width="100%" />
 </p>
-
-Drawbridge is a native macOS PDF viewer for architectural drawing sets, focused on generating sheet bookmarks and hyperlinks. Open, search, and navigate PDFs, generate sheet bookmarks and hyperlinks, and add editable vector markups without changing the original drawing content. Flatten/Unflatten and lossless file reduction are also available. Measurement and page-conversion tools are not yet available.
-
-## Requirements
-
-- Apple Silicon Mac (M1 or newer)
-- macOS 13.0 or newer
 
 ## Download
 
-Get the latest release here:
+**Current release: [Drawbridge 5.7](https://github.com/dansc89/Drawbridge/releases/latest)** — signed with Developer ID and notarized by Apple.
 
-https://github.com/dansc89/Drawbridge/releases/latest
+Download the **DMG**, open it, and drag **Drawbridge.app** into **Applications**. A ZIP containing the app is also available.
 
-Download the `.dmg`, open it, then drag **Drawbridge.app** into **Applications**.
+Requires **macOS 13 or newer** on an **Apple Silicon Mac (M1 or newer)**. Intel builds are not currently provided.
 
-## Quick Start
+## What it does
 
-1. Open Drawbridge.
-2. Open an existing PDF.
-3. Use **Bookmarks > Auto-Generate Sheet Names/Bookmarks…** to name sheets and create bookmarks.
-4. Use **Hyperlinks > Batch Link Sheet Numbers…** to link sheet references.
-5. Save the PDF, or choose **File > Save As PDF...** to save a copy.
-6. Use **File > Flatten PDF…** to make existing consultant markups permanent in the PDF you have open, while preserving drawing quality and interactive links. Click the same button again to Unflatten.
-7. Use **File > Reduce File Size…** (or the clamp toolbar button) for lossless compression. Drawbridge verifies decoded PDF content and saves over the open file only when the result is smaller. Image resolution, vector graphics, text, navigation, forms, and Unflatten recovery are preserved; JPEG images may already be compact.
+- **Navigate drawing sets:** page thumbnails track the current sheet and refresh after markup changes. Switch to bookmarks, search sheet names, or use separate page and viewing-history controls.
+- **Index and link sheets:** generate sheet numbers/titles and bookmarks from title blocks, then batch-link sheet references. Processing dialogs report stages and page progress, with cancellation and review before applying bookmarks.
+- **Add vector markups:** pen, rectangle, ellipse, line, arrow, polygon, polyline, and on-page text boxes. The active tool is highlighted; custom colors, line weights, text sizes, and polygon fills are available in Markup Properties.
+- **Manage pages and bookmarks:** Shift/Command-select several entries, then press Backspace/Delete or right-click to delete with confirmation. Undo/redo also works after saving while the document remains open. Deleting bookmarks leaves PDF pages intact.
+- **Save PDF changes:** save the open file or a separate copy. Markup saves append annotation changes rather than rasterizing or rebuilding drawing pages.
+- **Flatten and unflatten:** flatten supported consultant annotations into page content. Drawbridge embeds recovery information so its flattened PDFs can be unflattened after reopening.
+- **Reduce file size:** lossless compression with content verification. Image resolution is preserved; already-compressed images may not get smaller.
+- **Read and print:** document text search, text selection/copy, fit-page/fit-width views, and native macOS printing. Invert changes on-screen colors only, leaving saved and printed colors unchanged.
 
-Processing dialogs show the current stage and page counts. Cancel stops at the next safe page or processing-step boundary; Escape also cancels OCR. Canceling bookmark review leaves existing bookmarks intact. Duplicate OCR sheet numbers are reported and excluded from hyperlink destinations instead of guessing a target.
+PDF Contents details are collapsed by default to leave more space for navigation.
 
-## Viewing drawing sets
+## Quick start
 
-- **Go to Sheet (⌘L):** search sheet labels, bookmark titles, or page numbers. Arrow keys select a result; Return opens the whole sheet. Duplicate labels remain separate pages.
-- **Fit Entire Page (⌘9):** center the complete sheet. **Fit Width (⌘⌥9)** fits its displayed width while keeping your reading position.
-- **Find (⌘F):** search runs asynchronously with live progress. Change the query to cancel the previous search; ⌘G / ⇧⌘G move between results. Large result sets show a `+` and a prompt to narrow the query.
+1. Open a PDF with **Cmd+O**.
+2. Navigate using **Pages** thumbnails or **Bookmarks**. Use **Go to Sheet (Cmd+L)** to find a sheet, or **Find (Cmd+F)** to search document text.
+3. For an unindexed set, choose **Bookmarks > Auto-Generate Sheet Names/Bookmarks…** and review the results. Use **Hyperlinks > Batch Link Sheet Numbers…** to create sheet links.
+4. Select a markup tool, draw on the PDF, and use **Cmd+S** to save. **Save As PDF… (Shift+Cmd+S)** creates a separate copy.
 
-## Marking up drawings
+The [user manual](USER_MANUAL.md) covers navigation, page/bookmark deletion, saving, printing, flattening, and tool behavior.
 
-Use the separate markup toolbar, or press **P** (pen), **R** (rectangle), **E** (ellipse), **L** (line), **A** (arrow), **Shift+P** (polygon), **Shift+N** (polyline), or **T** (text). Press **V** to select a markup. Line and arrow tools use two clicks: start, then end. Text boxes let you type directly on the page. Use **Cmd+Z** to undo and **Shift+Cmd+Z** to redo.
+## Markup shortcuts
 
-Drawbridge can edit its own markups; imported annotations remain visible and preserved. **Invert** changes the display only, leaving saved PDFs and print output unchanged.
+| Tool | Shortcut |
+| --- | --- |
+| Select | V |
+| Pen | P |
+| Rectangle | R |
+| Ellipse | E |
+| Line | L |
+| Arrow | A |
+| Polygon | Shift+P |
+| Polyline | Shift+N |
+| Text box | T |
+| Undo / Redo | Cmd+Z / Shift+Cmd+Z |
 
-Native printing is available: **File > Print… (Cmd+P)** or **Print Current Sheet…**. The macOS dialog offers paper size, orientation, scale, and page ranges. Output starts at **100% actual size**; select paper large enough for your drawing, or adjust the scale in the print dialog.
+Line and arrow tools use two clicks: start, then end. Text boxes let you type directly on the page. Escape cancels an unfinished drawing. Shortcuts do not activate drawing tools while you are typing text.
 
-Use **Markup Properties** (the sliders button) for custom colors, exact line weights, font sizes, and polygon fill. With a markup selected, it edits that markup; with no selection, it edits new-markup defaults.
+## Current limits
 
-Tab switching keeps tab order, page, zoom, navigation history, and each document's search query. Saved PDFs can be reused from a small cache; files changed externally reload from disk. Unsaved changes still use the Save/Discard/Cancel prompt.
+- Drawbridge edits its own markups. Imported annotations remain visible and preserved, but are not editable through the markup tools.
+- Measurement/calibration, secure redaction, snapshot pasting, page combining/conversion, and general editing of original PDF text are not available.
+- File reduction is lossless; there is no lossy image-quality or image-downsampling option.
+- Encrypted or digitally signed PDFs are not supported for annotation-only markup saving. Flattening also excludes encrypted PDFs and PDFs with signature fields.
+- Unflatten requires recovery information from Drawbridge. Unsupported/hidden annotations are retained, and flattening does not guarantee a smaller file.
+- Switching documents requires saving or discarding pending edits and clears markup Undo history. Undo history is not retained after closing a document.
 
-## Support
+## Support and development
 
-If you hit an issue, open a GitHub issue with:
-- what file you opened
-- what action you took
-- what happened vs expected behavior
+[Report an issue](https://github.com/dansc89/Drawbridge/issues) with your app version, macOS version, the action you took, and what happened. Include a sample PDF if you are able to share it.
 
-## Developer Docs
-
-Developer/build/release docs are in `DEVELOPMENT.md`.
-For trusted macOS distribution (Developer ID signing + Apple notarization), see the same doc.
-User manual is in `USER_MANUAL.md`.
+The source corresponding to the current release is [tag v5.7](https://github.com/dansc89/Drawbridge/tree/v5.7). Build, signing, notarization, and test instructions are in the [development guide for that release](https://github.com/dansc89/Drawbridge/blob/v5.7/DEVELOPMENT.md).
