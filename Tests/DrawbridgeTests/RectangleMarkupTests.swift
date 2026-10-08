@@ -91,6 +91,50 @@ final class RectangleMarkupTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(activeOverlay.path).isEmpty)
     }
 
+    func testMarkupNavigationCentersDestinationAndTracksScrolling() async throws {
+        _ = NSApplication.shared
+        let controller = MainViewController()
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1100, height: 800),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentViewController = controller
+        defer { window.contentViewController = nil }
+        let document = PDFDocument()
+        for _ in 0..<4 {
+            let page = PDFPage()
+            page.setBounds(CGRect(x: 0, y: 0, width: 1600, height: 2400), for: .mediaBox)
+            document.insert(page, at: document.pageCount)
+        }
+        let view = controller.pdfView
+        view.document = document
+        view.rectangleMarkup.bind(to: document)
+        view.autoScales = false; view.scaleFactor = 1
+        window.contentView?.layoutSubtreeIfNeeded()
+        let targetPage = try XCTUnwrap(document.page(at: 3))
+        let target = PDFAnnotation(bounds: CGRect(x: 700, y: 500, width: 120, height: 60),
+                                   forType: .freeText, withProperties: nil)
+        target.contents = "Destination"; targetPage.addAnnotation(target)
+        controller.commandToggleMarkupsList(nil); controller.refreshMarkups()
+        window.contentView?.layoutSubtreeIfNeeded()
+        let row = try XCTUnwrap(controller.markupItems.firstIndex { $0.annotation === target })
+        controller.markupsTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        controller.jumpToSelectedMarkup()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(view.currentPage === targetPage)
+        XCTAssertEqual(view.scaleFactor, 1, accuracy: 0.001)
+        let documentView = try XCTUnwrap(view.documentView)
+        let clip = try XCTUnwrap(documentView.enclosingScrollView?.contentView)
+        let targetRect = documentView.convert(view.convert(target.bounds, from: targetPage), from: view)
+        XCTAssertEqual(targetRect.midX, clip.bounds.midX, accuracy: 3)
+        XCTAssertEqual(targetRect.midY, clip.bounds.midY, accuracy: 3)
+        let overlay = try XCTUnwrap(view.layer?.sublayers?.first { $0.name == "drawbridge.activeMarkupSelection" } as? CAShapeLayer)
+        clip.scroll(to: clip.bounds.origin.applying(CGAffineTransform(translationX: 0, y: 100)))
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let expected = view.convert(target.bounds, from: targetPage).standardized
+        let drawn = try XCTUnwrap(overlay.path).boundingBoxOfPath
+        XCTAssertEqual(drawn.midX, expected.midX, accuracy: 1)
+        XCTAssertEqual(drawn.midY, expected.midY, accuracy: 1)
+    }
+
     func testMarkupAuthorPreferenceDefaultsAndOverride() {
         let suite = "DrawbridgeAuthorTest-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!

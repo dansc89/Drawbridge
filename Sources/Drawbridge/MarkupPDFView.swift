@@ -660,7 +660,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func installClipViewObserverIfNeeded() {
-        guard let clipView = enclosingScrollView?.contentView else { return }
+        guard let clipView = contentClipView else { return }
         if observedClipView === clipView {
             return
         }
@@ -691,6 +691,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         _ = notification
         updateHyperlinkOverlayIfNeeded()
         rectangleMarkup.refresh()
+        onViewportChanged?()
     }
 
     private func updateHyperlinkOverlayIfNeeded(forceHideWhenDisabled: Bool = false) {
@@ -2145,6 +2146,42 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         navigateToPageWithHistory(page, preservingNormalizedViewportCenter: anchor)
         applyingHistoryNavigation = previousHistoryState
         onViewportChanged?()
+    }
+
+    /// Navigate after PDFKit has laid out the destination page, preserving the user's zoom.
+    func revealMarkup(_ annotation: PDFAnnotation) {
+        guard let page = annotation.page, page.document === document else { return }
+        zoomAnchorGeneration &+= 1
+        let generation = zoomAnchorGeneration
+        go(to: page)
+        centerMarkup(annotation, on: page)
+        correctMarkupNavigation(annotation, page: page, generation: generation, remainingPasses: 3)
+    }
+
+    private func centerMarkup(_ annotation: PDFAnnotation, on page: PDFPage) {
+        guard currentPage === page, annotation.page === page else { return }
+        forceZoomLayout()
+        if let clip = contentClipView, let documentView {
+            let rect = documentView.convert(convert(annotation.bounds, from: page), from: self).standardized
+            scrollContentClipView(to: NSPoint(x: rect.midX - clip.bounds.width / 2,
+                                             y: rect.midY - clip.bounds.height / 2))
+        }
+        rectangleMarkup.refresh()
+        onViewportChanged?()
+    }
+
+    private func correctMarkupNavigation(_ annotation: PDFAnnotation, page: PDFPage,
+                                         generation: UInt, remainingPasses: Int) {
+        guard remainingPasses > 0 else { return }
+        DispatchQueue.main.async { [weak self, weak annotation, weak page] in
+            guard let self, let annotation, let page,
+                  self.zoomAnchorGeneration == generation,
+                  self.rectangleMarkup.selected === annotation,
+                  self.currentPage === page, page.document === self.document else { return }
+            self.centerMarkup(annotation, on: page)
+            self.correctMarkupNavigation(annotation, page: page, generation: generation,
+                                         remainingPasses: remainingPasses - 1)
+        }
     }
 
     private func centerWholePageInViewport(_ page: PDFPage) {

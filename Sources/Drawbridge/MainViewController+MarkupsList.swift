@@ -99,7 +99,7 @@ extension MainViewController {
               let item = currentSelectedMarkupItem(), let page = item.annotation.page,
               page.document === pdfView.document else { return }
         pdfView.rectangleMarkup.selectFromList(item.annotation)
-        pdfView.go(to: item.annotation.bounds.insetBy(dx: -30, dy: -30), on: page)
+        pdfView.revealMarkup(item.annotation)
     }
     @objc func deleteListedMarkups(_ sender: Any?) {
         guard !isPDFProcessingBusy else { return }
