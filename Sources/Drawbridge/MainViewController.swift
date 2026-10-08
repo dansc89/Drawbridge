@@ -5969,7 +5969,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return index >= 0 ? index : nil
     }
 
-    private func bookmarkStyleDestination(for page: PDFPage) -> PDFDestination {
+    func bookmarkStyleDestination(for page: PDFPage) -> PDFDestination {
         let destination = PDFDestination(
             page: page,
             at: NSPoint(x: kPDFDestinationUnspecifiedValue, y: kPDFDestinationUnspecifiedValue)
@@ -6067,7 +6067,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return (number, isUsableSheetTitle(title) ? title : nil)
     }
 
-    private func detectSheetTokenForBatchLink(
+    func detectSheetTokenForBatchLink(
         on page: PDFPage,
         normalizedZone: NormalizedPageRect
     ) -> (token: String?, strategy: String, rawTextPreview: String, failureReason: String?, usedFallback: Bool) {

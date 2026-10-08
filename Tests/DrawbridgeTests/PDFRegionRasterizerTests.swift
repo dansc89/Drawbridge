@@ -62,6 +62,69 @@ final class PDFRegionRasterizerTests: XCTestCase {
         }
     }
 
+    func testCompleteArchitecturalOCRTargetsSurviveSaving() throws {
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_ARCHITECTURAL_FIXTURE"] else { throw XCTSkip("Provide local Architectural PDF") }
+        let source = URL(fileURLWithPath: path)
+        let document = try XCTUnwrap(PDFDocument(url: source))
+        XCTAssertEqual(document.pageCount, 69)
+        let controller = MainViewController(); _ = controller.view
+        var readings: [String] = [], expected: [String] = []
+        let started = Date()
+        for index in 0..<document.pageCount {
+            let page = try XCTUnwrap(document.page(at: index))
+            let bounds = PDFBookmarkExtractor.Geometry(page: page, box: controller.pdfView.displayBox).bounds
+            let zone = MainViewController.NormalizedPageRect(x: 30/bounds.width, y: 15/bounds.height,
+                                                           width: 230/bounds.width, height: 120/bounds.height)
+            let reading = controller.detectSheetTokenForBatchLink(on: page, normalizedZone: zone)
+            readings.append(reading.token ?? "")
+            // Existing labels are an independent test oracle, never an input to OCR.
+            expected.append(try XCTUnwrap(page.label?.components(separatedBy: " - ").first))
+        }
+        readings = SheetReferencePolicy.reconcileOCRNumbers(readings)
+        for index in readings.indices { XCTAssertEqual(readings[index], expected[index], "Sheet \(index+1)") }
+        var targets = OCRSheetTargetIndex()
+        for (index, token) in readings.enumerated() { targets.record(token, pageIndex: index) }
+        XCTAssertEqual(targets.targets.count, 69); XCTAssertTrue(targets.ambiguous.isEmpty)
+        // Exercise persisted destination mapping using only the OCR-produced target index.
+        let first = try XCTUnwrap(document.page(at: 0))
+        for (_, index) in targets.targets {
+            let link = PDFAnnotation(bounds: CGRect(x: 100, y: 100+index*3, width: 20, height: 2), forType: .link, withProperties: nil)
+            link.userName = "DrawbridgeAutoSheetLink:\(index)"; link.contents = "DrawbridgeAutoSheetLink:\(index)"
+            link.action = PDFActionGoTo(destination: controller.bookmarkStyleDestination(for: try XCTUnwrap(document.page(at: index))))
+            first.addAnnotation(link)
+        }
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent("OCR-verification-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: output) }
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: output, pageLabels: [:], records: RectangleMarkupRecord.capture(document), navigationSnapshot: PDFTKBookmarkWriter.captureNavigation(in: document)))
+        let saved = try XCTUnwrap(PDFDocument(url: output))
+        let links = try XCTUnwrap(saved.page(at: 0)).annotations.filter { $0.contents?.hasPrefix("DrawbridgeAutoSheetLink:") == true && $0.bounds.minX == 100 && $0.bounds.width == 20 && $0.bounds.height == 2 }
+        XCTAssertEqual(links.count, 69)
+        for link in links {
+            let index = try XCTUnwrap(Int(try XCTUnwrap(link.contents).dropFirst("DrawbridgeAutoSheetLink:".count)))
+            let token = readings[index]
+            let destination = try XCTUnwrap((link.action as? PDFActionGoTo)?.destination ?? link.destination)
+            XCTAssertEqual(saved.index(for: try XCTUnwrap(destination.page)), targets.targets[token])
+        }
+        print("COMPLETE ARCHITECTURAL: 69 sheet numbers and 69 saved destinations verified in \(Date().timeIntervalSince(started)) seconds")
+    }
+
+    func testAdditionalPDFRegionAlignment() throws {
+        guard let paths = ProcessInfo.processInfo.environment["DRAWBRIDGE_REGION_CORPUS"] else { throw XCTSkip("Provide additional local PDFs") }
+        for path in paths.components(separatedBy: "|") {
+            let document = try XCTUnwrap(PDFDocument(url: URL(fileURLWithPath: path)))
+            let page = try XCTUnwrap(document.page(at: 0))
+            let bounds = page.bounds(for: .cropBox)
+            let rect = CGRect(x: bounds.maxX-260, y: bounds.minY+15, width: 230, height: 120)
+            let actual = try XCTUnwrap(PDFRegionRasterizer.render(page: page, box: .cropBox, rect: rect))
+            let expected = try reference(page, rect: rect, scale: 4)
+            let a = try pixels(actual), b = try pixels(expected)
+            XCTAssertEqual(a.count, b.count)
+            let difference = zip(a,b).reduce(0.0) { $0 + Double(abs(Int($1.0)-Int($1.1))) } / Double(a.count)
+            XCTAssertLessThan(difference, 0.5, path)
+            print("ADDITIONAL REGION verified \(URL(fileURLWithPath: path).lastPathComponent)")
+        }
+    }
+
     func testArchitecturalRegionBenchmark() throws {
         guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_ARCHITECTURAL_FIXTURE"] else { throw XCTSkip("Provide local Architectural PDF") }
         let document = try XCTUnwrap(PDFDocument(url: URL(fileURLWithPath: path)))
