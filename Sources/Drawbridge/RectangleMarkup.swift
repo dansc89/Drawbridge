@@ -271,6 +271,7 @@ final class RectangleMarkupController {
     var onDraftBegan: (() -> Void)?
     var onDraftEnded: (() -> Void)?
     var onPresentationChanged: (() -> Void)?
+    var onClickAway: (() -> Void)?
     var canEdit: () -> Bool = { true }
     var tool: Tool = .select {
         didSet { finishTextEditing(); cancelGesture(); if tool != .select { selected = nil }; refresh(); (view as? MarkupPDFView)?.markupToolCursorChanged() }
@@ -363,7 +364,15 @@ final class RectangleMarkupController {
 
     func pointerDown(at location: CGPoint, clickCount: Int = 1) -> Bool {
         finishTextEditing()
-        guard let view, canEdit(), let page = view.page(for: location, nearest: false) else { return false }
+        guard let view else { return false }
+        guard let page = view.page(for: location, nearest: false) else {
+            if tool == .select { deselectForClickAway() }
+            return false
+        }
+        guard canEdit() else {
+            if tool == .select { deselectForClickAway() }
+            return false
+        }
         bind(to: view.document)
         let point = view.convert(location, to: page)
         if tool == .pen {
@@ -433,7 +442,14 @@ final class RectangleMarkupController {
             selected = hit; view.setCurrentSelection(nil, animate: false)
             gesture = .edit(page, hit, hit.bounds, point, nil); preview = (page, hit.bounds); refresh(); return true
         }
-        selected = nil; refresh(); return false
+        deselectForClickAway(); return false
+    }
+
+    private func deselectForClickAway() {
+        cancelGesture()
+        selected = nil
+        refresh()
+        onClickAway?()
     }
 
     func pointerMoved(at location: CGPoint) {

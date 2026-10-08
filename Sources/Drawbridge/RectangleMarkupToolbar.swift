@@ -109,6 +109,10 @@ extension MainViewController {
             guard let self, !self.pdfView.rectangleMarkup.hasUnsavedChanges else { return }
             self.view.window?.isDocumentEdited = dirtyBeforeDraft
         }
+        session.onClickAway = { [weak self] in
+            self?.clearMarkupTableSelectionUI()
+            self?.scheduleMarkupsRefresh(selecting: nil)
+        }
         session.onPresentationChanged = { [weak self] in self?.refreshRectangleToolbar() }
         rectangleToolbar.propertiesController.session = session
         rectangleToolbar.propertiesButton.target = self

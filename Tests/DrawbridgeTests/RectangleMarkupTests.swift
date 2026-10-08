@@ -135,6 +135,62 @@ final class RectangleMarkupTests: XCTestCase {
         XCTAssertEqual(drawn.midY, expected.midY, accuracy: 1)
     }
 
+    func testClickAwayClearsCanvasAndListSelectionWithoutDeletingMarkup() async throws {
+        _ = NSApplication.shared
+        let source = try fixture(rotation: 0)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let controller = MainViewController()
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1100, height: 800),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.contentViewController = controller
+        defer { window.contentViewController = nil }
+        controller.openDocument(at: source)
+        let view = controller.pdfView, page = try XCTUnwrap(view.document?.page(at: 0))
+        let session = view.rectangleMarkup
+        session.canEdit = { true }; session.undo.groupsByEvent = false
+        session.undo.beginUndoGrouping()
+        defer { session.undo.endUndoGrouping() }
+        let annotation = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 100, y: 100, width: 90, height: 60)))
+        controller.commandToggleMarkupsList(nil); controller.refreshMarkups()
+        view.autoScales = false; view.scaleFactor = 1
+        window.contentView?.layoutSubtreeIfNeeded()
+        let row = try XCTUnwrap(controller.markupItems.firstIndex { $0.annotation === annotation })
+        func click(_ point: CGPoint) throws {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown,
+                location: view.convert(point, to: nil), modifierFlags: [], timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+            view.mouseDown(with: event)
+        }
+        controller.markupsTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        XCTAssertTrue(session.selected === annotation)
+        try click(view.convert(CGPoint(x: 300, y: 250), from: page))
+        XCTAssertNil(session.selected)
+        XCTAssertEqual(controller.markupsTable.numberOfSelectedRows, 0)
+        for layer in view.layer?.sublayers ?? [] where layer.name == "drawbridge.markupSelection" || layer.name == "drawbridge.activeMarkupSelection" {
+            XCTAssertTrue((layer as? CAShapeLayer)?.path?.isEmpty != false)
+        }
+        XCTAssertTrue(page.annotations.contains { $0 === annotation })
+        // The same rectangle remains selectable and its corner remains draggable.
+        let corner = view.convert(CGPoint(x: annotation.bounds.maxX, y: annotation.bounds.maxY), from: page)
+        let interior = view.convert(CGPoint(x: annotation.bounds.midX, y: annotation.bounds.midY), from: page)
+        XCTAssertTrue(session.pointerDown(at: interior)); _ = session.pointerUp(at: interior)
+        XCTAssertTrue(session.selected === annotation)
+        let expanded = view.convert(CGPoint(x: 210, y: 180), from: page)
+        XCTAssertTrue(session.pointerDown(at: corner))
+        XCTAssertTrue(session.pointerDragged(at: expanded)); XCTAssertTrue(session.pointerUp(at: expanded))
+        XCTAssertEqual(annotation.bounds.maxX, 210, accuracy: 1)
+        XCTAssertEqual(annotation.bounds.maxY, 180, accuracy: 1)
+        controller.markupsTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        controller.scheduleMarkupsRefresh(selecting: annotation)
+        let margin = CGPoint(x: 2, y: 2)
+        XCTAssertNil(view.page(for: margin, nearest: false))
+        try click(margin)
+        try await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertNil(session.selected)
+        XCTAssertEqual(controller.markupsTable.numberOfSelectedRows, 0)
+        XCTAssertTrue(page.annotations.contains { $0 === annotation })
+    }
+
     func testMarkupAuthorPreferenceDefaultsAndOverride() {
         let suite = "DrawbridgeAuthorTest-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!

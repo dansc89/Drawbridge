@@ -961,6 +961,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let location = convert(event.locationInWindow, from: nil)
         lastPointerInView = location
         navigationSelectionStart = nil
+        if !isRegionCaptureModeEnabled, rectangleMarkup.pointerDown(at: location, clickCount: event.clickCount) { return }
         guard let page = page(for: location, nearest: false) else { return }
         if isRegionCaptureModeEnabled {
             regionCaptureStartInView = location
@@ -973,7 +974,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             dragPreviewLayer.isHidden = false
             return
         }
-        if rectangleMarkup.pointerDown(at: location, clickCount:event.clickCount) { return }
         let point = convert(location, to: page)
         if event.clickCount == 1, let link = linkAnnotation(at: point, on: page) {
             if followLinkIfPossible(link) { return }
