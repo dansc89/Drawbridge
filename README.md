@@ -8,7 +8,7 @@ A native macOS PDF viewer and markup editor for architectural drawing sets. Navi
 
 ## Download
 
-**Current release: [Drawbridge 5.7](https://github.com/dansc89/Drawbridge/releases/latest)** — signed with Developer ID and notarized by Apple.
+**[Download the latest release](https://github.com/dansc89/Drawbridge/releases/latest)** — signed with Developer ID and notarized by Apple.
 
 Download the **DMG**, open it, and drag **Drawbridge.app** into **Applications**. A ZIP containing the app is also available.
 
@@ -66,4 +66,4 @@ Line and arrow tools use two clicks: start, then end. Text boxes let you type di
 
 [Report an issue](https://github.com/dansc89/Drawbridge/issues) with your app version, macOS version, the action you took, and what happened. Include a sample PDF if you are able to share it.
 
-The source corresponding to the current release is [tag v5.7](https://github.com/dansc89/Drawbridge/tree/v5.7). Build, signing, notarization, and test instructions are in the [development guide for that release](https://github.com/dansc89/Drawbridge/blob/v5.7/DEVELOPMENT.md).
+For the source corresponding to a released build, open the tag listed on its [release page](https://github.com/dansc89/Drawbridge/releases/latest). That tag also contains its `DEVELOPMENT.md` build, signing, notarization, and test instructions.
