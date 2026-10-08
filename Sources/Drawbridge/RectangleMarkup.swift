@@ -348,6 +348,7 @@ final class RectangleMarkupController {
         overlay.strokeColor = NSColor.systemBlue.cgColor
         overlay.fillColor = NSColor.clear.cgColor
         overlay.lineWidth = 2
+        overlay.name = "drawbridge.activeMarkupSelection"
         overlay.zPosition = 2000
         view.layer?.addSublayer(overlay)
     }
@@ -855,7 +856,7 @@ final class RectangleMarkupController {
         defer { CATransaction.commit() }
         overlay.frame = view?.bounds ?? .zero
         let path = CGMutablePath()
-        if let view, let (page, bounds) = preview ?? selected.flatMap({ a in a.page.map { ($0, a.bounds) } }), page.document === view.document {
+        if let view, let (page, bounds) = preview ?? selected.flatMap({ a in a.page.map { ($0, a.bounds) } }), page.document === view.document, (preview != nil || page === view.currentPage) {
             let rect = view.convert(bounds, from: page).standardized
             let vertices = selected.map { RectangleMarkupRecord.vertices($0) } ?? []
             if !vertices.isEmpty, let annotation = selected {

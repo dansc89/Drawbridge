@@ -253,6 +253,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let snapRowsStack = NSStackView(frame: .zero)
     private let selectedMarkupOverlayLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
+        layer.name = "drawbridge.markupSelection"
         layer.strokeColor = NSColor.systemOrange.cgColor
         layer.fillColor = NSColor.clear.cgColor
         layer.lineWidth = 2
@@ -267,6 +268,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }()
     private let selectedTextOverlayLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
+        layer.name = "drawbridge.textSelection"
         layer.strokeColor = NSColor.systemBlue.cgColor
         layer.fillColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
         layer.lineWidth = 2.25
@@ -516,6 +518,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc private func handlePDFPageChangedNotification(_ notification: Notification) {
+        updateSelectionOverlay()
         requestChromeRefresh(immediate: true)
     }
 
@@ -4728,7 +4731,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         var addedText = false
         var addedLineEndpoints = false
         for item in selectedItems {
-            guard let page = pdfView.document?.page(at: item.pageIndex) else { continue }
+            guard let page = item.annotation.page, page === pdfView.currentPage else { continue }
             let bounds = item.annotation.bounds
             let p1 = pdfView.convert(bounds.origin, from: page)
             let p2 = pdfView.convert(NSPoint(x: bounds.maxX, y: bounds.maxY), from: page)

@@ -61,6 +61,36 @@ final class RectangleMarkupTests: XCTestCase {
         XCTAssertEqual(PDFDocument(url: output)?.page(at: 1)?.annotations.first { $0.userName == "Consultant" }?.contents, "Review this")
     }
 
+    func testSelectionOverlaysStayOnSelectedMarkupPage() throws {
+        _ = NSApplication.shared
+        let source = try fixture(rotation: 0)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let seed = try XCTUnwrap(PDFDocument(url: source))
+        let second = PDFPage(); second.setBounds(CGRect(x: 0, y: 0, width: 600, height: 400), for: .mediaBox)
+        seed.insert(second, at: 1); XCTAssertTrue(seed.write(to: source))
+        let controller = MainViewController(); _ = controller.view; controller.openDocument(at: source)
+        let view = controller.pdfView, first = try XCTUnwrap(view.document?.page(at: 0))
+        let session = view.rectangleMarkup; session.canEdit = { true }
+        let text = try XCTUnwrap(session.create(on: first, bounds: CGRect(x: 100, y: 100, width: 90, height: 50), kind: .text, text: "Review"))
+        controller.commandToggleMarkupsList(nil); controller.refreshMarkups()
+        let row = try XCTUnwrap(controller.markupItems.firstIndex { $0.annotation === text })
+        controller.markupsTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        view.go(to: first); controller.updateSelectionOverlay(); session.refresh()
+        let textOverlay = try XCTUnwrap(view.layer?.sublayers?.first { $0.name == "drawbridge.textSelection" } as? CAShapeLayer)
+        let activeOverlay = try XCTUnwrap(view.layer?.sublayers?.first { $0.name == "drawbridge.activeMarkupSelection" } as? CAShapeLayer)
+        XCTAssertFalse(textOverlay.isHidden)
+        XCTAssertFalse(try XCTUnwrap(activeOverlay.path).isEmpty)
+        view.go(to: try XCTUnwrap(view.document?.page(at: 1)))
+        XCTAssertTrue(textOverlay.isHidden, "Page navigation must immediately hide the list selection overlay")
+        XCTAssertTrue(try XCTUnwrap(activeOverlay.path).isEmpty, "The drawing selection must not project onto another page")
+        controller.updateSelectionOverlay(); session.refresh()
+        XCTAssertTrue(textOverlay.isHidden)
+        XCTAssertTrue(try XCTUnwrap(activeOverlay.path).isEmpty)
+        view.go(to: first); controller.updateSelectionOverlay(); session.refresh()
+        XCTAssertFalse(textOverlay.isHidden)
+        XCTAssertFalse(try XCTUnwrap(activeOverlay.path).isEmpty)
+    }
+
     func testMarkupAuthorPreferenceDefaultsAndOverride() {
         let suite = "DrawbridgeAuthorTest-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
