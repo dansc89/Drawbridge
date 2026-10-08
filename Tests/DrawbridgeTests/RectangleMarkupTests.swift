@@ -17,6 +17,50 @@ private final class BackgroundPDFDocumentRead: @unchecked Sendable {
 
 @MainActor
 final class RectangleMarkupTests: XCTestCase {
+    func testMarkupsListNavigationSearchBatchDeleteUndoAndSave() throws {
+        _ = NSApplication.shared
+        let source = try fixture(rotation: 0)
+        let output = source.deletingLastPathComponent().appendingPathComponent("MarkupList-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
+        let seed = try XCTUnwrap(PDFDocument(url: source))
+        let secondPage = PDFPage(); secondPage.setBounds(CGRect(x: 0,y: 0,width: 600,height: 400), for: .mediaBox)
+        seed.insert(secondPage, at: 1)
+        let external = PDFAnnotation(bounds: CGRect(x: 100,y: 100,width: 80,height: 60), forType: .circle, withProperties: nil)
+        external.userName = "Consultant"; external.contents = "Review this"; secondPage.addAnnotation(external)
+        let locked = PDFAnnotation(bounds: CGRect(x: 200,y: 100,width: 80,height: 60), forType: .square, withProperties: nil)
+        locked.setValue(64, forAnnotationKey: PDFAnnotationKey(rawValue: "/F")); locked.userName = "Reviewer"; secondPage.addAnnotation(locked)
+        XCTAssertTrue(seed.write(to: source))
+        let controller = MainViewController(); _ = controller.view; controller.openDocument(at: source)
+        let document = try XCTUnwrap(controller.pdfView.document), page = try XCTUnwrap(document.page(at: 0))
+        let session = controller.pdfView.rectangleMarkup; session.canEdit = { true }; session.undo.groupsByEvent = false
+        document.page(at: 1)?.annotations.first { $0.userName == "Reviewer" }?.isReadOnly = true
+        session.undo.beginUndoGrouping()
+        let added = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 100,y: 110,width: 80,height: 60)))
+        session.undo.endUndoGrouping()
+        controller.commandToggleMarkupsList(nil); controller.refreshMarkups()
+        XCTAssertTrue(controller.isMarkupsPanelVisible)
+        XCTAssertFalse(controller.markupItems.contains { $0.annotation.type == "Link" })
+        XCTAssertTrue(controller.markupItems.contains { $0.annotation.isReadOnly })
+        let externalRow = try XCTUnwrap(controller.markupItems.firstIndex { $0.annotation.userName == "Consultant" })
+        controller.markupsTable.selectRowIndexes(IndexSet(integer: externalRow), byExtendingSelection: false)
+        controller.jumpToSelectedMarkup()
+        XCTAssertEqual(controller.pdfView.currentPage, document.page(at: 1))
+        XCTAssertEqual(session.selected?.userName, "Consultant")
+        controller.markupsSearchField.stringValue = "Consultant"; controller.filterListedMarkups(nil); controller.refreshMarkups()
+        XCTAssertEqual(controller.markupItems.count, 1)
+        controller.markupsSearchField.stringValue = ""; controller.filterListedMarkups(nil); controller.refreshMarkups()
+        let rows = IndexSet(controller.markupItems.indices.filter { controller.markupItems[$0].annotation === added || controller.markupItems[$0].annotation.userName == "Consultant" })
+        XCTAssertEqual(rows.count, 2)
+        controller.markupsTable.selectRowIndexes(rows, byExtendingSelection: false)
+        controller.deleteListedMarkups(nil); controller.refreshMarkups()
+        XCTAssertFalse(controller.markupItems.contains { $0.annotation === added || $0.annotation.userName == "Consultant" })
+        session.undo.undo(); controller.refreshMarkups()
+        XCTAssertTrue(controller.markupItems.contains { $0.annotation === added })
+        XCTAssertTrue(controller.markupItems.contains { $0.annotation.userName == "Consultant" })
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: output, pageLabels: [:], records: RectangleMarkupRecord.capture(document), importedPlan: session.importedPlan()))
+        XCTAssertEqual(PDFDocument(url: output)?.page(at: 1)?.annotations.first { $0.userName == "Consultant" }?.contents, "Review this")
+    }
+
     func testMarkupAuthorPreferenceDefaultsAndOverride() {
         let suite = "DrawbridgeAuthorTest-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!

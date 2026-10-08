@@ -654,7 +654,7 @@ extension MainViewController {
         let hasDocument = pdfView.document != nil
         switch action {
         case #selector(commandOpen(_:)), #selector(commandKeyboardShortcuts(_:)),
-             #selector(commandPerformanceSettings(_:)), #selector(commandMarkupAuthor(_:)), #selector(commandQuickStart(_:)):
+             #selector(commandPerformanceSettings(_:)), #selector(commandMarkupAuthor(_:)), #selector(commandToggleMarkupsList(_:)), #selector(commandQuickStart(_:)):
             return true
         case #selector(commandCycleNextDocument(_:)), #selector(commandCyclePreviousDocument(_:)):
             return sessionDocumentURLs.count > 1

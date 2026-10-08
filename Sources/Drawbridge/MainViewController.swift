@@ -175,7 +175,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let emptyStateSampleButton = NSButton(title: "Create New", target: nil, action: nil)
     private let emptyStateBatchMobileButton = NSButton(title: "Batch Export to iPhone / iPad", target: nil, action: nil)
     let markupsTable = NSTableView(frame: .zero)
-    private let markupsCountLabel = NSTextField(labelWithString: "0 items")
+    let markupsPanel = NSView()
+    var markupsPanelHeight: NSLayoutConstraint?
+    var isMarkupsPanelVisible = false
+    var isRestoringMarkupSelection = false
+    let markupsToggleButton = NSButton(title: "Markups", target: nil, action: nil)
+    let markupsSearchField = NSSearchField()
+    let markupsDeleteButton = NSButton(title: "Delete Selected", target: nil, action: nil)
+    let markupsCountLabel = NSTextField(labelWithString: "0 items")
     let measurementScaleField = NSTextField(frame: .zero)
     let measurementUnitPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let actionsPopup = NSPopUpButton(frame: .zero, pullsDown: true)
@@ -208,7 +215,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let documentTabsBar = NSView(frame: .zero)
     private let documentTabsScrollView = NSScrollView(frame: .zero)
     private let documentTabsStack = NSStackView(frame: .zero)
-    private let statusBar = NSView(frame: .zero)
+    let statusBar = NSView(frame: .zero)
     private let invertColorsButton = NSButton(title: "Invert", target: nil, action: nil)
     private let busyOverlayView = NSView(frame: .zero)
     private let captureToastView = NSView(frame: .zero)
@@ -300,7 +307,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var markupItems: [MarkupItem] = []
     var scrollEventMonitor: Any?
     var keyEventMonitor: Any?
-    private var markupFilterText = ""
+    var markupFilterText = ""
     var pendingCalibrationDistanceInPoints: CGFloat?
     let rectangleToolbar = RectangleMarkupToolbar()
 
@@ -663,6 +670,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         view.addSubview(splitView)
         view.addSubview(documentTabsBar)
         view.addSubview(statusBar)
+        configureMarkupsPanel()
         configureStatusBar()
         view.addSubview(busyOverlayView)
         view.addSubview(captureToastView)
@@ -681,7 +689,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             splitView.topAnchor.constraint(equalTo: documentTabsBar.bottomAnchor),
             splitView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            splitView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+            splitView.bottomAnchor.constraint(equalTo: markupsPanel.topAnchor),
 
             statusBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             statusBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -1557,7 +1565,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         invertColorsButton.identifier = NSUserInterfaceItemIdentifier("drawbridgeInvertColors")
         invertColorsButton.toolTip = "Invert PDF colors on screen. Saved and printed colors stay unchanged."
         invertColorsButton.setAccessibilityLabel("Invert PDF colors")
-        let details = NSStackView(views: [history,pages] + labels + [invertColorsButton])
+        markupsToggleButton.bezelStyle = .texturedRounded
+        markupsToggleButton.controlSize = .small
+        markupsToggleButton.setButtonType(.toggle)
+        markupsToggleButton.target = self; markupsToggleButton.action = #selector(commandToggleMarkupsList(_:))
+        markupsToggleButton.identifier = NSUserInterfaceItemIdentifier("drawbridgeMarkupsList")
+        let details = NSStackView(views: [history,pages] + labels + [invertColorsButton, markupsToggleButton])
         details.orientation = .horizontal
         details.spacing = 14
         details.translatesAutoresizingMaskIntoConstraints = false
@@ -2952,7 +2965,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 if self.isMarkupListTruncated {
                     self.markupsCountLabel.stringValue = "\(collected.count) of \(totalMatching) items (refine filter)"
                 } else {
-                    self.markupsCountLabel.stringValue = "\(collected.count) items"
+                    self.markupsCountLabel.stringValue = filter.isEmpty ? "\(collected.count) markups" : "\(collected.count) matches"
                 }
                 self.updateMeasurementSummary()
                 self.restoreSelection(for: selectedAnnotation)
@@ -3065,7 +3078,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                         self.dirtyMarkupPageIndexes.remove(pageIndex)
                         continue
                     }
-                    let annotations = page.annotations.filter(self.isUserEditableMarkup)
+                    let annotations = page.annotations.filter { MarkupListPresentation.includes($0) && self.isUserEditableMarkup($0) }
                     let previousCount = self.pageMarkupCache[pageIndex]?.count ?? 0
                     self.pageMarkupCache[pageIndex] = annotations
                     self.pageMarkupSearchIndex.removeValue(forKey: pageIndex)
@@ -4651,6 +4664,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func restoreSelection(for annotation: PDFAnnotation?) {
+        isRestoringMarkupSelection = true
+        defer { isRestoringMarkupSelection = false }
         guard let annotation else {
             clearMarkupTableSelectionUI(updateStatusBarValue: false)
             return

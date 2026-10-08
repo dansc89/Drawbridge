@@ -646,6 +646,12 @@ final class RectangleMarkupController {
         onDraftEnded?()
     }
 
+    func selectFromList(_ annotation: PDFAnnotation) {
+        finishTextEditing(); cancelGesture(); tool = .select
+        guard annotation.page?.document === boundDocument else { return }
+        selected = annotation; refresh()
+    }
+
     func deleteSelected() {
         guard canEdit(), let selected, (RectangleMarkupRecord.owns(selected) || ImportedMarkupState.selectable(selected)), !selected.isReadOnly, let page = selected.page else { return }
         cancelGesture(); setPresence(false, annotation: selected, page: page, action: "Delete Markup")

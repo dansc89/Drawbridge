@@ -18,6 +18,7 @@ Requires **macOS 13 or newer** on an **Apple Silicon Mac (M1 or newer)**. Intel 
 
 - **Navigate drawing sets:** page thumbnails track the current sheet and refresh after markup changes. Switch to bookmarks, search sheet names, or use separate page and viewing-history controls.
 - **Index and link sheets:** generate sheet numbers/titles and bookmarks from title blocks, then batch-link sheet references. Processing dialogs report stages and page progress, with cancellation and review before applying bookmarks.
+- **Track review markups:** open **View → Markups List** or click **Markups** in the bottom bar. See each markup’s page, comment, and author; click a row to jump to it, search the list, or select multiple rows to delete with Undo. Links and form fields are excluded; locked annotations remain visible.
 - **Add vector markups:** pen, rectangle, ellipse, line, arrow, polygon, polyline, and on-page text boxes. The active tool is highlighted; custom colors, line weights, text sizes, and polygon fills are available in Markup Properties.
 - **Manage pages and bookmarks:** Shift/Command-select several entries, then press Backspace/Delete or right-click to delete with confirmation. Undo/redo also works after saving while the document remains open. Deleting bookmarks leaves PDF pages intact.
 - **Save PDF changes:** save the open file or a separate copy. Markup saves append annotation changes rather than rasterizing or rebuilding drawing pages.

@@ -198,6 +198,7 @@ extension MainViewController {
                 deleteBookmarkFromSidebar()
                 return nil
             }
+            if view.window?.firstResponder === markupsTable { deleteListedMarkups(nil); return nil }
             if view.window?.firstResponder === pdfView { rectangleDelete(nil); return nil }
             return event
         }

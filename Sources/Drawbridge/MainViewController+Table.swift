@@ -33,10 +33,10 @@ extension MainViewController: NSTableViewDataSource, NSTableViewDelegate {
                !author.isEmpty {
                 text = author
             } else {
-                text = item.annotation.type ?? "Unknown"
+                text = MarkupListPresentation.typeName(item.annotation) + (item.annotation.isReadOnly ? " (Locked)" : "")
             }
         } else if columnId == "author" {
-            text = item.annotation.userName?.isEmpty == false ? item.annotation.userName! : "(No author)"
+            text = MarkupListPresentation.author(item.annotation)
         } else {
             text = item.annotation.contents?.isEmpty == false ? item.annotation.contents! : "(No text)"
         }
@@ -54,5 +54,6 @@ extension MainViewController: NSTableViewDataSource, NSTableViewDelegate {
         }
         updateSelectionOverlay()
         updateStatusBar()
+        if !isRestoringMarkupSelection { jumpToSelectedMarkup() }
     }
 }

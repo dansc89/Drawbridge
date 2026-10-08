@@ -95,6 +95,7 @@ extension MainViewController {
             self.markMarkupChanged()
             self.updateStatusBar()
             self.updatePDFContentsSummary()
+            self.scheduleMarkupsRefresh(selecting: self.pdfView.rectangleMarkup.selected)
         }
         // Typing changes the editor draft, not the PDF annotation collection.
         // Keep the unsaved indicator current without rescanning the entire set
