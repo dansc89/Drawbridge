@@ -881,6 +881,44 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         gridOverlayLayer.isHidden = false
     }
 
+    // Draw once at cursor scale; the nib is the drawing hotspot.
+    static let penCursor: NSCursor = {
+        let image = NSImage(size: NSSize(width: 24, height: 24), flipped: false) { _ in
+            let body = NSBezierPath()
+            body.move(to: NSPoint(x: 3, y: 3))
+            body.line(to: NSPoint(x: 6, y: 11))
+            body.line(to: NSPoint(x: 17, y: 22))
+            body.line(to: NSPoint(x: 22, y: 17))
+            body.line(to: NSPoint(x: 11, y: 6))
+            body.close()
+            NSColor.white.setStroke(); body.lineWidth = 3; body.stroke()
+            NSColor.black.setFill(); body.fill()
+            let detail = NSBezierPath()
+            detail.move(to: NSPoint(x: 7, y: 10)); detail.line(to: NSPoint(x: 10, y: 7))
+            detail.move(to: NSPoint(x: 16, y: 18)); detail.line(to: NSPoint(x: 18, y: 16))
+            NSColor.white.setStroke(); detail.lineWidth = 1; detail.stroke()
+            return true
+        }
+        return NSCursor(image: image, hotSpot: NSPoint(x: 3, y: 21))
+    }()
+
+    var usesPenCursor: Bool { rectangleMarkup.tool == .pen && !isRegionCaptureModeEnabled }
+
+    func markupToolCursorChanged() {
+        window?.invalidateCursorRects(for: self)
+        guard let window, bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil)) else { return }
+        if usesPenCursor { Self.penCursor.set() } else { NSCursor.arrow.set() }
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if usesPenCursor { addCursorRect(visibleRect, cursor: Self.penCursor) }
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if usesPenCursor { Self.penCursor.set() } else { super.cursorUpdate(with: event) }
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let tracking = mouseTrackingArea {
@@ -888,7 +926,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         let tracking = NSTrackingArea(
             rect: bounds,
-            options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved],
+            options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved, .cursorUpdate],
             owner: self,
             userInfo: nil
         )
@@ -905,6 +943,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         rectangleMarkup.pointerMoved(at:convert(event.locationInWindow,from:nil))
         lastPointerInView = convert(event.locationInWindow, from: nil)
         super.mouseMoved(with: event)
+        if usesPenCursor { Self.penCursor.set() }
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {

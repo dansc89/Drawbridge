@@ -273,7 +273,7 @@ final class RectangleMarkupController {
     var onPresentationChanged: (() -> Void)?
     var canEdit: () -> Bool = { true }
     var tool: Tool = .select {
-        didSet { finishTextEditing(); cancelGesture(); if tool != .select { selected = nil }; refresh() }
+        didSet { finishTextEditing(); cancelGesture(); if tool != .select { selected = nil }; refresh(); (view as? MarkupPDFView)?.markupToolCursorChanged() }
     }
     private var inlineText: (page:PDFPage, bounds:CGRect, annotation:PDFAnnotation?, editor:MarkupInlineTextView, wasDirty:Bool)?
     var isEditingText: Bool { inlineText != nil }
