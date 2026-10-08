@@ -55,7 +55,7 @@ Line and arrow tools use two clicks: start, then end. Text boxes let you type di
 
 ## Current limits
 
-- Drawbridge edits its own markups. Imported annotations remain visible and preserved, but are not editable through the markup tools.
+- Drawbridge can select, move, and delete standard unlocked markups from other PDF apps, with Undo/Redo. Imported text, style, and node editing are not yet supported. Flattened content and locked annotations cannot be selected as editable markups.
 - Measurement/calibration, secure redaction, snapshot pasting, page combining/conversion, and general editing of original PDF text are not available.
 - File reduction is lossless; there is no lossy image-quality or image-downsampling option.
 - Encrypted or digitally signed PDFs are not supported for annotation-only markup saving. Flattening also excludes encrypted PDFs and PDFs with signature fields.
