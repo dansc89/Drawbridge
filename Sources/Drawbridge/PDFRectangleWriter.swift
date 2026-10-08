@@ -438,7 +438,7 @@ enum PDFRectangleWriter {
             let existing = annotations(page["/Annots"], objects: objects)
             let existingByID = Dictionary(existing.compactMap { entry -> (String, String)? in
                 guard owned(entry, objects: objects), let reference = entry as? String,
-                      let id = dictionary(entry, objects: objects)["/T"] as? String else { return nil }
+                      let id = ownedIdentity(dictionary(entry, objects: objects)) else { return nil }
                 return (id, reference)
             }, uniquingKeysWith: { first, _ in first })
             var entries = existing.filter { !owned($0, objects: objects) }
@@ -447,7 +447,7 @@ enum PDFRectangleWriter {
                 let annotationRef = oldReference ?? "\(next) 0 R"; if oldReference == nil { next += 1 }
                 let appearanceRef = "\(next) 0 R"; next += 1
                 let b = record.bounds
-                var annotation: [String:Any] = ["/Type": "/Annot", "/Subtype": subtype(record.kind), "/Rect": [b.minX,b.minY,b.maxX,b.maxY], "/T": "u:\(record.id)", "/NM": "u:\(record.id)", "/Contents": "u:\(record.kind.rawValue.capitalized)", "/F": 4, "/C": [record.red,record.green,record.blue], "/BS": ["/W":record.lineWidth,"/S":"/S"], "/AP": ["/N":appearanceRef]]
+                var annotation: [String:Any] = ["/Type": "/Annot", "/Subtype": subtype(record.kind), "/Rect": [b.minX,b.minY,b.maxX,b.maxY], "/T": "u:\(record.author)", "/NM": "u:\(record.id)", "/Contents": "u:\(record.kind.rawValue.capitalized)", "/F": 4, "/C": [record.red,record.green,record.blue], "/BS": ["/W":record.lineWidth,"/S":"/S"], "/AP": ["/N":appearanceRef]]
                 if let a = record.start, let z = record.end {
                     annotation["/L"] = [a.x,a.y,z.x,z.y]
                     annotation["/LE"] = ["/None",record.kind == .arrow ? "/OpenArrow" : "/None"]
@@ -534,7 +534,8 @@ enum PDFRectangleWriter {
             let page = (objects["obj:\(reference)"] as? [String: Any])?["value"] as? [String: Any] ?? [:]
             for entry in annotations(page["/Annots"], objects: objects) where owned(entry, objects: objects) {
                 let value = dictionary(entry, objects: objects)
-                guard let id = value["/T"] as? String,
+                guard let id = ownedIdentity(value),
+                      value["/T"] as? String == "u:" + (recordsByID[id]?.author ?? ""),
                       let expected = recordsByID[id], expected.pageIndex == index,
                       value["/Subtype"] as? String == subtype(expected.kind),
                       let rect = value["/Rect"] as? [Double], rect.count == 4,
@@ -577,9 +578,15 @@ enum PDFRectangleWriter {
     private static func annotations(_ value: Any?, objects: [String:Any]) -> [Any] {
         if let ref = value as? String { return (objects["obj:\(ref)"] as? [String:Any])?["value"] as? [Any] ?? [] }; return value as? [Any] ?? []
     }
+    private static func ownedIdentity(_ value: [String: Any]) -> String? {
+        for key in ["/NM", "/T"] {
+            if let name = value[key] as? String, name.hasPrefix("u:" + RectangleMarkupRecord.prefix) { return name }
+        }
+        return nil
+    }
     private static func owned(_ entry: Any, objects: [String:Any]) -> Bool {
         let d = dictionary(entry, objects: objects)
-        return ["/Square","/Circle","/Line","/FreeText","/Ink","/Polygon"].contains(d["/Subtype"] as? String ?? "") && (d["/T"] as? String)?.hasPrefix("u:" + RectangleMarkupRecord.prefix) == true
+        return ["/Square","/Circle","/Line","/FreeText","/Ink","/Polygon"].contains(d["/Subtype"] as? String ?? "") && ownedIdentity(d) != nil
     }
 }
 

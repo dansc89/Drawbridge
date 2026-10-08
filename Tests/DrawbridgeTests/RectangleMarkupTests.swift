@@ -17,6 +17,67 @@ private final class BackgroundPDFDocumentRead: @unchecked Sendable {
 
 @MainActor
 final class RectangleMarkupTests: XCTestCase {
+    func testMarkupAuthorPreferenceDefaultsAndOverride() {
+        let suite = "DrawbridgeAuthorTest-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertEqual(MarkupAuthorPreference.name(defaults: defaults, accountName: "Mac User"), "Mac User")
+        defaults.set("  Alex García  ", forKey: MarkupAuthorPreference.defaultsKey)
+        XCTAssertEqual(MarkupAuthorPreference.name(defaults: defaults, accountName: "Mac User"), "Alex García")
+        defaults.set("   ", forKey: MarkupAuthorPreference.defaultsKey)
+        XCTAssertEqual(MarkupAuthorPreference.name(defaults: defaults, accountName: "Mac User"), "Mac User")
+    }
+
+    func testEveryMarkupAuthorSurvivesSavingReopeningAndEditing() throws {
+        let source = try fixture(rotation: 0)
+        let output = source.deletingLastPathComponent().appendingPathComponent("Authors-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
+        let doc = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(doc.page(at: 0))
+        let session = RectangleMarkupController(); session.bind(to: doc)
+        let points = [CGPoint(x: 110,y: 110), CGPoint(x: 180,y: 130), CGPoint(x: 150,y: 170)]
+        for kind in [RectangleMarkupRecord.Kind.rectangle, .ellipse, .line, .arrow, .text, .polyline, .polygon] {
+            let annotation = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 100,y: 100,width: 100,height: 100), kind: kind, endpoints: kind == .line || kind == .arrow ? (points[0],points[1]) : nil, text: "Author test", vertices: points))
+            XCTAssertEqual(annotation.userName, MarkupAuthorPreference.currentName)
+            annotation.setValue("Alex García (Design)", forAnnotationKey: PDFAnnotationKey(rawValue: "/T"))
+        }
+        let records = RectangleMarkupRecord.capture(doc)
+        XCTAssertEqual(records.count, 7)
+        XCTAssertEqual(Set(records.map(\.id)).count, 7, "Shared author must never become shared markup identity")
+        let bytes = try Data(contentsOf: source)
+        XCTAssertTrue(PDFRectangleWriter.write(document: doc, source: source, destination: output, pageLabels: [:], records: records))
+        let saved = try XCTUnwrap(PDFDocument(url: output))
+        XCTAssertEqual(RectangleMarkupRecord.capture(saved), records)
+        for annotation in try XCTUnwrap(saved.page(at: 0)).annotations where RectangleMarkupRecord.owns(annotation) {
+            XCTAssertEqual(annotation.userName, "Alex García (Design)")
+        }
+        let editing = RectangleMarkupController(); editing.bind(to: saved)
+        let polygon = try XCTUnwrap(saved.page(at: 0)?.annotations.first { $0.type == "Polygon" })
+        XCTAssertTrue(RectangleMarkupRecord.owns(polygon), "Polygon replacement must retain identity")
+        XCTAssertEqual(polygon.userName, "Alex García (Design)")
+        editing.setBounds(polygon.bounds.offsetBy(dx: 5,dy: 5), of: polygon, on: saved.page(at: 0)!, action: "Move")
+        XCTAssertTrue(PDFRectangleWriter.write(document: saved, source: output, destination: output, pageLabels: [:], records: RectangleMarkupRecord.capture(saved)))
+        XCTAssertEqual(PDFDocument(url: output)?.page(at: 0)?.annotations.filter(RectangleMarkupRecord.owns).count, 7)
+        XCTAssertEqual(try Data(contentsOf: source), bytes)
+    }
+
+    func testLegacyInternalAuthorMigratesWithoutLosingIdentity() throws {
+        let source = try fixture(rotation: 0)
+        let output = source.deletingLastPathComponent().appendingPathComponent("LegacyAuthor-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
+        let doc = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(doc.page(at: 0))
+        let legacy = PDFAnnotation(bounds: CGRect(x: 100,y: 110,width: 80,height: 60), forType: .square, withProperties: nil)
+        let id = RectangleMarkupRecord.prefix + UUID().uuidString
+        legacy.userName = id; legacy.color = .red; page.addAnnotation(legacy)
+        XCTAssertTrue(RectangleMarkupRecord.owns(legacy))
+        let records = RectangleMarkupRecord.capture(doc)
+        XCTAssertEqual(records.first?.id, id)
+        XCTAssertEqual(records.first?.author, MarkupAuthorPreference.currentName)
+        XCTAssertTrue(PDFRectangleWriter.write(document: doc, source: source, destination: output, pageLabels: [:], records: records))
+        let saved = try XCTUnwrap(PDFDocument(url: output))
+        XCTAssertEqual(RectangleMarkupRecord.capture(saved), records)
+        XCTAssertEqual(saved.page(at: 0)?.annotations.first(where: RectangleMarkupRecord.owns)?.userName, MarkupAuthorPreference.currentName)
+    }
+
     func testLargeRealDrawingSetsMixedMarkupSaves() async throws {
         guard let manifest = ProcessInfo.processInfo.environment["DRAWBRIDGE_LARGE_SAVE_MANIFEST"] else { throw XCTSkip("Optional real drawing-set manifest") }
         _ = NSApplication.shared
@@ -1170,7 +1231,7 @@ final class RectangleMarkupTests: XCTestCase {
         let session = RectangleMarkupController(); session.bind(to: doc)
         let first = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 100,y: 110,width: 80,height: 60)))
         let second = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 250,y: 180,width: 90,height: 70)))
-        second.setValue(try XCTUnwrap(first.userName), forAnnotationKey: PDFAnnotationKey(rawValue: "/T"))
+        second.setValue(try XCTUnwrap(RectangleMarkupRecord.identity(first)), forAnnotationKey: RectangleMarkupRecord.identityKey)
         let original = try Data(contentsOf: source)
         let records = RectangleMarkupRecord.capture(doc)
         XCTAssertEqual(records.count, 2)

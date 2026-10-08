@@ -79,6 +79,7 @@ private final class PDFMarkupSourceBaseline: @unchecked Sendable {
 struct RectangleMarkupRecord: Sendable, Equatable {
     static let prefix = "DrawbridgeRectangleV1:"
     enum Kind: String, Sendable { case rectangle, ellipse, line, arrow, text, polyline, polygon }
+    var author: String = ""
     var kind: Kind = .rectangle
     var text: String = ""
     var fontSize: Double = 18
@@ -94,8 +95,14 @@ struct RectangleMarkupRecord: Sendable, Equatable {
     var blue: Double
     var lineWidth: Double
 
+    static let identityKey = PDFAnnotationKey(rawValue: "/NM")
+    static func identity(_ annotation: PDFAnnotation) -> String? {
+        if let name = annotation.value(forAnnotationKey: identityKey) as? String, name.hasPrefix(prefix) { return name }
+        // Compatibility with releases that put the internal ID in the author field.
+        return annotation.userName.flatMap { $0.hasPrefix(prefix) ? $0 : nil }
+    }
     static func owns(_ annotation: PDFAnnotation) -> Bool {
-        ["Square", "Circle", "Line", "FreeText", "Ink", "Polygon"].contains(annotation.type ?? "") && annotation.userName?.hasPrefix(prefix) == true
+        ["Square", "Circle", "Line", "FreeText", "Ink", "Polygon"].contains(annotation.type ?? "") && identity(annotation) != nil
     }
 
     static let fillKey = PDFAnnotationKey(rawValue:"DrawbridgePolygonFill")
@@ -158,15 +165,14 @@ struct RectangleMarkupRecord: Sendable, Equatable {
     }
 
     static func capture(_ document: PDFDocument) -> [Self] {
-        // PDF editors may preserve /T when duplicating a markup. Give each owned
+        // PDF editors may preserve /NM when duplicating a markup. Give each owned
         // annotation its own identity without changing its appearance or geometry.
         var seen = Set<String>()
         return (0..<document.pageCount).flatMap { index in
             document.page(at: index)?.annotations.compactMap { annotation -> Self? in
-                guard owns(annotation), var id = annotation.userName else { return nil }
+                guard owns(annotation), var id = identity(annotation) else { return nil }
                 if !seen.insert(id).inserted {
                     id = prefix + UUID().uuidString
-                    annotation.setValue(id, forAnnotationKey: PDFAnnotationKey(rawValue: "/T"))
                     annotation.setValue(id, forAnnotationKey: PDFAnnotationKey(rawValue: "/NM"))
                     seen.insert(id)
                 }
@@ -174,6 +180,8 @@ struct RectangleMarkupRecord: Sendable, Equatable {
                 var record = Self(id: id, pageIndex: index, bounds: annotation.bounds,
                             red: Double(rgb.redComponent), green: Double(rgb.greenComponent), blue: Double(rgb.blueComponent),
                             lineWidth: Double(annotation.border?.lineWidth ?? 2))
+                let author = annotation.userName ?? ""
+                record.author = author.hasPrefix(prefix) ? MarkupAuthorPreference.currentName : author
                 if annotation.type == "FreeText" {
                     record.kind = .text; record.text = annotation.contents ?? ""; record.fontSize = Double(textFontSize(annotation))
                     record.lineWidth = 2
@@ -318,7 +326,7 @@ final class RectangleMarkupController {
                     }
                     guard original.type == "Polygon", !(original is DrawbridgePolygonAnnotation) else { continue }
                     let polygon = DrawbridgePolygonAnnotation(bounds:original.bounds,forType:PDFAnnotationSubtype(rawValue:"/Polygon"),withProperties:nil)
-                    polygon.setValue(original.userName ?? "",forAnnotationKey:PDFAnnotationKey(rawValue:"/T")); polygon.contents = original.contents; polygon.color = original.color; polygon.border = original.border
+                    polygon.setValue(original.userName ?? "",forAnnotationKey:PDFAnnotationKey(rawValue:"/T")); polygon.setValue(RectangleMarkupRecord.identity(original) ?? "", forAnnotationKey: RectangleMarkupRecord.identityKey); polygon.contents = original.contents; polygon.color = original.color; polygon.border = original.border
                     polygon.shouldDisplay = original.shouldDisplay; polygon.shouldPrint = original.shouldPrint; polygon.isReadOnly = original.isReadOnly
                     RectangleMarkupRecord.setVertices(RectangleMarkupRecord.vertices(original),on:polygon)
                     RectangleMarkupRecord.setPolygonFill(RectangleMarkupRecord.polygonFill(original),on:polygon)
@@ -564,7 +572,8 @@ final class RectangleMarkupController {
             annotation.endPoint = CGPoint(x:b.x-bounds.minX,y:b.y-bounds.minY)
             annotation.endLineStyle = kind == .arrow ? .openArrow : .none
         }
-        annotation.setValue(RectangleMarkupRecord.prefix + UUID().uuidString,forAnnotationKey:PDFAnnotationKey(rawValue:"/T"))
+        annotation.setValue(RectangleMarkupRecord.prefix + UUID().uuidString, forAnnotationKey: RectangleMarkupRecord.identityKey)
+        annotation.setValue(MarkupAuthorPreference.currentName, forAnnotationKey: PDFAnnotationKey(rawValue: "/T"))
         annotation.contents = kind == .text ? text : kind.rawValue.capitalized
         if kind == .text { annotation.font = NSFont(name:"Helvetica",size:fontSize); annotation.fontColor = strokeColor; annotation.alignment = .left }
         if kind == .text { RectangleMarkupRecord.setTextColor(strokeColor,on:annotation); RectangleMarkupRecord.setTextFontSize(fontSize,on:annotation) } else { annotation.color = strokeColor }

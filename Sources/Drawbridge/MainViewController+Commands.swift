@@ -304,6 +304,21 @@ extension MainViewController {
         saveShortcutBindings()
         updateShortcutHintLabel()
     }
+    @objc func commandMarkupAuthor(_ sender: Any?) {
+        let field = NSTextField(string: MarkupAuthorPreference.currentName)
+        field.frame = NSRect(x: 0, y: 0, width: 360, height: 24)
+        field.placeholderString = "Your name"
+        let alert = NSAlert()
+        alert.messageText = "Markup Author"
+        alert.informativeText = "This name appears as the author of new markups in Drawbridge and other PDF apps. Existing author names are preserved."
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        UserDefaults.standard.set(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: MarkupAuthorPreference.defaultsKey)
+    }
+
     @objc func commandPerformanceSettings(_ sender: Any?) {
         let defaults = UserDefaults.standard
         let adaptiveDefault = defaults.bool(forKey: Self.defaultsAdaptiveIndexCapEnabledKey)
@@ -639,7 +654,7 @@ extension MainViewController {
         let hasDocument = pdfView.document != nil
         switch action {
         case #selector(commandOpen(_:)), #selector(commandKeyboardShortcuts(_:)),
-             #selector(commandPerformanceSettings(_:)), #selector(commandQuickStart(_:)):
+             #selector(commandPerformanceSettings(_:)), #selector(commandMarkupAuthor(_:)), #selector(commandQuickStart(_:)):
             return true
         case #selector(commandCycleNextDocument(_:)), #selector(commandCyclePreviousDocument(_:)):
             return sessionDocumentURLs.count > 1

@@ -169,6 +169,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(NSMenuItem.separator())
         let shortcutItem = appMenu.addItem(withTitle: "Keyboard Shortcuts…", action: #selector(MainViewController.commandKeyboardShortcuts(_:)), keyEquivalent: ",")
         shortcutItem.target = controller
+        let authorItem = appMenu.addItem(withTitle: "Markup Author…", action: #selector(MainViewController.commandMarkupAuthor(_:)), keyEquivalent: "")
+        authorItem.target = controller
         let prefsItem = appMenu.addItem(withTitle: "Performance Settings…", action: #selector(MainViewController.commandPerformanceSettings(_:)), keyEquivalent: "")
         prefsItem.target = controller
         appMenu.addItem(NSMenuItem.separator())

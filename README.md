@@ -34,6 +34,8 @@ PDF Contents details are collapsed by default to leave more space for navigation
 3. For an unindexed set, choose **Bookmarks > Auto-Generate Sheet Names/Bookmarks…** and review the results. Use **Hyperlinks > Batch Link Sheet Numbers…** to create sheet links.
 4. Select a markup tool, draw on the PDF, and use **Cmd+S** to save. **Save As PDF… (Shift+Cmd+S)** creates a separate copy.
 
+Choose **Drawbridge → Markup Author…** to set the name shown on new annotations in other PDF apps. It defaults to your Mac account name.
+
 The [user manual](USER_MANUAL.md) covers navigation, page/bookmark deletion, saving, printing, flattening, and tool behavior.
 
 ## Markup shortcuts
