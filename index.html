@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drawbridge | PDF Markup For macOS</title>
+    <meta name="description" content="Drawbridge is a native macOS PDF markup and takeoff app built for architects, designers, and engineers, with cloud markups, text annotations, highlights, freehand drawing, callouts, measurements, and fast save and export workflows.">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['"Plus Jakarta Sans"', 'sans-serif'],
+                        mono: ['"JetBrains Mono"', 'monospace'],
+                    },
+                    colors: {
+                        terracotta: {
+                            DEFAULT: '#c85a32',
+                            hover: '#b24d27',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+</head>
+<body class="bg-[#f3efe6] text-slate-900 font-sans antialiased selection:bg-[#c85a32] selection:text-white">
+    <!-- Header -->
+    <header class="fixed top-0 left-0 right-0 z-50 bg-[#f3efe6]/90 backdrop-blur-md border-b border-slate-300/60">
+        <div class="max-w-7xl mx-auto px-6 h-20 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-[#c85a32] to-amber-600 flex items-center justify-center shadow-md shadow-orange-900/10 font-bold text-xl text-white">
+                    D
+                </div>
+                <span class="text-xl font-bold tracking-tight text-slate-900">Drawbridge</span>
+            </div>
+            <nav class="hidden md:flex items-center gap-8 text-sm font-medium text-slate-700">
+                <a href="#features" class="hover:text-[#c85a32] transition">Features</a>
+                <a href="#workflow" class="hover:text-[#c85a32] transition">Workflow</a>
+                <a href="#download" class="hover:text-[#c85a32] transition">Download</a>
+                <a href="https://github.com/dansc89/Drawbridge" target="_blank" class="hover:text-[#c85a32] transition">GitHub</a>
+            </nav>
+            <div>
+                <a href="https://github.com/dansc89/Drawbridge/releases/latest" target="_blank" class="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#c85a32] hover:bg-[#b24d27] text-white font-semibold text-sm transition shadow-lg shadow-[#c85a32]/20">
+                    Download Latest Release
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <!-- Hero Section -->
+    <section class="pt-36 pb-20 md:pt-48 md:pb-32 relative overflow-hidden">
+        <div class="max-w-7xl mx-auto px-6 relative z-10">
+            <div class="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
+                <div class="lg:col-span-5 space-y-6">
+                    <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#c85a32]/10 border border-[#c85a32]/30 text-[#c85a32] text-xs font-semibold tracking-wide uppercase">
+                        <span class="w-2 h-2 rounded-full bg-[#c85a32] animate-pulse"></span>
+                        Native macOS PDF Markup
+                    </div>
+                    <h1 class="text-4xl md:text-5xl font-extrabold tracking-tight text-slate-900 leading-[1.1]">
+                        Fast markups, clean takeoffs, and export-ready reviews.
+                    </h1>
+                    <p class="text-base text-slate-700 font-normal leading-relaxed">
+                        Drawbridge is a native macOS PDF markup and takeoff app built for architects, designers, and engineers, with cloud markups, text annotations, highlights, freehand drawing, callouts, measurements, and fast save and export workflows.
+                    </p>
+                    <div class="flex flex-col sm:flex-row items-center gap-4 pt-2">
+                        <a href="https://github.com/dansc89/Drawbridge/releases/latest" target="_blank" class="w-full sm:w-auto px-7 py-3.5 rounded-xl bg-[#c85a32] hover:bg-[#b24d27] text-white font-bold text-sm transition shadow-xl shadow-[#c85a32]/20 flex items-center justify-center gap-3">
+                            Download Latest Release
+                        </a>
+                        <a href="https://github.com/dansc89/Drawbridge" target="_blank" class="w-full sm:w-auto px-7 py-3.5 rounded-xl bg-[#e5dfd3] hover:bg-[#dad3c5] border border-slate-300 text-slate-800 font-bold text-sm transition flex items-center justify-center gap-2">
+                            View GitHub
+                        </a>
+                    </div>
+                    <div class="flex items-center gap-6 text-xs text-slate-600 font-mono pt-2">
+                        <span>Apple Silicon Mac (M1+)</span>
+                        <span>•</span>
+                        <span>macOS 13.0+</span>
+                    </div>
+                </div>
+
+                <!-- Hero Screenshot -->
+                <div class="lg:col-span-7">
+                    <div class="rounded-2xl border border-slate-300 bg-white p-2 shadow-2xl shadow-slate-900/15">
+                        <div class="rounded-xl overflow-hidden border border-slate-200 bg-slate-900 shadow-inner">
+                            <div class="bg-slate-800 px-4 py-2.5 border-b border-slate-700 flex items-center gap-2">
+                                <div class="w-3 h-3 rounded-full bg-red-500"></div>
+                                <div class="w-3 h-3 rounded-full bg-yellow-500"></div>
+                                <div class="w-3 h-3 rounded-full bg-green-500"></div>
+                                <div class="mx-auto text-xs text-slate-300 font-mono">Drawbridge.app — PDF Markup & Takeoff</div>
+                            </div>
+                            <img src="hero.png" alt="Drawbridge App Screenshot" class="w-full h-auto block object-cover">
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section id="features" class="py-24 bg-[#eae4d9] border-t border-slate-300/60">
+        <div class="max-w-7xl mx-auto px-6">
+            <div class="text-center max-w-2xl mx-auto space-y-4 mb-16">
+                <h2 class="text-3xl md:text-4xl font-extrabold text-slate-900 tracking-tight">Focused tools for reviewing PDFs without the usual drag.</h2>
+                <p class="text-slate-700 text-base font-medium">Built for speed, clarity, and seamless team collaboration.</p>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                <div class="p-8 rounded-2xl bg-white border border-slate-300/80 shadow-sm space-y-4">
+                    <div class="w-12 h-12 rounded-xl bg-[#c85a32]/10 border border-[#c85a32]/20 flex items-center justify-center text-[#c85a32] text-xl font-bold">
+                        ✍️
+                    </div>
+                    <h3 class="text-xl font-bold text-slate-900">Mark up fast</h3>
+                    <p class="text-slate-700 text-sm leading-relaxed">Add text annotations, highlights, freehand drawing, callouts, and measurements without leaving the document.</p>
+                </div>
+                <div class="p-8 rounded-2xl bg-white border border-slate-300/80 shadow-sm space-y-4">
+                    <div class="w-12 h-12 rounded-xl bg-[#c85a32]/10 border border-[#c85a32]/20 flex items-center justify-center text-[#c85a32] text-xl font-bold">
+                        ⚡
+                    </div>
+                    <h3 class="text-xl font-bold text-slate-900">Native app</h3>
+                    <p class="text-slate-700 text-sm leading-relaxed">Built natively for macOS, not a sluggish browser wrapper. Designed for maximum responsiveness.</p>
+                </div>
+                <div class="p-8 rounded-2xl bg-white border border-slate-300/80 shadow-sm space-y-4">
+                    <div class="w-12 h-12 rounded-xl bg-[#c85a32]/10 border border-[#c85a32]/20 flex items-center justify-center text-[#c85a32] text-xl font-bold">
+                        📤
+                    </div>
+                    <h3 class="text-xl font-bold text-slate-900">Shareable reviews</h3>
+                    <p class="text-slate-700 text-sm leading-relaxed">Cloud markups and export-ready save workflows so your team and consultants stay perfectly aligned.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Workflow Section -->
+    <section id="workflow" class="py-24 border-t border-slate-300/60">
+        <div class="max-w-7xl mx-auto px-6">
+            <div class="max-w-3xl mx-auto space-y-12">
+                <div class="text-center space-y-4">
+                    <h2 class="text-3xl md:text-4xl font-extrabold text-slate-900 tracking-tight">Open a PDF. Mark it up. Keep moving.</h2>
+                    <p class="text-slate-700 text-base font-medium">Three simple steps to streamline your drawing review process.</p>
+                </div>
+                <div class="space-y-6">
+                    <div class="flex items-start gap-6 p-6 rounded-2xl bg-white border border-slate-300 shadow-sm">
+                        <div class="w-10 h-10 rounded-xl bg-[#c85a32] text-white font-bold flex items-center justify-center flex-shrink-0">1</div>
+                        <div>
+                            <h4 class="text-lg font-bold text-slate-900 mb-1">Open Drawbridge</h4>
+                            <p class="text-slate-700 text-sm">Launch the app on an Apple Silicon Mac running macOS 13 or newer.</p>
+                        </div>
+                    </div>
+                    <div class="flex items-start gap-6 p-6 rounded-2xl bg-white border border-slate-300 shadow-sm">
+                        <div class="w-10 h-10 rounded-xl bg-[#c85a32] text-white font-bold flex items-center justify-center flex-shrink-0">2</div>
+                        <div>
+                            <h4 class="text-lg font-bold text-slate-900 mb-1">Open an existing PDF or create a new one</h4>
+                            <p class="text-slate-700 text-sm">Start from the drawing set, detail sheet, or review file you already have.</p>
+                        </div>
+                    </div>
+                    <div class="flex items-start gap-6 p-6 rounded-2xl bg-white border border-slate-300 shadow-sm">
+                        <div class="w-10 h-10 rounded-xl bg-[#c85a32] text-white font-bold flex items-center justify-center flex-shrink-0">3</div>
+                        <div>
+                            <h4 class="text-lg font-bold text-slate-900 mb-1">Add markups</h4>
+                            <p class="text-slate-700 text-sm">Use text, highlights, freehand drawing, callouts, and measurements to get comments out quickly.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer id="download" class="py-16 bg-[#eae4d9] border-t border-slate-300/65">
+        <div class="max-w-7xl mx-auto px-6 flex flex-col md:flex-row items-center justify-between gap-6">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-lg bg-[#c85a32] flex items-center justify-center font-bold text-white">D</div>
+                <span class="font-bold text-slate-900">Drawbridge</span>
+            </div>
+            <p class="text-xs text-slate-700 font-mono font-medium">Apple Silicon Mac (M1+) • macOS 13.0+</p>
+            <div class="flex items-center gap-6 text-sm text-slate-800 font-medium">
+                <a href="https://github.com/dansc89/Drawbridge" target="_blank" class="hover:text-[#c85a32] transition">GitHub Repo</a>
+                <a href="https://github.com/dansc89/Drawbridge/releases/latest" target="_blank" class="hover:text-[#c85a32] transition">Releases</a>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>
