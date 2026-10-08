@@ -234,6 +234,16 @@ final class RectangleMarkupController {
         init(dirty: Bool, stamp: PDFMarkupSourceStamp?) { self.dirty = dirty; self.stamp = stamp }
     }
     private let documentStates = NSMapTable<PDFDocument, DocumentState>.weakToStrongObjects()
+    private let importedStates = NSMapTable<PDFDocument, ImportedMarkupState>.weakToStrongObjects()
+    private var importedState: ImportedMarkupState? { boundDocument.flatMap { importedStates.object(forKey: $0) } }
+    var openingMarkupSourceStamp: PDFMarkupSourceStamp? {
+        guard let document = boundDocument else { return nil }
+        return readerSnapshots.object(forKey: document)?.stamp ?? importedState?.openingStamp ?? sourceStamp
+    }
+    func importedPlan() -> ImportedMarkupPlan? {
+        guard let document = boundDocument else { return nil }
+        return importedState?.plan(document: document, stamp: readerSnapshots.object(forKey: document)?.stamp ?? sourceStamp)
+    }
     private let readerSnapshots = NSMapTable<PDFDocument, DocumentState>.weakToStrongObjects()
     func retainReaderSnapshot(_ stamp: PDFMarkupSourceStamp, for document: PDFDocument) {
         // PDFKit may lazily load a page long after the next save replaced the
@@ -296,6 +306,7 @@ final class RectangleMarkupController {
         undo.removeAllActions(withTarget: self)
         fallbackUndo.removeAllActions()
         boundDocument = document
+        if let document, importedStates.object(forKey: document) == nil { importedStates.setObject(ImportedMarkupState(document: document), forKey: document) }
         if let document, documentStates.object(forKey: document) == nil {
             for index in 0..<document.pageCount {
                 guard let page = document.page(at:index) else { continue }
@@ -390,7 +401,7 @@ final class RectangleMarkupController {
             gesture = .create(page, point); preview = (page, CGRect(origin: point, size: .zero)); refresh()
             return true
         }
-        if let selected, selected.page === page {
+        if let selected, selected.page === page, RectangleMarkupRecord.owns(selected) {
             let vertices = RectangleMarkupRecord.vertices(selected)
             if let index = vertices.indices.first(where: { i in
                 let p = view.convert(vertices[i],from:page)
@@ -409,7 +420,7 @@ final class RectangleMarkupController {
                 preview = (page, selected.bounds); refresh(); return true
             }
         }
-        if let hit = page.annotations.reversed().first(where: { RectangleMarkupRecord.owns($0) && !$0.isReadOnly && $0.shouldDisplay && Self.hitTest($0,at:point,tolerance:8 / max(view.scaleFactor,0.01)) }) {
+        if let hit = page.annotations.reversed().first(where: { (RectangleMarkupRecord.owns($0) || ImportedMarkupState.selectable($0)) && !$0.isReadOnly && $0.shouldDisplay && Self.hitTest($0,at:point,tolerance:8 / max(view.scaleFactor,0.01)) }) {
             selected = hit; view.setCurrentSelection(nil, animate: false)
             gesture = .edit(page, hit, hit.bounds, point, nil); preview = (page, hit.bounds); refresh(); return true
         }
@@ -474,7 +485,7 @@ final class RectangleMarkupController {
         case .edit(let page, let annotation, let original, let start, let corner):
             let end = view.convert(location, to: page)
             let crop = page.bounds(for: view.displayBox)
-            if annotation.type == "Line" {
+            if annotation.type == "Line" && RectangleMarkupRecord.owns(annotation) {
                 var a = handlePoint(.lowerLeft, annotation: annotation), b = handlePoint(.upperRight, annotation: annotation)
                 if let corner {
                     if corner == .lowerLeft { a = Self.clamped(end,to:crop) } else { b = Self.clamped(end,to:crop) }
@@ -627,7 +638,7 @@ final class RectangleMarkupController {
     }
 
     func deleteSelected() {
-        guard canEdit(), let selected, RectangleMarkupRecord.owns(selected), !selected.isReadOnly, let page = selected.page else { return }
+        guard canEdit(), let selected, (RectangleMarkupRecord.owns(selected) || ImportedMarkupState.selectable(selected)), !selected.isReadOnly, let page = selected.page else { return }
         cancelGesture(); setPresence(false, annotation: selected, page: page, action: "Delete Markup")
     }
 
@@ -697,11 +708,23 @@ final class RectangleMarkupController {
         setGeometry(bounds, endpoints:nil, of:annotation, on:page, action:action)
     }
     func setGeometry(_ bounds: CGRect, endpoints: (CGPoint,CGPoint)?, of annotation: PDFAnnotation, on page: PDFPage, action: String) {
-        guard canEdit(), page.document === boundDocument, RectangleMarkupRecord.owns(annotation), !annotation.isReadOnly, bounds.width >= 2, bounds.height >= 2, [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy({ $0.isFinite }) else { return }
+        guard canEdit(), page.document === boundDocument, (RectangleMarkupRecord.owns(annotation) || ImportedMarkupState.selectable(annotation)), !annotation.isReadOnly, bounds.width >= 2, bounds.height >= 2, [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy({ $0.isFinite }) else { return }
         if let (a,b) = endpoints {
             guard [a.x,a.y,b.x,b.y].allSatisfy({ $0.isFinite }), bounds.contains(a), bounds.contains(b), hypot(a.x-b.x,a.y-b.y) >= 2 else { return }
         }
         let previous = annotation.bounds
+        if !RectangleMarkupRecord.owns(annotation) {
+            guard bounds.size == previous.size, endpoints == nil else { return }
+            undo.registerUndo(withTarget: self) { target in target.setGeometry(previous, endpoints: nil, of: annotation, on: page, action: action) }
+            undo.setActionName(action)
+            importedState?.touch(annotation)
+            annotation.shouldDisplay = false
+            page.removeAnnotation(annotation)
+            annotation.bounds = bounds
+            page.addAnnotation(annotation)
+            annotation.shouldDisplay = true
+            selected = annotation; changed(page, importedAppearanceChanged: true); return
+        }
         let oldVertices = RectangleMarkupRecord.vertices(annotation)
         let oldEndpoints: (CGPoint,CGPoint)? = annotation.type == "Line" ? (handlePoint(.lowerLeft,annotation:annotation),handlePoint(.upperRight,annotation:annotation)) : nil
         if previous == bounds {
@@ -743,6 +766,24 @@ final class RectangleMarkupController {
             let b = CGPoint(x:origin.x+annotation.endPoint.x,y:origin.y+annotation.endPoint.y)
             return distanceFromSegment(point, a, b) <= radius
         }
+        if annotation.type == "Ink", !RectangleMarkupRecord.owns(annotation), let paths = annotation.paths {
+            let local = CGPoint(x: point.x - annotation.bounds.minX, y: point.y - annotation.bounds.minY)
+            return paths.contains { path in
+                let outline = CGMutablePath()
+                for index in 0..<path.elementCount {
+                    var points = [CGPoint](repeating: .zero, count: 3)
+                    switch path.element(at: index, associatedPoints: &points) {
+                    case .moveTo: outline.move(to: points[0])
+                    case .lineTo: outline.addLine(to: points[0])
+                    case .curveTo, .cubicCurveTo: outline.addCurve(to: points[2], control1: points[0], control2: points[1])
+                    case .quadraticCurveTo: outline.addQuadCurve(to: points[1], control: points[0])
+                    case .closePath: outline.closeSubpath()
+                    @unknown default: break
+                    }
+                }
+                return outline.copy(strokingWithWidth: radius * 2, lineCap: .round, lineJoin: .round, miterLimit: 10).contains(local)
+            }
+        }
         if annotation.type == "Circle" {
             let bounds = annotation.bounds
             guard bounds.width > 0, bounds.height > 0 else { return false }
@@ -772,14 +813,23 @@ final class RectangleMarkupController {
         guard canEdit(), page.document === boundDocument else { return }
         undo.registerUndo(withTarget: self) { target in target.setPresence(!exists, annotation: annotation, page: page, action: action) }
         undo.setActionName(action)
-        if exists { page.addAnnotation(annotation); selected = annotation } else { page.removeAnnotation(annotation); selected = nil }
-        changed(page)
+        let imported = !RectangleMarkupRecord.owns(annotation)
+        if imported { importedState?.touch(annotation) }
+        if exists {
+            page.addAnnotation(annotation)
+            if imported { annotation.shouldDisplay = true }
+            selected = annotation
+        } else {
+            if imported { annotation.shouldDisplay = false }
+            page.removeAnnotation(annotation); selected = nil
+        }
+        changed(page, importedAppearanceChanged: imported)
     }
 
-    private func changed(_ page: PDFPage) {
+    private func changed(_ page: PDFPage, importedAppearanceChanged: Bool = false) {
         // A real style mutation during drafting survives cancellation of the text.
         if var draft = inlineText { draft.wasDirty = true; inlineText = draft }
-        hasUnsavedChanges = true; (view as? MarkupPDFView)?.refreshAnnotationRendering(on: page); refresh(); onMutation?(page)
+        hasUnsavedChanges = true; (view as? MarkupPDFView)?.refreshAnnotationRendering(on: page, importedAppearanceChanged: importedAppearanceChanged); refresh(); onMutation?(page)
     }
 
     func cancelGesture() { pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
@@ -812,7 +862,7 @@ final class RectangleMarkupController {
                 path.move(to:view.convert(a,from:page)); path.addLine(to:view.convert(b,from:page))
             } else if preview != nil && tool == .ellipse { path.addEllipse(in:rect) }
             else { path.addRect(rect) }
-            if preview == nil && vertices.isEmpty {
+            if preview == nil && vertices.isEmpty && selected.map(RectangleMarkupRecord.owns) != false {
                 let corners: [Corner] = selected?.type == "Line" ? [.lowerLeft,.upperRight] : Corner.allCases
                 for corner in corners {
                     let point = selected.map { handlePoint(corner,annotation:$0) } ?? Self.cornerPoint(corner,in:bounds)

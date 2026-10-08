@@ -204,7 +204,8 @@ extension MainViewController {
         let captureStartedAt = CFAbsoluteTimeGetCurrent()
         let capturedRectangles = RectangleMarkupRecord.capture(document)
         let structureState = pageStructureState?.document === document ? pageStructureState : nil
-        let structurePlan = structureState?.plan(for: document)
+        let importedPlan = pdfView.rectangleMarkup.importedPlan()
+        let structurePlan = structureState?.plan(for: document, forceOriginal: importedPlan != nil)
         let savedPageIdentities = (0..<document.pageCount).compactMap(document.page(at:)).map(ObjectIdentifier.init)
         // Freeze navigation beside markups on the UI thread. Saving must not
         // enumerate the live PDFKit annotation arrays while the user edits.
@@ -231,7 +232,7 @@ extension MainViewController {
 
             if let structurePlan, let navigationSourceURL {
                 let writeStartedAt = CFAbsoluteTimeGetCurrent()
-                success = structurePlan.write(document: documentBox.document, currentSource: navigationSourceURL, destination: targetURL, expectedStamp: rectangleSourceStamp, labels: pageLabelsForEmbeddedSave, records: capturedRectangles, navigation: navigationSnapshot, onCommitted: { committedMarkupStamp = $0 })
+                success = structurePlan.write(document: documentBox.document, currentSource: navigationSourceURL, destination: targetURL, expectedStamp: rectangleSourceStamp, labels: pageLabelsForEmbeddedSave, records: capturedRectangles, navigation: navigationSnapshot, importedPlan: importedPlan, onCommitted: { committedMarkupStamp = $0 })
                 if !success { errorDescription = "The page deletion could not be verified. Your original PDF is unchanged and your edits remain open." }
                 writeElapsed = CFAbsoluteTimeGetCurrent() - writeStartedAt
             } else if rectangleRecords != nil {
@@ -248,6 +249,7 @@ extension MainViewController {
                     rectangleRecords: rectangleRecords,
                     rectangleSourceStamp: rectangleSourceStamp,
                     navigationSnapshot: navigationSnapshot,
+                    importedPlan: importedPlan,
                     onMarkupCommitted: { committedMarkupStamp = $0 },
                     onMarkupSaveFailure: { markupSaveFailure = $0 }
                 )
@@ -597,13 +599,14 @@ extension MainViewController {
         rectangleRecords: [RectangleMarkupRecord]? = nil,
         rectangleSourceStamp: PDFMarkupSourceStamp? = nil,
         navigationSnapshot: PDFTKBookmarkWriter.NavigationSnapshot? = nil,
+        importedPlan: ImportedMarkupPlan? = nil,
         onMarkupCommitted: ((PDFMarkupSourceStamp) -> Void)? = nil,
         onMarkupSaveFailure: ((PDFRectangleWriter.SaveFailure) -> Void)? = nil,
         options: [PDFDocumentWriteOption: Any]? = nil
     ) -> Bool {
         if let rectangleRecords {
             guard let source = navigationSourceURL ?? document.documentURL else { return false }
-            return PDFRectangleWriter.write(document: document, source: source, destination: url, pageLabels: pageLabels, records: rectangleRecords, expectedSourceStamp: rectangleSourceStamp, navigationSnapshot: navigationSnapshot, onCommitted: onMarkupCommitted, onFailure: onMarkupSaveFailure)
+            return PDFRectangleWriter.write(document: document, source: source, destination: url, pageLabels: pageLabels, records: rectangleRecords, expectedSourceStamp: rectangleSourceStamp, navigationSnapshot: navigationSnapshot, importedPlan: importedPlan, onCommitted: onMarkupCommitted, onFailure: onMarkupSaveFailure)
         }
         switch PDFTKBookmarkWriter.writeNavigation(
             in: document,

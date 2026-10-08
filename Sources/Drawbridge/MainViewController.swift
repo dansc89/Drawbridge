@@ -1369,7 +1369,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
               !indexes.isEmpty, indexes.count < document.pageCount,
               indexes.allSatisfy({ $0 < document.pageCount && $0 >= 0 }) else { return }
         if pageStructureState?.document !== document {
-            guard let stamp = pdfView.rectangleMarkup.sourceStamp,
+            guard let stamp = pdfView.rectangleMarkup.openingMarkupSourceStamp,
                   let source = stamp.recoverySourceURL else {
                 throw NSError(domain: "Drawbridge", code: 1, userInfo: [NSLocalizedDescriptionKey: "Save this PDF before deleting pages so Drawbridge can preserve its original drawing content."])
             }

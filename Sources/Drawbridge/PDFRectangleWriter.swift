@@ -47,6 +47,7 @@ enum PDFRectangleWriter {
     static func write(document: PDFDocument, source: URL, destination: URL,
                       pageLabels: [Int: String], records: [RectangleMarkupRecord], expectedSourceStamp: PDFMarkupSourceStamp? = nil,
                       navigationSnapshot: PDFTKBookmarkWriter.NavigationSnapshot? = nil,
+                      importedPlan: ImportedMarkupPlan? = nil,
                       onCommitted: ((PDFMarkupSourceStamp) -> Void)? = nil,
                       onFailure: ((SaveFailure) -> Void)? = nil) -> Bool {
         var stage = "record validation"
@@ -119,6 +120,19 @@ enum PDFRectangleWriter {
             profile("navigation changes")
             stage = "annotation update"
             try update(&json, records: records)
+            var importedArrays: [Int: [Any]] = [:]
+            var importedObjects: [String: [String: Any]] = [:]
+            if let importedPlan {
+                guard let originalSource = importedPlan.source else { return false }
+                let version = try MarkupFileVersion.read(originalSource)
+                let originalGraph: [String: Any]
+                if let cached = inspectionCache.snapshot(for: originalSource, version: version) { originalGraph = cached.graph }
+                else {
+                    originalGraph = try read(originalSource, "imported.json", decoded: false)
+                    try? inspectionCache.store(url: originalSource, graph: originalGraph, cost: (try Data(contentsOf: directory.appendingPathComponent("imported.json"))).count, expectedVersion: version)
+                }
+                try updateImported(&json, original: originalGraph, plan: importedPlan, arrays: &importedArrays, objects: &importedObjects)
+            }
             if try changedObjects(baseline: inspected, updated: json).isEmpty {
                 guard try MarkupFileVersion.read(source) == sourceVersion else { return false }
                 let verifiedInput = PDFMarkupSourceStamp.capture(input)
@@ -140,7 +154,7 @@ enum PDFRectangleWriter {
             let candidate = directory.appendingPathComponent("candidate.pdf")
             let changed = try changedObjects(baseline: inspected, updated: json)
             stage = "original content verification"
-            guard try preservesOriginalObjects(baseline: inspected, updated: json, changed: changed) else { return false }
+            guard try preservesOriginalObjects(baseline: inspected, updated: json, changed: changed, importedArrays: importedArrays, importedObjects: importedObjects) else { return false }
             stage = "incremental serialization"
             try PDFIncrementalMarkupPatch.append(original: original, baseline: inspected, updated: json, snapshot: input, to: candidate)
             profile("candidate write")
@@ -194,7 +208,7 @@ enum PDFRectangleWriter {
     /// Check the mutation boundary before serializing. Only navigation, annotation
     /// arrays and owned annotations may change; base page dictionaries and all
     /// original streams/resources stay immutable.
-    static func preservesOriginalObjects(baseline: [String: Any], updated: [String: Any], changed: [String]) throws -> Bool {
+    static func preservesOriginalObjects(baseline: [String: Any], updated: [String: Any], changed: [String], importedArrays: [Int: [Any]] = [:], importedObjects: [String: [String: Any]] = [:]) throws -> Bool {
         let before = try objectTable(baseline), after = try objectTable(updated)
         let pageRefs = try pages(baseline)
         let pageKeys = Set(pageRefs.map { "obj:" + $0 })
@@ -216,13 +230,19 @@ enum PDFRectangleWriter {
                     let a = old["value"] as! [String: Any], b = new["value"] as! [String: Any]
                     let importedBefore = annotations(a["/Annots"], objects: before).filter { !owned($0, objects: before) && !generated($0, before) }
                     let importedAfter = annotations(b["/Annots"], objects: after).filter { !owned($0, objects: after) && !generated($0, after) }
-                    guard NSArray(array: importedBefore).isEqual(to: importedAfter) else { return false }
+                    let expected = importedArrays[pageRefs.firstIndex(of: String(key.dropFirst(4))) ?? -1] ?? importedBefore
+                    guard NSArray(array: expected).isEqual(to: importedAfter) else { return false }
                 }
             } else if arrays.contains(key) {
                 guard let a = old["value"] as? [Any], let b = new["value"] as? [Any] else { return false }
                 let importedBefore = a.filter { !owned($0, objects: before) && !generated($0, before) }
                 let importedAfter = b.filter { !owned($0, objects: after) && !generated($0, after) }
-                guard NSArray(array: importedBefore).isEqual(to: importedAfter) else { return false }
+                let pageIndex = pageRefs.firstIndex { ref in
+                    ((before["obj:" + ref] as? [String: Any])?["value"] as? [String: Any])?["/Annots"] as? String == String(key.dropFirst(4))
+                } ?? -1
+                guard NSArray(array: importedArrays[pageIndex] ?? importedBefore).isEqual(to: importedAfter) else { return false }
+            } else if let expected = importedObjects[key] {
+                guard NSDictionary(dictionary: new).isEqual(to: expected) else { return false }
             } else if owned(String(key.dropFirst(4)), objects: before) || generated(String(key.dropFirst(4)), before) {
                 guard new["value"] is [String: Any] else { return false }
             } else { return false }
@@ -338,6 +358,73 @@ enum PDFRectangleWriter {
             object["value"] = page; objects["obj:\(reference)"] = object
         }
         qpdf[1] = objects; json["qpdf"] = qpdf; return json
+    }
+
+    /// External annotation dictionaries and AP streams stay unchanged except for
+    /// an explicitly requested translation. Deletion only changes page membership.
+    private static func updateImported(_ json: inout [String: Any], original: [String: Any], plan: ImportedMarkupPlan,
+                                       arrays: inout [Int: [Any]], objects authorized: inout [String: [String: Any]]) throws {
+        let originalObjects = try objectTable(original), originalPages = try pages(original)
+        var tables = try tableArray(json), objects = tables[1]
+        let currentPages = try pages(json)
+        func generated(_ entry: Any, _ table: [String: Any]) -> Bool {
+            let d = dictionary(entry, objects: table)
+            return [d["/Contents"], d["/T"]].compactMap { $0 as? String }.contains { $0.contains("DrawbridgeAutoSheetLink") }
+        }
+        for (pageIndex, changes) in Dictionary(grouping: plan.changes, by: \.page) {
+            guard currentPages.indices.contains(pageIndex), let sourceIndex = changes.first?.sourcePage,
+                  originalPages.indices.contains(sourceIndex), changes.allSatisfy({ $0.sourcePage == sourceIndex }) else { throw CocoaError(.fileReadCorruptFile) }
+            let originalPage = dictionary(originalPages[sourceIndex], objects: originalObjects)
+            let originalEntries = annotations(originalPage["/Annots"], objects: originalObjects)
+            let pageKey = "obj:" + currentPages[pageIndex]
+            guard var pageObject = objects[pageKey] as? [String: Any], var page = pageObject["value"] as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
+            let currentEntries = annotations(page["/Annots"], objects: objects)
+            var deleted = Set(changes.filter(\.deleted).map(\.slot))
+            let deletedRefs = Set(deleted.compactMap { originalEntries.indices.contains($0) ? originalEntries[$0] as? String : nil })
+            for (slot, entry) in originalEntries.enumerated() {
+                let value = dictionary(entry, objects: originalObjects)
+                if value["/Subtype"] as? String == "/Popup", let parent = value["/Parent"] as? String, deletedRefs.contains(parent) { deleted.insert(slot) }
+            }
+            for change in changes {
+                guard originalEntries.indices.contains(change.slot), let ref = originalEntries[change.slot] as? String,
+                      var value = (originalObjects["obj:" + ref] as? [String: Any])?["value"] as? [String: Any],
+                      let existingObject = objects["obj:" + ref] as? [String: Any],
+                      let existing = existingObject["value"] as? [String: Any],
+                      !owned(ref, objects: originalObjects), !generated(ref, originalObjects),
+                      ["/Square", "/Circle", "/Line", "/FreeText", "/Ink", "/Polygon", "/PolyLine", "/Highlight", "/Underline", "/StrikeOut", "/Squiggly", "/Text", "/Stamp", "/Caret"].contains(value["/Subtype"] as? String ?? ""),
+                      ((value["/F"] as? Int ?? 0) & (1 | 2 | 32 | 64 | 128 | 512)) == 0 else { throw CocoaError(.fileReadCorruptFile) }
+                guard value["/Subtype"] as? String == "/" + change.subtype,
+                      let rect = value["/Rect"] as? [NSNumber], rect.count == 4,
+                      zip(rect.map(\.doubleValue), [change.originalBounds.minX, change.originalBounds.minY, change.originalBounds.maxX, change.originalBounds.maxY]).allSatisfy({ abs($0.0 - Double($0.1)) < 0.01 }) else { throw CocoaError(.fileReadCorruptFile) }
+                if let name = change.name, let rawName = value["/NM"] as? String, rawName.hasPrefix("u:"), rawName != "u:" + name { throw CocoaError(.fileReadCorruptFile) }
+                let geometry = ["/Rect", "/L", "/Vertices", "/InkList", "/QuadPoints", "/CL"]
+                var a = value, b = existing
+                for field in geometry { a.removeValue(forKey: field); b.removeValue(forKey: field) }
+                guard NSDictionary(dictionary: a).isEqual(to: b), change.offset.x.isFinite, change.offset.y.isFinite else { throw CocoaError(.fileReadCorruptFile) }
+                func translated(_ raw: Any) throws -> [Double] {
+                    guard let numbers = raw as? [NSNumber], numbers.count.isMultiple(of: 2) else { throw CocoaError(.fileReadCorruptFile) }
+                    return numbers.enumerated().map { $0.element.doubleValue + Double($0.offset.isMultiple(of: 2) ? change.offset.x : change.offset.y) }
+                }
+                for field in geometry {
+                    guard let raw = value[field] else { continue }
+                    if field == "/InkList" {
+                        guard let paths = raw as? [Any] else { throw CocoaError(.fileReadCorruptFile) }
+                        value[field] = try paths.map(translated)
+                    } else { value[field] = try translated(raw) }
+                }
+                let object: [String: Any] = ["value": value]
+                objects["obj:" + ref] = object; authorized["obj:" + ref] = object
+            }
+            // Keep all original imported entries in their original order, including
+            // CAD helpers and ordinary links. Owned/generated annotations use the
+            // current save's entries. Deleted objects remain available for undo.
+            let imported = originalEntries.enumerated().filter { !deleted.contains($0.offset) && !owned($0.element, objects: originalObjects) && !generated($0.element, originalObjects) }.map(\.element)
+            let managed = currentEntries.filter { owned($0, objects: objects) || generated($0, objects) }
+            let entries = imported + managed
+            if entries.isEmpty { page.removeValue(forKey: "/Annots") } else { page["/Annots"] = entries }
+            pageObject["value"] = page; objects[pageKey] = pageObject; arrays[pageIndex] = imported
+        }
+        tables[1] = objects; json["qpdf"] = tables
     }
 
     private static func update(_ json: inout [String: Any], records: [RectangleMarkupRecord]) throws {

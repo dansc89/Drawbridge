@@ -17,10 +17,10 @@ final class PDFPageStructureState {
         savedPages = originalPages.map(ObjectIdentifier.init)
     }
 
-    func plan(for document: PDFDocument) -> PDFPageStructurePlan? {
+    func plan(for document: PDFDocument, forceOriginal: Bool = false) -> PDFPageStructurePlan? {
         guard self.document === document else { return nil }
         let pages = (0..<document.pageCount).compactMap(document.page(at:))
-        guard pages.map(ObjectIdentifier.init) != savedPages else { return nil }
+        guard pages.map(ObjectIdentifier.init) != savedPages || (forceOriginal && pages.map(ObjectIdentifier.init) != originalPages.map(ObjectIdentifier.init)) else { return nil }
         let sourceIndexes = pages.compactMap { page in originalPages.firstIndex { $0 === page } }
         guard sourceIndexes.count == pages.count else { return nil }
         return PDFPageStructurePlan(source: source, retainedStamp: stamp, sourceIndexes: sourceIndexes)
@@ -36,6 +36,7 @@ struct PDFPageStructurePlan: Sendable {
     func write(document: PDFDocument, currentSource: URL, destination: URL,
                expectedStamp: PDFMarkupSourceStamp?, labels: [Int: String],
                records: [RectangleMarkupRecord], navigation: PDFTKBookmarkWriter.NavigationSnapshot,
+               importedPlan: ImportedMarkupPlan? = nil,
                onCommitted: (PDFMarkupSourceStamp) -> Void) -> Bool {
         guard let executable = PDFTKBookmarkWriter.executableURL(), !sourceIndexes.isEmpty,
               expectedStamp?.matchesSource(currentSource) == true else { return false }
@@ -48,9 +49,10 @@ struct PDFPageStructurePlan: Sendable {
             let range = sourceIndexes.map { String($0 + 1) }.joined(separator: ",")
             guard PDFTKBookmarkWriter.run(executable, arguments: [source.path, "--stream-data=preserve", "--pages", ".", range, "--", selected.path]),
                   verifySelectedPages(at: selected),
+                  let selectedStamp = PDFMarkupSourceStamp.capture(selected),
                   PDFRectangleWriter.prepareInspection(source: selected),
                   PDFRectangleWriter.write(document: document, source: selected, destination: candidate,
-                    pageLabels: labels, records: records, expectedSourceStamp: PDFMarkupSourceStamp.capture(selected), navigationSnapshot: navigation),
+                    pageLabels: labels, records: records, expectedSourceStamp: selectedStamp, navigationSnapshot: navigation, importedPlan: importedPlan?.rebased(to: selectedStamp)),
                   verifySelectedPages(at: candidate),
                   expectedStamp?.matchesSource(currentSource) == true else { return false }
             try MainViewController.commitStagedSave(from: candidate, to: destination)

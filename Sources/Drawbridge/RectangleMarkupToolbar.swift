@@ -121,7 +121,15 @@ extension MainViewController {
     func refreshRectangleToolbar() {
         let s = pdfView.rectangleMarkup
         let enabled = s.canEdit()
-        rectangleToolbar.propertiesButton.isEnabled = enabled && s.selected?.isReadOnly != true
+        let importedSelected = s.selected.map(RectangleMarkupRecord.owns) == false
+        let styleEnabled = enabled && !importedSelected
+        rectangleToolbar.propertiesButton.toolTip = importedSelected
+            ? "Imported markup: move or delete; style editing is not yet supported"
+            : "Markup Properties"
+        rectangleToolbar.editTextButton.toolTip = importedSelected
+            ? "Imported text editing is not yet supported"
+            : "Edit Text"
+        rectangleToolbar.propertiesButton.isEnabled = styleEnabled && s.selected?.isReadOnly != true
         if rectangleToolbar.propertiesPopover.isShown { rectangleToolbar.propertiesController.refresh() }
         for (button, tool) in [(rectangleToolbar.penButton, RectangleMarkupController.Tool.pen), (rectangleToolbar.selectButton, RectangleMarkupController.Tool.select), (rectangleToolbar.rectangleButton, .rectangle), (rectangleToolbar.ellipseButton, .ellipse), (rectangleToolbar.lineButton, .line), (rectangleToolbar.arrowButton, .arrow), (rectangleToolbar.polygonButton, .polygon), (rectangleToolbar.polylineButton, .polyline), (rectangleToolbar.textButton, .text)] {
             button.isEnabled = enabled
@@ -131,16 +139,16 @@ extension MainViewController {
         }
         let polygonSelected = s.selected?.type == "Polygon"
         rectangleToolbar.fillPopup.isHidden = !(polygonSelected || s.tool == .polygon)
-        rectangleToolbar.fillPopup.isEnabled = enabled
+        rectangleToolbar.fillPopup.isEnabled = styleEnabled
         rectangleToolbar.fillPopup.menu?.autoenablesItems = false
-        rectangleToolbar.fillPopup.itemArray.forEach { $0.isEnabled = enabled }
+        rectangleToolbar.fillPopup.itemArray.forEach { $0.isEnabled = styleEnabled }
         let fill = polygonSelected ? RectangleMarkupRecord.polygonFill(s.selected!) : s.fillColor
         let textSelected = s.selected?.type == "FreeText"
-        rectangleToolbar.editTextButton.isEnabled = enabled && textSelected
+        rectangleToolbar.editTextButton.isEnabled = styleEnabled && textSelected
         rectangleToolbar.fontPopup.isHidden = !(textSelected || s.tool == .text)
-        rectangleToolbar.fontPopup.isEnabled = enabled
+        rectangleToolbar.fontPopup.isEnabled = styleEnabled
         rectangleToolbar.widthPopup.isHidden = textSelected || s.tool == .text
-        rectangleToolbar.colorPopup.isEnabled = enabled; rectangleToolbar.widthPopup.isEnabled = enabled
+        rectangleToolbar.colorPopup.isEnabled = styleEnabled; rectangleToolbar.widthPopup.isEnabled = styleEnabled
         rectangleToolbar.deleteButton.isEnabled = enabled && s.selected != nil
         rectangleToolbar.undoButton.isEnabled = enabled && s.undo.canUndo
         rectangleToolbar.redoButton.isEnabled = enabled && s.undo.canRedo
