@@ -52,7 +52,7 @@ jobs:
       - name: Build app bundle
         env:
           DRAWBRIDGE_VERSION_TAG: ${{ github.ref_name }}
-          DRAWBRIDGE_BUILD_NUMBER: "158"
+          DRAWBRIDGE_BUILD_NUMBER: "159"
         run: ./Scripts/package-app.sh
 
       - name: Notarize app before packaging
