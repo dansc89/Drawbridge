@@ -6077,18 +6077,25 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guard let image = renderCroppedImage(from: page, rectInPage: rect) else {
             return (nil, "captured zone OCR", "", "Could not render the captured region.", false)
         }
-        let raw = recognizeText(in: image)
+        // Keep the four orientation readings so recovery never repeats the same OCR work.
+        let readings = [CGImagePropertyOrientation.up, .right, .left, .down].compactMap {
+            recognizeText(in: image, orientation: $0, usesLanguageCorrection: false)
+        }
+        var raw = ""
+        var bestScore: Float = -.greatestFiniteMagnitude
+        for reading in readings where reading.score > bestScore {
+            raw = reading.text
+            bestScore = reading.score
+        }
         if let token = SheetReferencePolicy.uniqueOCRSheetIdentifier(in: raw) {
             return (token, "captured zone OCR", truncatedZoneDiagnosticText(raw), nil, false)
         }
         // The generic reader ranks orientations by prose confidence/length.
         // A high-scoring upside-down reading can hide a valid sheet number.
-        // Retry the same captured pixels; no labels, bookmarks or substitutions.
-        let readings = [CGImagePropertyOrientation.up, .right, .left, .down].compactMap {
-            recognizeText(in: image, orientation: $0, usesLanguageCorrection: false)?.text
-        }
-        let token = SheetReferencePolicy.uniqueOCRSheetIdentifier(inOrientationReadings: readings)
-        return (token, "captured zone OCR orientation recovery", truncatedZoneDiagnosticText(readings.joined(separator: " | ")),
+        // Check the same captured pixels; no labels, bookmarks or substitutions.
+        let texts = readings.map(\.text)
+        let token = SheetReferencePolicy.uniqueOCRSheetIdentifier(inOrientationReadings: texts)
+        return (token, "captured zone OCR orientation recovery", truncatedZoneDiagnosticText(texts.joined(separator: " | ")),
                 token == nil ? "OCR did not read one unambiguous full sheet number in the captured region." : nil, token != nil)
     }
 
@@ -6659,50 +6666,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let displayBox = pdfView.displayBox
         let scale: CGFloat = 4.0
 
-        // 1. Get the oriented box dimensions
-        let transform = page.transform(for: displayBox)
-        let orientedFullBox = page.bounds(for: displayBox).applying(transform).standardized
-
-        let widthPx = Int((orientedFullBox.width * scale).rounded(.up))
-        let heightPx = Int((orientedFullBox.height * scale).rounded(.up))
-
-        // Safety cap for massive scans
-        guard widthPx > 0, heightPx > 0, widthPx < 12000, heightPx < 12000 else { return nil }
-
-        // 2. Render the ENTIRE oriented page box. This is the only way to guarantee alignment.
-        guard let fullContext = CGContext(
-            data: nil,
-            width: widthPx,
-            height: heightPx,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-
-        fullContext.interpolationQuality = .high
-        fullContext.setFillColor(NSColor.white.cgColor)
-        fullContext.fill(CGRect(x: 0, y: 0, width: widthPx, height: heightPx))
-        fullContext.scaleBy(x: scale, y: scale)
-        fullContext.translateBy(x: -orientedFullBox.minX, y: -orientedFullBox.minY)
-
-        // PDFPage.draw handles orientation into the target context box perfectly.
-        page.draw(with: displayBox, to: fullContext)
-
-        guard let fullImage = fullContext.makeImage() else { return nil }
-
-        // 3. Crop at the pixel level using CIImage (top-down coordinates matched to our render)
-        let orientedCrop = rectInPage.applying(transform).standardized
-        let ciImage = CIImage(cgImage: fullImage)
-        let cropRectPx = CGRect(
-            x: (orientedCrop.minX - orientedFullBox.minX) * scale,
-            y: (orientedCrop.minY - orientedFullBox.minY) * scale,
-            width: orientedCrop.width * scale,
-            height: orientedCrop.height * scale
-        ).intersection(ciImage.extent)
-        guard !cropRectPx.isEmpty else { return nil }
-
-        let croppedCI = ciImage.cropped(to: cropRectPx)
+        guard let image = PDFRegionRasterizer.render(page: page, box: displayBox, rect: rectInPage, scale: scale) else { return nil }
+        let croppedCI = CIImage(cgImage: image)
 
         // 4. Enhance
         let colorControls = CIFilter(name: "CIColorControls")
