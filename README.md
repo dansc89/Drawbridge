@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Assets/readme/drawbridge-hero-v017.png" alt="Drawbridge" width="100%" />
+  <img src="Assets/readme/drawbridge-hero-v57.png" alt="Drawbridge" width="100%" />
 </p>
 
 Drawbridge is a native macOS PDF viewer for architectural drawing sets, focused on generating sheet bookmarks and hyperlinks. Open, search, and navigate PDFs, then save bookmark and hyperlink changes. Markup, drawing, measurement, and page-conversion tools are not available.
