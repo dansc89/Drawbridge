@@ -18,13 +18,14 @@ function resolveFromBackend(value, fallback) {
 export const config = {
   nodeEnv: process.env.NODE_ENV || "development",
   port: Number(process.env.PORT || 8787),
-  jwtSecret: process.env.JWT_SECRET || "dev-only-secret-change-me",
+  host: process.env.HOST || "127.0.0.1",
+  jwtSecret: process.env.JWT_SECRET || "",
   dbPath: resolveFromBackend(process.env.DB_PATH, "./data/drawbridge.db"),
   storageRoot: resolveFromBackend(process.env.STORAGE_ROOT, "./storage"),
   maxUploadBytes: Number(process.env.MAX_UPLOAD_MB || 200) * 1024 * 1024,
-  corsOrigin: process.env.CORS_ORIGIN || "*"
+  corsOrigin: process.env.CORS_ORIGIN || "http://localhost:3000"
 };
 
-if (config.jwtSecret === "dev-only-secret-change-me" && config.nodeEnv !== "development") {
-  throw new Error("JWT_SECRET must be set outside development");
+if (config.jwtSecret.length < 64 || /replace|change-me|dev-only/i.test(config.jwtSecret)) {
+  throw new Error("JWT_SECRET must be a generated secret of at least 64 characters (openssl rand -hex 32)");
 }

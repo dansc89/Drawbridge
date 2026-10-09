@@ -18,3 +18,22 @@ Backend/.env
 *.xccheckout
 *.moved-aside
 *.swp
+
+# Private QA inputs, downloaded builds, and audit output
+/tmp/
+/local-test/
+/verified-download/
+/verified-v*/
+/private-fixtures/
+
+# Credentials and local configuration (examples remain shareable)
+.env
+.env.*
+!.env.example
+*.p12
+*.pfx
+*.key
+*.pem
+*.mobileprovision
+*.p8
+*.keychain-db

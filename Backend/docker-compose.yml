@@ -6,7 +6,9 @@ services:
     container_name: drawbridge-sync-api
     restart: unless-stopped
     ports:
-      - "8787:8787"
+      - "127.0.0.1:8787:8787"
+    environment:
+      HOST: 0.0.0.0
     env_file:
       - .env
     volumes:
@@ -19,10 +21,10 @@ services:
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-drawbridge}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-drawbridge-change-me}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD in .env}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
       - ./minio-data:/data

@@ -46,7 +46,7 @@ final class PDFRegionRasterizerTests: XCTestCase {
         }
     }
     func testArchitecturalSheetNumberOCRFromClippedRegions() throws {
-        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_ARCHITECTURAL_FIXTURE"] else { throw XCTSkip("Provide local Architectural PDF") }
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_ARCHITECTURAL_FIXTURE"] else { throw XCTSkip("Provide local architectural PDF") }
         let document = try XCTUnwrap(PDFDocument(url: URL(fileURLWithPath: path)))
         for (index, expected) in ["A0.00", "A0.10"].enumerated() {
             let page = try XCTUnwrap(document.page(at: index))
@@ -63,7 +63,7 @@ final class PDFRegionRasterizerTests: XCTestCase {
     }
 
     func testCompleteArchitecturalOCRTargetsSurviveSaving() throws {
-        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_ARCHITECTURAL_FIXTURE"] else { throw XCTSkip("Provide local Architectural PDF") }
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_ARCHITECTURAL_FIXTURE"] else { throw XCTSkip("Provide local architectural PDF") }
         let source = URL(fileURLWithPath: path)
         let document = try XCTUnwrap(PDFDocument(url: source))
         XCTAssertEqual(document.pageCount, 69)
@@ -126,7 +126,7 @@ final class PDFRegionRasterizerTests: XCTestCase {
     }
 
     func testArchitecturalRegionBenchmark() throws {
-        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_ARCHITECTURAL_FIXTURE"] else { throw XCTSkip("Provide local Architectural PDF") }
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_ARCHITECTURAL_FIXTURE"] else { throw XCTSkip("Provide local architectural PDF") }
         let document = try XCTUnwrap(PDFDocument(url: URL(fileURLWithPath: path)))
         for index in 0..<2 {
             let page = try XCTUnwrap(document.page(at: index))

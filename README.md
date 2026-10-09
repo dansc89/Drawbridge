@@ -67,6 +67,6 @@ Line and arrow tools use two clicks: start, then end. Text boxes let you type di
 
 ## Support and development
 
-[Report an issue](https://github.com/dansc89/Drawbridge/issues) with your app version, macOS version, the action you took, and what happened. Include a sample PDF if you are able to share it.
+[Report an issue](https://github.com/dansc89/Drawbridge/issues) with your app version, macOS version, the action you took, and what happened. Attach only synthetic or sanitized sample PDFs you have permission to publish. Remove client details, document metadata, annotations, and private file paths from samples and logs. Report security vulnerabilities privately using the [security policy](SECURITY.md).
 
 For the source corresponding to a released build, open the tag listed on its [release page](https://github.com/dansc89/Drawbridge/releases/latest). That tag also contains its `DEVELOPMENT.md` build, signing, notarization, and test instructions.

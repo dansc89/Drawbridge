@@ -4,18 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC_DIR="${1:-$ROOT_DIR}"
 
-DRIVE_PRIMARY="$HOME/Library/CloudStorage/developer@example.com/My Drive"
-DRIVE_FALLBACK="$HOME/Google Drive"
-
-if [[ -d "$DRIVE_PRIMARY" ]]; then
-  DRIVE_ROOT="$DRIVE_PRIMARY"
-elif [[ -d "$DRIVE_FALLBACK" ]]; then
-  DRIVE_ROOT="$DRIVE_FALLBACK"
-else
-  echo "Google Drive folder not found."
-  echo "Checked:"
-  echo "  $DRIVE_PRIMARY"
-  echo "  $DRIVE_FALLBACK"
+# Explicit destination avoids embedding a developer's work account in source.
+DRIVE_ROOT="${DRAWBRIDGE_SYNC_ROOT:-}"
+if [[ -z "$DRIVE_ROOT" || ! -d "$DRIVE_ROOT" ]]; then
+  echo "Set DRAWBRIDGE_SYNC_ROOT to an existing Google Drive destination folder."
   exit 1
 fi
 
@@ -46,6 +38,18 @@ fi
 rsync "${RSYNC_FLAGS[@]}" \
   --exclude '.build/' \
   --exclude '.DS_Store' \
+  --exclude '.git/' \
+  --exclude '.env*' \
+  --exclude '*.p12' \
+  --exclude '*.p8' \
+  --exclude '*.pem' \
+  --exclude '*.key' \
+  --exclude 'tmp/' \
+  --exclude 'local-test/' \
+  --exclude 'private-fixtures/' \
+  --exclude 'verified-*/' \
+  --exclude 'Backend/data/' \
+  --exclude 'Backend/storage/' \
   "$SRC_DIR/" "$DST_DIR/"
 
 echo "Done."
