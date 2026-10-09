@@ -90,7 +90,16 @@ final class MarkupPDFViewZoomTests: XCTestCase {
         let sourceCenter = try XCTUnwrap(pdfView.normalizedVisibleCenter(on: firstPage))
 
         pdfView.navigateToPageWithHistory(secondPage, preservingNormalizedViewportCenter: sourceCenter)
-        drainMainQueue()
+        // PDFKit's scrollbar/page layout settles asynchronously and differs
+        // between OS versions. Check the settled result, keeping the same
+        // positional accuracy requirement.
+        let deadline = Date().addingTimeInterval(1)
+        repeat {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            if let center = pdfView.normalizedVisibleCenter(on: secondPage),
+               abs(center.x - sourceCenter.x) < 0.005,
+               abs(center.y - sourceCenter.y) < 0.005 { break }
+        } while Date() < deadline
         let targetCenter = try XCTUnwrap(pdfView.normalizedVisibleCenter(on: secondPage))
         XCTAssertEqual(targetCenter.x, sourceCenter.x, accuracy: 0.005)
         XCTAssertEqual(targetCenter.y, sourceCenter.y, accuracy: 0.005)

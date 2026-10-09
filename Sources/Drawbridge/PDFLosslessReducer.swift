@@ -44,7 +44,7 @@ enum PDFLosslessReducer {
         var after = try read(output, decoded: false, name: "after.json")
         if try PDFAnnotationFlattener.refreshRecoveryAfterLosslessCompression(before: original, after: &after) {
             let metadata = directory.appendingPathComponent("recovery.json")
-            try JSONSerialization.data(withJSONObject: PDFAnnotationFlattener.metadataJSON(after), options: [.sortedKeys, .withoutEscapingSlashes]).write(to: metadata)
+            try PDFJSONPatchEncoder.data(withJSONObject: PDFAnnotationFlattener.metadataJSON(after), options: [.sortedKeys, .withoutEscapingSlashes]).write(to: metadata)
             let recovered = directory.appendingPathComponent("with-recovery.pdf")
             try run([output.path, "--stream-data=preserve", "--update-from-json=\(metadata.path)", recovered.path])
             try FileManager.default.removeItem(at: output)
@@ -75,6 +75,7 @@ enum PDFLosslessReducer {
         let table = try objects(json)
         let trailer = (table["trailer"] as? [String: Any])?["value"] as? [String: Any] ?? [:]
         var cache: [String: String] = [:]
+        let hex = Array("0123456789abcdef".utf8)
         func digest(_ value: Any, visiting: Set<String>) throws -> String {
             if let ref = value as? String, let entry = table["obj:\(ref)"] as? [String: Any] {
                 if visiting.contains(ref) { return "cycle" }
@@ -93,9 +94,57 @@ enum PDFLosslessReducer {
                 normalized = result
             } else if let array = value as? [Any] { normalized = try array.map { try digest($0, visiting: visiting) } }
             else { normalized = value }
-            return SHA256.hash(data: try JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys, .fragmentsAllowed])).map { String(format: "%02x", $0) }.joined()
+            let bytes = SHA256.hash(data: try JSONSerialization.data(withJSONObject: normalized, options: [.sortedKeys, .fragmentsAllowed]))
+            // Avoid 32 locale-aware format calls for every value in the PDF graph.
+            var encoded = [UInt8](); encoded.reserveCapacity(64)
+            for byte in bytes { encoded.append(hex[Int(byte >> 4)]); encoded.append(hex[Int(byte & 15)]) }
+            return String(decoding: encoded, as: UTF8.self)
         }
         return try digest(["root": trailer["/Root"] ?? NSNull(), "info": trailer["/Info"] ?? NSNull()], visiting: [])
+    }
+
+    /// Compare reachable objects directly, allowing qpdf to renumber references.
+    /// Streams stay encoded: exact byte comparison avoids serializing and hashing
+    /// large base64 image strings twice on every annotation save.
+    static func semanticGraphsMatch(_ before: [String: Any], _ after: [String: Any]) throws -> Bool {
+        let left = try objects(before), right = try objects(after)
+        struct Pair: Hashable { let left: String; let right: String }
+        var visited = Set<Pair>()
+        let a = (left["trailer"] as? [String: Any])?["value"] as? [String: Any] ?? [:]
+        let b = (right["trailer"] as? [String: Any])?["value"] as? [String: Any] ?? [:]
+        var pending: [(Any, Any)] = [(a["/Root"] ?? NSNull(), b["/Root"] ?? NSNull()),
+                                      (a["/Info"] ?? NSNull(), b["/Info"] ?? NSNull())]
+        let ignored = Set(["/Length", "/FlattenedDrawingHash"])
+        // PDF parent/child and annotation links form deep cyclic graphs. Keep
+        // traversal on an explicit work list rather than the worker thread stack.
+        while let (a, b) = pending.popLast() {
+            if let a = a as? String, let b = b as? String {
+                let first = left["obj:\(a)"] as? [String: Any]
+                let second = right["obj:\(b)"] as? [String: Any]
+                if let first, let second {
+                    if visited.insert(Pair(left: a, right: b)).inserted {
+                        pending.append((first["value"] ?? first["stream"] ?? NSNull(), second["value"] ?? second["stream"] ?? NSNull()))
+                    }
+                } else if first != nil || second != nil || a != b { return false }
+            } else if let a = a as? [String: Any], let b = b as? [String: Any] {
+                let keys = Set(a.keys).subtracting(ignored)
+                guard keys == Set(b.keys).subtracting(ignored) else { return false }
+                for key in keys { pending.append((a[key]!, b[key]!)) }
+            } else if let a = a as? [Any], let b = b as? [Any] {
+                guard a.count == b.count else { return false }
+                pending.append(contentsOf: zip(a, b))
+            } else if let a = a as? NSNumber, let b = b as? NSNumber {
+                // JSON booleans must not compare equal to numeric 0 or 1.
+                guard (CFGetTypeID(a) == CFBooleanGetTypeID()) == (CFGetTypeID(b) == CFBooleanGetTypeID()) else { return false }
+                if a != b {
+                    // Foundation may parse the same JSON number as a decimal or
+                    // binary NSNumber. Compare their canonical JSON spelling;
+                    // do not use a tolerance that could conceal a content change.
+                    guard try JSONSerialization.data(withJSONObject: a, options: .fragmentsAllowed) == JSONSerialization.data(withJSONObject: b, options: .fragmentsAllowed) else { return false }
+                }
+            } else if !(a is NSNull && b is NSNull) { return false }
+        }
+        return true
     }
 }
 

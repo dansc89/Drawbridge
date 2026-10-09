@@ -6,6 +6,8 @@ A native macOS PDF viewer and markup editor for architectural drawing sets. Navi
   <img src="Assets/readme/drawbridge-hero-v57-pages.png" alt="Drawbridge showing architectural drawings with page thumbnails and a separate markup toolbar" width="100%" />
 </p>
 
+Demo drawing: *Marilyn’s Farmhouse* by Jay Osborne / [FreeFarmhouse](https://www.freefarmhouse.com/), licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
+
 ## Download
 
 **[Download the latest release](https://github.com/dansc89/Drawbridge/releases/latest)** — signed with Developer ID and notarized by Apple.
@@ -66,6 +68,10 @@ Line and arrow tools use two clicks: start, then end. Text boxes let you type di
 - Encrypted or digitally signed PDFs are not supported for annotation-only markup saving. Flattening also excludes encrypted PDFs and PDFs with signature fields.
 - Unflatten requires recovery information from Drawbridge. Unsupported/hidden annotations are retained, and flattening does not guarantee a smaller file.
 - Switching documents requires saving or discarding pending edits and clears markup Undo history. Undo history is not retained after closing a document.
+
+## Privacy and security
+
+PDF viewing, markup editing, and sheet indexing run locally on your Mac. The optional backend prototype is separate from the released app. See [SECURITY.md](SECURITY.md) for private vulnerability reporting and contribution guidelines.
 
 ## Support and development
 

@@ -11,6 +11,8 @@ struct Drawbridge {
         let delegate = AppDelegate()
         app.setActivationPolicy(.regular)
         app.delegate = delegate
-        app.run()
+        // NSApplication keeps a weak delegate. Keep the controller/window owner
+        // alive throughout the event loop, including optimized release builds.
+        withExtendedLifetime(delegate) { app.run() }
     }
 }

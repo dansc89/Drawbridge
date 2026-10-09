@@ -26,6 +26,9 @@ jobs:
         with:
           xcode-version: latest-stable
 
+      - name: Check publishable files
+        run: python3 Scripts/check-public-files.py
+
       - name: Import Developer ID certificate
         env:
           APPLE_DEVELOPER_ID_CERT_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_BASE64 }}
@@ -55,8 +58,8 @@ jobs:
 
       - name: Build app bundle
         env:
-          DRAWBRIDGE_VERSION_TAG: ${{ github.ref_name }}
-          DRAWBRIDGE_BUILD_NUMBER: "137"
+          DRAWBRIDGE_VERSION_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v6.0' }}
+          DRAWBRIDGE_BUILD_NUMBER: "162"
         run: ./Scripts/package-app.sh
 
       - name: Notarize app before packaging

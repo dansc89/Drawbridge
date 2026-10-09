@@ -8,6 +8,11 @@ import Vision
 private final class NavigationResizeHandleView: NSView {
     private var trackingAreaRef: NSTrackingArea?
 
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(bounds, cursor: .resizeLeftRight)
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let trackingAreaRef {
@@ -15,7 +20,7 @@ private final class NavigationResizeHandleView: NSView {
         }
         let tracking = NSTrackingArea(
             rect: bounds,
-            options: [.activeInKeyWindow, .inVisibleRect, .cursorUpdate],
+            options: [.activeAlways, .inVisibleRect, .cursorUpdate, .mouseEnteredAndExited, .mouseMoved, .enabledDuringMouseDrag],
             owner: self,
             userInfo: nil
         )
@@ -24,6 +29,14 @@ private final class NavigationResizeHandleView: NSView {
     }
 
     override func cursorUpdate(with event: NSEvent) {
+        NSCursor.resizeLeftRight.set()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        NSCursor.resizeLeftRight.set()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
         NSCursor.resizeLeftRight.set()
     }
 }
@@ -94,9 +107,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     private let autosaveIntervalSeconds: TimeInterval = 120
     let snapshotStore = ProjectSnapshotStore()
-    private let chromeBackgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1.0)
-    private let panelBackgroundColor = NSColor(calibratedWhite: 0.12, alpha: 1.0)
-    private let sidebarBackgroundColor = NSColor(calibratedWhite: 0.14, alpha: 1.0)
+    private let chromeBackgroundColor = AppAppearance.chrome
+    private let panelBackgroundColor = AppAppearance.panel
+    private let sidebarBackgroundColor = AppAppearance.sidebar
 
     static let defaultsAdaptiveIndexCapEnabledKey = "DrawbridgeAdaptiveIndexCapEnabled"
     static let defaultsIndexCapKey = "DrawbridgeIndexCap"
@@ -119,24 +132,57 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let navigationTitleLabel = NSTextField(labelWithString: "Navigation")
     private let navigationModeControl = NSSegmentedControl(labels: ["Pages", "Bookmarks"], trackingMode: .selectOne, target: nil, action: nil)
     private let addPageButton = NSButton(title: "", target: nil, action: nil)
-    private let pagesTableView = NSTableView(frame: .zero)
+    let pagesTableView = PageThumbnailTableView(frame: .zero)
+    private let pageStructureStates = NSMapTable<PDFDocument, PDFPageStructureState>.weakToStrongObjects()
+    var pageStructureState: PDFPageStructureState? {
+        get { pdfView.document.flatMap { pageStructureStates.object(forKey: $0) } }
+        set {
+            guard let document = pdfView.document else { return }
+            if let newValue { pageStructureStates.setObject(newValue, forKey: document) }
+            else { pageStructureStates.removeObject(forKey: document) }
+        }
+    }
+    let pageThumbnailCache = PageThumbnailCache()
     private let thumbnailScrollView = NSScrollView(frame: .zero)
     private let thumbnailsEmptyLabel = NSTextField(labelWithString: "No Pages")
     private let bookmarksScrollView = NSScrollView(frame: .zero)
-    let bookmarksOutlineView = NSOutlineView(frame: .zero)
+    let bookmarksOutlineView = SidebarBookmarkOutlineView(frame: .zero)
     private let bookmarksEmptyLabel = NSTextField(labelWithString: "No Bookmarks")
     private let bookmarksSelectionLabel = NSTextField(labelWithString: "")
     private let pdfContentsTitleLabel = NSTextField(labelWithString: "PDF Contents")
+    private let pdfContentsDisclosure = NSButton(title: "", target: nil, action: nil)
+    private weak var contentsSummaryDocument: PDFDocument?
+    private var cachedContentsSummary: String?
+    // Keep only counts and short samples, never annotation/page objects. A
+    // markup mutation invalidates one page rather than recounting the full set.
+    private struct PageContentsSummary {
+        var annotations = 0
+        var extraneous = 0
+        var nonPrint = 0
+        var hidden = 0
+        var links = 0
+        var types: [String: Int] = [:]
+        var samples: [String] = []
+    }
+    private var contentsSummaryByPage: [Int: PageContentsSummary] = [:]
+    private var contentsSummaryPageCount = 0
     private let pdfContentsSummaryLabel = NSTextField(labelWithString: "No PDF loaded")
     private let splitView = NSSplitView(frame: .zero)
     private let emptyStateView = StartupDropView(frame: .zero)
-    private let emptyStateTitle = NSTextField(labelWithString: "Open or create a PDF to start marking up")
+    private let emptyStateTitle = NSTextField(labelWithString: "Open a drawing set to get started")
     private let emptyStateOpenButton = NSButton(title: "Open PDF", target: nil, action: nil)
     private let emptyStateRecentButton = NSButton(title: "Open Recent", target: nil, action: nil)
     private let emptyStateSampleButton = NSButton(title: "Create New", target: nil, action: nil)
     private let emptyStateBatchMobileButton = NSButton(title: "Batch Export to iPhone / iPad", target: nil, action: nil)
     let markupsTable = NSTableView(frame: .zero)
-    private let markupsCountLabel = NSTextField(labelWithString: "0 items")
+    let markupsPanel = NSView()
+    var markupsPanelHeight: NSLayoutConstraint?
+    var isMarkupsPanelVisible = false
+    var isRestoringMarkupSelection = false
+    let markupsToggleButton = NSButton(title: "Markups", target: nil, action: nil)
+    let markupsSearchField = NSSearchField()
+    let markupsDeleteButton = NSButton(title: "Delete Selected", target: nil, action: nil)
+    let markupsCountLabel = NSTextField(labelWithString: "0 items")
     let measurementScaleField = NSTextField(frame: .zero)
     let measurementUnitPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let actionsPopup = NSPopUpButton(frame: .zero, pullsDown: true)
@@ -144,6 +190,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let autoNameSheetsButton = NSButton(title: "", target: nil, action: nil)
     private let batchLinkSheetsButton = NSButton(title: "", target: nil, action: nil)
     private let flattenPDFButton = NSButton(title: "", target: nil, action: nil)
+    private let previousPageButton = NSButton(title: "", target: nil, action: nil)
+    private let nextPageButton = NSButton(title: "", target: nil, action: nil)
+    private let navigationBackButton = NSButton(title: "", target: nil, action: nil)
+    private let navigationForwardButton = NSButton(title: "", target: nil, action: nil)
+    private let goToSheetButton = NSButton(title: "", target: nil, action: nil)
+    private let fitPageButton = NSButton(title: "", target: nil, action: nil)
     private let reduceFileSizeButton = NSButton(title: "", target: nil, action: nil)
     private let highlightButton = NSButton(title: "Highlight Selection", target: nil, action: nil)
     private let exportButton = NSButton(title: "Save As PDF", target: nil, action: nil)
@@ -163,7 +215,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let documentTabsBar = NSView(frame: .zero)
     private let documentTabsScrollView = NSScrollView(frame: .zero)
     private let documentTabsStack = NSStackView(frame: .zero)
-    private let statusBar = NSView(frame: .zero)
+    let statusBar = NSView(frame: .zero)
+    private let invertColorsButton = NSButton(title: "Invert", target: nil, action: nil)
     private let busyOverlayView = NSView(frame: .zero)
     private let captureToastView = NSView(frame: .zero)
     private let captureToastLabel = NSTextField(labelWithString: "Captured")
@@ -200,6 +253,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let snapRowsStack = NSStackView(frame: .zero)
     private let selectedMarkupOverlayLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
+        layer.name = "drawbridge.markupSelection"
         layer.strokeColor = NSColor.systemOrange.cgColor
         layer.fillColor = NSColor.clear.cgColor
         layer.lineWidth = 2
@@ -214,6 +268,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }()
     private let selectedTextOverlayLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
+        layer.name = "drawbridge.textSelection"
         layer.strokeColor = NSColor.systemBlue.cgColor
         layer.fillColor = NSColor.systemBlue.withAlphaComponent(0.12).cgColor
         layer.lineWidth = 2.25
@@ -254,19 +309,27 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var markupItems: [MarkupItem] = []
     var scrollEventMonitor: Any?
     var keyEventMonitor: Any?
-    private var markupFilterText = ""
+    var markupFilterText = ""
     var pendingCalibrationDistanceInPoints: CGFloat?
-    var isPDFProcessingBusy: Bool { busyOperationDepth > 0 || isSavingDocumentOperation }
+    let rectangleToolbar = RectangleMarkupToolbar()
+
+    var isPDFProcessingBusy: Bool { busyOperationDepth > 0 || isSavingDocumentOperation || isSwitchingDocument }
+    private var isSwitchingDocument = false
     private var busyOperationDepth = 0
     var markupChangeVersion = 0
     var lastAutosavedChangeVersion = 0
-    var openDocumentURL: URL?
+    var openDocumentURL: URL? { didSet { pdfView.rectangleMarkup.rememberSource(openDocumentURL) } }
     var sessionDocumentURLs: [URL] = []
+    let documentTabCache = DocumentTabCache()
+    private var tabViewStates: [URL: MarkupPDFView.TabViewState] = [:]
+    private var tabSearchQueries: [URL: String] = [:]
     var autosaveURL: URL?
     lazy var persistenceCoordinator = DocumentPersistenceCoordinator(autosaveInterval: autosaveIntervalSeconds)
     var pendingMarkupsRefreshWorkItem: DispatchWorkItem?
     var pendingSearchWorkItem: DispatchWorkItem?
     private var pendingChromeRefreshWorkItem: DispatchWorkItem?
+    let textSearch = PDFTextSearch()
+    var searchResultsLimited = false
     var searchHits: [SearchHit] = []
     var searchHitIndex: Int = -1
     var markupsScanGeneration = 0
@@ -455,6 +518,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc private func handlePDFPageChangedNotification(_ notification: Notification) {
+        updateSelectionOverlay()
         requestChromeRefresh(immediate: true)
     }
 
@@ -471,11 +535,22 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     override func viewDidLayout() {
         super.viewDidLayout()
         applySplitLayoutIfPossible(force: false)
+        let thumbnailWidth = thumbnailScrollView.contentSize.width
+        if thumbnailWidth > 0 {
+            if abs(pagesTableView.frame.width - thumbnailWidth) > 0.5 {
+                pagesTableView.setFrameSize(NSSize(width: thumbnailWidth, height: pagesTableView.frame.height))
+            }
+            let columnWidth = max(80, thumbnailWidth - pagesTableView.intercellSpacing.width)
+            if let column = pagesTableView.tableColumns.first, abs(column.width - columnWidth) > 0.5 {
+                column.width = columnWidth
+            }
+        }
     }
 
     override func viewWillDisappear() {
         super.viewWillDisappear()
         watchdog?.stop()
+        resetSearchState()
         stopSaveProgressTracking()
         if let monitor = scrollEventMonitor {
             NSEvent.removeMonitor(monitor)
@@ -489,7 +564,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func setupUI() {
-        view.appearance = NSAppearance(named: .darkAqua)
         view.wantsLayer = true
 
         openButton.title = "Open"
@@ -533,7 +607,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfView.translatesAutoresizingMaskIntoConstraints = false
         pdfCanvasContainer.translatesAutoresizingMaskIntoConstraints = false
         statusBar.translatesAutoresizingMaskIntoConstraints = false
-        configureStatusBar()
         configurePDFCanvasContainer()
         configureCollapsedSidebarRevealButton()
 
@@ -561,6 +634,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             guard self.confirmDiscardUnsavedChangesIfNeeded() else { return }
             self.openDocument(at: url)
         }
+        configureRectangleMarkup()
         pdfView.onViewportChanged = { [weak self] in
             self?.lastUserInteractionAt = Date()
             self?.requestChromeRefresh()
@@ -599,6 +673,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         view.addSubview(splitView)
         view.addSubview(documentTabsBar)
         view.addSubview(statusBar)
+        configureMarkupsPanel()
+        configureStatusBar()
         view.addSubview(busyOverlayView)
         view.addSubview(captureToastView)
         view.addSubview(collapsedSidebarRevealButton)
@@ -616,7 +692,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             splitView.topAnchor.constraint(equalTo: documentTabsBar.bottomAnchor),
             splitView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            splitView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
+            splitView.bottomAnchor.constraint(equalTo: markupsPanel.topAnchor),
 
             statusBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             statusBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -639,22 +715,28 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func applyAppearanceColors() {
-        if let rootDropView = view as? StartupDropView {
-            rootDropView.wantsLayer = true
-            rootDropView.layer?.backgroundColor = chromeBackgroundColor.cgColor
+        view.effectiveAppearance.performAsCurrentDrawingAppearance {
+            if let rootDropView = view as? StartupDropView {
+                rootDropView.wantsLayer = true
+                rootDropView.layer?.backgroundColor = chromeBackgroundColor.cgColor
+            }
+            view.layer?.backgroundColor = chromeBackgroundColor.cgColor
+            pdfCanvasContainer.layer?.backgroundColor = AppAppearance.canvas.cgColor
+            bookmarksContainer.layer?.backgroundColor = sidebarBackgroundColor.cgColor
+            pagesTableView.backgroundColor = sidebarBackgroundColor
+            bookmarksOutlineView.backgroundColor = sidebarBackgroundColor
+            statusBar.layer?.backgroundColor = panelBackgroundColor.cgColor
+            busyOverlayView.layer?.backgroundColor = panelBackgroundColor.cgColor
+            captureToastView.layer?.backgroundColor = panelBackgroundColor.cgColor
+            emptyStateView.layer?.backgroundColor = panelBackgroundColor.cgColor
+            collapsedSidebarRevealButton.layer?.backgroundColor = panelBackgroundColor.cgColor
+            documentTabsBar.layer?.backgroundColor = panelBackgroundColor.cgColor
+            pdfView.refreshAppearanceColors()
+            view.window?.backgroundColor = chromeBackgroundColor
+            bookmarksContainer.layer?.borderColor = NSColor.separatorColor.cgColor
+            documentTabsBar.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+            refreshRectangleToolbar()
         }
-        view.layer?.backgroundColor = chromeBackgroundColor.cgColor
-        pdfCanvasContainer.layer?.backgroundColor = chromeBackgroundColor.cgColor
-        bookmarksContainer.layer?.backgroundColor = sidebarBackgroundColor.cgColor
-        pagesTableView.backgroundColor = sidebarBackgroundColor
-        bookmarksOutlineView.backgroundColor = sidebarBackgroundColor
-        statusBar.layer?.backgroundColor = panelBackgroundColor.cgColor
-        busyOverlayView.layer?.backgroundColor = panelBackgroundColor.cgColor
-        captureToastView.layer?.backgroundColor = panelBackgroundColor.cgColor
-        emptyStateView.layer?.backgroundColor = panelBackgroundColor.cgColor
-        collapsedSidebarRevealButton.layer?.backgroundColor = panelBackgroundColor.cgColor
-        documentTabsBar.layer?.backgroundColor = panelBackgroundColor.cgColor
-        pdfView.refreshAppearanceColors()
     }
 
     private func applySplitLayoutIfPossible(force: Bool) {
@@ -698,7 +780,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             bookmarksContainer.isHidden = true
         }
         pdfCanvasContainer.wantsLayer = true
-        pdfCanvasContainer.layer?.backgroundColor = chromeBackgroundColor.cgColor
+        pdfCanvasContainer.layer?.backgroundColor = AppAppearance.canvas.cgColor
         bookmarksContainer.translatesAutoresizingMaskIntoConstraints = false
         navigationResizeHandle.translatesAutoresizingMaskIntoConstraints = false
 
@@ -727,7 +809,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         bookmarksWidthConstraint = bookmarksWidth
 
         navigationResizeHandle.wantsLayer = true
-        navigationResizeHandle.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.4).cgColor
+        navigationResizeHandle.layer?.backgroundColor = NSColor.clear.cgColor
         navigationResizeHandle.layer?.cornerRadius = 1
         let resizePan = NSPanGestureRecognizer(target: self, action: #selector(handleNavigationResizePan(_:)))
         navigationResizeHandle.addGestureRecognizer(resizePan)
@@ -757,7 +839,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
 
         bookmarksContainer.wantsLayer = true
-        bookmarksContainer.layer?.borderWidth = 1
+        bookmarksContainer.layer?.borderWidth = 0.5
         bookmarksContainer.layer?.borderColor = NSColor.separatorColor.cgColor
         bookmarksContainer.layer?.backgroundColor = sidebarBackgroundColor.cgColor
 
@@ -794,12 +876,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pagesColumn.width = 208
         pagesTableView.identifier = NSUserInterfaceItemIdentifier("pagesTable")
         pagesTableView.addTableColumn(pagesColumn)
+        pagesTableView.autoresizingMask = [.width]
         pagesTableView.headerView = nil
         pagesTableView.usesAlternatingRowBackgroundColors = false
-        pagesTableView.rowHeight = 24
+        pagesTableView.rowHeight = 164
         pagesTableView.focusRingType = .none
-        pagesTableView.style = .sourceList
-        pagesTableView.selectionHighlightStyle = .none
+        pagesTableView.style = .fullWidth
+        pagesTableView.selectionHighlightStyle = .regular
         pagesTableView.allowsEmptySelection = true
         pagesTableView.allowsMultipleSelection = true
         pagesTableView.backgroundColor = sidebarBackgroundColor
@@ -814,6 +897,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let renamePageItem = NSMenuItem(title: "Rename Page Label…", action: #selector(renamePageLabelFromSidebar), keyEquivalent: "")
         renamePageItem.target = self
         pagesContextMenu.addItem(renamePageItem)
+        pagesContextMenu.addItem(.separator())
+        let deletePageItem = NSMenuItem(title: "Delete Selected Page(s)…", action: #selector(deletePagesFromSidebar), keyEquivalent: "")
+        deletePageItem.target = self
+        pagesContextMenu.addItem(deletePageItem)
         pagesTableView.menu = pagesContextMenu
 
         thumbnailScrollView.borderType = .noBorder
@@ -882,7 +969,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfContentsTitleLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         pdfContentsTitleLabel.textColor = .secondaryLabelColor
         pdfContentsTitleLabel.setContentCompressionResistancePriority(.required, for: .vertical)
-        pdfContentsSummaryLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        pdfContentsDisclosure.bezelStyle = .disclosure
+        pdfContentsDisclosure.setButtonType(.onOff)
+        pdfContentsDisclosure.controlSize = .small
+        pdfContentsDisclosure.state = .off
+        pdfContentsDisclosure.target = self
+        pdfContentsDisclosure.action = #selector(togglePDFContentsDetails)
+        pdfContentsDisclosure.setAccessibilityLabel("Show PDF contents details")
+        pdfContentsDisclosure.toolTip = "Show or hide PDF contents details"
+        pdfContentsSummaryLabel.isHidden = true
+        pdfContentsSummaryLabel.font = NSFont.systemFont(ofSize: 10)
         pdfContentsSummaryLabel.textColor = .tertiaryLabelColor
         pdfContentsSummaryLabel.maximumNumberOfLines = 0
         pdfContentsSummaryLabel.lineBreakMode = .byWordWrapping
@@ -892,9 +988,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         contentsSeparator.boxType = .separator
         contentsSeparator.translatesAutoresizingMaskIntoConstraints = false
 
+        let contentsHeader = NSStackView(views: [pdfContentsDisclosure, pdfContentsTitleLabel])
+        contentsHeader.orientation = .horizontal
+        contentsHeader.alignment = .centerY
+        contentsHeader.spacing = 4
         let pdfContentsStack = NSStackView(views: [
             contentsSeparator,
-            pdfContentsTitleLabel,
+            contentsHeader,
             pdfContentsSummaryLabel
         ])
         pdfContentsStack.orientation = .vertical
@@ -934,6 +1034,20 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     @objc private func changeNavigationMode() {
         let showingPages = (navigationModeControl.selectedSegment != 1)
         thumbnailScrollView.isHidden = !showingPages
+        if showingPages {
+            let width = thumbnailScrollView.contentSize.width
+            if width > 0 {
+                pagesTableView.setFrameSize(NSSize(width: width, height: pagesTableView.frame.height))
+                pagesTableView.tableColumns.first?.width = max(80, width - pagesTableView.intercellSpacing.width)
+            }
+            pageThumbnailCache.bind(pdfView.document)
+            let selected = pagesTableView.selectedRowIndexes
+            pagesTableView.reloadData()
+            pagesTableView.selectRowIndexes(selected, byExtendingSelection: false)
+            if sidebarCurrentPageIndex >= 0, sidebarCurrentPageIndex < pagesTableView.numberOfRows {
+                pagesTableView.scrollRowToVisible(sidebarCurrentPageIndex)
+            }
+        }
         thumbnailsEmptyLabel.isHidden = !showingPages || (pdfView.document != nil)
         bookmarksScrollView.isHidden = showingPages
         bookmarksEmptyLabel.isHidden = showingPages || !(bookmarksOutlineView.numberOfRows == 0)
@@ -947,6 +1061,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func reloadBookmarks() {
+        let selectedPages = pagesTableView.selectedRowIndexes
+        let selectedBookmarks = bookmarksOutlineView.selectedRowIndexes.compactMap { bookmarksOutlineView.item(atRow: $0) as? PDFOutline }
+        defer {
+            pagesTableView.selectRowIndexes(IndexSet(selectedPages.filter { $0 < pagesTableView.numberOfRows }), byExtendingSelection: false)
+            let rows = selectedBookmarks.map { bookmarksOutlineView.row(forItem: $0) }.filter { $0 >= 0 }
+            bookmarksOutlineView.selectRowIndexes(IndexSet(rows), byExtendingSelection: false)
+        }
+        pageThumbnailCache.bind(pdfView.document)
         pagesTableView.reloadData()
         updatePDFContentsSummary()
         if navigationModeControl.selectedSegment < 0 {
@@ -985,12 +1107,32 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         bookmarksSelectionLabel.stringValue = "(selectedCount) bookmarks selected • Delete to remove"
     }
 
+    @objc private func togglePDFContentsDetails() {
+        let expanded = pdfContentsDisclosure.state == .on
+        pdfContentsSummaryLabel.isHidden = !expanded
+        pdfContentsDisclosure.setAccessibilityLabel(expanded ? "Hide PDF contents details" : "Show PDF contents details")
+    }
+
     func updatePDFContentsSummary() {
         guard let document = pdfView.document else {
+            contentsSummaryDocument = nil
+            cachedContentsSummary = nil
+            contentsSummaryByPage.removeAll()
+            contentsSummaryPageCount = 0
             pdfContentsSummaryLabel.stringValue = "No PDF loaded"
             return
         }
 
+        if contentsSummaryDocument !== document || contentsSummaryPageCount != document.pageCount {
+            contentsSummaryByPage.removeAll()
+            cachedContentsSummary = nil
+            contentsSummaryDocument = document
+            contentsSummaryPageCount = document.pageCount
+        }
+        if let cachedContentsSummary {
+            pdfContentsSummaryLabel.stringValue = cachedContentsSummary
+            return
+        }
         var totalAnnotations = 0
         var extraneousAnnotations = 0
         var nonPrintAnnotations = 0
@@ -1000,29 +1142,43 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         var shxSamples: [String] = []
 
         for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex) else { continue }
-            for annotation in page.annotations {
-                totalAnnotations += 1
-                let type = (annotation.type ?? "Unknown").trimmingCharacters(in: .whitespacesAndNewlines)
-                typeCounts[type.isEmpty ? "Unknown" : type, default: 0] += 1
-                if isExtraneousEmbeddedPDFAnnotation(annotation) {
-                    extraneousAnnotations += 1
-                    if shxSamples.count < 3,
-                       let contents = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines),
-                       !contents.isEmpty {
-                        shxSamples.append(contents)
+            var pageSummary: PageContentsSummary
+            if let cached = contentsSummaryByPage[pageIndex] {
+                pageSummary = cached
+            } else {
+                guard let page = document.page(at: pageIndex) else { continue }
+                pageSummary = PageContentsSummary()
+                for annotation in page.annotations {
+                    pageSummary.annotations += 1
+                    let type = (annotation.type ?? "Unknown").trimmingCharacters(in: .whitespacesAndNewlines)
+                    pageSummary.types[type.isEmpty ? "Unknown" : type, default: 0] += 1
+                    if isExtraneousEmbeddedPDFAnnotation(annotation) {
+                        pageSummary.extraneous += 1
+                        if pageSummary.samples.count < 3,
+                           let contents = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines),
+                           !contents.isEmpty {
+                            pageSummary.samples.append(contents)
+                        }
+                    }
+                    if !annotation.shouldPrint {
+                        pageSummary.nonPrint += 1
+                    }
+                    if !annotation.shouldDisplay {
+                        pageSummary.hidden += 1
+                    }
+                    if (annotation.type ?? "").localizedCaseInsensitiveContains("link") {
+                        pageSummary.links += 1
                     }
                 }
-                if !annotation.shouldPrint {
-                    nonPrintAnnotations += 1
-                }
-                if !annotation.shouldDisplay {
-                    hiddenAnnotations += 1
-                }
-                if (annotation.type ?? "").localizedCaseInsensitiveContains("link") {
-                    linkAnnotations += 1
-                }
+                contentsSummaryByPage[pageIndex] = pageSummary
             }
+            totalAnnotations += pageSummary.annotations
+            extraneousAnnotations += pageSummary.extraneous
+            nonPrintAnnotations += pageSummary.nonPrint
+            hiddenAnnotations += pageSummary.hidden
+            linkAnnotations += pageSummary.links
+            for (type, count) in pageSummary.types { typeCounts[type, default: 0] += count }
+            shxSamples.append(contentsOf: pageSummary.samples.prefix(max(0, 3 - shxSamples.count)))
         }
 
         let topTypes = typeCounts
@@ -1047,16 +1203,20 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if !shxSamples.isEmpty {
             lines.append("Samples:\n\(shxSamples.joined(separator: "\n"))")
         }
-        pdfContentsSummaryLabel.stringValue = lines.joined(separator: "\n")
+        let summary = lines.joined(separator: "\n")
+        contentsSummaryDocument = document
+        cachedContentsSummary = summary
+        pdfContentsSummaryLabel.stringValue = summary
     }
 
     @objc private func selectPageFromSidebar() {
+        guard pagesTableView.selectedRowIndexes.count == 1 else { return }
         let row = pagesTableView.selectedRow
         guard row >= 0, let document = pdfView.document, row < document.pageCount, let page = document.page(at: row) else {
             return
         }
         pdfView.navigateToPageWithHistory(page)
-        pagesTableView.deselectAll(nil)
+        view.window?.makeFirstResponder(pagesTableView)
         requestChromeRefresh(immediate: true)
     }
 
@@ -1069,10 +1229,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return
         }
         pdfView.navigateToDestinationWithHistory(destination)
+        view.window?.makeFirstResponder(bookmarksOutlineView)
         requestChromeRefresh(immediate: true)
     }
 
-    @objc private func renameBookmarkFromSidebar() {
+    @objc func renameBookmarkFromSidebar() {
         let row = bookmarksOutlineView.clickedRow >= 0 ? bookmarksOutlineView.clickedRow : bookmarksOutlineView.selectedRow
         guard row >= 0,
               let outline = bookmarksOutlineView.item(atRow: row) as? PDFOutline else { return }
@@ -1114,11 +1275,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         markMarkupChangedAndScheduleAutosave()
     }
 
-    @objc func deleteBookmarkFromSidebar() {
-        let clickedRow = bookmarksOutlineView.clickedRow
-        if clickedRow >= 0, !bookmarksOutlineView.selectedRowIndexes.contains(clickedRow) {
-            bookmarksOutlineView.selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
-        }
+    @objc func deleteBookmarkFromSidebar() { deleteSelectedBookmarks() }
+
+    func deleteSelectedBookmarks(confirm: Bool = true) {
+        guard !isPDFProcessingBusy else { return }
         let selectedOutlines = bookmarksOutlineView.selectedRowIndexes.compactMap {
             bookmarksOutlineView.item(atRow: $0) as? PDFOutline
         }
@@ -1144,12 +1304,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 : "Remove “\(title)”? The PDF page is unaffected."
         } else {
             alert.messageText = "Delete \(outlines.count) Bookmarks?"
-            alert.informativeText = "This also removes \(descendantCount) nested bookmark\(descendantCount == 1 ? "" : "s"). PDF pages are unaffected."
+            alert.informativeText = descendantCount > 0
+                ? "This also removes \(descendantCount) nested bookmark\(descendantCount == 1 ? "" : "s"). PDF pages are unaffected."
+                : "Remove the selected bookmarks? PDF pages are unaffected."
         }
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard !confirm || alert.runModal() == .alertFirstButtonReturn else { return }
 
         for outline in outlines {
             guard let parent = outline.parent else { continue }
@@ -1206,7 +1368,93 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         undo.setActionName(actionName)
     }
 
-    @objc private func renamePageLabelFromSidebar() {
+    @objc func deletePagesFromSidebar() {
+        guard !isPDFProcessingBusy, let document = pdfView.document else { return }
+        let indexes = pagesTableView.selectedRowIndexes
+        guard !indexes.isEmpty else { return }
+        guard indexes.count < document.pageCount else {
+            runAlert(title: "Keep at least one page", informativeText: "A PDF must contain at least one page. Select fewer pages to delete.", style: .informational)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = indexes.count == 1 ? "Delete Page?" : "Delete \(indexes.count) Pages?"
+        alert.informativeText = "The selected pages and their markups will be removed from this PDF. You can undo this change."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Delete")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do { try deletePages(at: indexes) }
+        catch { runAlert(title: "Could not delete pages", informativeText: error.localizedDescription, style: .warning) }
+    }
+
+    /// The original page objects remain available to Undo, even after saving.
+    func deletePages(at indexes: IndexSet) throws {
+        guard !isPDFProcessingBusy, let document = pdfView.document,
+              !indexes.isEmpty, indexes.count < document.pageCount,
+              indexes.allSatisfy({ $0 < document.pageCount && $0 >= 0 }) else { return }
+        if pageStructureState?.document !== document {
+            guard let stamp = pdfView.rectangleMarkup.openingMarkupSourceStamp,
+                  let source = stamp.recoverySourceURL else {
+                throw NSError(domain: "Drawbridge", code: 1, userInfo: [NSLocalizedDescriptionKey: "Save this PDF before deleting pages so Drawbridge can preserve its original drawing content."])
+            }
+            pageStructureState = PDFPageStructureState(document: document, stamp: stamp, source: source)
+        }
+        pdfView.rectangleMarkup.finishTextEditing()
+        pdfView.rectangleMarkup.cancelGesture()
+        let removed = indexes.compactMap { index in document.page(at: index).map { (index, $0) } }
+        let labels = Dictionary(uniqueKeysWithValues: (0..<document.pageCount).map { ($0, displayPageLabel(forPageIndex: $0)) })
+        let scales = pageScaleLocks
+        let suppressed = suppressedEmbeddedPageLabelIndexes
+        let removedPages = removed.map { $0.1 }
+        var destinations: [(PDFOutline, PDFDestination)] = []
+        func detachDestinations(_ outline: PDFOutline) {
+            if let destination = outline.destination, let page = destination.page, removedPages.contains(where: { $0 === page }) {
+                destinations.append((outline, destination)); outline.destination = nil
+            }
+            for index in 0..<outline.numberOfChildren { if let child = outline.child(at: index) { detachDestinations(child) } }
+        }
+        if let root = document.outlineRoot { detachDestinations(root) }
+        for index in indexes.reversed() { document.removePage(at: index) }
+        func newIndex(_ old: Int) -> Int? { indexes.contains(old) ? nil : old - indexes.filter { $0 < old }.count }
+        pageLabelOverrides = Dictionary(uniqueKeysWithValues: labels.compactMap { key, value in newIndex(key).map { ($0, value) } })
+        pageScaleLocks = Dictionary(uniqueKeysWithValues: scales.compactMap { key, value in newIndex(key).map { ($0, value) } })
+        suppressedEmbeddedPageLabelIndexes = Set(suppressed.compactMap(newIndex))
+        registerPageDeletionUndo(document: document, removed: removed, labels: labels, scales: scales, suppressed: suppressed, destinations: destinations)
+        refreshAfterPageStructureChange(document: document, preferredIndex: min(indexes.first ?? 0, document.pageCount - 1))
+    }
+
+    private func registerPageDeletionUndo(document: PDFDocument, removed: [(Int, PDFPage)], labels: [Int: String], scales: [Int: PageScaleLock], suppressed: Set<Int>, destinations: [(PDFOutline, PDFDestination)]) {
+        let undo = view.window?.undoManager ?? undoManager
+        undo?.registerUndo(withTarget: self) { target in
+            guard target.pdfView.document === document, !target.isPDFProcessingBusy else { return }
+            for (index, page) in removed { document.insert(page, at: min(index, document.pageCount)) }
+            for (outline, destination) in destinations { outline.destination = destination }
+            target.pageLabelOverrides = labels
+            target.pageScaleLocks = scales
+            target.suppressedEmbeddedPageLabelIndexes = suppressed
+            target.refreshAfterPageStructureChange(document: document, preferredIndex: removed.first?.0 ?? 0)
+            (target.view.window?.undoManager ?? target.undoManager)?.registerUndo(withTarget: target) { owner in
+                do { try owner.deletePages(at: IndexSet(removed.map { $0.0 })) }
+                catch { owner.runAlert(title: "Could not delete pages", informativeText: error.localizedDescription, style: .warning) }
+            }
+        }
+        undo?.setActionName(removed.count == 1 ? "Delete Page" : "Delete Pages")
+    }
+
+    private func refreshAfterPageStructureChange(document: PDFDocument, preferredIndex: Int) {
+        pdfView.rectangleMarkup.cancelGesture()
+        pdfView.clearNavigationHistory()
+        clearMarkupCache()
+        sidebarCurrentPageIndex = -1
+        pagesTableView.deselectAll(nil)
+        reloadBookmarks()
+        if let page = document.page(at: preferredIndex) { pdfView.go(to: page) }
+        performRefreshMarkups(selecting: nil, forceImmediate: true)
+        markMarkupChangedAndScheduleAutosave()
+        view.window?.makeFirstResponder(pagesTableView)
+    }
+
+    @objc func renamePageLabelFromSidebar() {
         let row = pagesTableView.clickedRow >= 0 ? pagesTableView.clickedRow : pagesTableView.selectedRow
         guard row >= 0, row < sidebarPageCount() else { return }
         let existing = displayPageLabel(forPageIndex: row)
@@ -1286,18 +1534,56 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             $0.textColor = .secondaryLabelColor
         }
 
-        let stack = NSStackView(views: labels)
-        stack.orientation = .horizontal
-        stack.spacing = 14
-        stack.edgeInsets = NSEdgeInsets(top: 4, left: 10, bottom: 4, right: 8)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        statusBar.addSubview(stack)
+        for (button, symbol, name, action, identifier) in [
+            (navigationBackButton, "arrow.uturn.backward", "Back to previous view (⌥←)", #selector(commandNavigateBack(_:)), "drawbridgeNavigateBack"),
+            (navigationForwardButton, "arrow.uturn.forward", "Forward to next view (⌥→)", #selector(commandNavigateForward(_:)), "drawbridgeNavigateForward"),
+            (previousPageButton, "arrowtriangle.left.fill", "Previous Page", #selector(commandPreviousPage(_:)), "drawbridgePreviousPage"),
+            (nextPageButton, "arrowtriangle.right.fill", "Next Page", #selector(commandNextPage(_:)), "drawbridgeNextPage")
+        ] {
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)
+            button.imagePosition = .imageOnly; button.bezelStyle = .texturedRounded; button.controlSize = .small
+            button.target = self; button.action = action; button.toolTip = name
+            button.setAccessibilityLabel(name); button.identifier = NSUserInterfaceItemIdentifier(identifier)
+            button.widthAnchor.constraint(equalToConstant: 24).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        }
+        statusPageLabel.lineBreakMode = .byTruncatingMiddle
+        statusPageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        func group(_ title: String, _ buttons: [NSButton]) -> NSStackView {
+            let label = NSTextField(labelWithString:title)
+            label.font = .systemFont(ofSize:10,weight:.medium); label.textColor = .secondaryLabelColor
+            let stack = NSStackView(views:[label] + buttons)
+            stack.orientation = .horizontal; stack.spacing = 5; stack.alignment = .centerY
+            return stack
+        }
+        let history = group("History",[navigationBackButton,navigationForwardButton])
+        let pages = group("Pages",[previousPageButton,nextPageButton])
+        invertColorsButton.image = NSImage(systemSymbolName: "circle.lefthalf.filled", accessibilityDescription: "Invert PDF colors")
+        invertColorsButton.imagePosition = .imageLeading
+        invertColorsButton.bezelStyle = .texturedRounded
+        invertColorsButton.controlSize = .small
+        invertColorsButton.setButtonType(.toggle)
+        invertColorsButton.target = self
+        invertColorsButton.action = #selector(commandToggleInvert(_:))
+        invertColorsButton.identifier = NSUserInterfaceItemIdentifier("drawbridgeInvertColors")
+        invertColorsButton.toolTip = "Invert PDF colors on screen. Saved and printed colors stay unchanged."
+        invertColorsButton.setAccessibilityLabel("Invert PDF colors")
+        markupsToggleButton.bezelStyle = .texturedRounded
+        markupsToggleButton.controlSize = .small
+        markupsToggleButton.setButtonType(.toggle)
+        markupsToggleButton.target = self; markupsToggleButton.action = #selector(commandToggleMarkupsList(_:))
+        markupsToggleButton.identifier = NSUserInterfaceItemIdentifier("drawbridgeMarkupsList")
+        let details = NSStackView(views: [history,pages] + labels + [invertColorsButton, markupsToggleButton])
+        details.orientation = .horizontal
+        details.spacing = 14
+        details.translatesAutoresizingMaskIntoConstraints = false
+        statusBar.addSubview(details)
 
         NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: statusBar.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: statusBar.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor)
+            details.centerXAnchor.constraint(equalTo: statusBar.centerXAnchor),
+            details.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
+            details.leadingAnchor.constraint(greaterThanOrEqualTo: statusBar.leadingAnchor, constant: 10),
+            details.trailingAnchor.constraint(lessThanOrEqualTo: statusBar.trailingAnchor, constant: -10)
         ])
     }
 
@@ -1380,6 +1666,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func beginBusyIndicator(_ message: String, detail: String? = nil, lockInteraction: Bool = true) {
+        pdfView.rectangleMarkup.cancelGesture()
+        if textSearch.isSearching { resetSearchState() }
         busyOperationDepth += 1
         refreshFlattenButtonState()
         busyStatusLabel.stringValue = message
@@ -1415,6 +1703,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         busyProgressIndicator.maxValue = 100
         busyProgressIndicator.doubleValue = 0
         busyOverlayView.isHidden = true
+        if searchPanel?.isVisible == true { refreshSearchIfNeeded() }
         busyDetailLabel.stringValue = ""
         busySubdetailLabel.stringValue = ""
         setBusyCancelAction(nil)
@@ -1590,8 +1879,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         flattenPDFButton.toolTip = "Flatten PDF — make visible markups permanent and save this PDF"
         flattenPDFButton.setAccessibilityLabel("Flatten PDF")
         flattenPDFButton.identifier = NSUserInterfaceItemIdentifier("drawbridgeFlattenPDF")
-        reduceFileSizeButton.image = NSImage(systemSymbolName: "arrow.down.doc", accessibilityDescription: "Reduce File Size")
-            ?? NSImage(systemSymbolName: "doc", accessibilityDescription: "Reduce File Size")
+        reduceFileSizeButton.image = ToolbarIcons.compressionClamp()
         reduceFileSizeButton.imagePosition = .imageOnly
         reduceFileSizeButton.bezelStyle = .texturedRounded
         reduceFileSizeButton.toolTip = "Reduce File Size — lossless compression, preserving image resolution"
@@ -1629,6 +1917,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             didInstallToolbarWidthConstraints = true
         }
 
+        for (button, symbol, name, action) in [
+            (goToSheetButton, "list.bullet.rectangle", "Go to Sheet (⌘L)", #selector(commandGoToSheet(_:))),
+            (fitPageButton, "arrow.up.left.and.arrow.down.right", "Fit Entire Page (⌘9)", #selector(commandFitPage(_:)))
+        ] {
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)
+            button.imagePosition = .imageOnly; button.bezelStyle = .texturedRounded
+            button.target = self; button.action = action; button.toolTip = name
+            button.setAccessibilityLabel(name)
+        }
+
         toolbarControlsStack.orientation = .horizontal
         toolbarControlsStack.spacing = 8
         toolbarControlsStack.alignment = .centerY
@@ -1654,6 +1952,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             toolbarControlsStack.addArrangedSubview(batchLinkSheetsButton)
             toolbarControlsStack.addArrangedSubview(flattenPDFButton)
             toolbarControlsStack.addArrangedSubview(reduceFileSizeButton)
+            toolbarControlsStack.addArrangedSubview(goToSheetButton)
+            toolbarControlsStack.addArrangedSubview(fitPageButton)
         }
 
         toolbarSearchField.placeholderString = "Search PDF text"
@@ -1841,7 +2141,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     private func configureDocumentTabsBar() {
         documentTabsBar.wantsLayer = true
-        documentTabsBar.layer?.borderWidth = 1
+        documentTabsBar.layer?.borderWidth = 0.5
         documentTabsBar.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
         documentTabsBar.layer?.backgroundColor = panelBackgroundColor.cgColor
         documentTabsBar.translatesAutoresizingMaskIntoConstraints = false
@@ -1950,6 +2250,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
+        toolbar.centeredItemIdentifiers = [.drawbridgeMarkupControls]
         return toolbar
     }
 
@@ -2123,7 +2424,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.drawbridgePrimaryControls, .flexibleSpace, .space]
+        [.drawbridgePrimaryControls, .drawbridgeMarkupControls, .flexibleSpace, .space]
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
@@ -2141,7 +2442,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.drawbridgePrimaryControls, .flexibleSpace]
+        [.drawbridgePrimaryControls, .flexibleSpace, .drawbridgeMarkupControls, .flexibleSpace]
     }
 
     func toolbar(
@@ -2150,8 +2451,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         willBeInsertedIntoToolbar flag: Bool
     ) -> NSToolbarItem? {
         let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+        if itemIdentifier == .drawbridgeMarkupControls {
+            item.label = "Markup"; item.view = rectangleToolbar; return item
+        }
         if itemIdentifier == .drawbridgePrimaryControls {
-            item.label = "Bookmarks, Hyperlinks and Flatten"
+            item.label = "Drawing Set Tools and Navigation"
             item.view = toolbarControlsStack
             return item
         }
@@ -2170,6 +2474,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private func activateTool(_ requestedMode: ToolMode) {
         // Only text selection is supported; stale shortcuts cannot enable editing.
         cancelPendingMarkupInteractions()
+        pdfView.rectangleMarkup.escape()
         pdfView.toolMode = .select
         refreshToolSegmentIcons()
         refreshTakeoffSegmentIcons()
@@ -2431,7 +2736,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         let document = PDFDocument()
         document.insert(page, at: 0)
-        pdfView.document = document
+        pdfView.setMarkupDocument(document)
         clearMarkupCache()
         pageScaleLocks.removeAll(keepingCapacity: false)
         lastScaleLockAppliedPageIndex = -1
@@ -2475,13 +2780,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     @objc func saveDocument() {
         guard let document = pdfView.document else { beep(); return }
         if let url = openDocumentURL {
+            pdfView.rectangleMarkup.finishTextEditing()
+            guard hasUnsavedChanges() || pdfView.rectangleMarkup.hasUnsavedChanges else { return }
             // Bluebeam-style Save: persist changes into the PDF itself.
             persistDocument(
                 to: url,
                 adoptAsPrimaryDocument: false,
                 busyMessage: "Saving PDF…",
                 document: document,
-                showBusyOverlay: false
+                showBusyOverlay: pdfView.rectangleMarkup.hasUnsavedChanges
             )
         } else {
             saveDocumentAsProject(document: document)
@@ -2661,7 +2968,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 if self.isMarkupListTruncated {
                     self.markupsCountLabel.stringValue = "\(collected.count) of \(totalMatching) items (refine filter)"
                 } else {
-                    self.markupsCountLabel.stringValue = "\(collected.count) items"
+                    self.markupsCountLabel.stringValue = filter.isEmpty ? "\(collected.count) markups" : "\(collected.count) matches"
                 }
                 self.updateMeasurementSummary()
                 self.restoreSelection(for: selectedAnnotation)
@@ -2774,7 +3081,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                         self.dirtyMarkupPageIndexes.remove(pageIndex)
                         continue
                     }
-                    let annotations = page.annotations.filter(self.isUserEditableMarkup)
+                    let annotations = page.annotations.filter { MarkupListPresentation.includes($0) && self.isUserEditableMarkup($0) }
                     let previousCount = self.pageMarkupCache[pageIndex]?.count ?? 0
                     self.pageMarkupCache[pageIndex] = annotations
                     self.pageMarkupSearchIndex.removeValue(forKey: pageIndex)
@@ -2818,6 +3125,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func clearMarkupCache() {
+        contentsSummaryDocument = nil
+        cachedContentsSummary = nil
+        contentsSummaryByPage.removeAll()
+        contentsSummaryPageCount = 0
         cancelSearchIndexWarmup()
         cachedMarkupDocumentID = nil
         pageMarkupCache.removeAll(keepingCapacity: false)
@@ -2833,11 +3144,22 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func markPageMarkupCacheDirty(_ page: PDFPage?) {
-        guard let page, let document = pdfView.document else { return }
+        cachedContentsSummary = nil
+        guard let page, let document = pdfView.document else {
+            contentsSummaryByPage.removeAll()
+            pageThumbnailCache.invalidate(nil)
+            pagesTableView.reloadData()
+            return
+        }
         ensureMarkupCacheDocumentIdentity(for: document)
         let pageIndex = document.index(for: page)
-        guard pageIndex >= 0 else { return }
+        guard pageIndex >= 0, pageIndex < document.pageCount else { return }
+        contentsSummaryByPage.removeValue(forKey: pageIndex)
         dirtyMarkupPageIndexes.insert(pageIndex)
+        pageThumbnailCache.invalidate(page)
+        if navigationModeControl.selectedSegment == 0 {
+            pagesTableView.reloadData(forRowIndexes: IndexSet(integer: pageIndex), columnIndexes: IndexSet(integer: 0))
+        }
         invalidateVisibleMarkupRendering(on: page)
     }
 
@@ -3096,7 +3418,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     func scheduleMarkupsRefresh(selecting selectedAnnotation: PDFAnnotation?) {
         pendingMarkupsRefreshWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
-            self?.performRefreshMarkups(selecting: selectedAnnotation)
+            guard let self else { return }
+            self.pendingMarkupsRefreshWorkItem = nil
+            self.performRefreshMarkups(selecting: selectedAnnotation)
         }
         pendingMarkupsRefreshWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: workItem)
@@ -4118,15 +4442,32 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func openDocument(at url: URL) {
+        guard !isSwitchingDocument else { return }
         let openSpan = PerformanceMetrics.begin(
             "open_document",
             thresholdMs: 250,
             fields: ["file": url.lastPathComponent]
         )
         cancelAutoNameCapture()
-        beginBusyIndicator("Loading PDF…")
-        defer { endBusyIndicator() }
-        guard let document = PDFDocument(url: url) else {
+        rectangleToolbar.propertiesPopover.close()
+        pdfView.rectangleMarkup.finishTextEditing()
+        let departingViewState = pdfView.captureTabViewState()
+        let departingSearchQuery = toolbarSearchField.stringValue
+        isSwitchingDocument = true
+        defer {
+            isSwitchingDocument = false
+            refreshRectangleToolbar()
+            requestChromeRefresh()
+        }
+        let normalizedURL = canonicalDocumentURL(url)
+        let cached = documentTabCache.take(normalizedURL)
+        if cached == nil { beginBusyIndicator("Loading PDF…") }
+        defer { if cached == nil { endBusyIndicator() } }
+        let openingStamp = cached == nil ? PDFMarkupSourceStamp.capture(url) : nil
+        // A provider/editor can replace the original while PDFKit is lazily
+        // reading it. View the exact frozen source used for safe markup saves.
+        let readerURL = openingStamp?.recoverySourceURL ?? url
+        guard let document = cached?.document ?? PDFDocument(url: readerURL) else {
             PerformanceMetrics.end(openSpan, extra: ["result": "invalid_pdf"])
             runAlert(
                 title: "Unable to open PDF",
@@ -4135,8 +4476,23 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             )
             return
         }
+        // Capture before replacing the viewer. Dirty documents are deliberately
+        // excluded even when the caller has just chosen Discard Changes.
+        if let previousURL = openDocumentURL.map(canonicalDocumentURL),
+           previousURL != normalizedURL, sessionDocumentURLs.contains(previousURL),
+           let previousDocument = pdfView.document {
+            tabViewStates[previousURL] = departingViewState
+            tabSearchQueries[previousURL] = departingSearchQuery
+            if !hasUnsavedChanges(), !pdfView.rectangleMarkup.hasUnsavedChanges,
+               let stamp = PDFMarkupSourceStamp.read(previousURL),
+               pdfView.rectangleMarkup.sourceStamp == stamp {
+                documentTabCache.store(.init(document: previousDocument, stamp: stamp,
+                    labels: pageLabelOverrides, suppressedLabels: suppressedEmbeddedPageLabelIndexes,
+                    scaleLocks: pageScaleLocks), for: previousURL)
+            } else { documentTabCache.remove(previousURL) }
+        }
         dominantDocumentPageSizeInInches = dominantPageSizeInInches(for: document)
-        pdfView.document = document
+        pdfView.setMarkupDocument(document)
         clearMarkupCache()
         pageScaleLocks.removeAll(keepingCapacity: false)
         lastScaleLockAppliedPageIndex = -1
@@ -4151,11 +4507,33 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         suppressedEmbeddedPageLabelIndexes.removeAll()
         hasPromptedForInitialMarkupSaveCopy = false
         isPresentingInitialMarkupSaveCopyPrompt = false
-        loadSidecarSnapshotIfAvailable(for: url, document: document)
+        if let cached {
+            pageLabelOverrides = cached.labels
+            suppressedEmbeddedPageLabelIndexes = cached.suppressedLabels
+            pageScaleLocks = cached.scaleLocks
+        } else { loadSidecarSnapshotIfAvailable(for: url, document: document) }
         openDocumentURL = url
+        if let openingStamp {
+            pdfView.rectangleMarkup.retainReaderSnapshot(openingStamp, for: document)
+            pdfView.rectangleMarkup.acceptPersistedSource(at: url, stamp: openingStamp)
+        }
+        if cached == nil {
+            DispatchQueue.global(qos: .utility).async {
+                PDFRectangleWriter.prepareInspection(source: url)
+            }
+        }
+        // A replacement document can inherit a scroll offset beyond its last
+        // page. Establish a visible page before refreshing navigation/chrome.
+        if let state = tabViewStates[normalizedURL], pdfView.restoreTabViewState(state) {
+            // Restoring directly avoids laying out and fitting the first sheet
+            // before immediately laying out the user's previous sheet again.
+        } else if let firstPage = document.page(at: 0) {
+            pdfView.navigateToPageFittingWholePageWithHistory(firstPage, recordHistory: false)
+        }
         registerSessionDocument(url)
         configureAutosaveURL(for: url)
         resetSearchState(clearQuery: false)
+        toolbarSearchField.stringValue = tabSearchQueries[normalizedURL] ?? ""
         refreshSearchIfNeeded()
         if let snapshot = loadMarkupIndexSnapshot(for: url), snapshot.pageCount == document.pageCount {
             markupsCountLabel.stringValue = "Indexed \(snapshot.totalAnnotations) (refreshing…)"
@@ -4179,14 +4557,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     func registerSessionDocument(_ url: URL) {
         let normalized = canonicalDocumentURL(url)
-        sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == normalized }
-        sessionDocumentURLs.append(normalized)
+        if !sessionDocumentURLs.contains(normalized) { sessionDocumentURLs.append(normalized) }
         refreshDocumentTabs()
     }
 
     func unregisterSessionDocument(_ url: URL) {
         let normalized = canonicalDocumentURL(url)
         sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == normalized }
+        documentTabCache.remove(normalized)
+        tabViewStates.removeValue(forKey: normalized)
+        tabSearchQueries.removeValue(forKey: normalized)
         refreshDocumentTabs()
     }
 
@@ -4195,8 +4575,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func clearToStartState() {
+        rectangleToolbar.propertiesPopover.close()
+        documentTabCache.removeAll()
+        tabViewStates.removeAll()
+        tabSearchQueries.removeAll()
         cancelAutoNameCapture()
-        pdfView.document = nil
+        pdfView.setMarkupDocument(nil)
         clearMarkupCache()
         pageScaleLocks.removeAll(keepingCapacity: false)
         lastScaleLockAppliedPageIndex = -1
@@ -4285,6 +4669,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func restoreSelection(for annotation: PDFAnnotation?) {
+        isRestoringMarkupSelection = true
+        defer { isRestoringMarkupSelection = false }
         guard let annotation else {
             clearMarkupTableSelectionUI(updateStatusBarValue: false)
             return
@@ -4347,7 +4733,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         var addedText = false
         var addedLineEndpoints = false
         for item in selectedItems {
-            guard let page = pdfView.document?.page(at: item.pageIndex) else { continue }
+            guard let page = item.annotation.page, page === pdfView.currentPage else { continue }
             let bounds = item.annotation.bounds
             let p1 = pdfView.convert(bounds.origin, from: page)
             let p2 = pdfView.convert(NSPoint(x: bounds.maxX, y: bounds.maxY), from: page)
@@ -4488,6 +4874,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func refreshFlattenButtonState() {
+        refreshRectangleToolbar()
+        goToSheetButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
+        fitPageButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
         reduceFileSizeButton.isEnabled = pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy
         let recoverable = pdfView.document.map(PDFAnnotationFlattener.canUnflatten) ?? false
         flattenPDFButton.image = NSImage(systemSymbolName: recoverable ? "square.stack.3d.up" : "square.stack.3d.down.forward", accessibilityDescription: recoverable ? "Unflatten PDF" : "Flatten PDF")
@@ -4498,7 +4887,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     func updateStatusBar() {
         refreshFlattenButtonState()
-        statusToolLabel.stringValue = "Tool: \(currentToolName())"
+        invertColorsButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
+        invertColorsButton.state = pdfView.isColorInverted ? .on : .off
+        invertColorsButton.contentTintColor = pdfView.isColorInverted ? .systemBlue : .secondaryLabelColor
+        navigationBackButton.isEnabled = !isPDFProcessingBusy && pdfView.canNavigateBackInHistory
+        navigationForwardButton.isEnabled = !isPDFProcessingBusy && pdfView.canNavigateForwardInHistory
+        let pageIndex = pdfView.currentPage.flatMap { page in pdfView.document.map { $0.index(for:page) } }
+        previousPageButton.isEnabled = !isPDFProcessingBusy && (pageIndex ?? 0) > 0
+        nextPageButton.isEnabled = !isPDFProcessingBusy && pageIndex != nil && pageIndex! < (pdfView.document?.pageCount ?? 0)-1
+        statusToolLabel.stringValue = "Tool: \(pdfView.rectangleMarkup.tool)"
         applyScaleLockForCurrentPageIfNeeded()
 
         if let document = pdfView.document,
@@ -4506,19 +4903,24 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             let index = document.index(for: page)
             let label = displayPageLabel(forPageIndex: index)
             statusPageSizeLabel.stringValue = "Size: \(formattedPageSize(for: page))"
-            statusPageLabel.stringValue = "Page: \(label)"
+            statusPageLabel.stringValue = "Page \(index + 1) of \(document.pageCount): \(label)"
+            statusPageLabel.toolTip = label
             pageJumpField.stringValue = label
             if sidebarCurrentPageIndex != index {
                 sidebarCurrentPageIndex = index
+                let selectedPages = pagesTableView.selectedRowIndexes
+                let selectedBookmarks = bookmarksOutlineView.selectedRowIndexes
                 pagesTableView.reloadData()
                 bookmarksOutlineView.reloadData()
+                pagesTableView.selectRowIndexes(selectedPages, byExtendingSelection: false)
+                bookmarksOutlineView.selectRowIndexes(selectedBookmarks, byExtendingSelection: false)
                 if navigationModeControl.selectedSegment == 0, pagesTableView.numberOfRows > index {
                     pagesTableView.scrollRowToVisible(index)
                 }
             }
             pageJumpField.isEnabled = false
-            autoNameSheetsButton.isEnabled = true
-            batchLinkSheetsButton.isEnabled = true
+            autoNameSheetsButton.isEnabled = !isPDFProcessingBusy
+            batchLinkSheetsButton.isEnabled = !isPDFProcessingBusy
         } else {
             statusPageSizeLabel.stringValue = "Size: -"
             statusPageLabel.stringValue = "Page: -"
@@ -4528,7 +4930,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 pagesTableView.reloadData()
                 bookmarksOutlineView.reloadData()
             }
-            pagesTableView.deselectAll(nil)
+            if pdfView.document == nil { pagesTableView.deselectAll(nil) }
             pageJumpField.isEnabled = false
             autoNameSheetsButton.isEnabled = false
             batchLinkSheetsButton.isEnabled = false
@@ -5569,7 +5971,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return index >= 0 ? index : nil
     }
 
-    private func bookmarkStyleDestination(for page: PDFPage) -> PDFDestination {
+    func bookmarkStyleDestination(for page: PDFPage) -> PDFDestination {
         let destination = PDFDestination(
             page: page,
             at: NSPoint(x: kPDFDestinationUnspecifiedValue, y: kPDFDestinationUnspecifiedValue)
@@ -5667,7 +6069,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return (number, isUsableSheetTitle(title) ? title : nil)
     }
 
-    private func detectSheetTokenForBatchLink(
+    func detectSheetTokenForBatchLink(
         on page: PDFPage,
         normalizedZone: NormalizedPageRect
     ) -> (token: String?, strategy: String, rawTextPreview: String, failureReason: String?, usedFallback: Bool) {
@@ -5677,18 +6079,25 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guard let image = renderCroppedImage(from: page, rectInPage: rect) else {
             return (nil, "captured zone OCR", "", "Could not render the captured region.", false)
         }
-        let raw = recognizeText(in: image)
+        // Keep the four orientation readings so recovery never repeats the same OCR work.
+        let readings = [CGImagePropertyOrientation.up, .right, .left, .down].compactMap {
+            recognizeText(in: image, orientation: $0, usesLanguageCorrection: false)
+        }
+        var raw = ""
+        var bestScore: Float = -.greatestFiniteMagnitude
+        for reading in readings where reading.score > bestScore {
+            raw = reading.text
+            bestScore = reading.score
+        }
         if let token = SheetReferencePolicy.uniqueOCRSheetIdentifier(in: raw) {
             return (token, "captured zone OCR", truncatedZoneDiagnosticText(raw), nil, false)
         }
         // The generic reader ranks orientations by prose confidence/length.
         // A high-scoring upside-down reading can hide a valid sheet number.
-        // Retry the same captured pixels; no labels, bookmarks or substitutions.
-        let readings = [CGImagePropertyOrientation.up, .right, .left, .down].compactMap {
-            recognizeText(in: image, orientation: $0, usesLanguageCorrection: false)?.text
-        }
-        let token = SheetReferencePolicy.uniqueOCRSheetIdentifier(inOrientationReadings: readings)
-        return (token, "captured zone OCR orientation recovery", truncatedZoneDiagnosticText(readings.joined(separator: " | ")),
+        // Check the same captured pixels; no labels, bookmarks or substitutions.
+        let texts = readings.map(\.text)
+        let token = SheetReferencePolicy.uniqueOCRSheetIdentifier(inOrientationReadings: texts)
+        return (token, "captured zone OCR orientation recovery", truncatedZoneDiagnosticText(texts.joined(separator: " | ")),
                 token == nil ? "OCR did not read one unambiguous full sheet number in the captured region." : nil, token != nil)
     }
 
@@ -6259,50 +6668,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let displayBox = pdfView.displayBox
         let scale: CGFloat = 4.0
 
-        // 1. Get the oriented box dimensions
-        let transform = page.transform(for: displayBox)
-        let orientedFullBox = page.bounds(for: displayBox).applying(transform).standardized
-
-        let widthPx = Int((orientedFullBox.width * scale).rounded(.up))
-        let heightPx = Int((orientedFullBox.height * scale).rounded(.up))
-
-        // Safety cap for massive scans
-        guard widthPx > 0, heightPx > 0, widthPx < 12000, heightPx < 12000 else { return nil }
-
-        // 2. Render the ENTIRE oriented page box. This is the only way to guarantee alignment.
-        guard let fullContext = CGContext(
-            data: nil,
-            width: widthPx,
-            height: heightPx,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-
-        fullContext.interpolationQuality = .high
-        fullContext.setFillColor(NSColor.white.cgColor)
-        fullContext.fill(CGRect(x: 0, y: 0, width: widthPx, height: heightPx))
-        fullContext.scaleBy(x: scale, y: scale)
-        fullContext.translateBy(x: -orientedFullBox.minX, y: -orientedFullBox.minY)
-
-        // PDFPage.draw handles orientation into the target context box perfectly.
-        page.draw(with: displayBox, to: fullContext)
-
-        guard let fullImage = fullContext.makeImage() else { return nil }
-
-        // 3. Crop at the pixel level using CIImage (top-down coordinates matched to our render)
-        let orientedCrop = rectInPage.applying(transform).standardized
-        let ciImage = CIImage(cgImage: fullImage)
-        let cropRectPx = CGRect(
-            x: (orientedCrop.minX - orientedFullBox.minX) * scale,
-            y: (orientedCrop.minY - orientedFullBox.minY) * scale,
-            width: orientedCrop.width * scale,
-            height: orientedCrop.height * scale
-        ).intersection(ciImage.extent)
-        guard !cropRectPx.isEmpty else { return nil }
-
-        let croppedCI = ciImage.cropped(to: cropRectPx)
+        guard let image = PDFRegionRasterizer.render(page: page, box: displayBox, rect: rectInPage, scale: scale) else { return nil }
+        let croppedCI = CIImage(cgImage: image)
 
         // 4. Enhance
         let colorControls = CIFilter(name: "CIColorControls")
@@ -6447,7 +6814,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private func updateEmptyStateVisibility() {
         if let document = pdfView.document, document.pageCount == 0 {
             // A zero-page PDF object is not actionable in the UI; treat it as no document.
-            pdfView.document = nil
+            pdfView.setMarkupDocument(nil)
         }
         let hasDocument = (pdfView.document != nil)
         emptyStateView.isHidden = hasDocument
@@ -6467,7 +6834,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func confirmDiscardUnsavedChangesIfNeeded() -> Bool {
-        guard !isPDFFileProcessingOperation else { return false }
+        // Do not close or replace the document while a background save owns it.
+        // This also prevents a second, modal save from racing the active save.
+        guard !isPDFProcessingBusy else { return false }
         guard hasUnsavedChanges() else {
             return true
         }

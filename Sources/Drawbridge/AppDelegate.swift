@@ -36,10 +36,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.titlebarAppearsTransparent = false
         window.titleVisibility = .hidden
         window.toolbarStyle = .unifiedCompact
-        window.appearance = NSAppearance(named: .darkAqua)
         window.isOpaque = true
         window.alphaValue = 1.0
-        window.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1.0)
+        window.backgroundColor = AppAppearance.chrome
         window.isMovableByWindowBackground = false
         let mainViewController = MainViewController()
         loadRecentFiles()
@@ -54,9 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.toolbar = mainViewController.makeToolbar()
         window.toolbar?.showsBaselineSeparator = true
         window.contentView?.wantsLayer = true
-        window.contentView?.layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1.0).cgColor
         window.contentView?.superview?.wantsLayer = true
-        window.contentView?.superview?.layer?.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1.0).cgColor
         window.delegate = self
         window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
         window.minSize = NSSize(width: 1360, height: 700)
@@ -172,6 +169,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(NSMenuItem.separator())
         let shortcutItem = appMenu.addItem(withTitle: "Keyboard Shortcuts…", action: #selector(MainViewController.commandKeyboardShortcuts(_:)), keyEquivalent: ",")
         shortcutItem.target = controller
+        let authorItem = appMenu.addItem(withTitle: "Markup Author…", action: #selector(MainViewController.commandMarkupAuthor(_:)), keyEquivalent: "")
+        authorItem.target = controller
         let prefsItem = appMenu.addItem(withTitle: "Performance Settings…", action: #selector(MainViewController.commandPerformanceSettings(_:)), keyEquivalent: "")
         prefsItem.target = controller
         appMenu.addItem(NSMenuItem.separator())
@@ -219,6 +218,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: "Flatten PDF…", action: #selector(MainViewController.commandFlattenPDF(_:)), keyEquivalent: "").target = controller
         fileMenu.addItem(withTitle: "Reduce File Size…", action: #selector(MainViewController.commandReduceFileSize(_:)), keyEquivalent: "").target = controller
+        fileMenu.addItem(NSMenuItem.separator())
+        fileMenu.addItem(withTitle: "Print…", action: #selector(MainViewController.commandPrint(_:)), keyEquivalent: "p").target = controller
+        fileMenu.addItem(withTitle: "Print Current Sheet…", action: #selector(MainViewController.commandPrintCurrentSheet(_:)), keyEquivalent: "").target = controller
         fileItem.submenu = fileMenu
 
         let editItem = NSMenuItem()
@@ -234,6 +236,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenu.addItem(withTitle: "Select All Text", action: #selector(MainViewController.commandSelectAll(_:)), keyEquivalent: "a").target = controller
         editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: "Find…", action: #selector(MainViewController.commandFocusSearch(_:)), keyEquivalent: "f").target = controller
+        editMenu.addItem(withTitle: "Find Next", action: #selector(MainViewController.selectNextSearchHit), keyEquivalent: "g").target = controller
+        let findPrevious = editMenu.addItem(withTitle: "Find Previous", action: #selector(MainViewController.selectPreviousSearchHit), keyEquivalent: "g")
+        findPrevious.keyEquivalentModifierMask = [.command, .shift]
+        findPrevious.target = controller
         editItem.submenu = editMenu
 
         let bookmarksItem = NSMenuItem()
@@ -260,9 +266,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         viewItem.title = "View"
         mainMenu.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(withTitle: "Markups List", action: #selector(MainViewController.commandToggleMarkupsList(_:)), keyEquivalent: "").target = controller
+        viewMenu.addItem(withTitle: "Invert", action: #selector(MainViewController.commandToggleInvert(_:)), keyEquivalent: "").target = controller
         viewMenu.addItem(withTitle: "Zoom In", action: #selector(MainViewController.commandZoomIn(_:)), keyEquivalent: "+").target = controller
         viewMenu.addItem(withTitle: "Zoom Out", action: #selector(MainViewController.commandZoomOut(_:)), keyEquivalent: "-").target = controller
         viewMenu.addItem(withTitle: "Actual Size", action: #selector(MainViewController.commandActualSize(_:)), keyEquivalent: "0").target = controller
+        viewMenu.addItem(withTitle: "Fit Entire Page", action: #selector(MainViewController.commandFitPage(_:)), keyEquivalent: "9").target = controller
+        viewMenu.addItem(withTitle: "Go to Sheet…", action: #selector(MainViewController.commandGoToSheet(_:)), keyEquivalent: "l").target = controller
         let fitWidthItem = viewMenu.addItem(withTitle: "Fit Width", action: #selector(MainViewController.commandFitWidth(_:)), keyEquivalent: "9")
         fitWidthItem.keyEquivalentModifierMask = [.command, .option]
         fitWidthItem.target = controller
@@ -307,7 +317,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 Drawbridge
 Version \(version) (\(build))
 
-Drawbridge is a native macOS PDF viewer for architects, designers, and engineers, focused on sheet bookmarks and hyperlinks.
+Drawbridge is a native macOS PDF viewer for architects, designers, and engineers, with sheet bookmarks, hyperlinks, and editable vector markups.
 
 System Requirements:
 • Apple Silicon Mac (M1 or newer)

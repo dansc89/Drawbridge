@@ -147,6 +147,11 @@ extension MainViewController {
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField {
                 return event
             }
+            if pdfView.rectangleMarkup.handleToolShortcut(event) {
+                view.window?.makeFirstResponder(pdfView)
+                return nil
+            }
+            if [36,76].contains(event.keyCode), pdfView.rectangleMarkup.finishPolyline() { return nil }
             switch event.keyCode {
             case 123, 126: // Left / Up
                 lastUserInteractionAt = Date()
@@ -161,6 +166,20 @@ extension MainViewController {
             }
         }
 
+        if modifiers.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "z",
+           view.window?.firstResponder === pagesTableView || view.window?.firstResponder === bookmarksOutlineView {
+            guard !isPDFProcessingBusy else { return nil }
+            if modifiers.contains(.shift) { view.window?.undoManager?.redo() }
+            else { view.window?.undoManager?.undo() }
+            return nil
+        }
+
+        if modifiers.contains(.command), event.charactersIgnoringModifiers?.lowercased() == "z",
+           view.window?.firstResponder === pdfView {
+            if modifiers.contains(.shift) { rectangleRedo(nil) } else { rectangleUndo(nil) }
+            return nil
+        }
+
         let forbidden: NSEvent.ModifierFlags = [.command, .option, .control]
         guard modifiers.isDisjoint(with: forbidden) else {
             return event
@@ -171,11 +190,17 @@ extension MainViewController {
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField {
                 return event
             }
+            if view.window?.firstResponder === pagesTableView {
+                deletePagesFromSidebar()
+                return nil
+            }
             if view.window?.firstResponder === bookmarksOutlineView {
                 deleteBookmarkFromSidebar()
                 return nil
             }
-            return nil
+            if view.window?.firstResponder === markupsTable { deleteListedMarkups(nil); return nil }
+            if view.window?.firstResponder === pdfView { rectangleDelete(nil); return nil }
+            return event
         }
 
         if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField {
@@ -196,6 +221,7 @@ extension MainViewController {
     }
 
     func handleEscapePress() {
+        pdfView.rectangleMarkup.escape()
         cancelPendingMarkupInteractions()
         if pdfView.toolMode != .select {
             setTool(.select)

@@ -1,5 +1,6 @@
 import AppKit
 import PDFKit
+import CoreImage
 import UniformTypeIdentifiers
 
 private final class PDFOverscrollClipView: NSClipView {
@@ -52,6 +53,16 @@ private final class PDFOverscrollClipView: NSClipView {
 }
 
 final class MarkupPDFView: PDFView, NSTextFieldDelegate {
+    let rectangleMarkup = RectangleMarkupController()
+    // Keep PDFView.document inherited: PDFKit reads it from its formFillingQueue.
+    // Overriding it here gives the ObjC getter a main-actor assertion and crashes
+    // those legitimate framework callbacks on macOS 26.
+    func setMarkupDocument(_ document: PDFDocument?) {
+        rectangleMarkup.finishTextEditing()
+        self.document = document
+        rectangleMarkup.bind(to:document)
+    }
+
     enum ReorderAction {
         case sendToBack
         case bringForward
@@ -98,7 +109,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let tickAngle: CGFloat
         let labelOffset: CGFloat
     }
-    private struct ViewportHistoryEntry {
+    struct ViewportHistoryEntry {
         let pageIndex: Int
         let point: NSPoint
         let scale: CGFloat
@@ -248,6 +259,25 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var navigationForwardStack: [ViewportHistoryEntry] = []
     private var applyingHistoryNavigation = false
     private let navigationHistoryLimit = 300
+    struct TabViewState {
+        let current: ViewportHistoryEntry
+        let back: [ViewportHistoryEntry]
+        let forward: [ViewportHistoryEntry]
+        let autoScales: Bool
+    }
+    func captureTabViewState() -> TabViewState? {
+        resetNavigationHistoryIfNeeded()
+        guard let current = currentViewportHistoryEntry() else { return nil }
+        return TabViewState(current: current, back: navigationBackStack, forward: navigationForwardStack, autoScales: autoScales)
+    }
+    @discardableResult func restoreTabViewState(_ state: TabViewState) -> Bool {
+        resetNavigationHistoryIfNeeded()
+        guard applyHistoryEntry(state.current) else { return false }
+        navigationBackStack = state.back.filter { $0.pageIndex < (document?.pageCount ?? 0) }
+        navigationForwardStack = state.forward.filter { $0.pageIndex < (document?.pageCount ?? 0) }
+        autoScales = state.autoScales
+        return true
+    }
     private var navigationHistoryDocumentID: ObjectIdentifier?
     private var pendingCalloutPage: PDFPage?
     private var pendingCalloutTipInPage: NSPoint?
@@ -453,6 +483,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         refreshAppearanceColors()
         registerForDraggedTypes([.fileURL])
         installViewportObserversIfNeeded()
+        rectangleMarkup.install(on: self)
     }
 
     required init?(coder: NSCoder) {
@@ -469,7 +500,53 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     func refreshAppearanceColors() {
-        backgroundColor = NSColor(calibratedWhite: 0.07, alpha: 1.0)
+        // Core Image inverts in linear light. Near-white becomes a dark surround.
+        backgroundColor = isColorInverted ? NSColor(calibratedWhite: 0.997, alpha: 1.0) : AppAppearance.canvas
+    }
+
+    /// A screen-only filter. Never mutate a PDF page, annotation, or save payload.
+    private(set) var isColorInverted = false
+
+    func setColorInverted(_ inverted: Bool) {
+        guard inverted != isColorInverted else { return }
+        let filter = CIFilter(name: "CIColorInvert")
+        guard !inverted || filter != nil else { return }
+        isColorInverted = inverted
+        layerUsesCoreImageFilters = true
+        contentFilters = inverted ? [filter!] : []
+        refreshAppearanceColors()
+        needsDisplay = true
+    }
+
+    /// PDFKit draws pages in nested views/layers; invalidating only PDFView can
+    /// leave a cached annotation image visible after the annotation is removed.
+    func refreshAnnotationRendering(on page: PDFPage, importedAppearanceChanged: Bool = false) {
+        if importedAppearanceChanged {
+            // PDFKit bakes external AP streams into page tiles. A geometry
+            // invalidation clears those tiles. Restore rotation synchronously;
+            // the document and viewport retain their original orientation.
+            let rotation = page.rotation
+            page.rotation = (rotation + 90) % 360
+            page.rotation = rotation
+        }
+        annotationsChanged(on: page)
+        guard currentPage === page || visiblePages.contains(where: { $0 === page }) else { return }
+        let pageRect = convert(page.bounds(for: displayBox), from: page).insetBy(dx: -4, dy: -4)
+        guard !pageRect.isEmpty, !pageRect.isNull,
+              pageRect.origin.x.isFinite, pageRect.origin.y.isFinite,
+              pageRect.width.isFinite, pageRect.height.isFinite else {
+            needsDisplay = true
+            documentView?.needsDisplay = true
+            return
+        }
+        func invalidate(_ target: NSView) {
+            let localRect = target.convert(pageRect, from: self).intersection(target.bounds)
+            guard !localRect.isEmpty, !localRect.isNull else { return }
+            target.setNeedsDisplay(localRect)
+            target.layer?.setNeedsDisplay(localRect)
+            for child in target.subviews { invalidate(child) }
+        }
+        invalidate(self)
     }
 
     private func installOverscrollClipViewIfNeeded() {
@@ -534,6 +611,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         installClipViewObserverIfNeeded()
         updateGridOverlayIfNeeded()
         updateHyperlinkOverlayIfNeeded()
+        rectangleMarkup.refresh()
     }
 
     func setGridVisible(_ visible: Bool) {
@@ -548,6 +626,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     func refreshHyperlinkHighlights() {
         updateHyperlinkOverlayIfNeeded()
+        rectangleMarkup.refresh()
     }
 
     func setOrthoSnapEnabled(_ enabled: Bool) {
@@ -581,7 +660,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func installClipViewObserverIfNeeded() {
-        guard let clipView = enclosingScrollView?.contentView else { return }
+        guard let clipView = contentClipView else { return }
         if observedClipView === clipView {
             return
         }
@@ -605,11 +684,14 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     @objc private func handlePDFViewportChangedNotification(_ notification: Notification) {
         _ = notification
         updateHyperlinkOverlayIfNeeded()
+        rectangleMarkup.refresh()
     }
 
     @objc private func handleClipViewBoundsDidChange(_ notification: Notification) {
         _ = notification
         updateHyperlinkOverlayIfNeeded()
+        rectangleMarkup.refresh()
+        onViewportChanged?()
     }
 
     private func updateHyperlinkOverlayIfNeeded(forceHideWhenDisabled: Bool = false) {
@@ -800,6 +882,44 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         gridOverlayLayer.isHidden = false
     }
 
+    // Draw once at cursor scale; the nib is the drawing hotspot.
+    static let penCursor: NSCursor = {
+        let image = NSImage(size: NSSize(width: 24, height: 24), flipped: false) { _ in
+            let body = NSBezierPath()
+            body.move(to: NSPoint(x: 3, y: 3))
+            body.line(to: NSPoint(x: 6, y: 11))
+            body.line(to: NSPoint(x: 17, y: 22))
+            body.line(to: NSPoint(x: 22, y: 17))
+            body.line(to: NSPoint(x: 11, y: 6))
+            body.close()
+            NSColor.white.setStroke(); body.lineWidth = 3; body.stroke()
+            NSColor.black.setFill(); body.fill()
+            let detail = NSBezierPath()
+            detail.move(to: NSPoint(x: 7, y: 10)); detail.line(to: NSPoint(x: 10, y: 7))
+            detail.move(to: NSPoint(x: 16, y: 18)); detail.line(to: NSPoint(x: 18, y: 16))
+            NSColor.white.setStroke(); detail.lineWidth = 1; detail.stroke()
+            return true
+        }
+        return NSCursor(image: image, hotSpot: NSPoint(x: 3, y: 21))
+    }()
+
+    var usesPenCursor: Bool { rectangleMarkup.tool == .pen && !isRegionCaptureModeEnabled }
+
+    func markupToolCursorChanged() {
+        window?.invalidateCursorRects(for: self)
+        guard let window, bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil)) else { return }
+        if usesPenCursor { Self.penCursor.set() } else { NSCursor.arrow.set() }
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if usesPenCursor { addCursorRect(visibleRect, cursor: Self.penCursor) }
+    }
+
+    override func cursorUpdate(with event: NSEvent) {
+        if usesPenCursor { Self.penCursor.set() } else { super.cursorUpdate(with: event) }
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let tracking = mouseTrackingArea {
@@ -807,7 +927,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         let tracking = NSTrackingArea(
             rect: bounds,
-            options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved],
+            options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved, .cursorUpdate],
             owner: self,
             userInfo: nil
         )
@@ -815,9 +935,16 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         mouseTrackingArea = tracking
     }
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
+    }
+
     override func mouseMoved(with event: NSEvent) {
+        rectangleMarkup.pointerMoved(at:convert(event.locationInWindow,from:nil))
         lastPointerInView = convert(event.locationInWindow, from: nil)
         super.mouseMoved(with: event)
+        if usesPenCursor { Self.penCursor.set() }
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -834,6 +961,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let location = convert(event.locationInWindow, from: nil)
         lastPointerInView = location
         navigationSelectionStart = nil
+        if !isRegionCaptureModeEnabled, rectangleMarkup.pointerDown(at: location, clickCount: event.clickCount) { return }
         guard let page = page(for: location, nearest: false) else { return }
         if isRegionCaptureModeEnabled {
             regionCaptureStartInView = location
@@ -880,6 +1008,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             dragPreviewLayer.path = CGPath(rect: normalizedRect(from: start, to: location), transform: nil)
             return
         }
+        if rectangleMarkup.pointerDragged(at: location) { return }
         guard let start = navigationSelectionStart else { return }
         let end = convert(location, to: start.page)
         setCurrentSelection(start.page.selection(from: start.point, to: end), animate: false)
@@ -887,6 +1016,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     override func mouseUp(with event: NSEvent) {
         navigationSelectionStart = nil
+        if !isRegionCaptureModeEnabled, rectangleMarkup.pointerUp(at: convert(event.locationInWindow, from: nil)) { return }
         guard isRegionCaptureModeEnabled else { return }
         defer {
             regionCaptureStartInView = nil
@@ -1966,8 +2096,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     /// layout immediately after a page change. Let automatic scaling establish
     /// the target page first, then lock in and reassert the target page's fit
     /// scale over the next layout passes.
-    func navigateToPageFittingWholePageWithHistory(_ page: PDFPage) {
-        if !applyingHistoryNavigation {
+    func navigateToPageFittingWholePageWithHistory(_ page: PDFPage, recordHistory: Bool = true) {
+        if recordHistory && !applyingHistoryNavigation {
             pushBackHistoryCurrentLocation()
             navigationForwardStack.removeAll(keepingCapacity: true)
         }
@@ -1993,6 +2123,65 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         go(to: page)
         forceZoomLayout()
         centerWholePageInViewport(page)
+    }
+
+    func fitCurrentPageWidth() {
+        guard let page = currentPage, let clip = contentClipView else { return }
+        zoomAnchorGeneration &+= 1
+        let anchor = normalizedVisibleCenter(on: page) ?? (x: 0.5, y: 0.5)
+        autoScales = false
+        forceZoomLayout()
+        let pageRect = convert(page.bounds(for: displayBox), from: page).standardized
+        guard pageRect.width > 0, clip.bounds.width > 8 else { return }
+        let target = scaleFactor * (clip.bounds.width - 8) / pageRect.width
+        guard target.isFinite, target > 0 else { return }
+        if !applyingHistoryNavigation {
+            pushBackHistoryCurrentLocation()
+            navigationForwardStack.removeAll(keepingCapacity: true)
+        }
+        scaleFactor = min(max(minScaleFactor, target), maxScaleFactor)
+        forceZoomLayout()
+        let previousHistoryState = applyingHistoryNavigation
+        applyingHistoryNavigation = true
+        navigateToPageWithHistory(page, preservingNormalizedViewportCenter: anchor)
+        applyingHistoryNavigation = previousHistoryState
+        onViewportChanged?()
+    }
+
+    /// Navigate after PDFKit has laid out the destination page, preserving the user's zoom.
+    func revealMarkup(_ annotation: PDFAnnotation) {
+        guard let page = annotation.page, page.document === document else { return }
+        zoomAnchorGeneration &+= 1
+        let generation = zoomAnchorGeneration
+        go(to: page)
+        centerMarkup(annotation, on: page)
+        correctMarkupNavigation(annotation, page: page, generation: generation, remainingPasses: 3)
+    }
+
+    private func centerMarkup(_ annotation: PDFAnnotation, on page: PDFPage) {
+        guard currentPage === page, annotation.page === page else { return }
+        forceZoomLayout()
+        if let clip = contentClipView, let documentView {
+            let rect = documentView.convert(convert(annotation.bounds, from: page), from: self).standardized
+            scrollContentClipView(to: NSPoint(x: rect.midX - clip.bounds.width / 2,
+                                             y: rect.midY - clip.bounds.height / 2))
+        }
+        rectangleMarkup.refresh()
+        onViewportChanged?()
+    }
+
+    private func correctMarkupNavigation(_ annotation: PDFAnnotation, page: PDFPage,
+                                         generation: UInt, remainingPasses: Int) {
+        guard remainingPasses > 0 else { return }
+        DispatchQueue.main.async { [weak self, weak annotation, weak page] in
+            guard let self, let annotation, let page,
+                  self.zoomAnchorGeneration == generation,
+                  self.rectangleMarkup.selected === annotation,
+                  self.currentPage === page, page.document === self.document else { return }
+            self.centerMarkup(annotation, on: page)
+            self.correctMarkupNavigation(annotation, page: page, generation: generation,
+                                         remainingPasses: remainingPasses - 1)
+        }
     }
 
     private func centerWholePageInViewport(_ page: PDFPage) {
@@ -2026,6 +2215,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             )
             self.onViewportChanged?()
         }
+    }
+
+    func clearNavigationHistory() {
+        navigationBackStack.removeAll()
+        navigationForwardStack.removeAll()
     }
 
     private func resetNavigationHistoryIfNeeded() {
@@ -2076,6 +2270,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
               let page = document.page(at: entry.pageIndex) else {
             return false
         }
+        zoomAnchorGeneration &+= 1
         applyingHistoryNavigation = true
         defer { applyingHistoryNavigation = false }
         autoScales = false
@@ -2118,6 +2313,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             x: pageBounds.minX + pageBounds.width * min(max(anchor.x, 0), 1),
             y: pageBounds.minY + pageBounds.height * min(max(anchor.y, 0), 1)
         )
+        go(to: page)
+        forceZoomLayout()
+        // Changing page geometry can change the scrollbar layout and thus
+        // the viewport center. Use the destination viewport, not the old one.
         let desiredWindowPoint: NSPoint
         if let clipView = contentClipView {
             desiredWindowPoint = clipView.convert(
@@ -2128,8 +2327,6 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             desiredWindowPoint = convert(NSPoint(x: bounds.midX, y: bounds.midY), to: nil)
         }
 
-        go(to: page)
-        forceZoomLayout()
         zoomAnchorGeneration &+= 1
         let generation = zoomAnchorGeneration
         correctZoomAnchor(page: page, pagePoint: targetPagePoint, desiredWindowPoint: desiredWindowPoint)
@@ -2139,7 +2336,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             desiredWindowPoint: desiredWindowPoint,
             targetScale: scaleFactor,
             generation: generation,
-            remainingPasses: 3
+            remainingPasses: 3,
+            trackViewportCenter: true
         )
         onViewportChanged?()
     }
@@ -2152,6 +2350,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         go(to: selection)
         onViewportChanged?()
     }
+
+    var canNavigateBackInHistory: Bool { resetNavigationHistoryIfNeeded(); return !navigationBackStack.isEmpty }
+    var canNavigateForwardInHistory: Bool { resetNavigationHistoryIfNeeded(); return !navigationForwardStack.isEmpty }
 
     @discardableResult
     func navigateBackInHistory() -> Bool {
@@ -2397,10 +2598,14 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     override func keyDown(with event: NSEvent) {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard modifiers.isDisjoint(with: [.command, .option, .control]) else { return }
+        if rectangleMarkup.handleToolShortcut(event) { return }
         switch event.keyCode {
+        case 36, 76: _ = rectangleMarkup.finishPolyline()
         case 123, 126: onPageNavigationShortcut?(-1)
         case 124, 125: onPageNavigationShortcut?(1)
+        case 51, 117: rectangleMarkup.deleteSelected()
         case 53:
+            rectangleMarkup.escape()
             cancelRegionCaptureMode()
             setCurrentSelection(nil, animate: false)
         default:
@@ -2424,6 +2629,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             pendingInteractiveViewportFeedbackWorkItem = nil
             lastInteractiveViewportFeedbackAt = now
             updateGridOverlayIfNeeded()
+            rectangleMarkup.refresh()
             onViewportChanged?()
             return
         }
@@ -2496,22 +2702,27 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         desiredWindowPoint: NSPoint,
         targetScale: CGFloat,
         generation: UInt,
-        remainingPasses: Int
+        remainingPasses: Int,
+        trackViewportCenter: Bool = false
     ) {
         guard remainingPasses > 0 else { return }
         // PDFKit may relayout its document view over several main-loop turns.
         // Reassert the anchor after each pass; a newer wheel event invalidates
         // this chain through zoomAnchorGeneration.
-        DispatchQueue.main.async { [weak self, weak page] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + (trackViewportCenter ? 1.0 / 60.0 : 0)) { [weak self, weak page] in
             guard let self,
                   let page,
                   self.zoomAnchorGeneration == generation,
                   abs(self.scaleFactor - targetScale) < 0.000_001 else { return }
             self.forceZoomLayout()
+            var resolvedWindowPoint = desiredWindowPoint
+            if trackViewportCenter, let clip = self.contentClipView {
+                resolvedWindowPoint = clip.convert(NSPoint(x: clip.bounds.midX, y: clip.bounds.midY), to: nil)
+            }
             self.correctZoomAnchor(
                 page: page,
                 pagePoint: pagePoint,
-                desiredWindowPoint: desiredWindowPoint
+                desiredWindowPoint: resolvedWindowPoint
             )
             self.scheduleZoomAnchorCorrection(
                 page: page,
@@ -2519,7 +2730,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 desiredWindowPoint: desiredWindowPoint,
                 targetScale: targetScale,
                 generation: generation,
-                remainingPasses: remainingPasses - 1
+                remainingPasses: remainingPasses - 1,
+                trackViewportCenter: trackViewportCenter
             )
             self.emitInteractiveViewportFeedback()
         }

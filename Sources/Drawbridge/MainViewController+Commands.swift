@@ -304,6 +304,21 @@ extension MainViewController {
         saveShortcutBindings()
         updateShortcutHintLabel()
     }
+    @objc func commandMarkupAuthor(_ sender: Any?) {
+        let field = NSTextField(string: MarkupAuthorPreference.currentName)
+        field.frame = NSRect(x: 0, y: 0, width: 360, height: 24)
+        field.placeholderString = "Your name"
+        let alert = NSAlert()
+        alert.messageText = "Markup Author"
+        alert.informativeText = "This name appears as the author of new markups in Drawbridge and other PDF apps. Existing author names are preserved."
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        UserDefaults.standard.set(field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: MarkupAuthorPreference.defaultsKey)
+    }
+
     @objc func commandPerformanceSettings(_ sender: Any?) {
         let defaults = UserDefaults.standard
         let adaptiveDefault = defaults.bool(forKey: Self.defaultsAdaptiveIndexCapEnabledKey)
@@ -398,12 +413,12 @@ extension MainViewController {
         }
 
         if let current = openDocumentURL.map({ canonicalDocumentURL($0) }) {
-            sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == current }
+            unregisterSessionDocument(current)
         }
 
         while let fallback = sessionDocumentURLs.last {
             guard FileManager.default.fileExists(atPath: fallback.path) else {
-                sessionDocumentURLs.removeLast()
+                unregisterSessionDocument(fallback)
                 continue
             }
             openDocument(at: fallback)
@@ -467,6 +482,8 @@ extension MainViewController {
             textView.selectAll(nil)
             return
         }
+        if view.window?.firstResponder === pagesTableView { pagesTableView.selectAll(sender); return }
+        if view.window?.firstResponder === bookmarksOutlineView { bookmarksOutlineView.selectAll(sender); return }
         pdfView.selectAll(sender)
     }
     @objc func commandEditMarkup(_ sender: Any?) { editSelectedMarkupText() }
@@ -485,6 +502,7 @@ extension MainViewController {
         NSApp.activate(ignoringOtherApps: true)
         searchPanel?.makeFirstResponder(toolbarSearchField)
         toolbarSearchField.currentEditor()?.selectAll(nil)
+        refreshSearchIfNeeded()
     }
     @objc func commandZoomIn(_ sender: Any?) { zoom(by: 1.12) }
     @objc func commandZoomOut(_ sender: Any?) { zoom(by: 1.0 / 1.12) }
@@ -504,14 +522,22 @@ extension MainViewController {
         pdfView.scaleFactor = 1.0
         updateStatusBar()
     }
+    @objc func commandFitPage(_ sender: Any?) {
+        guard let page = pdfView.currentPage else { return }
+        pdfView.navigateToPageFittingWholePageWithHistory(page)
+        updateStatusBar()
+    }
     @objc func commandFitWidth(_ sender: Any?) {
-        guard pdfView.document != nil else { return }
-        pdfView.autoScales = true
-        let fit = pdfView.scaleFactorForSizeToFit
-        if fit > 0 {
-            pdfView.scaleFactor = fit
-            pdfView.autoScales = false
-        }
+        pdfView.fitCurrentPageWidth()
+        updateStatusBar()
+    }
+    @objc func commandGoToSheet(_ sender: Any?) {
+        guard let document = pdfView.document, !isPDFProcessingBusy else { return }
+        let entries = SheetNavigationEntry.build(document: document, label: displayPageLabel(forPageIndex:))
+        let picker = SheetNavigator(entries: entries, currentPage: pdfView.currentPage.map(document.index(for:)) ?? 0)
+        guard let index = picker.runModal(parent: view.window), pdfView.document === document,
+              let page = document.page(at: index) else { return }
+        pdfView.navigateToPageFittingWholePageWithHistory(page)
         updateStatusBar()
     }
 
@@ -616,23 +642,37 @@ extension MainViewController {
         }
     }
 
+    @objc func commandToggleInvert(_ sender: Any?) {
+        guard pdfView.document != nil, !isPDFProcessingBusy else { return }
+        pdfView.setColorInverted(!pdfView.isColorInverted)
+        updateStatusBar()
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         guard let action = menuItem.action else { return true }
         guard !isPDFProcessingBusy else { return false }
         let hasDocument = pdfView.document != nil
         switch action {
         case #selector(commandOpen(_:)), #selector(commandKeyboardShortcuts(_:)),
-             #selector(commandPerformanceSettings(_:)), #selector(commandQuickStart(_:)):
+             #selector(commandPerformanceSettings(_:)), #selector(commandMarkupAuthor(_:)), #selector(commandToggleMarkupsList(_:)), #selector(commandQuickStart(_:)):
             return true
         case #selector(commandCycleNextDocument(_:)), #selector(commandCyclePreviousDocument(_:)):
             return sessionDocumentURLs.count > 1
         case #selector(commandCloseDocument(_:)):
             return hasDocument || !sessionDocumentURLs.isEmpty
+        case #selector(commandPrint(_:)), #selector(commandPrintCurrentSheet(_:)):
+            return PDFPrinting.canPrint(pdfView.document)
         case #selector(commandReduceFileSize(_:)):
             return hasDocument && openDocumentURL != nil && !isPDFProcessingBusy
         case #selector(commandFlattenPDF(_:)):
             menuItem.title = pdfView.document.map(PDFAnnotationFlattener.canUnflatten) == true ? "Unflatten PDF…" : "Flatten PDF…"
             return hasDocument && openDocumentURL != nil && !isPDFProcessingBusy
+        case #selector(renamePageLabelFromSidebar):
+            return hasDocument && pagesTableView.selectedRowIndexes.count == 1
+        case #selector(renameBookmarkFromSidebar):
+            return hasDocument && bookmarksOutlineView.selectedRowIndexes.count == 1
+        case #selector(deletePagesFromSidebar):
+            return hasDocument && !pagesTableView.selectedRowIndexes.isEmpty
         case #selector(deleteBookmarkFromSidebar):
             return hasDocument && !bookmarksOutlineView.selectedRowIndexes.isEmpty
         case #selector(commandCopy(_:)), #selector(commandPaste(_:)), #selector(commandSelectAll(_:)):
@@ -644,11 +684,19 @@ extension MainViewController {
              #selector(commandAutoGenerateSheetNames(_:)), #selector(commandBatchLinkSheetNumbers(_:)),
              #selector(commandFocusSearch(_:)), #selector(commandZoomIn(_:)), #selector(commandZoomOut(_:)),
              #selector(commandPreviousPage(_:)), #selector(commandNextPage(_:)),
-             #selector(commandNavigateBack(_:)), #selector(commandNavigateForward(_:)),
-             #selector(commandActualSize(_:)), #selector(commandFitWidth(_:)), #selector(selectSelectionTool(_:)):
+             #selector(commandActualSize(_:)), #selector(commandFitWidth(_:)), #selector(commandFitPage(_:)), #selector(commandGoToSheet(_:)), #selector(selectSelectionTool(_:)):
             return hasDocument
+        case #selector(commandNavigateBack(_:)):
+            return pdfView.canNavigateBackInHistory
+        case #selector(commandNavigateForward(_:)):
+            return pdfView.canNavigateForwardInHistory
+        case #selector(selectNextSearchHit), #selector(selectPreviousSearchHit):
+            return hasDocument && !searchHits.isEmpty
         case #selector(commandToggleHyperlinkHighlights(_:)):
             menuItem.state = isHyperlinkHighlightsVisible ? .on : .off
+            return hasDocument
+        case #selector(commandToggleInvert(_:)):
+            menuItem.state = pdfView.isColorInverted ? .on : .off
             return hasDocument
         default:
             // Legacy annotation selectors cannot be re-enabled by old menu state.
@@ -662,7 +710,7 @@ extension MainViewController {
         alert.informativeText = "Open a PDF to generate bookmarks, link sheet references, flatten markups, or reduce file size."
         alert.alertStyle = .informational
 
-        let guide = NSTextView(frame: NSRect(x: 0, y: 0, width: 440, height: 210))
+        let guide = NSTextView(frame: NSRect(x: 0, y: 0, width: 480, height: 300))
         guide.isEditable = false
         guide.drawsBackground = false
         guide.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
@@ -672,10 +720,21 @@ extension MainViewController {
 3) Create sheet-reference hyperlinks with ⌘⇧H.
 4) Navigate with the Pages/Bookmarks sidebar or arrow keys.
    Mouse wheel zooms at the pointer; middle mouse drag pans.
-5) Rename/delete bookmarks by right-clicking a bookmark.
-6) Save with ⌘S; Save As PDF with ⌘⇧S.
+5) Go to Sheet with ⌘L; fit the entire page with ⌘9.
+6) Right-click pages/bookmarks to rename or delete. Shift-click selects a
+   range; Command-click selects individual items. Delete asks for confirmation.
+7) Save with ⌘S; Save As PDF with ⌘⇧S.
+8) Mark up with R (rectangle), E (ellipse), L (line), A (arrow),
+   ⇧P (polygon), ⇧N (polyline), or T (text). V selects markups.
+   Lines/arrows: click the start, then click the end.
+   Text: draw a box and type directly on the page.
+9) Undo with ⌘Z; redo with ⌘⇧Z. Escape cancels drawing.
+10) Print with ⌘P, or choose File > Print Current Sheet.
+    Printing defaults to actual size; check paper and scale.
 
-Existing PDF annotations are displayed without editing tools.
+Invert changes the screen only, not saved PDFs or printing.
+Imported annotations are displayed; editing currently supports
+markups created in Drawbridge.
 """
         alert.accessoryView = guide
         alert.addButton(withTitle: "Done")
@@ -714,6 +773,7 @@ Existing PDF annotations are displayed without editing tools.
     }
 
     private func navigatePage(delta: Int) {
+        guard !isPDFProcessingBusy else { return }
         guard let document = pdfView.document else { return }
         let current = pdfView.currentPage.map { document.index(for: $0) } ?? 0
         let anchor = currentPageNavigationAnchor()

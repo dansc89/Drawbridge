@@ -57,7 +57,7 @@ enum PDFAnnotationFlattener {
         }
         func writeJSON(_ json: [String: Any], name: String) throws -> URL {
             let url = directory.appendingPathComponent(name)
-            try JSONSerialization.data(withJSONObject: metadataJSON(json), options: [.withoutEscapingSlashes, .sortedKeys]).write(to: url)
+            try PDFJSONPatchEncoder.data(withJSONObject: metadataJSON(json), options: [.withoutEscapingSlashes, .sortedKeys]).write(to: url)
             return url
         }
         progress("Inspecting markup appearances…")
@@ -242,7 +242,7 @@ enum PDFAnnotationFlattener {
         catalog.removeValue(forKey: recoveryKey)
         objects["obj:\(root)"] = ["value": catalog]
         setObjects(objects, in: &json)
-        try JSONSerialization.data(withJSONObject: metadataJSON(json), options: [.withoutEscapingSlashes, .sortedKeys]).write(to: jsonURL)
+        try PDFJSONPatchEncoder.data(withJSONObject: metadataJSON(json), options: [.withoutEscapingSlashes, .sortedKeys]).write(to: jsonURL)
         if cancelled() { throw CancellationError() }
         progress("Restoring \(restored) editable annotations…")
         guard PDFTKBookmarkWriter.run(executable, arguments: [snapshot.path, "--stream-data=preserve", "--update-from-json=\(jsonURL.path)", output.path]),

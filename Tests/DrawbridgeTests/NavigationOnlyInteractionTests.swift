@@ -152,7 +152,7 @@ final class NavigationOnlyInteractionTests: XCTestCase {
         for action in [#selector(MainViewController.commandDeleteMarkup(_:)), #selector(MainViewController.commandPaste(_:)), #selector(MainViewController.selectPenTool(_:)), #selector(MainViewController.commandFlattenPDF(_:))] {
             XCTAssertFalse(controller.validateMenuItem(NSMenuItem(title: "Legacy action", action: action, keyEquivalent: "")))
         }
-        XCTAssertEqual(controller.toolbarDefaultItemIdentifiers(NSToolbar()), [.drawbridgePrimaryControls, .flexibleSpace])
+        XCTAssertEqual(controller.toolbarDefaultItemIdentifiers(NSToolbar()), [.drawbridgePrimaryControls, .flexibleSpace, .drawbridgeMarkupControls, .flexibleSpace])
     }
 
     private func makePage() throws -> PDFPage {

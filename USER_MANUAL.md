@@ -1,4 +1,4 @@
-# Drawbridge 5.7 User Manual
+# Drawbridge User Manual
 
 Drawbridge is a macOS PDF viewer for architectural drawing sets, with sheet bookmarks, hyperlinks, and editable vector markups.
 
@@ -44,7 +44,7 @@ Markup saving appends annotation changes without rasterizing the drawing pages. 
 
 The separate markup toolbar supports pen (`P`), rectangle (`R`), ellipse (`E`), line (`L`), arrow (`A`), polygon (`Shift+P`), polyline (`Shift+N`), and text (`T`). The active tool is highlighted. `V` returns to selection; Escape cancels an unfinished drawing. Click a line or arrow's start and then its end. Draw a text box and type on the page; double-click an existing Drawbridge text annotation to edit it.
 
-Select Drawbridge markups to move them, change their color or line weight, or delete them. Polygon and polyline handles follow their vertices. Polygons support fill; polylines remain open lines. Use `Cmd+Z` to undo and `Shift+Cmd+Z` to redo. Imported annotations are displayed and preserved but are not editable through these tools. Measurement, snapshot pasting, page-combining, and page-conversion tools are not yet available.
+Select Drawbridge markups to move them, change their color or line weight, or delete them. Polygon and polyline handles follow their vertices. Polygons support fill; polylines remain open lines. Use `Cmd+Z` to undo and `Shift+Cmd+Z` to redo. Standard unlocked imported annotations can also be selected, moved, and deleted with Undo/Redo. Their original appearance and metadata are preserved when saving. Imported text, style, and node editing are not yet supported; those controls are disabled when an imported markup is selected. Flattened page content and locked annotations cannot be selected as editable markups. Measurement, snapshot pasting, page-combining, and page-conversion tools are not yet available.
 
 ## Markup Properties
 
@@ -79,3 +79,9 @@ Choose **File > Reduce File Size…** or the clamp toolbar button. Compression i
 ## Settings
 
 Use **Drawbridge > Keyboard Shortcuts…** to review shortcuts and **Drawbridge > Performance Settings…** for performance preferences.
+
+## Review Markups
+
+Choose **View > Markups List**, or click **Markups** in the bottom bar. The list shows markup type, page, comment, and author across the document. Click a row to navigate to that annotation. Search by text or author. Shift-click or Command-click to select multiple rows, then press Backspace/Delete or choose **Delete Selected**. Cmd+Z restores deleted markups. Links, form controls, and AutoCAD SHX text helpers are excluded from this review list. Locked annotations remain listed but cannot be deleted. Clear the search before checking whether any review markups remain.
+
+Choose **Drawbridge > Markup Author…** to set the name recorded on new markups. The default is your Mac account’s full name. Existing annotations from other apps retain their authors.
