@@ -1,18 +1,20 @@
 # Drawbridge Development
 
-Technical scripts and workflows for local development and release management.
+Technical scripts and workflows for local development and release management. Replace `/path/to/Drawbridge` with your checkout location. Keep client PDFs, logs, and credentials outside tracked files.
+
+The optional `Backend/` prototype is separate from the released macOS app and is not a production collaboration service.
 
 ## Run In Dev Mode
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 swift run
 ```
 
-## Run Backend (Cloud Sync)
+## Optional Experimental Backend
 
 ```bash
-cd /Users/example/Drawbridge/Backend
+cd /path/to/Drawbridge/Backend
 cp .env.example .env
 npm install
 npm run start
@@ -20,23 +22,23 @@ npm run start
 
 Backend docs:
 
-`/Users/example/Drawbridge/Backend/README.md`
+[Backend instructions](Backend/README.md)
 
 ## Build A Launchable `.app` Bundle
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 ./Scripts/package-app.sh
 ```
 
 Output:
 
-`/Users/example/Drawbridge/dist/Drawbridge.app`
+`/path/to/Drawbridge/dist/Drawbridge.app`
 
 Launch:
 
 ```bash
-open /Users/example/Drawbridge/dist/Drawbridge.app
+open /path/to/Drawbridge/dist/Drawbridge.app
 ```
 
 ## Trusted macOS Distribution (Sign + Notarize)
@@ -58,7 +60,7 @@ Quick local diagnostic:
 ### 2) Build with Developer ID signing
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 export DRAWBRIDGE_CODESIGN_IDENTITY="Developer ID Application: <Your Name> (<TEAMID>)"
 ./Scripts/package-app.sh
 ```
@@ -66,8 +68,8 @@ export DRAWBRIDGE_CODESIGN_IDENTITY="Developer ID Application: <Your Name> (<TEA
 ### 3) Store notarization profile (one-time)
 
 ```bash
-cd /Users/example/Drawbridge
-./Scripts/setup-notary-profile.sh drawbridge-notary <apple-id-email> <TEAMID> <app-specific-password>
+cd /path/to/Drawbridge
+./Scripts/setup-notary-profile.sh drawbridge-notary <apple-id-email> <TEAMID>
 ```
 
 ### 4) Notarize + staple app (and optional DMG)
@@ -75,7 +77,7 @@ cd /Users/example/Drawbridge
 App only:
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 export DRAWBRIDGE_NOTARY_PROFILE="drawbridge-notary"
 ./Scripts/notarize-release.sh dist/Drawbridge.app
 ```
@@ -83,9 +85,9 @@ export DRAWBRIDGE_NOTARY_PROFILE="drawbridge-notary"
 App + DMG:
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 export DRAWBRIDGE_NOTARY_PROFILE="drawbridge-notary"
-./Scripts/notarize-release.sh dist/Drawbridge.app dist/Drawbridge-vX.Y.Z.dmg
+./Scripts/notarize-release.sh dist/Drawbridge.app dist/Drawbridge-vX.Y.dmg
 ```
 
 ### 5) Verify Gatekeeper acceptance
@@ -98,7 +100,7 @@ xcrun stapler validate dist/Drawbridge.app
 ## Optional Install To Applications
 
 ```bash
-cp -R /Users/example/Drawbridge/dist/Drawbridge.app /Applications/
+cp -R /path/to/Drawbridge/dist/Drawbridge.app /Applications/
 open /Applications/Drawbridge.app
 ```
 
@@ -114,28 +116,28 @@ If no label is provided, the current Git tag is used.
 Optional labeled checkpoint:
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 CHECKPOINT_LABEL="stable-window-fix" ./Scripts/package-app.sh
 ```
 
 List checkpoints:
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 ./Scripts/checkpoint.sh list
 ```
 
 Restore app checkpoint:
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 ./Scripts/checkpoint.sh restore <checkpoint-name>
 ```
 
 Restore source snapshot:
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 ./Scripts/checkpoint.sh restore-source <checkpoint-name>
 ```
 
@@ -144,15 +146,15 @@ cd /Users/example/Drawbridge
 Safe sync (no deletes in target):
 
 ```bash
-cd /Users/example/Drawbridge
-./Scripts/sync-to-gdrive.sh
+cd /path/to/Drawbridge
+DRAWBRIDGE_SYNC_ROOT="/path/to/Google Drive/My Drive" ./Scripts/sync-to-gdrive.sh
 ```
 
 Mirror sync (deletes removed local files from target):
 
 ```bash
-cd /Users/example/Drawbridge
-./Scripts/sync-to-gdrive.sh /Users/example/Drawbridge --mirror
+cd /path/to/Drawbridge
+DRAWBRIDGE_SYNC_ROOT="/path/to/Google Drive/My Drive" ./Scripts/sync-to-gdrive.sh /path/to/Drawbridge --mirror
 ```
 
 ## GitHub Releases
@@ -164,16 +166,16 @@ Release workflow publishes macOS artifacts when pushing a version tag:
 Create and publish a release:
 
 ```bash
-cd /Users/example/Drawbridge
-git tag v0.1.4
-git push origin v0.1.4
+cd /path/to/Drawbridge
+git tag vX.Y
+git push origin vX.Y
 ```
 
 Standard local publish command (ensures DMG is uploaded to the release):
 
 ```bash
-cd /Users/example/Drawbridge
-./Scripts/publish-release.sh v0.1.4 dist/Drawbridge-v0.1.4.dmg
+cd /path/to/Drawbridge
+./Scripts/publish-release.sh vX.Y dist/Drawbridge-vX.Y.dmg
 ```
 
 Latest release URL:
@@ -185,8 +187,8 @@ Latest release URL:
 Generate and benchmark a synthetic heavy PDF:
 
 ```bash
-cd /Users/example/Drawbridge
-./Scripts/run-stress.sh 300 100 /Users/example/Drawbridge/dist/stress/Drawbridge-Stress.pdf
+cd /path/to/Drawbridge
+./Scripts/run-stress.sh 300 100 /path/to/Drawbridge/dist/stress/Drawbridge-Stress.pdf
 ```
 
 Args:
@@ -198,8 +200,8 @@ Args:
 Example with benchmark summary:
 
 ```bash
-cd /Users/example/Drawbridge
-./Scripts/run-stress.sh 300 100 /Users/example/Drawbridge/dist/stress/Drawbridge-Stress.pdf 5
+cd /path/to/Drawbridge
+./Scripts/run-stress.sh 300 100 /path/to/Drawbridge/dist/stress/Drawbridge-Stress.pdf 5
 ```
 
 Index snapshot path:
@@ -224,7 +226,7 @@ Watchdog log path:
 Optional performance event log:
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 DRAWBRIDGE_PERF=1 swift run
 ```
 
@@ -237,14 +239,14 @@ Log path:
 Run manually:
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 ./Scripts/nightly-stress-suite.sh
 ```
 
 Install launchd automation (daily 2:00 AM):
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 ./Scripts/install-nightly-stress-launchd.sh
 ```
 
@@ -253,14 +255,14 @@ cd /Users/example/Drawbridge
 Run backend-only compatibility and save-performance validation:
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 ./Scripts/run-compat-gate.sh smoke
 ```
 
 Standard release-grade profile:
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 ./Scripts/run-compat-gate.sh standard
 ```
 
@@ -273,7 +275,7 @@ Notes:
 Generate backend-only hyperlink destination variants for external viewer A/B checks:
 
 ```bash
-cd /Users/example/Drawbridge
+cd /path/to/Drawbridge
 ./Scripts/export-link-compat-variants.sh /absolute/path/to/file.pdf /absolute/path/to/output-dir
 ```
 
@@ -296,3 +298,9 @@ Bookmark generation reports the current page, field being read, OCR verification
 `SheetReferencePolicy.reconcileOCRNumbers` resolves OCR O/0 and I/L/1 confusion only in numeric positions of a strongly supported format, with ordered OCR anchors before and after the sheet. It does not consult saved labels or bookmarks, change reference matching, or allow ordinal destinations. This correction is shared by bookmarking and hyperlink destination scanning.
 
 Local native validation read 43 general-sheet title blocks in a 99-page architectural PDF, recovering three missing destinations. Saved links reopened at pages 7, 9 and 12. All 99 drawing streams, resource trees, boxes and rotations remained unchanged; three added link annotations grew the file by 1,071 bytes. `OCRNumericFormatTests` covers supported correction, insufficient evidence, legitimate letter prefixes, and ordinary numeric tokens.
+
+## Private corpus fixtures
+
+`PDFBookmarkCorpusTests` accepts `DRAWBRIDGE_BOOKMARK_DESKTOP_FIXTURES` pointing to a private folder containing `project-a/mechanical.pdf`, `project-a/landscape.pdf`, `project-b/electrical.pdf`, and `project-b/landscape.pdf`. The separate `DRAWBRIDGE_BOOKMARK_FIXTURES` folder contains `MECH.pdf`, `ARCH.pdf`, `Survey.pdf`, and `SCALE TEST.pdf`. Copy or symlink your permitted local fixtures to these neutral names; never commit them. Other optional test environment variable names are retained for compatibility, but their values stay local.
+
+Before publishing, run `python3 Scripts/check-public-files.py` and `gitleaks git . --log-opts="--all" --redact`. Public CI repeats both checks.

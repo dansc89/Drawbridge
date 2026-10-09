@@ -1,6 +1,6 @@
 # Drawbridge Sync Backend
 
-Account-based backend for Drawbridge collaboration, cloud uploads, and realtime session sync.
+Experimental account-based collaboration prototype, separate from the released macOS app. It is intended for local development, not public deployment. It still needs an independent security review, rate limiting, TLS deployment design, and session revocation controls before production use.
 
 ## Features
 - Username/password account registration and login
@@ -14,9 +14,11 @@ Account-based backend for Drawbridge collaboration, cloud uploads, and realtime 
 ## Quick Start (local)
 
 ```bash
-cd /Users/example/Drawbridge/Backend
+cd /path/to/Drawbridge/Backend
 cp .env.example .env
 npm install
+# Generate a JWT_SECRET with at least 32 random bytes and put it in .env:
+openssl rand -hex 32
 npm run start
 ```
 
@@ -87,7 +89,7 @@ Example subscribe:
 }
 ```
 
-## Orange Pi Deployment
+## Development-host setup
 
 ### Option A: systemd
 1. Copy backend to `/opt/drawbridge/Backend`
@@ -112,3 +114,7 @@ docker compose up -d --build
 ## Notes
 - V1 uses SQLite for fast setup and low ops overhead on Orange Pi.
 - For higher concurrency, migrate to PostgreSQL + Redis while keeping the same API contract.
+
+## Private configuration
+
+Never commit `.env`, storage, databases, or uploaded PDFs. Docker excludes these from the image. The API binds to `127.0.0.1` by default; Compose publishes ports only on loopback and explicitly sets the container listener to `0.0.0.0`. The Compose example also starts MinIO and requires separately configured `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`; set both in `.env` before using Compose. A generated `JWT_SECRET` is required in every environment; example placeholders are rejected. Do not expose this prototype to the Internet.

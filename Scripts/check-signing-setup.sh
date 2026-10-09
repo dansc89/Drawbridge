@@ -32,5 +32,5 @@ if xcrun notarytool history --keychain-profile "$PROFILE_NAME" >/dev/null 2>&1; 
 else
   echo "Notary profile missing or invalid: $PROFILE_NAME"
   echo "Recreate it with:"
-  echo "  ./Scripts/setup-notary-profile.sh $PROFILE_NAME <apple-id-email> <TEAMID> <app-specific-password>"
+  echo "  ./Scripts/setup-notary-profile.sh $PROFILE_NAME <apple-id-email> <TEAMID>"
 fi

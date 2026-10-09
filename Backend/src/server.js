@@ -51,7 +51,7 @@ function authRequired(req, res, next) {
     return res.status(401).json({ error: "Missing bearer token" });
   }
   try {
-    const decoded = jwt.verify(match[1], config.jwtSecret);
+    const decoded = jwt.verify(match[1], config.jwtSecret, { algorithms: ["HS256"] });
     req.auth = decoded;
     return next();
   } catch {
@@ -586,7 +586,7 @@ server.on("upgrade", (req, socket, head) => {
   }
 
   try {
-    const decoded = jwt.verify(token, config.jwtSecret);
+    const decoded = jwt.verify(token, config.jwtSecret, { algorithms: ["HS256"] });
     req.auth = decoded;
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit("connection", ws, req);
@@ -698,7 +698,7 @@ wss.on("connection", (ws, req) => {
   });
 });
 
-server.listen(config.port, () => {
+server.listen(config.port, config.host, () => {
   console.log(`Drawbridge backend listening on :${config.port}`);
   console.log(`DB path: ${config.dbPath}`);
   console.log(`Storage root: ${config.storageRoot}`);
