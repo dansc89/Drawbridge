@@ -12,13 +12,15 @@ for name in filter(None, paths):
     parts = path.parts
     if (parts[0] in {"tmp", "local-test", "private-fixtures", "verified-download"}
             or parts[0].startswith("verified-v")
-            or path.suffix.lower() in {".p12", ".pfx", ".pem", ".key", ".p8", ".keychain-db"}
+            or path.suffix.lower() in {".p12", ".pfx", ".pem", ".key", ".p8", ".keychain-db", ".db", ".sqlite", ".sqlite3", ".log"}
             or (path.name.startswith(".env") and path.name != ".env.example")
             or name.startswith(("Backend/data/", "Backend/storage/", "Backend/minio-data/"))):
         failures.append((name, "local data or credentials"))
         continue
     if path.suffix.lower() not in {".md", ".swift", ".sh", ".py", ".js", ".yml", ".yaml", ".html"}:
         continue
+    if re.search(r"\b[\w.-]+\.(?:localdomain|ts\.net|lan)\b", Path(name).read_text(encoding="utf-8"), re.I):
+        failures.append((name, "private network hostname"))
     text = Path(name).read_text(encoding="utf-8")
     if re.search(r"/Users/" + r"(?!runner(?:/|\b)|example(?:/|\b)|user(?:/|\b))[^/\s'\"]+/", text):
         failures.append((name, "personal home path"))
