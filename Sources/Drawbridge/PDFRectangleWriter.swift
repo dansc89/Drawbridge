@@ -471,6 +471,7 @@ enum PDFRectangleWriter {
                     annotation["/DS"] = "u:font: Helvetica \(record.fontSize)pt; color: rgb(\(Int(record.red*255)),\(Int(record.green*255)),\(Int(record.blue*255)))"
                     annotation["/DR"] = ["/Font":["/Helv":["/Type":"/Font","/Subtype":"/Type1","/BaseFont":"/Helvetica"]]]
                     annotation["/BS"] = ["/W":0]; annotation["/Q"] = 0
+                    annotation["/Rotate"] = record.textRotation
                 }
                 if let oldReference {
                     var old = dictionary(oldReference, objects: objects), desired = annotation

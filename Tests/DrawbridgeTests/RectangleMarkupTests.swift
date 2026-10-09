@@ -191,6 +191,58 @@ final class RectangleMarkupTests: XCTestCase {
         XCTAssertTrue(page.annotations.contains { $0 === annotation })
     }
 
+    func testRectangleStrokeSelectionAllowsSmallOutsideTolerance() throws {
+        let rectangle = PDFAnnotation(bounds: CGRect(x: 100, y: 100, width: 90, height: 60), forType: .square, withProperties: nil)
+        XCTAssertTrue(RectangleMarkupController.hitTest(rectangle, at: CGPoint(x: 190, y: 160.00000000000003), tolerance: 4))
+        XCTAssertTrue(RectangleMarkupController.hitTest(rectangle, at: CGPoint(x: 192, y: 130), tolerance: 4))
+        XCTAssertFalse(RectangleMarkupController.hitTest(rectangle, at: CGPoint(x: 200, y: 130), tolerance: 4))
+    }
+
+    func testPendingListRefreshPreservesNewerUserSelection() async throws {
+        _ = NSApplication.shared
+        let source = try fixture(rotation: 0)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let controller = MainViewController(); _ = controller.view
+        controller.openDocument(at: source)
+        let page = try XCTUnwrap(controller.pdfView.document?.page(at: 0))
+        let session = controller.pdfView.rectangleMarkup; session.canEdit = { true }
+        let annotation = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 100, y: 100, width: 90, height: 60)))
+        controller.commandToggleMarkupsList(nil); controller.refreshMarkups()
+        controller.scheduleMarkupsRefresh(selecting: nil)
+        let row = try XCTUnwrap(controller.markupItems.firstIndex { $0.annotation === annotation })
+        controller.markupsTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        XCTAssertTrue(session.selected === annotation)
+        try await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertTrue(session.selected === annotation)
+        XCTAssertEqual(controller.markupsTable.numberOfSelectedRows, 1)
+    }
+
+    func testSwitchingDrawingToolsAndEscapeClearOlderListSelection() async throws {
+        _ = NSApplication.shared
+        let source = try fixture(rotation: 0)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let controller = MainViewController(); _ = controller.view
+        controller.openDocument(at: source)
+        let page = try XCTUnwrap(controller.pdfView.document?.page(at: 0))
+        let session = controller.pdfView.rectangleMarkup; session.canEdit = { true }
+        let annotation = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 100, y: 100, width: 90, height: 60)))
+        controller.commandToggleMarkupsList(nil); controller.refreshMarkups()
+        let row = try XCTUnwrap(controller.markupItems.firstIndex { $0.annotation === annotation })
+        for tool in [RectangleMarkupController.Tool.pen, .rectangle, .ellipse, .line, .arrow, .polygon, .polyline, .text] {
+            controller.markupsTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            XCTAssertTrue(session.selected === annotation)
+            session.tool = tool
+            XCTAssertNil(session.selected)
+            XCTAssertEqual(controller.markupsTable.numberOfSelectedRows, 0)
+        }
+        controller.markupsTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        session.escape()
+        try await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertNil(session.selected)
+        XCTAssertEqual(controller.markupsTable.numberOfSelectedRows, 0)
+        XCTAssertTrue(page.annotations.contains { $0 === annotation })
+    }
+
     func testMarkupAuthorPreferenceDefaultsAndOverride() {
         let suite = "DrawbridgeAuthorTest-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!
@@ -1283,6 +1335,34 @@ final class RectangleMarkupTests: XCTestCase {
             let plain = RectangleMarkupController(); plain.bind(to:doc); plain.undo.groupsByEvent = false
             plain.undo.beginUndoGrouping(); _ = plain.createPolyline(on:page,points:points); plain.undo.endUndoGrouping()
             XCTAssertNil(RectangleMarkupRecord.capture(doc).last?.fill,"Polylines must remain unfilled")
+        }
+    }
+
+    func testSavedTextIsHorizontalAtEveryPageRotation() throws {
+        for rotation in [0, 90, 180, 270] {
+            let source = try fixture(rotation: rotation)
+            let output = source.appendingPathExtension("saved.pdf")
+            defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
+            let document = try XCTUnwrap(PDFDocument(url: source))
+            let page = try XCTUnwrap(document.page(at: 0))
+            let session = RectangleMarkupController(); session.bind(to: document)
+            let sideways = rotation % 180 != 0
+            _ = session.create(on: page, bounds: CGRect(x: 100, y: 100, width: sideways ? 60 : 220, height: sideways ? 220 : 60), kind: .text, text: "HORIZONTAL TEXT")
+            let records = RectangleMarkupRecord.capture(document)
+            XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: output, pageLabels: [:], records: records))
+            let saved = try XCTUnwrap(PDFDocument(url: output))
+            let pixels = try renderedPixels(try XCTUnwrap(saved.page(at: 0)), size: NSSize(width: 800, height: 800))
+            var minX = pixels.width, minY = pixels.height, maxX = 0, maxY = 0, count = 0
+            pixels.bytes.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+                for y in 0..<pixels.height { for x in 0..<pixels.width {
+                    let offset = (y * pixels.width + x) * 4
+                    if bytes[offset] > 150 && bytes[offset + 1] < 100 && bytes[offset + 2] < 100 {
+                        minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y); count += 1
+                    }
+                } }
+            }
+            XCTAssertGreaterThan(count, 30)
+            XCTAssertGreaterThan(maxX - minX, (maxY - minY) * 3, "Saved text must stay horizontal at rotation \(rotation)")
         }
     }
 

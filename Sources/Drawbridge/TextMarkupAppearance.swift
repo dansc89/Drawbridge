@@ -5,6 +5,24 @@ import CoreText
 /// font substitution in other viewers without rasterizing or touching the page.
 enum TextMarkupAppearance {
     static func drawing(_ record: RectangleMarkupRecord) -> String {
+        // PDFKit displays free text upright on rotated sheets. Store the same
+        // orientation in the vector appearance used by other PDF readers.
+        if record.textRotation != 0 {
+            var upright = record
+            upright.textRotation = 0
+            let w = record.bounds.width, h = record.bounds.height
+            if record.textRotation == 90 || record.textRotation == 270 {
+                upright.bounds.size = CGSize(width: h, height: w)
+            }
+            let matrix: String
+            switch record.textRotation {
+            case 90: matrix = "0 1 -1 0 \(w) 0"
+            case 180: matrix = "-1 0 0 -1 \(w) \(h)"
+            case 270: matrix = "0 -1 1 0 0 \(h)"
+            default: matrix = "1 0 0 1 0 0"
+            }
+            return "q \(matrix) cm\n" + drawing(upright) + "Q\n"
+        }
         let font = CTFontCreateWithName("Helvetica" as CFString, record.fontSize, nil)
         let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byWordWrapping
         let text = NSAttributedString(string: record.text, attributes: [.font:font, .paragraphStyle:paragraph])

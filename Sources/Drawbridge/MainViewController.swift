@@ -3418,7 +3418,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     func scheduleMarkupsRefresh(selecting selectedAnnotation: PDFAnnotation?) {
         pendingMarkupsRefreshWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
-            self?.performRefreshMarkups(selecting: selectedAnnotation)
+            guard let self else { return }
+            self.pendingMarkupsRefreshWorkItem = nil
+            self.performRefreshMarkups(selecting: selectedAnnotation)
         }
         pendingMarkupsRefreshWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: workItem)

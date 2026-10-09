@@ -99,6 +99,10 @@ extension MainViewController {
               let item = currentSelectedMarkupItem(), let page = item.annotation.page,
               page.document === pdfView.document else { return }
         pdfView.rectangleMarkup.selectFromList(item.annotation)
+        // A queued edit/filter refresh must not restore an older selection.
+        if pendingMarkupsRefreshWorkItem != nil {
+            scheduleMarkupsRefresh(selecting: item.annotation)
+        }
         pdfView.revealMarkup(item.annotation)
     }
     @objc func deleteListedMarkups(_ sender: Any?) {

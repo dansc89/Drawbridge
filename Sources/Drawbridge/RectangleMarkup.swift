@@ -83,6 +83,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
     var kind: Kind = .rectangle
     var text: String = ""
     var fontSize: Double = 18
+    var textRotation: Int = 0
     var fill: [Double]? = nil
     var vertices: [CGPoint] = []
     var start: CGPoint? = nil
@@ -185,6 +186,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
                 if annotation.type == "FreeText" {
                     record.kind = .text; record.text = annotation.contents ?? ""; record.fontSize = Double(textFontSize(annotation))
                     record.lineWidth = 2
+                    record.textRotation = (((annotation.page?.rotation ?? 0) % 360) + 360) % 360
                 }
                 if annotation.type == "Ink" || annotation.type == "Polygon" {
                     record.kind = annotation.type == "Polygon" ? .polygon : .polyline; record.vertices = vertices(annotation)
@@ -274,7 +276,7 @@ final class RectangleMarkupController {
     var onClickAway: (() -> Void)?
     var canEdit: () -> Bool = { true }
     var tool: Tool = .select {
-        didSet { finishTextEditing(); cancelGesture(); if tool != .select { selected = nil }; refresh(); (view as? MarkupPDFView)?.markupToolCursorChanged() }
+        didSet { finishTextEditing(); cancelGesture(); if tool != .select { selected = nil; onClickAway?() }; refresh(); (view as? MarkupPDFView)?.markupToolCursorChanged() }
     }
     private var inlineText: (page:PDFPage, bounds:CGRect, annotation:PDFAnnotation?, editor:MarkupInlineTextView, wasDirty:Bool)?
     var isEditingText: Bool { inlineText != nil }
@@ -823,7 +825,9 @@ final class RectangleMarkupController {
             let y = (point.y-bounds.midY)/(bounds.height/2+radius)
             return x*x+y*y <= 1
         }
-        guard let first = points.first, points.count >= 2 else { return annotation.bounds.contains(point) }
+        guard let first = points.first, points.count >= 2 else {
+            return annotation.bounds.insetBy(dx: -radius, dy: -radius).contains(point)
+        }
         let closed = annotation.type == "Polygon"
         let path = CGMutablePath(); path.move(to:first)
         for p in points.dropFirst() { path.addLine(to:p) }
@@ -865,7 +869,7 @@ final class RectangleMarkupController {
     }
 
     func cancelGesture() { pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
-    func escape() { cancelGesture(); selected = nil; tool = .select; refresh() }
+    func escape() { cancelGesture(); selected = nil; onClickAway?(); tool = .select; refresh() }
     func refresh(presentationChanged: Bool = true) {
         positionTextEditor()
         CATransaction.begin(); CATransaction.setDisableActions(true)
