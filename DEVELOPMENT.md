@@ -304,3 +304,7 @@ Local native validation read 43 general-sheet title blocks in a 99-page architec
 `PDFBookmarkCorpusTests` accepts `DRAWBRIDGE_BOOKMARK_DESKTOP_FIXTURES` pointing to a private folder containing `project-a/mechanical.pdf`, `project-a/landscape.pdf`, `project-b/electrical.pdf`, and `project-b/landscape.pdf`. The separate `DRAWBRIDGE_BOOKMARK_FIXTURES` folder contains `MECH.pdf`, `ARCH.pdf`, `Survey.pdf`, and `SCALE TEST.pdf`. Copy or symlink your permitted local fixtures to these neutral names; never commit them. Other optional test environment variable names are retained for compatibility, but their values stay local.
 
 Before publishing, run `python3 Scripts/check-public-files.py` and `gitleaks git . --log-opts="--all" --redact`. Public CI repeats both checks.
+
+## Local publication checks
+
+Enable the repository pre-push checks with `git config core.hooksPath .githooks` after installing Gitleaks. These check tracked files, reachable history for private paths/hosts, and credentials before a push. CI repeats the same checks. After any published history rewrite, start from a fresh clone or carefully align existing refs; merging old history can reintroduce removed data.
