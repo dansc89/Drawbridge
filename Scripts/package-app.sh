@@ -22,7 +22,7 @@ ICON_FILL_SCALE="${ICON_FILL_SCALE:-1.0}"
 ICON_FILE_NAME="Drawbridge"
 ICON_ICNS_PATH="$RESOURCES_DIR/$ICON_FILE_NAME.icns"
 QPDF_VENDOR_DIR="ThirdParty/QPDF/arm64"
-VERSION_TAG="${DRAWBRIDGE_VERSION_TAG:-$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")}"
+VERSION_TAG="${DRAWBRIDGE_VERSION_TAG:-v1.0}"
 APP_VERSION="${VERSION_TAG#v}"
 if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]$ ]]; then
   echo "Release versions must use the major.minor sequence (for example v2.1 through v2.9, then v3.0)."

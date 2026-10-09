@@ -41,6 +41,10 @@ Launch:
 open /path/to/Drawbridge/dist/Drawbridge.app
 ```
 
+## Release versioning
+
+The public release series starts at v1.0. Earlier tags are retained as development history. Set `DRAWBRIDGE_VERSION_TAG` explicitly when packaging a release; local packaging defaults to v1.0. Keep `DRAWBRIDGE_BUILD_NUMBER` increasing even when the displayed version resets. The first public build is 163.
+
 ## Trusted macOS Distribution (Sign + Notarize)
 
 ### 1) Confirm Developer ID identity is installed
