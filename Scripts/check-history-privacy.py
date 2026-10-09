@@ -7,7 +7,7 @@ import sys
 patterns = {
     'personal home path': re.compile(rb'/Users/' + rb'(?!runner(?:/|\b)|example(?:/|\b)|user(?:/|\b))[^/\s\'\"]+/'),
     'private network hostname': re.compile(rb'\b[\w.-]+\.(?:localdomain|ts\.net|lan)\b', re.I),
-    'embedded cloud account': re.compile(rb'GoogleDrive-(?!developer@example\.com|example@)[^/\s\'\"]+@[^/\s\'\"]+', re.I),
+    'embedded cloud account': re.compile(rb'GoogleDrive-' + rb'(?!developer@example\.com|example@)[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', re.I),
 }
 private_email = re.compile(rb'@[^\s]+\.(?:localdomain|local|lan|ts\.net)$', re.I)
 findings = set()
