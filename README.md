@@ -10,7 +10,7 @@ Demo drawing: *Marilyn’s Farmhouse* by Jay Osborne / [FreeFarmhouse](https://w
 
 ## Download
 
-**[Download the latest release](https://github.com/dansc89/Drawbridge/releases/latest)** — signed with Developer ID and notarized by Apple.
+**[Download the latest release](https://github.com/dansc89/Drawbridge/releases/latest)**, signed with Developer ID and notarized by Apple.
 
 Download the **DMG**, open it, and drag **Drawbridge.app** into **Applications**. A ZIP containing the app is also available.
 
@@ -61,6 +61,9 @@ The Pen tool displays a pen cursor over the PDF, with the nib aligned to the dra
 Line and arrow tools use two clicks: start, then end. Text boxes let you type directly on the page. Escape cancels an unfinished drawing. Shortcuts do not activate drawing tools while you are typing text.
 
 ## Current limits
+
+- Sheet-number, title, and hyperlink detection depend on the PDF’s text, scan quality, and layout. References can be missed or matched incorrectly. Review generated bookmarks before applying them and check hyperlink results afterward.
+- Processing and save times vary with document complexity, file size, and storage. There is no fixed completion-time guarantee.
 
 - Drawbridge can select, move, and delete standard unlocked markups from other PDF apps, with Undo/Redo. Imported text, style, and node editing are not yet supported. Flattened content and locked annotations cannot be selected as editable markups.
 - Measurement/calibration, secure redaction, snapshot pasting, page combining/conversion, and general editing of original PDF text are not available.
