@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+python3 Scripts/check-public-files.py
+python3 Scripts/check-history-privacy.py
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "Install Gitleaks before pushing (brew install gitleaks)."
+  exit 1
+fi
+gitleaks git . --log-opts='--all' --redact

@@ -9,7 +9,7 @@ Use [GitHub private vulnerability reporting](https://github.com/dansc89/Drawbrid
 - Keep credentials in Keychain or GitHub Actions secrets. Never commit signing keys, notarization passwords, `.env` files, databases, or client PDFs.
 - Keep local fixtures in `private-fixtures/` or outside the checkout. Optional corpus tests use locally supplied fixture paths; no client documents are required for the default test suite.
 - Use synthetic or explicitly publishable drawings for screenshots and examples. Check PDF metadata, annotation authors, filenames, and logs before uploading.
-- Scan all Git history with `gitleaks git . --log-opts="--all" --redact` before publishing. GitHub secret scanning and push protection are additional safeguards, not a substitute for review.
+- Run `python3 Scripts/check-history-privacy.py` to check historical personal paths and private hostnames. Scan all Git history with `gitleaks git . --log-opts="--all" --redact` before publishing. GitHub secret scanning and push protection are additional safeguards, not a substitute for review.
 - Removing a file in a new commit does not erase old commits, tags, forks, or copies. Rotate exposed credentials immediately; coordinate any history cleanup with maintainers.
 
 ## Scope
