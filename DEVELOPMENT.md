@@ -308,3 +308,7 @@ Before publishing, run `python3 Scripts/check-public-files.py` and `gitleaks git
 ## Local publication checks
 
 Enable the repository pre-push checks with `git config core.hooksPath .githooks` after installing Gitleaks. These check tracked files, reachable history for private paths/hosts, and credentials before a push. CI repeats the same checks. After any published history rewrite, start from a fresh clone or carefully align existing refs; merging old history can reintroduce removed data.
+
+## Public release versioning
+
+The public release series starts at v1.0, build 163. Earlier tags are retained as development history. Set `DRAWBRIDGE_VERSION_TAG` explicitly when packaging future releases and keep `DRAWBRIDGE_BUILD_NUMBER` increasing. Local packaging defaults to v1.0.

@@ -16,6 +16,8 @@ Download the **DMG**, open it, and drag **Drawbridge.app** into **Applications**
 
 Requires **macOS 13 or newer** on an **Apple Silicon Mac (M1 or newer)**. Intel builds are not currently provided.
 
+Version 1.0 starts the public release series. Earlier version numbers were development releases; their tags remain available for reference.
+
 ## What it does
 
 - **Navigate drawing sets:** page thumbnails track the current sheet and refresh after markup changes. Switch to bookmarks, search sheet names, or use separate page and viewing-history controls.
