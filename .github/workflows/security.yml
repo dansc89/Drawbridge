@@ -25,3 +25,22 @@ jobs:
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
       - name: Scan Git history without displaying secret values
         run: '"$RUNNER_TEMP/gitleaks" git . --log-opts="--all" --redact'
+
+  backend-configuration-and-uploads:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Install locked test dependencies
+        working-directory: Backend
+        run: npm ci --ignore-scripts
+      - name: Test configuration and multipart uploads
+        working-directory: Backend
+        run: npm test
+      - name: Check dependency advisories
+        working-directory: Backend
+        run: npm audit --omit=dev
