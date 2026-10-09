@@ -4,9 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Drawbridge | Native PDF Markup for macOS</title>
-    <meta name="description" content="Drawbridge is a native Apple Silicon macOS PDF markup and takeoff app for architects, designers, and engineers. Mark up drawings, generate bookmarks and hyperlinks, review annotations, flatten PDFs, and export clean project files.">
+    <meta name="description" content="Drawbridge is a native Apple Silicon macOS PDF viewer and markup editor for architects, designers, and engineers. Mark up drawings, generate bookmarks and hyperlinks, review annotations, flatten PDFs, and export clean project files.">
     <meta property="og:title" content="Drawbridge — Native PDF Markup for macOS">
-    <meta property="og:description" content="Fast native PDF markup, drawing-set navigation, bookmarks, hyperlinks, markups, flattening, and clean save/export workflows for Apple Silicon Macs.">
+    <meta property="og:description" content="Native PDF markup, drawing-set navigation, bookmarks, hyperlinks, markups, flattening, and clean save/export workflows for Apple Silicon Macs.">
     <meta property="og:image" content="hero.png">
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -67,10 +67,10 @@
                         </div>
                         <div class="space-y-5">
                             <h1 class="text-4xl md:text-6xl font-extrabold tracking-tight text-ink leading-[1.05]">
-                                Fast markups for architectural PDF reviews.
+                                Navigate and mark up architectural PDFs.
                             </h1>
                             <p class="text-lg text-stone-700 leading-relaxed">
-                                Drawbridge is a native macOS PDF markup and takeoff app for architects, designers, and engineers. Navigate drawing sets, generate bookmarks and hyperlinks, add vector markups, review annotations, and save clean project files without a sluggish browser wrapper.
+                                Drawbridge is a native macOS PDF viewer and markup editor for architects, designers, and engineers. Navigate drawing sets, generate bookmarks and hyperlinks, add vector markups, review annotations, and save changes to your PDF.
                             </p>
                         </div>
                         <div class="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 pt-1">
@@ -104,7 +104,7 @@
                                     <div class="w-3 h-3 rounded-full bg-red-500"></div>
                                     <div class="w-3 h-3 rounded-full bg-yellow-500"></div>
                                     <div class="w-3 h-3 rounded-full bg-green-500"></div>
-                                    <div class="mx-auto text-xs text-slate-300 font-mono">Drawbridge.app — PDF Markup & Takeoff</div>
+                                    <div class="mx-auto text-xs text-slate-300 font-mono">Drawbridge.app | PDF Markup</div>
                                 </div>
                                 <img src="hero.png" alt="Drawbridge showing architectural drawings, page thumbnails, and markup tools" class="w-full h-auto block object-cover">
                             </div>
@@ -118,7 +118,7 @@
             <div class="max-w-7xl mx-auto px-5 sm:px-6">
                 <div class="max-w-3xl space-y-4 mb-12">
                     <p class="text-clay text-sm font-extrabold uppercase tracking-[0.18em]">Built for drawing sets</p>
-                    <h2 class="text-3xl md:text-4xl font-extrabold tracking-tight">Review, link, mark up, and hand off PDFs without breaking the original drawing content.</h2>
+                    <h2 class="text-3xl md:text-4xl font-extrabold tracking-tight">Review, link, mark up, and hand off PDFs with editable vector markups.</h2>
                 </div>
                 <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                     <article class="p-7 rounded-2xl bg-white border border-stone-300/80 shadow-sm space-y-3">
@@ -129,12 +129,12 @@
                     <article class="p-7 rounded-2xl bg-white border border-stone-300/80 shadow-sm space-y-3">
                         <div class="text-2xl">🔗</div>
                         <h3 class="text-xl font-bold">Generate bookmarks and links</h3>
-                        <p class="text-stone-700 text-sm leading-relaxed">Create sheet names, PDF bookmarks, and internal hyperlinks from drawing references, with review before applying changes.</p>
+                        <p class="text-stone-700 text-sm leading-relaxed">Generate sheet names, bookmarks, and links to referenced sheets. Review bookmarks before applying them and check hyperlink results afterward; detection can miss or incorrectly match references.</p>
                     </article>
                     <article class="p-7 rounded-2xl bg-white border border-stone-300/80 shadow-sm space-y-3">
                         <div class="text-2xl">✍️</div>
                         <h3 class="text-xl font-bold">Add vector markups</h3>
-                        <p class="text-stone-700 text-sm leading-relaxed">Draw with pen, shapes, arrows, callouts, text boxes, highlights, line weights, colors, fills, and keyboard shortcuts.</p>
+                        <p class="text-stone-700 text-sm leading-relaxed">Add editable vector markups with pen, rectangle, ellipse, line, arrow, polygon, polyline, and text tools. Customize colors and line weights, and use keyboard shortcuts.</p>
                     </article>
                     <article class="p-7 rounded-2xl bg-white border border-stone-300/80 shadow-sm space-y-3">
                         <div class="text-2xl">📋</div>
@@ -149,7 +149,7 @@
                     <article class="p-7 rounded-2xl bg-white border border-stone-300/80 shadow-sm space-y-3">
                         <div class="text-2xl">⚡</div>
                         <h3 class="text-xl font-bold">Native performance</h3>
-                        <p class="text-stone-700 text-sm leading-relaxed">Built for macOS and Apple Silicon, with fast save paths and lossless file reduction designed for production drawing review.</p>
+                        <p class="text-stone-700 text-sm leading-relaxed">Built for macOS and Apple Silicon, with annotation-only saves and lossless file reduction. Processing and save times depend on the PDF and storage.</p>
                     </article>
                 </div>
             </div>
@@ -182,10 +182,14 @@
                 </div>
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
                     <div class="rounded-2xl bg-white/8 border border-white/10 p-6"><div class="w-10 h-10 rounded-xl bg-clay text-white font-bold flex items-center justify-center mb-5">1</div><h3 class="font-bold text-lg mb-2">Open a drawing set</h3><p class="text-sm text-stone-300 leading-relaxed">Start from the PDF you already have and navigate by pages, bookmarks, sheet search, or text search.</p></div>
-                    <div class="rounded-2xl bg-white/8 border border-white/10 p-6"><div class="w-10 h-10 rounded-xl bg-clay text-white font-bold flex items-center justify-center mb-5">2</div><h3 class="font-bold text-lg mb-2">Index and mark up</h3><p class="text-sm text-stone-300 leading-relaxed">Generate sheet labels and links, then add comments, shapes, highlights, measurements, and freehand notes.</p></div>
+                    <div class="rounded-2xl bg-white/8 border border-white/10 p-6"><div class="w-10 h-10 rounded-xl bg-clay text-white font-bold flex items-center justify-center mb-5">2</div><h3 class="font-bold text-lg mb-2">Index and mark up</h3><p class="text-sm text-stone-300 leading-relaxed">Generate and review sheet labels and links, then add text boxes, shapes, arrows, and freehand notes.</p></div>
                     <div class="rounded-2xl bg-white/8 border border-white/10 p-6"><div class="w-10 h-10 rounded-xl bg-clay text-white font-bold flex items-center justify-center mb-5">3</div><h3 class="font-bold text-lg mb-2">Save or export</h3><p class="text-sm text-stone-300 leading-relaxed">Save PDF changes, create a separate copy, flatten supported annotations, or reduce file size losslessly.</p></div>
                 </div>
             </div>
+        </section>
+        <section class="max-w-7xl mx-auto px-5 sm:px-6 py-10">
+            <h2 class="text-xl font-bold mb-3">Current limits</h2>
+            <p class="text-stone-700 leading-relaxed">Sheet detection depends on PDF text, scan quality, and layout. Review generated results for missed or incorrect matches. Measurement/calibration, secure redaction, and editing original PDF text are not available. See the <a class="underline" href="https://github.com/dansc89/Drawbridge#current-limits">README</a> for saving and annotation compatibility limits.</p>
         </section>
     </main>
 
