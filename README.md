@@ -23,6 +23,7 @@ Version 1.0 starts the public release series. Earlier version numbers were devel
 - **Navigate drawing sets:** page thumbnails track the current sheet and refresh after markup changes. Switch to bookmarks, search sheet names, or use separate page and viewing-history controls.
 - **Index and link sheets:** generate sheet numbers/titles and bookmarks from title blocks, then batch-link sheet references. Processing dialogs report stages and page progress, with cancellation and review before applying bookmarks.
 - **Add vector markups:** pen, rectangle, ellipse, line, arrow, polygon, polyline, and on-page text boxes. The active tool is highlighted; custom colors, line weights, text sizes, and polygon fills are available in Markup Properties.
+- **Measure drawings:** apply architectural or metric scales to several pages, calibrate against a known dimension, and trace area, perimeter, or open-path length. Measurement labels and page scales persist in the PDF.
 - **Review markups:** open the Markups List to see type, page, comment, and author. Click a row to jump to the annotation, search by text or author, and batch-delete selected markups with Undo. Links and form controls are excluded; locked annotations stay visible.
 - **Manage pages and bookmarks:** Shift/Command-select several entries, then press Backspace/Delete or right-click to delete with confirmation. Undo/redo also works after saving while the document remains open. Deleting bookmarks leaves PDF pages intact.
 - **Save PDF changes:** save the open file or a separate copy. Markup saves append annotation changes rather than rasterizing or rebuilding drawing pages.
@@ -56,11 +57,23 @@ The [user manual](USER_MANUAL.md) covers navigation, page/bookmark deletion, sav
 | Polygon | Shift+P |
 | Polyline | Shift+N |
 | Text box | T |
+| Area | Shift+A |
+| Perimeter / Length | Shift+L |
 | Undo / Redo | Cmd+Z / Shift+Cmd+Z |
 
 The Pen tool displays a pen cursor over the PDF, with the nib aligned to the drawing point.
 
+Hold **Shift** to constrain lines, arrows, pen strokes, and path segments to horizontal or vertical directions. Shift-drag creates squares and circles.
+
 Line and arrow tools use two clicks: start, then end. Text boxes let you type directly on the page. Escape cancels an unfinished drawing. Shortcuts do not activate drawing tools while you are typing text.
+
+## Drawing measurements
+
+Choose **Measurements > Set Drawing Scale…** to apply a preset or custom scale to one or several PDF pages. **Calibrate Drawing Scale…** uses two points and a known distance in feet or meters. Verify the result against a known dimension before taking measurements.
+
+Use **Area (Shift+A)** for a closed boundary. Use **Perimeter / Length (Shift+L)** for a closed perimeter or an open path. Click the first point to close, or press Enter to finish. Backspace removes the last unfinished point; Escape cancels. Editing nodes or changing page scale recalculates the totals and supports Undo/Redo.
+
+Each page has one scale. Automatic snapping to drawing geometry, multiple scale regions, curved measurements, and takeoff exports are not supported. See the [measurement instructions](USER_MANUAL.md#drawing-measurements) for details.
 
 ## Current limits
 
@@ -68,7 +81,7 @@ Line and arrow tools use two clicks: start, then end. Text boxes let you type di
 - Processing and save times vary with document complexity, file size, and storage. There is no fixed completion-time guarantee.
 
 - Drawbridge can select, move, and delete standard unlocked markups from other PDF apps, with Undo/Redo. Imported text, style, and node editing are not yet supported. Flattened content and locked annotations cannot be selected as editable markups.
-- Measurement/calibration, secure redaction, snapshot pasting, page combining/conversion, and general editing of original PDF text are not available.
+- Secure redaction, snapshot pasting, page combining/conversion, and general editing of original PDF text are not available.
 - File reduction is lossless; there is no lossy image-quality or image-downsampling option.
 - Encrypted or digitally signed PDFs are not supported for annotation-only markup saving. Flattening also excludes encrypted PDFs and PDFs with signature fields.
 - Unflatten requires recovery information from Drawbridge. Unsupported/hidden annotations are retained, and flattening does not guarantee a smaller file.

@@ -27,6 +27,9 @@ final class RectangleMarkupToolbar: NSStackView {
     let lineButton = MarkupToolButton(title: "Line", target: nil, action: nil)
     let arrowButton = MarkupToolButton(title: "Arrow", target: nil, action: nil)
     let polygonButton = MarkupToolButton(title:"Polygon",target:nil,action:nil)
+    let areaButton = MarkupToolButton(title: "Area", target: nil, action: nil)
+    let perimeterButton = MarkupToolButton(title: "Perimeter", target: nil, action: nil)
+    let scaleButton = NSButton(title: "Scale…", target: nil, action: nil)
     let fillPopup = NSPopUpButton()
     let polylineButton = MarkupToolButton(title:"Polyline",target:nil,action:nil)
     let textButton = MarkupToolButton(title:"Text",target:nil,action:nil)
@@ -46,7 +49,7 @@ final class RectangleMarkupToolbar: NSStackView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         orientation = .horizontal; spacing = 6; alignment = .centerY
-        for (button, symbol, name) in [(selectButton,"cursorarrow","Select markups (V)"),(penButton,"pencil","Pen (P)"),(rectangleButton,"rectangle","Draw Rectangle (R)"),(ellipseButton,"circle","Draw Ellipse (E)"),(lineButton,"line.diagonal","Draw Line (L)"),(arrowButton,"arrow.up.right","Draw Arrow (A)"),(polygonButton,"pentagon","Draw Polygon (Shift+P)"),(polylineButton,"point.topleft.down.to.point.bottomright.curvepath","Draw Polyline (Shift+N)"),(textButton,"textformat","Draw Text Box (T)"),(editTextButton,"square.and.pencil","Edit Text"),(deleteButton,"trash","Delete selected markup (Delete)"),(undoButton,"arrow.uturn.backward","Undo (⌘Z)"),(redoButton,"arrow.uturn.forward","Redo (⇧⌘Z)")] {
+        for (button, symbol, name) in [(selectButton,"cursorarrow","Select markups (V)"),(penButton,"pencil","Pen (P)"),(rectangleButton,"rectangle","Draw Rectangle (R)"),(ellipseButton,"circle","Draw Ellipse (E)"),(lineButton,"line.diagonal","Draw Line (L)"),(arrowButton,"arrow.up.right","Draw Arrow (A)"),(polygonButton,"pentagon","Draw Polygon (Shift+P)"),(polylineButton,"point.topleft.down.to.point.bottomright.curvepath","Draw Polyline (Shift+N)"),(textButton,"textformat","Draw Text Box (T)"),(areaButton,"square.dashed","Measure Area (Shift+A)"),(perimeterButton,"ruler","Measure Perimeter or Length (Shift+L)"),(editTextButton,"square.and.pencil","Edit Text"),(deleteButton,"trash","Delete selected markup (Delete)"),(undoButton,"arrow.uturn.backward","Undo (⌘Z)"),(redoButton,"arrow.uturn.forward","Redo (⇧⌘Z)")] {
             button.bezelStyle = .texturedRounded; button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)
             button.imagePosition = .imageOnly; button.toolTip = name; button.setAccessibilityLabel(name)
             if button is MarkupToolButton {
@@ -76,6 +79,10 @@ final class RectangleMarkupToolbar: NSStackView {
         propertiesPopover.behavior = .transient
         propertiesPopover.contentViewController = propertiesController
         propertiesPopover.contentSize = NSSize(width: 260, height: 200)
+        scaleButton.bezelStyle = .texturedRounded; scaleButton.controlSize = .small
+        scaleButton.setAccessibilityLabel("Set drawing scale")
+        scaleButton.widthAnchor.constraint(lessThanOrEqualToConstant: 125).isActive = true
+        addArrangedSubview(scaleButton)
         setHuggingPriority(.required, for: .horizontal)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -113,8 +120,17 @@ extension MainViewController {
             self?.clearMarkupTableSelectionUI()
             self?.scheduleMarkupsRefresh(selecting: nil)
         }
+        session.onCalibrationCompleted = { [weak self] page, start, end in self?.completeDrawingCalibration(on: page, start: start, end: end) }
+        session.onMeasurementNeedsScale = { [weak self] in self?.commandSetPageDrawingScale(nil) }
+        session.onInvalidMeasurement = { [weak self] in
+            self?.runAlert(title: "Check the measurement boundary", informativeText: "Area needs at least three corners with no crossing edges. A path can have up to 512 corners. Press Escape to cancel and trace again.", style: .warning)
+        }
         session.onPresentationChanged = { [weak self] in self?.refreshRectangleToolbar() }
         rectangleToolbar.propertiesController.session = session
+        rectangleToolbar.scaleButton.target = self
+        rectangleToolbar.scaleButton.action = #selector(commandSetPageDrawingScale(_:))
+        rectangleToolbar.areaButton.target = self; rectangleToolbar.areaButton.action = #selector(areaMeasure(_:))
+        rectangleToolbar.perimeterButton.target = self; rectangleToolbar.perimeterButton.action = #selector(perimeterMeasure(_:))
         rectangleToolbar.propertiesButton.target = self
         rectangleToolbar.propertiesButton.action = #selector(showMarkupProperties(_:))
         for (control, action) in [(rectangleToolbar.penButton, #selector(penDraw(_:))), (rectangleToolbar.selectButton, #selector(rectangleSelect(_:))), (rectangleToolbar.rectangleButton, #selector(rectangleDraw(_:))), (rectangleToolbar.ellipseButton, #selector(ellipseDraw(_:))), (rectangleToolbar.lineButton, #selector(lineDraw(_:))), (rectangleToolbar.arrowButton, #selector(arrowDraw(_:))), (rectangleToolbar.polygonButton, #selector(polygonDraw(_:))), (rectangleToolbar.fillPopup, #selector(polygonFill(_:))), (rectangleToolbar.polylineButton, #selector(polylineDraw(_:))), (rectangleToolbar.textButton, #selector(textDraw(_:))), (rectangleToolbar.editTextButton, #selector(editMarkupText(_:))), (rectangleToolbar.fontPopup, #selector(markupFontSize(_:))), (rectangleToolbar.deleteButton, #selector(rectangleDelete(_:))), (rectangleToolbar.undoButton, #selector(rectangleUndo(_:))), (rectangleToolbar.redoButton, #selector(rectangleRedo(_:))), (rectangleToolbar.colorPopup, #selector(rectangleStyle(_:))), (rectangleToolbar.widthPopup, #selector(rectangleStyle(_:)))] as [(NSControl, Selector)] {
@@ -124,6 +140,7 @@ extension MainViewController {
         refreshRectangleToolbar()
     }
     func refreshRectangleToolbar() {
+        refreshMeasurementScaleDisplay()
         let s = pdfView.rectangleMarkup
         let enabled = s.canEdit()
         let importedSelected = s.selected.map(RectangleMarkupRecord.owns) == false
@@ -136,7 +153,7 @@ extension MainViewController {
             : "Edit Text"
         rectangleToolbar.propertiesButton.isEnabled = styleEnabled && s.selected?.isReadOnly != true
         if rectangleToolbar.propertiesPopover.isShown { rectangleToolbar.propertiesController.refresh() }
-        for (button, tool) in [(rectangleToolbar.penButton, RectangleMarkupController.Tool.pen), (rectangleToolbar.selectButton, RectangleMarkupController.Tool.select), (rectangleToolbar.rectangleButton, .rectangle), (rectangleToolbar.ellipseButton, .ellipse), (rectangleToolbar.lineButton, .line), (rectangleToolbar.arrowButton, .arrow), (rectangleToolbar.polygonButton, .polygon), (rectangleToolbar.polylineButton, .polyline), (rectangleToolbar.textButton, .text)] {
+        for (button, tool) in [(rectangleToolbar.penButton, RectangleMarkupController.Tool.pen), (rectangleToolbar.selectButton, RectangleMarkupController.Tool.select), (rectangleToolbar.rectangleButton, .rectangle), (rectangleToolbar.ellipseButton, .ellipse), (rectangleToolbar.lineButton, .line), (rectangleToolbar.arrowButton, .arrow), (rectangleToolbar.polygonButton, .polygon), (rectangleToolbar.polylineButton, .polyline), (rectangleToolbar.textButton, .text), (rectangleToolbar.areaButton, .area), (rectangleToolbar.perimeterButton, .perimeter)] {
             button.isEnabled = enabled
             button.state = s.tool == tool ? .on : .off
             button.contentTintColor = s.tool == tool ? .systemBlue : .labelColor

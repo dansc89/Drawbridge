@@ -185,6 +185,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appMenu.addItem(withTitle: "Quit Drawbridge", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
+        let measurementsItem = NSMenuItem(title: "Measurements", action: nil, keyEquivalent: "")
+        let measurementsMenu = NSMenu(title: "Measurements")
+        measurementsMenu.addItem(withTitle: "Set Drawing Scale…", action: #selector(MainViewController.commandSetPageDrawingScale(_:)), keyEquivalent: "").target = controller
+        measurementsMenu.addItem(withTitle: "Calibrate Drawing Scale…", action: #selector(MainViewController.commandCalibrateDrawingScale(_:)), keyEquivalent: "").target = controller
+        measurementsMenu.addItem(withTitle: "Area (Shift+A)", action: #selector(MainViewController.areaMeasure(_:)), keyEquivalent: "").target = controller
+        measurementsMenu.addItem(withTitle: "Perimeter / Length (Shift+L)", action: #selector(MainViewController.perimeterMeasure(_:)), keyEquivalent: "").target = controller
+        measurementsItem.submenu = measurementsMenu
+
         let fileItem = NSMenuItem()
         fileItem.title = "File"
         mainMenu.addItem(fileItem)
@@ -262,6 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         batchLinkItem.target = controller
         hyperlinksItem.submenu = hyperlinksMenu
 
+        mainMenu.addItem(measurementsItem)
         let viewItem = NSMenuItem()
         viewItem.title = "View"
         mainMenu.addItem(viewItem)

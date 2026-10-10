@@ -79,6 +79,8 @@ private final class PDFMarkupSourceBaseline: @unchecked Sendable {
 struct RectangleMarkupRecord: Sendable, Equatable {
     static let prefix = "DrawbridgeRectangleV1:"
     enum Kind: String, Sendable { case rectangle, ellipse, line, arrow, text, polyline, polygon }
+    var measurement: DrawingMeasurement? = nil
+    var pageScale: DrawingScale? = nil
     var author: String = ""
     var kind: Kind = .rectangle
     var text: String = ""
@@ -181,6 +183,9 @@ struct RectangleMarkupRecord: Sendable, Equatable {
                 var record = Self(id: id, pageIndex: index, bounds: annotation.bounds,
                             red: Double(rgb.redComponent), green: Double(rgb.greenComponent), blue: Double(rgb.blueComponent),
                             lineWidth: Double(annotation.border?.lineWidth ?? 2))
+                record.measurement = MeasurementMetadata.measurement(annotation)
+                record.pageScale = MeasurementMetadata.pageScale(annotation)
+                if record.measurement != nil { record.textRotation = (((annotation.page?.rotation ?? 0) % 360) + 360) % 360 }
                 let author = annotation.userName ?? ""
                 record.author = author.hasPrefix(prefix) ? MarkupAuthorPreference.currentName : author
                 if annotation.type == "FreeText" {
@@ -205,6 +210,8 @@ struct RectangleMarkupRecord: Sendable, Equatable {
 
     var isValid: Bool {
         id.hasPrefix(Self.prefix) && pageIndex >= 0 &&
+        (pageScale == nil || (kind == .rectangle && pageScale!.isValid && measurement == nil)) &&
+        (measurement == nil || (measurement!.valid(points: vertices) && (kind == .polygon || kind == .polyline) && (measurement!.closed == (kind == .polygon)))) &&
         [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy { $0.isFinite } &&
         bounds.width >= 2 && bounds.height >= 2 &&
         [red, green, blue].allSatisfy { $0.isFinite && (0...1).contains($0) } &&
@@ -219,7 +226,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
 /// New annotation interaction state; deliberately independent of legacy ToolMode.
 @MainActor
 final class RectangleMarkupController {
-    enum Tool { case select, pen, rectangle, ellipse, line, arrow, text, polyline, polygon }
+    enum Tool { case select, pen, rectangle, ellipse, line, arrow, text, polyline, polygon, area, perimeter, calibrate }
     enum Corner: CaseIterable { case lowerLeft, lowerRight, upperLeft, upperRight }
     private enum Gesture {
         case create(PDFPage, CGPoint)
@@ -236,6 +243,7 @@ final class RectangleMarkupController {
     private var preview: (PDFPage, CGRect)?
     private var polylinePage: PDFPage?
     private var polylinePoints: [CGPoint] = []
+    private var penConstraintAnchor: Int?
     private var polylineHover: CGPoint?
     private var previewEndpoints: (CGPoint, CGPoint)?
     private var previewVertices: [CGPoint]?
@@ -274,6 +282,9 @@ final class RectangleMarkupController {
     var onDraftEnded: (() -> Void)?
     var onPresentationChanged: (() -> Void)?
     var onClickAway: (() -> Void)?
+    var onMeasurementNeedsScale: (() -> Void)?
+    var onCalibrationCompleted: ((PDFPage, CGPoint, CGPoint) -> Void)?
+    var onInvalidMeasurement: (() -> Void)?
     var canEdit: () -> Bool = { true }
     var tool: Tool = .select {
         didSet { finishTextEditing(); cancelGesture(); if tool != .select { selected = nil; onClickAway?() }; refresh(); (view as? MarkupPDFView)?.markupToolCursorChanged() }
@@ -298,6 +309,8 @@ final class RectangleMarkupController {
         case ("l", []): return .line
         case ("n", [.shift]): return .polyline
         case ("p", [.shift]): return .polygon
+        case ("a", [.shift]): return .area
+        case ("l", [.shift]): return .perimeter
         default: return nil
         }
     }
@@ -327,8 +340,10 @@ final class RectangleMarkupController {
                         if size != original.font?.pointSize { RectangleMarkupRecord.setTextFontSize(size, on: original) }
                         continue
                     }
-                    guard original.type == "Polygon", !(original is DrawbridgePolygonAnnotation) else { continue }
-                    let polygon = DrawbridgePolygonAnnotation(bounds:original.bounds,forType:PDFAnnotationSubtype(rawValue:"/Polygon"),withProperties:nil)
+                    let measuredPath = original.type == "Ink" && MeasurementMetadata.measurement(original) != nil
+                    guard (original.type == "Polygon" && !(original is DrawbridgePolygonAnnotation)) || (measuredPath && !(original is DrawbridgeMeasuredPathAnnotation)) else { continue }
+                    let polygon: PDFAnnotation = measuredPath ? DrawbridgeMeasuredPathAnnotation(bounds: original.bounds, forType: .ink, withProperties: nil) : DrawbridgePolygonAnnotation(bounds:original.bounds,forType:PDFAnnotationSubtype(rawValue:"/Polygon"),withProperties:nil)
+                    if let measurement = MeasurementMetadata.measurement(original) { polygon.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey) }
                     polygon.setValue(original.userName ?? "",forAnnotationKey:PDFAnnotationKey(rawValue:"/T")); polygon.setValue(RectangleMarkupRecord.identity(original) ?? "", forAnnotationKey: RectangleMarkupRecord.identityKey); polygon.contents = original.contents; polygon.color = original.color; polygon.border = original.border
                     polygon.shouldDisplay = original.shouldDisplay; polygon.shouldPrint = original.shouldPrint; polygon.isReadOnly = original.isReadOnly
                     RectangleMarkupRecord.setVertices(RectangleMarkupRecord.vertices(original),on:polygon)
@@ -364,7 +379,7 @@ final class RectangleMarkupController {
     /// version without marking those newer edits clean.
     func acceptPersistedSource(at url: URL, stamp: PDFMarkupSourceStamp? = nil) { sourceStamp = stamp ?? PDFMarkupSourceStamp.capture(url) }
 
-    func pointerDown(at location: CGPoint, clickCount: Int = 1) -> Bool {
+    func pointerDown(at location: CGPoint, clickCount: Int = 1, modifiers: NSEvent.ModifierFlags = []) -> Bool {
         finishTextEditing()
         guard let view else { return false }
         guard let page = view.page(for: location, nearest: false) else {
@@ -386,12 +401,18 @@ final class RectangleMarkupController {
             refresh(presentationChanged: false)
             return true
         }
-        if tool == .line || tool == .arrow {
+        if tool == .line || tool == .arrow || tool == .calibrate {
             view.setCurrentSelection(nil, animate: false)
-            let endpoint = Self.clamped(point, to: page.bounds(for: view.displayBox))
+            let candidate = modifiers.contains(.shift) && pendingLine != nil ? MeasurementGeometry.constrained(point, from: pendingLine!.start) : point
+            let endpoint = Self.clamped(candidate, to: page.bounds(for: view.displayBox))
             if let draft = pendingLine {
                 guard draft.page === page else { return true }
                 guard hypot(draft.start.x-endpoint.x, draft.start.y-endpoint.y) >= 2 else { return true }
+                if tool == .calibrate {
+                    tool = .select
+                    onCalibrationCompleted?(page, draft.start, endpoint)
+                    return true
+                }
                 let kind: RectangleMarkupRecord.Kind = tool == .arrow ? .arrow : .line
                 if create(on: page, bounds: Self.lineBounds(draft.start, endpoint, width: lineWidth), kind: kind, endpoints: (draft.start, endpoint)) != nil {
                     tool = .select
@@ -403,11 +424,19 @@ final class RectangleMarkupController {
             }
             refresh(); return true
         }
-        if tool == .polyline || tool == .polygon {
-            view.setCurrentSelection(nil, animate:false)
+        if tool == .polyline || tool == .polygon || tool == .area || tool == .perimeter {
             guard polylinePage == nil || polylinePage === page else { return true }
+            view.setCurrentSelection(nil, animate:false)
+            if tool == .area || tool == .perimeter {
+                guard MeasurementMetadata.scale(on: page) != nil, MeasurementMetadata.supportedPage(page) else { onMeasurementNeedsScale?(); return true }
+                if polylinePoints.count >= 3, let first = polylinePoints.first, hypot(first.x-point.x, first.y-point.y) <= 8 / max(view.scaleFactor, 0.01) {
+                    _ = finishPolyline(closed: true); return true
+                }
+                guard polylinePoints.count < 512 else { onInvalidMeasurement?(); return true }
+            }
             polylinePage = page
-            let p = Self.clamped(point,to:page.bounds(for:view.displayBox))
+            let candidate = modifiers.contains(.shift) && !polylinePoints.isEmpty ? MeasurementGeometry.constrained(point, from: polylinePoints.last!) : point
+            let p = Self.clamped(candidate,to:page.bounds(for:view.displayBox))
             if let last = polylinePoints.last, hypot(last.x-p.x,last.y-p.y) < 0.5 { } else { polylinePoints.append(p) }
             polylineHover = p
             if clickCount >= 2 { finishPolyline() } else { refresh() }
@@ -454,31 +483,93 @@ final class RectangleMarkupController {
         onClickAway?()
     }
 
-    func pointerMoved(at location: CGPoint) {
+    func pointerMoved(at location: CGPoint, modifiers: NSEvent.ModifierFlags = []) {
         if let draft = pendingLine, let view {
             guard view.page(for: location, nearest: false) === draft.page else { return }
-            let end = Self.clamped(view.convert(location, to: draft.page), to: draft.page.bounds(for: view.displayBox))
+            let point = view.convert(location, to: draft.page)
+            let end = Self.clamped(modifiers.contains(.shift) ? MeasurementGeometry.constrained(point, from: draft.start) : point, to: draft.page.bounds(for: view.displayBox))
             previewEndpoints = (draft.start, end)
             preview = (draft.page, Self.lineBounds(draft.start, end, width: lineWidth))
             refresh(presentationChanged: false); return
         }
         guard let view, let page = polylinePage else { return }
-        polylineHover = Self.clamped(view.convert(location,to:page),to:page.bounds(for:view.displayBox)); refresh(presentationChanged: false)
+        guard view.page(for: location, nearest: false) === page else { return }
+        let point = view.convert(location,to:page)
+        polylineHover = Self.clamped(modifiers.contains(.shift) && !polylinePoints.isEmpty ? MeasurementGeometry.constrained(point, from: polylinePoints.last!) : point,to:page.bounds(for:view.displayBox)); refresh(presentationChanged: false)
     }
     @discardableResult
-    func finishPolyline() -> Bool {
+    func finishPolyline(closed: Bool? = nil) -> Bool {
         guard let page = polylinePage else { return false }
         let points = polylinePoints
+        let isClosed = closed ?? (tool == .polygon || tool == .area)
+        if tool == .area || tool == .perimeter {
+            guard let scale = MeasurementMetadata.scale(on: page),
+                  createMeasurement(on: page, points: points, kind: tool == .area ? .area : .perimeter, closed: isClosed, scale: scale) != nil else { onInvalidMeasurement?(); return false }
+        } else { _ = createPolyline(on: page, points: points, closed: isClosed) }
         polylinePage = nil; polylinePoints = []; polylineHover = nil
-        _ = createPolyline(on:page,points:points,closed:tool == .polygon); refresh(); return true
+        refresh(); return true
     }
     @discardableResult
     func createPolyline(on page: PDFPage, points: [CGPoint], closed: Bool = false) -> PDFAnnotation? {
         guard points.count >= (closed ? 3 : 2), points.count <= 10000, points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }),
               zip(points,points.dropFirst()).contains(where: { hypot($0.0.x-$0.1.x,$0.0.y-$0.1.y) >= 2 }) else { return nil }
         let bounds = Self.polylineBounds(points,width:lineWidth)
-        guard let annotation = create(on:page,bounds:bounds,kind:closed ? .polygon : .polyline,vertices:points) else { return nil }
-        return annotation
+        return create(on:page,bounds:bounds,kind:closed ? .polygon : .polyline,vertices:points)
+    }
+    @discardableResult
+    func createMeasurement(on page: PDFPage, points: [CGPoint], kind: DrawingMeasurement.Kind, closed: Bool, scale: DrawingScale) -> PDFAnnotation? {
+        let measurement = DrawingMeasurement(kind: kind, scale: scale, closed: closed)
+        guard measurement.valid(points: points), MeasurementMetadata.supportedPage(page) else { return nil }
+        let padding: CGFloat = closed ? 8 : 24
+        let bounds = Self.polylineBounds(points, width: lineWidth).insetBy(dx: -padding, dy: -padding)
+        return create(on: page, bounds: bounds, kind: closed ? .polygon : .polyline, vertices: points, measurement: measurement)
+    }
+    /// Scale markers travel with each PDF page; settings survive save, deletion,
+    /// page reordering and reopening without an external sidecar file.
+    func applyDrawingScale(_ scale: DrawingScale?, to pages: [PDFPage]) {
+        guard canEdit(), scale == nil || scale!.isValid, !pages.isEmpty,
+              Set(pages.map(ObjectIdentifier.init)).count == pages.count,
+              pages.allSatisfy({ $0.document === boundDocument && MeasurementMetadata.supportedPage($0) }) else { return }
+        let changedPages = pages.filter { page in
+            if MeasurementMetadata.scale(on: page) != scale { return true }
+            guard let scale else { return false }
+            return page.annotations.compactMap(MeasurementMetadata.measurement).contains { $0.scale != scale }
+        }
+        guard !changedPages.isEmpty else { return }
+        restoreDrawingScales(changedPages.map { ($0, scale) })
+    }
+    private func restoreDrawingScales(_ updates: [(PDFPage, DrawingScale?)]) {
+        guard canEdit(), updates.allSatisfy({ $0.0.document === boundDocument }) else { return }
+        let previous = updates.map { ($0.0, MeasurementMetadata.scale(on: $0.0)) }
+        let previousMeasurements = updates.flatMap { page, _ in page.annotations.compactMap { a -> (PDFAnnotation, DrawingMeasurement)? in MeasurementMetadata.measurement(a).map { (a,$0) } } }
+        undo.registerUndo(withTarget: self) { target in
+            target.restoreDrawingScales(previous)
+            for (annotation, measurement) in previousMeasurements {
+                annotation.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey)
+                MeasurementMetadata.updateLabel(annotation)
+                if let page = annotation.page { target.changed(page) }
+            }
+        }
+        undo.setActionName("Set Page Scales")
+        for (page, scale) in updates {
+            for carrier in page.annotations where MeasurementMetadata.pageScale(carrier) != nil { page.removeAnnotation(carrier) }
+            if let scale {
+                let origin = page.bounds(for: .mediaBox).origin
+                let marker = PDFAnnotation(bounds: CGRect(origin: origin, size: CGSize(width: 2,height: 2)), forType: .square, withProperties: nil)
+                marker.setValue(RectangleMarkupRecord.prefix + UUID().uuidString, forAnnotationKey: RectangleMarkupRecord.identityKey)
+                marker.setValue(MeasurementMetadata.json(scale), forAnnotationKey: MeasurementMetadata.pageScaleKey)
+                marker.color = .clear; marker.shouldDisplay = false; marker.shouldPrint = false; marker.isReadOnly = true
+                page.addAnnotation(marker)
+                for annotation in page.annotations {
+                    if var measurement = MeasurementMetadata.measurement(annotation) {
+                        measurement.scale = scale
+                        annotation.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey)
+                        MeasurementMetadata.updateLabel(annotation)
+                    }
+                }
+            }
+            changed(page)
+        }
     }
     static func polylineBounds(_ points: [CGPoint], width: CGFloat) -> CGRect {
         let xs = points.map(\.x), ys = points.map(\.y)
@@ -486,36 +577,56 @@ final class RectangleMarkupController {
     }
 
     @discardableResult
-    func pointerDragged(at location: CGPoint) -> Bool {
+    func pointerDragged(at location: CGPoint, modifiers: NSEvent.ModifierFlags = []) -> Bool {
         if tool == .pen, let view, let page = polylinePage {
-            let point = Self.clamped(view.convert(location, to: page), to: page.bounds(for: view.displayBox))
+            var point = view.convert(location, to: page)
+            if modifiers.contains(.shift), !polylinePoints.isEmpty {
+                let index = penConstraintAnchor ?? (polylinePoints.count-1)
+                penConstraintAnchor = index
+                point = MeasurementGeometry.constrained(point, from: polylinePoints[index])
+                polylinePoints.removeSubrange((index+1)..<polylinePoints.count)
+            } else { penConstraintAnchor = nil }
+            point = Self.clamped(point, to: page.bounds(for: view.displayBox))
             if let last = polylinePoints.last, hypot(last.x-point.x, last.y-point.y) >= 0.25 / max(view.scaleFactor, 0.01), polylinePoints.count < 10000 {
                 polylinePoints.append(point)
             }
             refresh(presentationChanged: false)
             return true
         }
-        if pendingLine != nil { pointerMoved(at: location); return true }
+        if pendingLine != nil { pointerMoved(at: location, modifiers: modifiers); return true }
         guard let view, let gesture else { return false }
         switch gesture {
         case .vertex(let page, let annotation, let index):
             var points = RectangleMarkupRecord.vertices(annotation)
             guard points.indices.contains(index) else { return false }
-            points[index] = Self.clamped(view.convert(location,to:page),to:page.bounds(for:view.displayBox))
+            let candidate = view.convert(location,to:page)
+            let anchor = points[index == 0 ? 1 : index-1]
+            points[index] = Self.clamped(modifiers.contains(.shift) ? MeasurementGeometry.constrained(candidate, from: anchor) : candidate,to:page.bounds(for:view.displayBox))
             previewVertices = points
             preview = (page,Self.polylineBounds(points,width:annotation.border?.lineWidth ?? 2))
         case .create(let page, let start):
-            let end = Self.clamped(view.convert(location, to: page), to: page.bounds(for: view.displayBox))
+            var end = Self.clamped(view.convert(location, to: page), to: page.bounds(for: view.displayBox))
+            if modifiers.contains(.shift) {
+                if tool == .rectangle || tool == .ellipse {
+                    let crop = page.bounds(for: view.displayBox)
+                    let dx = end.x-start.x, dy = end.y-start.y
+                    let roomX = dx >= 0 ? crop.maxX-start.x : start.x-crop.minX
+                    let roomY = dy >= 0 ? crop.maxY-start.y : start.y-crop.minY
+                    let side = min(max(abs(dx),abs(dy)), roomX, roomY)
+                    end = CGPoint(x: start.x + (dx >= 0 ? side : -side), y: start.y + (dy >= 0 ? side : -side))
+                } else if tool == .line || tool == .arrow { end = MeasurementGeometry.constrained(end, from: start) }
+            }
             if tool == .line || tool == .arrow {
                 previewEndpoints = (start,end); preview = (page, Self.lineBounds(start,end,width:lineWidth))
             } else { preview = (page, Self.rect(start, end)) }
         case .edit(let page, let annotation, let original, let start, let corner):
-            let end = view.convert(location, to: page)
+            var end = view.convert(location, to: page)
+            if modifiers.contains(.shift), corner == nil { end = MeasurementGeometry.constrained(end, from: start) }
             let crop = page.bounds(for: view.displayBox)
             if annotation.type == "Line" && RectangleMarkupRecord.owns(annotation) {
                 var a = handlePoint(.lowerLeft, annotation: annotation), b = handlePoint(.upperRight, annotation: annotation)
                 if let corner {
-                    if corner == .lowerLeft { a = Self.clamped(end,to:crop) } else { b = Self.clamped(end,to:crop) }
+                    if corner == .lowerLeft { a = Self.clamped(modifiers.contains(.shift) ? MeasurementGeometry.constrained(end, from: b) : end,to:crop) } else { b = Self.clamped(modifiers.contains(.shift) ? MeasurementGeometry.constrained(end, from: a) : end,to:crop) }
                 } else {
                     let dx = min(max(end.x-start.x,crop.minX-original.minX),crop.maxX-original.maxX)
                     let dy = min(max(end.y-start.y,crop.minY-original.minY),crop.maxY-original.maxY)
@@ -540,20 +651,20 @@ final class RectangleMarkupController {
         refresh(presentationChanged: false); return true
     }
 
-    func pointerUp(at location: CGPoint) -> Bool {
+    func pointerUp(at location: CGPoint, modifiers: NSEvent.ModifierFlags = []) -> Bool {
         if tool == .pen, let page = polylinePage {
-            _ = pointerDragged(at: location)
+            _ = pointerDragged(at: location, modifiers: modifiers)
             let points = polylinePoints
-            polylinePage = nil; polylinePoints = []; polylineHover = nil
+            polylinePage = nil; polylinePoints = []; polylineHover = nil; penConstraintAnchor = nil
             _ = createPolyline(on: page, points: points)
             selected = nil
             refresh()
             return true
         }
         if pendingLine != nil { return true }
-        if tool == .polyline || tool == .polygon { return true }
+        if tool == .polyline || tool == .polygon || tool == .area || tool == .perimeter { return true }
         guard let gesture else { return false }
-        _ = pointerDragged(at: location)
+        _ = pointerDragged(at: location, modifiers: modifiers)
         let candidate = preview?.1
         let endpoints = previewEndpoints
         let vertices = previewVertices
@@ -576,16 +687,20 @@ final class RectangleMarkupController {
     }
 
     @discardableResult
-    func create(on page: PDFPage, bounds: CGRect, kind: RectangleMarkupRecord.Kind = .rectangle, endpoints: (CGPoint,CGPoint)? = nil, text: String = "", vertices: [CGPoint] = []) -> PDFAnnotation? {
+    func create(on page: PDFPage, bounds: CGRect, kind: RectangleMarkupRecord.Kind = .rectangle, endpoints: (CGPoint,CGPoint)? = nil, text: String = "", vertices: [CGPoint] = [], measurement: DrawingMeasurement? = nil) -> PDFAnnotation? {
         guard canEdit(), bounds.width >= 2, bounds.height >= 2,
               page.document === boundDocument, [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy({ $0.isFinite }) else { return nil }
         if kind == .text && (text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || text.utf8.count > 100000) { return nil }
         if (kind == .polyline || kind == .polygon) && (vertices.count < (kind == .polygon ? 3 : 2) || vertices.count > 10000 || !vertices.allSatisfy({ $0.x.isFinite && $0.y.isFinite && bounds.contains($0) })) { return nil }
+        if let measurement {
+            guard (kind == .polygon || kind == .polyline), measurement.closed == (kind == .polygon),
+                  measurement.valid(points: vertices), MeasurementMetadata.supportedPage(page) else { return nil }
+        }
         let type: PDFAnnotationSubtype = kind == .polygon ? PDFAnnotationSubtype(rawValue:"/Polygon") : kind == .polyline ? .ink : kind == .text ? .freeText : kind == .ellipse ? .circle : (kind == .line || kind == .arrow ? .line : .square)
         if type == .line {
             guard let (a,b) = endpoints, [a.x,a.y,b.x,b.y].allSatisfy({ $0.isFinite }), bounds.contains(a), bounds.contains(b), hypot(a.x-b.x,a.y-b.y) >= 2 else { return nil }
         }
-        let annotation = kind == .polygon ? DrawbridgePolygonAnnotation(bounds:bounds,forType:type,withProperties:nil) : PDFAnnotation(bounds: bounds, forType: type, withProperties: nil)
+        let annotation: PDFAnnotation = kind == .polygon ? DrawbridgePolygonAnnotation(bounds:bounds,forType:type,withProperties:nil) : measurement != nil ? DrawbridgeMeasuredPathAnnotation(bounds: bounds, forType: type, withProperties: nil) : PDFAnnotation(bounds: bounds, forType: type, withProperties: nil)
         if let (a,b) = endpoints {
             annotation.startPoint = CGPoint(x:a.x-bounds.minX,y:a.y-bounds.minY)
             annotation.endPoint = CGPoint(x:b.x-bounds.minX,y:b.y-bounds.minY)
@@ -598,7 +713,8 @@ final class RectangleMarkupController {
         if kind == .text { RectangleMarkupRecord.setTextColor(strokeColor,on:annotation); RectangleMarkupRecord.setTextFontSize(fontSize,on:annotation) } else { annotation.color = strokeColor }
         let border = PDFBorder(); border.lineWidth = kind == .text ? 0 : lineWidth; annotation.border = border
         if kind == .polyline || kind == .polygon { RectangleMarkupRecord.setVertices(vertices,on:annotation) }
-        if kind == .polygon { RectangleMarkupRecord.setPolygonFill(fillColor,on:annotation) }
+        if kind == .polygon { RectangleMarkupRecord.setPolygonFill(measurement != nil ? nil : fillColor,on:annotation) }
+        if let measurement { annotation.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey); MeasurementMetadata.updateLabel(annotation) }
         annotation.shouldDisplay = true; annotation.shouldPrint = true
         setPresence(true, annotation: annotation, page: page, action: "Add " + kind.rawValue.capitalized)
         return annotation
@@ -765,11 +881,13 @@ final class RectangleMarkupController {
             if endpoints == nil { return }
             if let a = oldEndpoints, let b = endpoints, a.0 == b.0 && a.1 == b.1 { return }
         }
+        let transformed = oldVertices.map { p in CGPoint(x:bounds.minX+(p.x-previous.minX)*bounds.width/previous.width,y:bounds.minY+(p.y-previous.minY)*bounds.height/previous.height) }
+        if let measurement = MeasurementMetadata.measurement(annotation), !measurement.valid(points: transformed) { onInvalidMeasurement?(); return }
         undo.registerUndo(withTarget: self) { target in target.setGeometry(previous,endpoints:oldEndpoints,of:annotation,on:page,action:action) }
         undo.setActionName(action)
         annotation.bounds = bounds
         if annotation.type == "Ink" || annotation.type == "Polygon" {
-            RectangleMarkupRecord.setVertices(oldVertices.map { p in CGPoint(x:bounds.minX+(p.x-previous.minX)*bounds.width/previous.width,y:bounds.minY+(p.y-previous.minY)*bounds.height/previous.height) },on:annotation)
+            RectangleMarkupRecord.setVertices(transformed,on:annotation)
         }
         if let (a,b) = endpoints {
             annotation.startPoint = CGPoint(x:a.x-bounds.minX,y:a.y-bounds.minY)
@@ -784,9 +902,12 @@ final class RectangleMarkupController {
         guard canEdit(), page.document === boundDocument, RectangleMarkupRecord.owns(annotation),
               !annotation.isReadOnly, !previous.isEmpty, points.count == previous.count,
               points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }), points != previous else { return }
+        if let measurement = MeasurementMetadata.measurement(annotation), !measurement.valid(points: points) { onInvalidMeasurement?(); return }
         undo.registerUndo(withTarget:self) { target in target.setVertexPositions(previous,of:annotation,on:page) }
         undo.setActionName("Edit Markup Node")
-        annotation.bounds = Self.polylineBounds(points,width:annotation.border?.lineWidth ?? 2)
+        let measurement = MeasurementMetadata.measurement(annotation)
+        let padding: CGFloat = measurement == nil ? 0 : (measurement!.closed ? 8 : 24)
+        annotation.bounds = Self.polylineBounds(points,width:annotation.border?.lineWidth ?? 2).insetBy(dx: -padding, dy: -padding)
         RectangleMarkupRecord.setVertices(points,on:annotation)
         selected = annotation; changed(page)
     }
@@ -863,12 +984,21 @@ final class RectangleMarkupController {
     }
 
     private func changed(_ page: PDFPage, importedAppearanceChanged: Bool = false) {
+        if let selected, selected.page === page { MeasurementMetadata.updateLabel(selected) }
         // A real style mutation during drafting survives cancellation of the text.
         if var draft = inlineText { draft.wasDirty = true; inlineText = draft }
         hasUnsavedChanges = true; (view as? MarkupPDFView)?.refreshAnnotationRendering(on: page, importedAppearanceChanged: importedAppearanceChanged); refresh(); onMutation?(page)
     }
 
-    func cancelGesture() { pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
+    @discardableResult
+    func removeLastDraftPoint() -> Bool {
+        guard tool == .area || tool == .perimeter || tool == .polygon || tool == .polyline, !polylinePoints.isEmpty else { return false }
+        polylinePoints.removeLast(); polylineHover = nil
+        if polylinePoints.isEmpty { polylinePage = nil }
+        refresh(presentationChanged: false)
+        return true
+    }
+    func cancelGesture() { penConstraintAnchor = nil; pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
     func escape() { cancelGesture(); selected = nil; onClickAway?(); tool = .select; refresh() }
     func refresh(presentationChanged: Bool = true) {
         positionTextEditor()
@@ -911,7 +1041,7 @@ final class RectangleMarkupController {
             for (i,p) in (polylinePoints + (polylineHover.map { [$0] } ?? [])).enumerated() {
                 if i == 0 { path.move(to:view.convert(p,from:page)) } else { path.addLine(to:view.convert(p,from:page)) }
             }
-            if tool == .polygon { path.closeSubpath() }
+            if tool == .polygon || tool == .area { path.closeSubpath() }
         }
         overlay.strokeColor = (tool == .pen && polylinePage != nil ? strokeColor : NSColor.systemBlue).cgColor
         overlay.lineWidth = tool == .pen && polylinePage != nil ? lineWidth * (view?.scaleFactor ?? 1) : 2
@@ -951,6 +1081,7 @@ final class DrawbridgePolygonAnnotation: PDFAnnotation {
         context.setLineWidth(border?.lineWidth ?? 2); context.setLineJoin(.round)
         if let fill = RectangleMarkupRecord.polygonFill(self) { context.setFillColor(fill.cgColor); context.drawPath(using:.fillStroke) }
         else { context.strokePath() }
+        MeasurementAppearance.draw(self, box: box, context: context)
     }
 }
 

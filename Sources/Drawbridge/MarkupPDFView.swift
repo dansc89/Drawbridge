@@ -941,7 +941,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        rectangleMarkup.pointerMoved(at:convert(event.locationInWindow,from:nil))
+        rectangleMarkup.pointerMoved(at:convert(event.locationInWindow,from:nil), modifiers: event.modifierFlags)
         lastPointerInView = convert(event.locationInWindow, from: nil)
         super.mouseMoved(with: event)
         if usesPenCursor { Self.penCursor.set() }
@@ -961,7 +961,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let location = convert(event.locationInWindow, from: nil)
         lastPointerInView = location
         navigationSelectionStart = nil
-        if !isRegionCaptureModeEnabled, rectangleMarkup.pointerDown(at: location, clickCount: event.clickCount) { return }
+        if !isRegionCaptureModeEnabled, rectangleMarkup.pointerDown(at: location, clickCount: event.clickCount, modifiers: event.modifierFlags) { return }
         guard let page = page(for: location, nearest: false) else { return }
         if isRegionCaptureModeEnabled {
             regionCaptureStartInView = location
@@ -1008,7 +1008,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             dragPreviewLayer.path = CGPath(rect: normalizedRect(from: start, to: location), transform: nil)
             return
         }
-        if rectangleMarkup.pointerDragged(at: location) { return }
+        if rectangleMarkup.pointerDragged(at: location, modifiers: event.modifierFlags) { return }
         guard let start = navigationSelectionStart else { return }
         let end = convert(location, to: start.page)
         setCurrentSelection(start.page.selection(from: start.point, to: end), animate: false)
@@ -1016,7 +1016,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     override func mouseUp(with event: NSEvent) {
         navigationSelectionStart = nil
-        if !isRegionCaptureModeEnabled, rectangleMarkup.pointerUp(at: convert(event.locationInWindow, from: nil)) { return }
+        if !isRegionCaptureModeEnabled, rectangleMarkup.pointerUp(at: convert(event.locationInWindow, from: nil), modifiers: event.modifierFlags) { return }
         guard isRegionCaptureModeEnabled else { return }
         defer {
             regionCaptureStartInView = nil
@@ -2603,7 +2603,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         case 36, 76: _ = rectangleMarkup.finishPolyline()
         case 123, 126: onPageNavigationShortcut?(-1)
         case 124, 125: onPageNavigationShortcut?(1)
-        case 51, 117: rectangleMarkup.deleteSelected()
+        case 51, 117: if !rectangleMarkup.removeLastDraftPoint() { rectangleMarkup.deleteSelected() }
         case 53:
             rectangleMarkup.escape()
             cancelRegionCaptureMode()

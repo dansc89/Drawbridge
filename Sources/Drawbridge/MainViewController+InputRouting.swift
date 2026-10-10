@@ -199,7 +199,7 @@ extension MainViewController {
                 return nil
             }
             if view.window?.firstResponder === markupsTable { deleteListedMarkups(nil); return nil }
-            if view.window?.firstResponder === pdfView { rectangleDelete(nil); return nil }
+            if view.window?.firstResponder === pdfView { if !pdfView.rectangleMarkup.removeLastDraftPoint() { rectangleDelete(nil) }; return nil }
             return event
         }
 

@@ -4,6 +4,7 @@ import PDFKit
 @MainActor
 enum MarkupListPresentation {
     static func includes(_ annotation: PDFAnnotation) -> Bool {
+        guard MeasurementMetadata.pageScale(annotation) == nil else { return false }
         guard !["Link", "Widget", "Popup"].contains(annotation.type ?? "") else { return false }
         let author = (annotation.userName ?? "").lowercased()
         return !author.contains("autocad shx")
@@ -13,6 +14,7 @@ enum MarkupListPresentation {
         return name.hasPrefix(RectangleMarkupRecord.prefix) ? MarkupAuthorPreference.currentName : name.isEmpty ? "Unknown" : name
     }
     static func typeName(_ annotation: PDFAnnotation) -> String {
+        if let measurement = MeasurementMetadata.measurement(annotation) { return measurement.kind == .area ? "Area" : measurement.closed ? "Perimeter" : "Length" }
         switch annotation.type {
         case "Square": return "Rectangle"
         case "Circle": return "Ellipse"

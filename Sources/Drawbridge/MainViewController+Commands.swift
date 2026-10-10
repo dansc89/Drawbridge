@@ -686,6 +686,9 @@ extension MainViewController {
              #selector(commandPreviousPage(_:)), #selector(commandNextPage(_:)),
              #selector(commandActualSize(_:)), #selector(commandFitWidth(_:)), #selector(commandFitPage(_:)), #selector(commandGoToSheet(_:)), #selector(selectSelectionTool(_:)):
             return hasDocument
+        case #selector(commandSetPageDrawingScale(_:)), #selector(commandCalibrateDrawingScale(_:)),
+             #selector(areaMeasure(_:)), #selector(perimeterMeasure(_:)):
+            return hasDocument && pdfView.currentPage != nil && pdfView.rectangleMarkup.canEdit()
         case #selector(commandNavigateBack(_:)):
             return pdfView.canNavigateBackInHistory
         case #selector(commandNavigateForward(_:)):

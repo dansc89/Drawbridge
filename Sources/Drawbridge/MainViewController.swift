@@ -4949,6 +4949,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             lockedSuffix = ""
         }
         statusScaleLabel.stringValue = "Scale: \(scaleText) \(unit)\(lockedSuffix)"
+        refreshMeasurementScaleDisplay()
     }
 
     func currentToolName() -> String {

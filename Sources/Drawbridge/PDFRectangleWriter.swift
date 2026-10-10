@@ -448,6 +448,14 @@ enum PDFRectangleWriter {
                 let appearanceRef = "\(next) 0 R"; next += 1
                 let b = record.bounds
                 var annotation: [String:Any] = ["/Type": "/Annot", "/Subtype": subtype(record.kind), "/Rect": [b.minX,b.minY,b.maxX,b.maxY], "/T": "u:\(record.author)", "/NM": "u:\(record.id)", "/Contents": "u:\(record.kind.rawValue.capitalized)", "/F": 4, "/C": [record.red,record.green,record.blue], "/BS": ["/W":record.lineWidth,"/S":"/S"], "/AP": ["/N":appearanceRef]]
+                if let scale = record.pageScale {
+                    annotation["/DrawbridgePageScale"] = "u:" + MeasurementMetadata.json(scale)
+                    annotation["/F"] = 98 // Hidden, NoView, ReadOnly; never printed.
+                }
+                if let measurement = record.measurement {
+                    annotation["/DrawbridgeMeasurement"] = "u:" + MeasurementMetadata.json(measurement)
+                    annotation["/Contents"] = "u:" + measurement.label(points: record.vertices)
+                }
                 if let a = record.start, let z = record.end {
                     annotation["/L"] = [a.x,a.y,z.x,z.y]
                     annotation["/LE"] = ["/None",record.kind == .arrow ? "/OpenArrow" : "/None"]
@@ -483,7 +491,7 @@ enum PDFRectangleWriter {
                     }
                 }
                 let drawing = appearanceDrawing(record)
-                objects["obj:\(appearanceRef)"] = ["stream": ["dict": ["/Type": "/XObject", "/Subtype": "/Form", "/BBox": [0,0,b.width,b.height], "/Resources": [String:Any](), "/DrawbridgeRectangleAppearance": true], "data": Data(drawing.utf8).base64EncodedString()]]
+                objects["obj:\(appearanceRef)"] = ["stream": ["dict": ["/Type": "/XObject", "/Subtype": "/Form", "/BBox": [0,0,b.width,b.height], "/Resources": record.measurement == nil ? [String:Any]() : ["/Font": ["/MeasureFont": ["/Type": "/Font", "/Subtype": "/Type1", "/BaseFont": "/Helvetica"]]], "/DrawbridgeRectangleAppearance": true], "data": Data(drawing.utf8).base64EncodedString()]]
                 objects["obj:\(annotationRef)"] = ["value": annotation]
                 entries.append(annotationRef)
             }
@@ -499,6 +507,7 @@ enum PDFRectangleWriter {
 
     /// Appearance coordinates are local to the annotation; page rotation is untouched.
     private static func appearanceDrawing(_ r: RectangleMarkupRecord) -> String {
+        if r.pageScale != nil { return "" }
         let half = r.lineWidth/2, w = max(0,Double(r.bounds.width)-r.lineWidth), h = max(0,Double(r.bounds.height)-r.lineWidth)
         var path: String
         switch r.kind {
@@ -522,9 +531,9 @@ enum PDFRectangleWriter {
         }
         if r.kind == .polygon {
             path += " h"
-            if let fill = r.fill { return "q \(r.red) \(r.green) \(r.blue) RG \(fill[0]) \(fill[1]) \(fill[2]) rg \(r.lineWidth) w 1 j \(path) B Q\n" }
+            if let fill = r.fill { return "q \(r.red) \(r.green) \(r.blue) RG \(fill[0]) \(fill[1]) \(fill[2]) rg \(r.lineWidth) w 1 j \(path) B Q\n" + MeasurementAppearance.pdf(r) }
         }
-        return "q \(r.red) \(r.green) \(r.blue) RG \(r.lineWidth) w 1 J 1 j \(path) S Q\n"
+        return "q \(r.red) \(r.green) \(r.blue) RG \(r.lineWidth) w 1 J 1 j \(path) S Q\n" + MeasurementAppearance.pdf(r)
     }
 
     private static func ownedRecordsMatch(_ json: [String: Any], records: [RectangleMarkupRecord]) throws -> Bool {
@@ -544,6 +553,10 @@ enum PDFRectangleWriter {
                       let appearance = (value["/AP"] as? [String: Any])?["/N"] as? String,
                       (objects["obj:\(appearance)"] as? [String: Any])?["stream"] != nil,
                       found.insert(id).inserted else { return false }
+                if value["/DrawbridgeMeasurement"] as? String != expected.measurement.map({ "u:" + MeasurementMetadata.json($0) }) { return false }
+                if value["/DrawbridgePageScale"] as? String != expected.pageScale.map({ "u:" + MeasurementMetadata.json($0) }) { return false }
+                if let scale = expected.pageScale, (!scale.isValid || value["/F"] as? Int != 98) { return false }
+                if let measurement = expected.measurement, value["/Contents"] as? String != "u:" + measurement.label(points: expected.vertices) { return false }
                 if expected.kind == .polygon {
                     guard value["/Vertices"] as? [Double] == expected.vertices.flatMap({ [Double($0.x),Double($0.y)] }),
                           value["/IC"] as? [Double] == expected.fill else { return false }

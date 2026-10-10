@@ -44,7 +44,22 @@ Markup saving appends annotation changes without rasterizing the drawing pages. 
 
 The separate markup toolbar supports pen (`P`), rectangle (`R`), ellipse (`E`), line (`L`), arrow (`A`), polygon (`Shift+P`), polyline (`Shift+N`), and text (`T`). The active tool is highlighted. `V` returns to selection; Escape cancels an unfinished drawing. Click a line or arrow's start and then its end. Draw a text box and type on the page; double-click an existing Drawbridge text annotation to edit it.
 
-Select Drawbridge markups to move them, change their color or line weight, or delete them. Polygon and polyline handles follow their vertices. Polygons support fill; polylines remain open lines. Use `Cmd+Z` to undo and `Shift+Cmd+Z` to redo. Standard unlocked imported annotations can also be selected, moved, and deleted with Undo/Redo. Their original appearance and metadata are preserved when saving. Imported text, style, and node editing are not yet supported; those controls are disabled when an imported markup is selected. Flattened page content and locked annotations cannot be selected as editable markups. Measurement, snapshot pasting, page-combining, and page-conversion tools are not yet available.
+Select Drawbridge markups to move them, change their color or line weight, or delete them. Polygon and polyline handles follow their vertices. Polygons support fill; polylines remain open lines. Use `Cmd+Z` to undo and `Shift+Cmd+Z` to redo. Standard unlocked imported annotations can also be selected, moved, and deleted with Undo/Redo. Their original appearance and metadata are preserved when saving. Imported text, style, and node editing are not yet supported; those controls are disabled when an imported markup is selected. Flattened page content and locked annotations cannot be selected as editable markups. Snapshot pasting, page-combining, and page-conversion tools are not yet available.
+
+## Drawing measurements
+
+1. Choose **Measurements > Set Drawing Scale…** or click **Scale…** in the markup toolbar. Pick an architectural preset such as `1/8" = 1'-0"`, a metric ratio, or a custom inches-to-feet scale.
+2. Enter the PDF page numbers to apply it to, such as `1, 3-6, 9`. Multiple selections in the Pages sidebar populate the page list. Verify the scale against a known drawing dimension before measuring.
+3. Choose **Area** (`Shift+A`) and click each boundary corner. Click the first corner again, double-click the final corner, or press Enter to close the area.
+4. Choose **Perimeter / Length** (`Shift+L`) and click along a path. Click the first corner again to measure a closed perimeter. Double-click the last point or press Enter to measure an open path's total distance.
+
+Choose **Measurements > Calibrate Drawing Scale…** to calibrate a resized drawing against a known dimension. Click both endpoints, enter the distance in feet or meters, and select the PDF pages that share this scale. Feet accept decimals or feet and inches (for example, `20' 6 1/2"`). Calibration is saved with the pages and recalculates existing measurements; Undo restores the previous scale and totals. The PDF page size does not change.
+
+Hold **Shift** while placing points to constrain each segment to horizontal or vertical directions. This also works with lines, arrows, polylines, polygons, calibration, and the pen. Shift-drag creates squares with Rectangle and circles with Ellipse. Shift-dragging a selected markup constrains its movement to one axis. **Backspace/Delete** removes the most recent unfinished point, allowing you to correct a boundary without restarting. Escape cancels an unfinished measurement. Crossed area boundaries are rejected. Measurements show square feet/meters for area and feet/meters for distance. They appear in the Markups List with the author's name. Move or edit their nodes to recalculate the value. Changing a page's scale recalculates measurements on that page; Undo/Redo restores both scales and totals.
+
+Scale settings and measurement labels persist inside the PDF. Saved labels are visible in other PDF viewers. Drawbridge-specific measurement editing is not guaranteed in other applications. These remain vector annotations; saving does not rasterize or rebuild the original drawing content.
+
+Each page has one scale. Reduced sheets and details at a different scale need verification. Automatic snapping to drawing geometry, multiple scale regions on one page, curved measurements, and takeoff exports are not implemented. Pages with non-default PDF `/UserUnit` are rejected rather than producing misleading values. A measurement can have up to 512 corners.
 
 ## Markup Properties
 
