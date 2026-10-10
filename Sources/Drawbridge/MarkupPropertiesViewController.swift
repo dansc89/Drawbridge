@@ -3,9 +3,12 @@ import AppKit
 /// A nonmodal inspector edits the selection, or the next tool's defaults when
 /// nothing is selected. Only properties supported by the verified writer appear.
 @MainActor
-final class MarkupPropertiesViewController: NSViewController {
+final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegate {
     weak var session: RectangleMarkupController?
     var onHide: (() -> Void)?
+    let setAsDefault = NSButton(title: "Set as Default", target: nil, action: nil)
+    let defaultStatus = NSTextField(labelWithString: "")
+    private var lastDefaultTool: RectangleMarkupController.Tool?
     let linePattern = NSPopUpButton()
     let strokeOpacity = NSSlider(value: 100, minValue: 0, maxValue: 100, target: nil, action: nil)
     let fillOpacity = NSSlider(value: 100, minValue: 0, maxValue: 100, target: nil, action: nil)
@@ -47,7 +50,7 @@ final class MarkupPropertiesViewController: NSViewController {
             field.setAccessibilityLabel(label)
             field.widthAnchor.constraint(equalToConstant: 85).isActive = true
             field.cell?.sendsActionOnEndEditing = true
-            field.target = self; field.action = #selector(changeNumber(_:))
+            field.target = self; field.action = #selector(changeNumber(_:)); field.delegate = self
         }
         stroke.target = self; stroke.action = #selector(changeStroke(_:)); stroke.setAccessibilityLabel("Markup color")
         fill.target = self; fill.action = #selector(changeFill(_:)); fill.setAccessibilityLabel("Polygon fill color")
@@ -95,7 +98,10 @@ final class MarkupPropertiesViewController: NSViewController {
         snapshotRows.orientation = .vertical; snapshotRows.alignment = .leading; snapshotRows.spacing = 10
         strokeRow = row("Stroke color", stroke)
         strokeOpacityRow = row("Stroke opacity", NSStackView(views: [strokeOpacity, strokePercent]))
-        let stack = NSStackView(views: [header, editingContext, captureHint, snapshotRows, strokeRow, weightRow, patternRow, strokeOpacityRow, fontRow, fillRow, fillOpacityRow, note])
+        setAsDefault.target = self; setAsDefault.action = #selector(saveDefault(_:))
+        setAsDefault.toolTip = "Remember this appearance for future markups made with this tool."
+        defaultStatus.font = .systemFont(ofSize: 11); defaultStatus.textColor = .secondaryLabelColor
+        let stack = NSStackView(views: [header, editingContext, captureHint, snapshotRows, strokeRow, weightRow, patternRow, strokeOpacityRow, fontRow, fillRow, fillOpacityRow, note, setAsDefault, defaultStatus])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
@@ -104,6 +110,8 @@ final class MarkupPropertiesViewController: NSViewController {
     func refresh() {
         _ = view
         guard let session else { return }
+        if lastDefaultTool != session.defaultTool { defaultStatus.stringValue = ""; lastDefaultTool = session.defaultTool }
+        setAsDefault.isEnabled = session.canEdit() && session.defaultTool != nil
         let selection = session.selected
         let text = selection.map { $0.type == "FreeText" } ?? (session.tool == .text)
         let polygon = selection.map { $0.type == "Polygon" } ?? (session.tool == .polygon || session.tool == .area)
@@ -142,6 +150,11 @@ final class MarkupPropertiesViewController: NSViewController {
         fill.isEnabled = enabled && color != nil
         fillOpacity.isEnabled = enabled && color != nil
     }
+    @objc func saveDefault(_ sender: Any?) {
+        guard view.window?.makeFirstResponder(nil) != false, let session else { return }
+        defaultStatus.stringValue = session.saveCurrentAsDefault() ? "Default saved for this tool." : "Select a markup or drawing tool first."
+        refresh()
+    }
     @objc func changeSnapshot(_ sender: NSControl) {
         guard let session, let rgb = snapshotColor.color.usingColorSpace(.deviceRGB) else { return }
         let style = SnapshotStyle(overlay: snapshotOverlay.state == .on, opacity: snapshotOpacity.doubleValue / 100,
@@ -160,6 +173,9 @@ final class MarkupPropertiesViewController: NSViewController {
     @objc func changeStroke(_ sender: Any?) {
         guard let session else { return }
         session.styleSelected(color: stroke.color, width: session.selected?.border?.lineWidth ?? session.lineWidth)
+    }
+    func controlTextDidEndEditing(_ notification: Notification) {
+        if let field = notification.object as? NSTextField { changeNumber(field) }
     }
     @objc func changeNumber(_ sender: NSTextField) {
         guard let session, let value = sender.objectValue as? NSNumber else { refresh(); return }

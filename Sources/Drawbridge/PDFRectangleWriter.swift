@@ -480,6 +480,7 @@ enum PDFRectangleWriter {
                 let appearanceRef = "\(next) 0 R"; next += 1
                 let b = record.bounds
                 var annotation: [String:Any] = ["/Type": "/Annot", "/Subtype": subtype(record.kind), "/Rect": [b.minX,b.minY,b.maxX,b.maxY], "/T": "u:\(record.author)", "/NM": "u:\(record.id)", "/Contents": "u:\(record.kind.rawValue.capitalized)", "/F": 4, "/C": [record.red,record.green,record.blue], "/BS": ["/W":record.lineWidth,"/S":"/S"], "/AP": ["/N":appearanceRef]]
+                if let tool = record.inkTool { annotation["/DrawbridgeInkTool"] = "u:" + tool }
                 annotation["/DrawbridgeLinePattern"] = "u:" + record.linePattern.rawValue
                 annotation["/DrawbridgeStrokeOpacity"] = record.strokeOpacity
                 annotation["/DrawbridgeFillOpacity"] = record.fillOpacity
@@ -611,6 +612,7 @@ enum PDFRectangleWriter {
                 guard value["/DrawbridgeLinePattern"] as? String == "u:" + expected.linePattern.rawValue,
                       value["/DrawbridgeStrokeOpacity"] as? Double == expected.strokeOpacity,
                       value["/DrawbridgeFillOpacity"] as? Double == expected.fillOpacity else { return false }
+                if let tool = expected.inkTool, value["/DrawbridgeInkTool"] as? String != "u:" + tool { return false }
                 if expected.kind == .snapshot, value["/DrawbridgeSnapshotStyle"] as? String != "u:" + expected.snapshotStyle.json { return false }
                 let payloadValue = value["/DrawbridgeSnapshotPDF"] as? String
                 let payloadString = payloadValue.flatMap { ref in

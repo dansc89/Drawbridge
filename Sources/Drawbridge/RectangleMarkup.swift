@@ -79,6 +79,8 @@ private final class PDFMarkupSourceBaseline: @unchecked Sendable {
 struct RectangleMarkupRecord: Sendable, Equatable {
     static let prefix = "DrawbridgeRectangleV1:"
     enum Kind: String, Sendable { case rectangle, ellipse, line, arrow, text, polyline, polygon, snapshot }
+    static let inkToolKey = PDFAnnotationKey(rawValue: "DrawbridgeInkTool")
+    var inkTool: String? = nil
     var linePattern: MarkupLinePattern = .solid
     var strokeOpacity: Double = 1
     var fillOpacity: Double = 1
@@ -189,6 +191,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
                 var record = Self(id: id, pageIndex: index, bounds: annotation.bounds,
                             red: Double(rgb.redComponent), green: Double(rgb.greenComponent), blue: Double(rgb.blueComponent),
                             lineWidth: Double(annotation.border?.lineWidth ?? 2))
+                record.inkTool = annotation.type == "Ink" ? annotation.value(forAnnotationKey: inkToolKey) as? String : nil
                 record.linePattern = MarkupStyle.pattern(annotation)
                 record.strokeOpacity = MarkupStyle.strokeOpacity(annotation)
                 record.fillOpacity = MarkupStyle.fillOpacity(annotation)
@@ -220,6 +223,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
 
     var isValid: Bool {
         id.hasPrefix(Self.prefix) && pageIndex >= 0 &&
+        (inkTool == nil || (kind == .polyline && ["pen", "polyline"].contains(inkTool!))) &&
         (kind != .snapshot || (snapshotStyle.isValid && snapshotData != nil && SnapshotPayload(data: snapshotData!).page != nil)) &&
         (pageScale == nil || (kind == .rectangle && pageScale!.isValid && measurement == nil)) &&
         (measurement == nil || (measurement!.valid(points: vertices) && (kind == .polygon || kind == .polyline) && (measurement!.closed == (kind == .polygon)))) &&
@@ -237,13 +241,16 @@ struct RectangleMarkupRecord: Sendable, Equatable {
 /// New annotation interaction state; deliberately independent of legacy ToolMode.
 @MainActor
 final class RectangleMarkupController {
-    enum Tool { case select, pen, rectangle, ellipse, line, arrow, text, polyline, polygon, area, perimeter, calibrate, snapshotBox, snapshotPolygon }
+    enum Tool: String { case select, pen, rectangle, ellipse, line, arrow, text, polyline, polygon, area, perimeter, calibrate, snapshotBox, snapshotPolygon }
     enum Corner: CaseIterable { case lowerLeft, lowerRight, upperLeft, upperRight }
     private enum Gesture {
         case create(PDFPage, CGPoint)
         case vertex(PDFPage, PDFAnnotation, Int)
         case edit(PDFPage, PDFAnnotation, CGRect, CGPoint, Corner?)
     }
+    let defaultPreferences: UserDefaults
+    private var appearanceBeforeSavedTool: SavedMarkupAppearance?
+    init(defaults: UserDefaults = .standard) { defaultPreferences = defaults }
     weak var view: PDFView?
     private weak var boundDocument: PDFDocument?
     private let fallbackUndo = UndoManager()
@@ -299,7 +306,17 @@ final class RectangleMarkupController {
     var onInvalidMeasurement: (() -> Void)?
     var canEdit: () -> Bool = { true }
     var tool: Tool = .select {
-        didSet { finishTextEditing(); cancelGesture(); if tool != .select { selected = nil; onClickAway?() }; refresh(); (view as? MarkupPDFView)?.markupToolCursorChanged() }
+        didSet {
+            finishTextEditing(); cancelGesture()
+            if oldValue != tool {
+                if let original = appearanceBeforeSavedTool, SavedMarkupAppearance.load(oldValue, from: defaultPreferences) != nil { applyDefaults(original) }
+                appearanceBeforeSavedTool = nil
+                if tool != .select && tool != .calibrate { appearanceBeforeSavedTool = currentAppearance }
+                if let saved = SavedMarkupAppearance.load(tool, from: defaultPreferences), tool != .select {
+                    applyDefaults(saved)
+                }
+            }
+            if tool != .select { selected = nil; onClickAway?() }; refresh(); (view as? MarkupPDFView)?.markupToolCursorChanged() }
     }
     private var inlineText: (page:PDFPage, bounds:CGRect, annotation:PDFAnnotation?, editor:MarkupInlineTextView, wasDirty:Bool)?
     var isEditingText: Bool { inlineText != nil }
@@ -717,7 +734,11 @@ final class RectangleMarkupController {
     }
 
     private func captureSnapshot(page: PDFPage, points: [CGPoint]) {
-        do { try SnapshotPayload.capture(page: page, points: points).copy(); tool = .select }
+        do {
+            var payload = try SnapshotPayload.capture(page: page, points: points)
+            payload.style = SavedMarkupAppearance.load(.snapshotBox, from: defaultPreferences)?.snapshot ?? SnapshotStyle()
+            payload.copy(); tool = .select
+        }
         catch { onSnapshotError?(error) }
     }
     @discardableResult
@@ -792,6 +813,7 @@ final class RectangleMarkupController {
         annotation.setValue(RectangleMarkupRecord.prefix + UUID().uuidString, forAnnotationKey: RectangleMarkupRecord.identityKey)
         annotation.setValue(MarkupAuthorPreference.currentName, forAnnotationKey: PDFAnnotationKey(rawValue: "/T"))
         annotation.contents = kind == .text ? text : kind.rawValue.capitalized
+        if kind == .polyline && measurement == nil { annotation.setValue(tool == .pen ? "pen" : "polyline", forAnnotationKey: RectangleMarkupRecord.inkToolKey) }
         if kind == .text { annotation.font = NSFont(name:"Helvetica",size:fontSize); annotation.fontColor = strokeColor; annotation.alignment = .left }
         if kind == .text { RectangleMarkupRecord.setTextColor(strokeColor,on:annotation); RectangleMarkupRecord.setTextFontSize(fontSize,on:annotation) } else { annotation.color = strokeColor }
         let border = PDFBorder(); border.lineWidth = kind == .text ? 0 : lineWidth; annotation.border = border

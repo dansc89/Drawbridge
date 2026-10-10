@@ -4501,7 +4501,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             fields: ["file": url.lastPathComponent]
         )
         cancelAutoNameCapture()
-        rectangleToolbar.propertiesPopover.close()
         pdfView.rectangleMarkup.finishTextEditing()
         let departingViewState = pdfView.captureTabViewState()
         let departingSearchQuery = toolbarSearchField.stringValue
@@ -4627,7 +4626,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func clearToStartState() {
-        rectangleToolbar.propertiesPopover.close()
         documentTabCache.removeAll()
         tabViewStates.removeAll()
         tabSearchQueries.removeAll()
