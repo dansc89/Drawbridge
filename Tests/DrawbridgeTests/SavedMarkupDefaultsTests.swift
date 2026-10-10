@@ -164,6 +164,62 @@ final class SavedMarkupDefaultsTests: XCTestCase {
         XCTAssertTrue(try Data(contentsOf: copy, options: .mappedIfSafe).starts(with: original))
         XCTAssertEqual(try Data(contentsOf: source, options: .mappedIfSafe), original)
     }
+    func testSavedSnapshotStyleReachesRectangleAndPolygonClipboardCaptures() throws {
+        _ = NSApplication.shared
+        let (name, prefs) = preferences(); defer { prefs.removePersistentDomain(forName: name) }
+        let board = NSPasteboard.general
+        let previousItems = (board.pasteboardItems ?? []).map { item in
+            item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
+        }
+        defer {
+            board.clearContents()
+            let items = previousItems.map { values in
+                let item = NSPasteboardItem()
+                for (type, data) in values { item.setData(data, forType: type) }
+                return item
+            }
+            board.writeObjects(items)
+        }
+        let source = try SnapshotTests().fixture()
+        defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(document.page(at: 0))
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 800, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = PDFView(frame: window.contentView!.bounds); window.contentView!.addSubview(view)
+        view.document = document; view.go(to: page); window.layoutIfNeeded(); view.layoutSubtreeIfNeeded()
+        let session = RectangleMarkupController(defaults: prefs); session.install(on: view); session.bind(to: document)
+        var appearance = session.currentAppearance
+        appearance.snapshot = SnapshotStyle(overlay: true, opacity: 0.4, filter: .colorize, color: [0.1, 0.8, 0.3])
+        prefs.set(try JSONEncoder().encode(appearance), forKey: SavedMarkupAppearance.key(.snapshotBox))
+        func location(_ x: CGFloat, _ y: CGFloat) -> CGPoint { view.convert(CGPoint(x: x, y: y), from: page) }
+        session.tool = .snapshotBox
+        XCTAssertTrue(session.pointerDown(at: location(80, 90)))
+        XCTAssertTrue(session.pointerDragged(at: location(200, 170)))
+        XCTAssertTrue(session.pointerUp(at: location(200, 170)))
+        XCTAssertEqual(try XCTUnwrap(SnapshotPayload.clipboard()).style, appearance.snapshot)
+        session.tool = .snapshotBox
+        XCTAssertTrue(session.pointerDown(at: location(80, 90))); _ = session.pointerUp(at: location(80, 90))
+        XCTAssertTrue(session.pointerDown(at: location(200, 90))); _ = session.pointerUp(at: location(200, 90))
+        XCTAssertTrue(session.pointerDown(at: location(80, 170), clickCount: 2)); _ = session.pointerUp(at: location(80, 170))
+        let payload = try XCTUnwrap(SnapshotPayload.clipboard())
+        XCTAssertEqual(payload.style, appearance.snapshot)
+        let annotation = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: .zero, inPlace: true))
+        XCTAssertEqual(SnapshotStyle.read(annotation), appearance.snapshot)
+    }
+
+    func testCorruptOversizedAndIncompletePreferencesFallBackWithoutChangingOtherTools() throws {
+        let (name, prefs) = preferences(); defer { prefs.removePersistentDomain(forName: name) }
+        let session = RectangleMarkupController(defaults: prefs)
+        session.tool = .pen; session.lineWidth = 5; XCTAssertTrue(session.saveCurrentAsDefault())
+        for corrupt in [Data("not JSON".utf8), Data(repeating: 32, count: 4096), Data("{}".utf8)] {
+            prefs.set(corrupt, forKey: SavedMarkupAppearance.key(.polygon))
+            session.tool = .polygon
+            XCTAssertEqual(session.lineWidth, 2)
+            XCTAssertNil(SavedMarkupAppearance.load(.polygon, from: prefs))
+            session.tool = .pen
+            XCTAssertEqual(session.lineWidth, 5)
+        }
+    }
+
     func testInvalidStoredValuesAreIgnoredAndReadOnlyCannotSaveDefaults() throws {
         let (name, prefs) = preferences(); defer { prefs.removePersistentDomain(forName: name) }
         let session = RectangleMarkupController(defaults: prefs)
