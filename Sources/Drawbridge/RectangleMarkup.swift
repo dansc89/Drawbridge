@@ -82,6 +82,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
     var linePattern: MarkupLinePattern = .solid
     var strokeOpacity: Double = 1
     var fillOpacity: Double = 1
+    var snapshotStyle = SnapshotStyle()
     var snapshotData: Data? = nil
     var measurement: DrawingMeasurement? = nil
     var pageScale: DrawingScale? = nil
@@ -205,7 +206,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
                     record.kind = annotation.type == "Polygon" ? .polygon : .polyline; record.vertices = vertices(annotation)
                     if let rgb = polygonFill(annotation)?.usingColorSpace(.deviceRGB), record.kind == .polygon { record.fill = [Double(rgb.redComponent),Double(rgb.greenComponent),Double(rgb.blueComponent)] }
                 }
-                if annotation.type == "Stamp" { record.kind = .snapshot; record.snapshotData = SnapshotPayload.read(annotation)?.data; record.textRotation = (((annotation.page?.rotation ?? 0) % 360) + 360) % 360 }
+                if annotation.type == "Stamp" { record.kind = .snapshot; record.snapshotStyle = SnapshotStyle.read(annotation); record.snapshotData = SnapshotPayload.read(annotation)?.data; record.textRotation = (((annotation.page?.rotation ?? 0) % 360) + 360) % 360 }
                 if annotation.type == "Circle" { record.kind = .ellipse }
                 if annotation.type == "Line" {
                     record.kind = annotation.endLineStyle == .openArrow ? .arrow : .line
@@ -219,7 +220,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
 
     var isValid: Bool {
         id.hasPrefix(Self.prefix) && pageIndex >= 0 &&
-        (kind != .snapshot || (snapshotData != nil && SnapshotPayload(data: snapshotData!).page != nil)) &&
+        (kind != .snapshot || (snapshotStyle.isValid && snapshotData != nil && SnapshotPayload(data: snapshotData!).page != nil)) &&
         (pageScale == nil || (kind == .rectangle && pageScale!.isValid && measurement == nil)) &&
         (measurement == nil || (measurement!.valid(points: vertices) && (kind == .polygon || kind == .polyline) && (measurement!.closed == (kind == .polygon)))) &&
         [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy { $0.isFinite } &&
@@ -314,7 +315,7 @@ final class RectangleMarkupController {
         let modifiers = event.modifierFlags.intersection([.shift,.command,.option,.control])
         switch (event.charactersIgnoringModifiers?.lowercased(),modifiers) {
         case ("g", []): return .snapshotBox
-        case ("g", [.shift]): return .snapshotPolygon
+        case ("g", [.shift]): return .snapshotBox
         case ("v", []): return .select
         case ("p", []): return .pen
         case ("a", []): return .arrow
@@ -440,11 +441,11 @@ final class RectangleMarkupController {
             }
             refresh(); return true
         }
-        if tool == .polyline || tool == .polygon || tool == .area || tool == .perimeter || tool == .snapshotPolygon {
+        if tool == .polyline || tool == .polygon || tool == .area || tool == .perimeter || tool == .snapshotPolygon || (tool == .snapshotBox && polylinePage != nil) {
             guard polylinePage == nil || polylinePage === page else { return true }
             view.setCurrentSelection(nil, animate:false)
-            if tool == .area || tool == .perimeter || tool == .snapshotPolygon {
-                if tool != .snapshotPolygon { guard MeasurementMetadata.scale(on: page) != nil, MeasurementMetadata.supportedPage(page) else { onMeasurementNeedsScale?(); return true } }
+            if tool == .area || tool == .perimeter || tool == .snapshotPolygon || tool == .snapshotBox {
+                if tool != .snapshotPolygon && tool != .snapshotBox { guard MeasurementMetadata.scale(on: page) != nil, MeasurementMetadata.supportedPage(page) else { onMeasurementNeedsScale?(); return true } }
                 if polylinePoints.count >= 3, let first = polylinePoints.first, hypot(first.x-point.x, first.y-point.y) <= 8 / max(view.scaleFactor, 0.01) {
                     _ = finishPolyline(closed: true); return true
                 }
@@ -518,7 +519,7 @@ final class RectangleMarkupController {
         guard let page = polylinePage else { return false }
         let points = polylinePoints
         let isClosed = closed ?? (tool == .polygon || tool == .area)
-        if tool == .snapshotPolygon {
+        if tool == .snapshotPolygon || tool == .snapshotBox {
             guard points.count >= 3 else { return false }
             captureSnapshot(page: page, points: points)
         } else if tool == .area || tool == .perimeter {
@@ -681,13 +682,19 @@ final class RectangleMarkupController {
             return true
         }
         if pendingLine != nil { return true }
-        if tool == .polyline || tool == .polygon || tool == .area || tool == .perimeter || tool == .snapshotPolygon { return true }
+        if tool == .polyline || tool == .polygon || tool == .area || tool == .perimeter || tool == .snapshotPolygon || (tool == .snapshotBox && polylinePage != nil) { return true }
         guard let gesture else { return false }
         _ = pointerDragged(at: location, modifiers: modifiers)
         let candidate = preview?.1
         let endpoints = previewEndpoints
         let vertices = previewVertices
         self.gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil
+        if tool == .snapshotBox, case .create(let page, let start) = gesture,
+           let candidate, max(candidate.width, candidate.height) * (view?.scaleFactor ?? 1) < 4 {
+            selected = nil
+            polylinePage = page; polylinePoints = [start]; polylineHover = start
+            refresh(); return true
+        }
         guard canEdit(), let candidate, candidate.width >= 2, candidate.height >= 2 else { refresh(); return true }
         switch gesture {
         case .vertex(let page, let annotation, _):
@@ -714,7 +721,7 @@ final class RectangleMarkupController {
         catch { onSnapshotError?(error) }
     }
     @discardableResult
-    func pasteSnapshot(_ payload: SnapshotPayload, on page: PDFPage, center: CGPoint) -> PDFAnnotation? {
+    func pasteSnapshot(_ payload: SnapshotPayload, on page: PDFPage, center: CGPoint, inPlace: Bool = false) -> PDFAnnotation? {
         guard canEdit(), page.document === boundDocument, let size = payload.size else { return nil }
         guard MeasurementMetadata.supportedPage(page) else { onSnapshotError?(SnapshotError.unsupportedPageUnits); return nil }
         let rotated = page.rotation % 180 != 0
@@ -722,10 +729,16 @@ final class RectangleMarkupController {
         let crop = page.bounds(for: view?.displayBox ?? .cropBox)
         let minX = paperSize.width <= crop.width ? min(max(center.x-paperSize.width/2,crop.minX),crop.maxX-paperSize.width) : crop.midX-paperSize.width/2
         let minY = paperSize.height <= crop.height ? min(max(center.y-paperSize.height/2,crop.minY),crop.maxY-paperSize.height) : crop.midY-paperSize.height/2
-        let rect = CGRect(x:minX,y:minY,width:paperSize.width,height:paperSize.height)
+        var rect = CGRect(x:minX,y:minY,width:paperSize.width,height:paperSize.height)
+        if inPlace, let placement = payload.placement,
+           [placement.x, placement.y, placement.width, placement.height].allSatisfy({ $0.isFinite && abs($0) < 1e7 }), placement.width > 0, placement.height > 0 {
+            let c = CGPoint(x: placement.x + placement.width/2, y: placement.y + placement.height/2)
+            rect = CGRect(x: c.x-paperSize.width/2, y: c.y-paperSize.height/2, width: paperSize.width, height: paperSize.height)
+        }
         let annotation: PDFAnnotation
-        do { annotation = try SnapshotStampFactory.make(payload: payload, bounds: rect, rotation: page.rotation) }
+        do { annotation = try SnapshotStampFactory.make(payload: payload, bounds: rect, rotation: page.rotation, style: payload.style) }
         catch { onSnapshotError?(error); return nil }
+        annotation.setValue(payload.style.json, forAnnotationKey: SnapshotStyle.key)
         annotation.setValue(payload.data.base64EncodedString(), forAnnotationKey: SnapshotPayload.key)
         annotation.setValue(RectangleMarkupRecord.prefix + UUID().uuidString, forAnnotationKey: RectangleMarkupRecord.identityKey)
         annotation.userName = MarkupAuthorPreference.currentName; annotation.contents = "Snapshot"
@@ -733,6 +746,27 @@ final class RectangleMarkupController {
         tool = .select
         setPresence(true, annotation: annotation, page: page, action: "Paste Snapshot")
         return annotation
+    }
+
+    func styleSelectedSnapshot(_ style: SnapshotStyle) {
+        guard canEdit(), style.isValid, let old = selected, RectangleMarkupRecord.owns(old), !old.isReadOnly,
+              let page = old.page, let payload = SnapshotPayload.read(old), SnapshotStyle.read(old) != style else { return }
+        do {
+            let replacement = try SnapshotStampFactory.make(payload: payload, bounds: old.bounds, rotation: page.rotation, style: style)
+            replacement.setValue(payload.data.base64EncodedString(), forAnnotationKey: SnapshotPayload.key)
+            replacement.setValue(style.json, forAnnotationKey: SnapshotStyle.key)
+            guard let identity = old.value(forAnnotationKey: RectangleMarkupRecord.identityKey) else { return }
+            replacement.setValue(identity, forAnnotationKey: RectangleMarkupRecord.identityKey)
+            replacement.userName = old.userName; replacement.contents = old.contents
+            replacement.shouldDisplay = old.shouldDisplay; replacement.shouldPrint = old.shouldPrint
+            replaceSnapshot(old, with: replacement, on: page)
+        } catch { onSnapshotError?(error) }
+    }
+    private func replaceSnapshot(_ old: PDFAnnotation, with replacement: PDFAnnotation, on page: PDFPage) {
+        guard canEdit(), page.document === boundDocument else { return }
+        undo.registerUndo(withTarget: self) { target in target.replaceSnapshot(replacement, with: old, on: page) }
+        undo.setActionName("Change Snapshot Appearance")
+        page.removeAnnotation(old); page.addAnnotation(replacement); selected = replacement; changed(page)
     }
 
     @discardableResult
@@ -1110,7 +1144,7 @@ final class RectangleMarkupController {
             for (i,p) in (polylinePoints + (polylineHover.map { [$0] } ?? [])).enumerated() {
                 if i == 0 { path.move(to:view.convert(p,from:page)) } else { path.addLine(to:view.convert(p,from:page)) }
             }
-            if tool == .polygon || tool == .area || tool == .snapshotPolygon { path.closeSubpath() }
+            if tool == .polygon || tool == .area || tool == .snapshotPolygon || tool == .snapshotBox { path.closeSubpath() }
         }
         overlay.strokeColor = (tool == .pen && polylinePage != nil ? strokeColor.withAlphaComponent(strokeOpacity) : NSColor.systemBlue).cgColor
         overlay.lineDashPattern = tool == .pen && polylinePage != nil ? linePattern.dash(width: lineWidth).map { NSNumber(value: $0 * Double(view?.scaleFactor ?? 1)) } : nil

@@ -433,17 +433,34 @@ enum PDFRectangleWriter {
         var qpdf = try tableArray(json); var objects = qpdf[1]
         var next = (qpdf[0]["maxobjectid"] as? Int ?? 0) + 1
         var snapshotForms: [Data:String] = [:]
+        var snapshotPayloads: [Data:String] = [:]
+        // Identical captures share one indirect PDF string rather than embedding
+        // many copies of a potentially large image in every annotation.
+        for (key, object) in objects where key.hasPrefix("obj:") {
+            guard let encoded = (object as? [String:Any])?["value"] as? String,
+                  encoded.hasPrefix("u:"), encoded.utf8.count <= SnapshotPayload.maximumBytes * 2,
+                  let data = Data(base64Encoded:String(encoded.dropFirst(2))), SnapshotPayload(data:data).page != nil else { continue }
+            snapshotPayloads[data] = String(key.dropFirst(4))
+        }
+        var reusedFragments = Set<String>()
         for object in objects.values {
-            guard let value = (object as? [String:Any])?["value"] as? [String:Any],
-                  let encoded = value["/DrawbridgeSnapshotPDF"] as? String, encoded.hasPrefix("u:"),
-                  let data = Data(base64Encoded: String(encoded.dropFirst(2))),
+            guard let value = (object as? [String:Any])?["value"] as? [String:Any], ownedIdentity(value) != nil,
+                  let payloadValue = value["/DrawbridgeSnapshotPDF"] as? String,
                   let appearance = (value["/AP"] as? [String:Any])?["/N"] as? String,
                   let stream = (objects["obj:" + appearance] as? [String:Any])?["stream"] as? [String:Any],
-                  let dictionary = stream["dict"] as? [String:Any],
-                  let resources = dictionary["/Resources"] as? [String:Any],
-                  let xobjects = resources["/XObject"] as? [String:Any],
-                  let fragment = xobjects["/Snapshot"] as? String, objects["obj:" + fragment] != nil else { continue }
-            snapshotForms[data] = fragment
+                  let resources = (stream["dict"] as? [String:Any])?["/Resources"] as? [String:Any],
+                  let fragment = (resources["/XObject"] as? [String:Any])?["/Snapshot"] as? String,
+                  let fragmentStream = (objects["obj:" + fragment] as? [String:Any])?["stream"] as? [String:Any],
+                  let fragmentDict = fragmentStream["dict"] as? [String:Any],
+                  (fragmentDict["/Group"] as? [String:Any])?["/S"] as? String == "/Transparency",
+                  reusedFragments.insert(fragment).inserted else { continue }
+            let encoded = (objects["obj:" + payloadValue] as? [String:Any])?["value"] as? String ?? payloadValue
+            guard encoded.hasPrefix("u:"), encoded.utf8.count <= SnapshotPayload.maximumBytes * 2,
+                  let data = Data(base64Encoded:String(encoded.dropFirst(2))), SnapshotPayload(data:data).page != nil else { continue }
+            let styleJSON = (value["/DrawbridgeSnapshotStyle"] as? String).flatMap { $0.hasPrefix("u:") ? String($0.dropFirst(2)).data(using:.utf8) : nil }
+            let style = styleJSON.flatMap { try? JSONDecoder().decode(SnapshotStyle.self,from:$0) } ?? SnapshotStyle()
+            guard style.isValid else { continue }
+            snapshotForms[try SnapshotFilterRenderer.filtered(data,style:style)] = fragment
         }
         let references = try pages(json)
         guard records.allSatisfy({ $0.pageIndex < references.count }) else { throw CocoaError(.fileReadCorruptFile) }
@@ -467,7 +484,17 @@ enum PDFRectangleWriter {
                 annotation["/DrawbridgeStrokeOpacity"] = record.strokeOpacity
                 annotation["/DrawbridgeFillOpacity"] = record.fillOpacity
                 annotation["/BS"] = ["/W": record.lineWidth, "/S": record.linePattern == .solid ? "/S" : "/D", "/D": record.linePattern.dash(width: CGFloat(record.lineWidth))]
-                if record.kind == .snapshot { annotation["/DrawbridgeSnapshotPDF"] = "u:" + record.snapshotData!.base64EncodedString() }
+                if record.kind == .snapshot, let data = record.snapshotData {
+                    let payloadRef: String
+                    if let existing = snapshotPayloads[data] { payloadRef = existing }
+                    else {
+                        payloadRef = "\(next) 0 R"; next += 1
+                        objects["obj:" + payloadRef] = ["value":"u:" + data.base64EncodedString()]
+                        snapshotPayloads[data] = payloadRef
+                    }
+                    annotation["/DrawbridgeSnapshotPDF"] = payloadRef
+                    annotation["/DrawbridgeSnapshotStyle"] = "u:" + record.snapshotStyle.json
+                }
                 if let scale = record.pageScale {
                     annotation["/DrawbridgePageScale"] = "u:" + MeasurementMetadata.json(scale)
                     annotation["/F"] = 98 // Hidden, NoView, ReadOnly; never printed.
@@ -511,7 +538,7 @@ enum PDFRectangleWriter {
                     }
                 }
                 if record.kind == .snapshot {
-                    objects["obj:\(appearanceRef)"] = try SnapshotAppearance.install(data: record.snapshotData!, bounds: b, rotation: record.textRotation, objects: &objects, next: &next, forms: &snapshotForms)
+                    objects["obj:\(appearanceRef)"] = try SnapshotAppearance.install(data: record.snapshotData!, bounds: b, rotation: record.textRotation, style: record.snapshotStyle, objects: &objects, next: &next, forms: &snapshotForms)
                     objects["obj:\(annotationRef)"] = ["value": annotation]; entries.append(annotationRef); continue
                 }
                 let drawing = appearanceDrawing(record)
@@ -584,7 +611,12 @@ enum PDFRectangleWriter {
                 guard value["/DrawbridgeLinePattern"] as? String == "u:" + expected.linePattern.rawValue,
                       value["/DrawbridgeStrokeOpacity"] as? Double == expected.strokeOpacity,
                       value["/DrawbridgeFillOpacity"] as? Double == expected.fillOpacity else { return false }
-                if value["/DrawbridgeSnapshotPDF"] as? String != expected.snapshotData.map({ "u:" + $0.base64EncodedString() }) { return false }
+                if expected.kind == .snapshot, value["/DrawbridgeSnapshotStyle"] as? String != "u:" + expected.snapshotStyle.json { return false }
+                let payloadValue = value["/DrawbridgeSnapshotPDF"] as? String
+                let payloadString = payloadValue.flatMap { ref in
+                    (objects["obj:" + ref] as? [String:Any])?["value"] as? String ?? ref
+                }
+                if payloadString != expected.snapshotData.map({ "u:" + $0.base64EncodedString() }) { return false }
                 if value["/DrawbridgeMeasurement"] as? String != expected.measurement.map({ "u:" + MeasurementMetadata.json($0) }) { return false }
                 if value["/DrawbridgePageScale"] as? String != expected.pageScale.map({ "u:" + MeasurementMetadata.json($0) }) { return false }
                 if let scale = expected.pageScale, (!scale.isValid || value["/F"] as? Int != 98) { return false }

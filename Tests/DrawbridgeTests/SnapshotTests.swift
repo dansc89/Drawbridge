@@ -184,7 +184,26 @@ import XCTest
         let elapsed=Date().timeIntervalSince(start); print("Twenty snapshots first save seconds",elapsed)
         XCTAssertLessThan(elapsed,5)
         let reopened=try XCTUnwrap(PDFDocument(url:output)); XCTAssertEqual(RectangleMarkupRecord.capture(reopened).filter { $0.kind == .snapshot }.count,20)
-        XCTAssertTrue(try Data(contentsOf:output,options:.mappedIfSafe).starts(with:Data(contentsOf:source,options:.mappedIfSafe)))
+        let savedData=try Data(contentsOf:output,options:.mappedIfSafe), originalData=try Data(contentsOf:source,options:.mappedIfSafe)
+        XCTAssertTrue(savedData.starts(with:originalData))
+        let inspection = URL(fileURLWithPath:"/tmp/Drawbridge-Snapshot-Sharing-QA.json")
+        let helper = try XCTUnwrap(PDFTKBookmarkWriter.executableURL())
+        XCTAssertTrue(PDFTKBookmarkWriter.run(helper,arguments:["--json=2","--json-stream-data=none",output.path,inspection.path]))
+        defer { try? FileManager.default.removeItem(at:inspection) }
+        let graph = try XCTUnwrap(try JSONSerialization.jsonObject(with:Data(contentsOf:inspection)) as? [String:Any])
+        let objects = try XCTUnwrap((graph["qpdf"] as? [[String:Any]])?.last)
+        let snapshots = objects.values.compactMap { ($0 as? [String:Any])?["value"] as? [String:Any] }.filter { $0["/DrawbridgeSnapshotPDF"] != nil }
+        XCTAssertEqual(snapshots.count,20)
+        let payloadReferences = snapshots.compactMap { $0["/DrawbridgeSnapshotPDF"] as? String }
+        XCTAssertEqual(Set(payloadReferences).count,1,"Repeated captures share one embedded payload")
+        let fragments = snapshots.compactMap { annotation -> String? in
+            guard let appearance = (annotation["/AP"] as? [String:Any])?["/N"] as? String,
+                  let stream = (objects["obj:" + appearance] as? [String:Any])?["stream"] as? [String:Any],
+                  let resources = (stream["dict"] as? [String:Any])?["/Resources"] as? [String:Any] else { return nil }
+            return (resources["/XObject"] as? [String:Any])?["/Snapshot"] as? String
+        }
+        XCTAssertEqual(fragments.count,20)
+        XCTAssertEqual(Set(fragments).count,1,"Repeated captures share one appearance fragment")
         view.document=reopened; session.bind(to:reopened)
         let stamp=reopened.page(at:0)!.annotations.first { $0.type == "Stamp" && RectangleMarkupRecord.owns($0) }!
         session.setBounds(stamp.bounds.offsetBy(dx:-5,dy:5),of:stamp,on:stamp.page!,action:"Move Snapshot")
@@ -206,4 +225,136 @@ import XCTest
         try FileManager.default.removeItem(at:source)
         XCTAssertNotNil(SnapshotPayload.read(try XCTUnwrap(page.annotations.first))?.page)
     }
+    func testUnifiedCameraClickNodesDoubleClickAndPasteInPlace() throws {
+        _ = NSApplication.shared
+        let window = NSWindow(contentRect:CGRect(x:0,y:0,width:1000,height:900),styleMask:[.titled],backing:.buffered,defer:false)
+        let view=MarkupPDFView(frame:window.contentView!.bounds); window.contentView!.addSubview(view)
+        for rotation in [0,90,180,270] {
+            let source=try fixture(rotation:rotation); defer { try? FileManager.default.removeItem(at:source) }
+            let doc=try XCTUnwrap(PDFDocument(url:source)), page=doc.page(at:0)!
+            view.setMarkupDocument(doc); view.go(to:page); window.layoutIfNeeded(); view.layoutSubtreeIfNeeded()
+            let session=view.rectangleMarkup; session.canEdit={true}; session.tool = .snapshotBox
+            func point(_ x:CGFloat,_ y:CGFloat) -> CGPoint { view.convert(CGPoint(x:x,y:y),from:page) }
+            XCTAssertTrue(session.pointerDown(at:point(80,90))); XCTAssertTrue(session.pointerUp(at:point(80,90)))
+            XCTAssertTrue(session.pointerDown(at:point(200,90))); XCTAssertTrue(session.pointerUp(at:point(200,90)))
+            XCTAssertTrue(session.pointerDown(at:point(80,170),clickCount:2)); _ = session.pointerUp(at:point(80,170))
+            let payload=try XCTUnwrap(SnapshotPayload.clipboard())
+            XCTAssertTrue(page.annotations.isEmpty)
+            let before=try XCTUnwrap(page.thumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation)
+            let stamp=try XCTUnwrap(session.pasteSnapshot(payload,on:page,center:.zero,inPlace:true))
+            let output=source.appendingPathExtension(UUID().uuidString + ".pdf")
+            defer { try? FileManager.default.removeItem(at:output) }
+            XCTAssertTrue(PDFRectangleWriter.write(document:doc,source:source,destination:output,pageLabels:[:],records:RectangleMarkupRecord.capture(doc)))
+            let restored=try XCTUnwrap(PDFDocument(url:output))
+            let after=try XCTUnwrap(restored.page(at:0)!.thumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation)
+            let a=try XCTUnwrap(NSBitmapImageRep(data:before)), b=try XCTUnwrap(NSBitmapImageRep(data:after)); var changedPixels=0
+            for y in 0..<a.pixelsHigh { for x in 0..<a.pixelsWide {
+                let c=a.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!, d=b.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!
+                if abs(c.redComponent-d.redComponent)+abs(c.greenComponent-d.greenComponent)+abs(c.blueComponent-d.blueComponent)>0.1 { changedPixels += 1 }
+            } }
+            XCTAssertLessThan(changedPixels,1200,"Paste in place must align with captured content, rotation \(rotation)")
+            XCTAssertEqual(stamp.bounds.minX,80,accuracy:0.00001); XCTAssertEqual(stamp.bounds.minY,90,accuracy:0.00001)
+            XCTAssertEqual(stamp.bounds.width,120,accuracy:0.00001); XCTAssertEqual(stamp.bounds.height,80,accuracy:0.00001)
+            session.setBounds(stamp.bounds.offsetBy(dx:35,dy:20),of:stamp,on:page,action:"Move")
+            let copied=try XCTUnwrap(SnapshotPayload.read(stamp)); copied.copy()
+            let duplicate=try XCTUnwrap(session.pasteSnapshot(SnapshotPayload.clipboard()!,on:page,center:.zero,inPlace:true))
+            XCTAssertEqual(duplicate.bounds,stamp.bounds)
+            session.tool = .snapshotBox
+            XCTAssertTrue(session.pointerDown(at:point(210,210))); XCTAssertTrue(session.pointerUp(at:point(210,210)))
+            session.cancelGesture(); XCTAssertEqual(page.annotations.count,2)
+        }
+    }
+    func testSnapshotFiltersOverlayOpacitySaveReopenAndUndo() throws {
+        _ = NSApplication.shared
+        for rotation in [0,90,180,270] {
+            let source=try fixture(rotation:rotation); defer { try? FileManager.default.removeItem(at:source) }
+            let doc=try XCTUnwrap(PDFDocument(url:source)), page=doc.page(at:0)!, payload=try capture(page,polygon:true)
+            let view=MarkupPDFView(); view.document=doc
+            let session=view.rectangleMarkup; session.bind(to:doc); session.canEdit={true}; session.undo.groupsByEvent=false
+            session.undo.beginUndoGrouping()
+            _ = try XCTUnwrap(session.pasteSnapshot(payload,on:page,center:CGPoint(x:250,y:240)))
+            session.undo.endUndoGrouping()
+            for filter in SnapshotStyle.Filter.allCases {
+                let style=SnapshotStyle(overlay:true,opacity:0.55,filter:filter,color:[0,0.65,0.15])
+                session.undo.beginUndoGrouping(); session.styleSelectedSnapshot(style); session.undo.endUndoGrouping()
+                let selected=try XCTUnwrap(session.selected)
+                XCTAssertEqual(SnapshotStyle.read(selected),style); XCTAssertEqual(SnapshotPayload.read(selected)?.data,payload.data)
+                let out=source.deletingLastPathComponent().appendingPathComponent("Styled-\(UUID().uuidString).pdf")
+                defer { try? FileManager.default.removeItem(at:out) }
+                XCTAssertTrue(PDFRectangleWriter.write(document:doc,source:source,destination:out,pageLabels:[:],records:RectangleMarkupRecord.capture(doc)))
+                let saved=try XCTUnwrap(PDFDocument(url:out)), savedStamp=try XCTUnwrap(saved.page(at:0)!.annotations.first)
+                XCTAssertEqual(SnapshotStyle.read(savedStamp),style); XCTAssertEqual(SnapshotPayload.read(savedStamp)?.data,payload.data)
+                let a=try XCTUnwrap(NSBitmapImageRep(data:page.thumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation!))
+                let b=try XCTUnwrap(NSBitmapImageRep(data:saved.page(at:0)!.thumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation!))
+                var differences=0
+                for y in 0..<a.pixelsHigh { for x in 0..<a.pixelsWide {
+                    let c=a.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!, d=b.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!
+                    if abs(c.redComponent-d.redComponent)+abs(c.greenComponent-d.greenComponent)+abs(c.blueComponent-d.blueComponent)>0.1 { differences += 1 }
+                } }
+                XCTAssertLessThan(differences,1200,"Live and saved filter match at rotation \(rotation), \(filter)")
+                session.undo.undo(); XCTAssertNotEqual(SnapshotStyle.read(session.selected!),style)
+                session.undo.redo(); XCTAssertEqual(SnapshotStyle.read(session.selected!),style)
+            }
+            session.undo.beginUndoGrouping(); session.styleSelectedSnapshot(SnapshotStyle()); session.undo.endUndoGrouping()
+            XCTAssertEqual(SnapshotPayload.read(session.selected!)?.data,payload.data)
+            XCTAssertEqual(try SnapshotFilterRenderer.filtered(payload.data,style:SnapshotStyle()),payload.data)
+        }
+    }
+
+    func testOverlayRevealsUnderlyingDrawingAndFiltersChangePixels() throws {
+        let source=try fixture(); defer { try? FileManager.default.removeItem(at:source) }
+        let doc=try XCTUnwrap(PDFDocument(url:source)), page=doc.page(at:0)!
+        let payload=try SnapshotPayload.capture(page:page,points:[CGPoint(x:220,y:220),CGPoint(x:240,y:220),CGPoint(x:240,y:240),CGPoint(x:220,y:240)])
+        let view=MarkupPDFView(); view.document=doc; let session=view.rectangleMarkup; session.bind(to:doc); session.canEdit={true}
+        func pixels(_ page:PDFPage) throws -> Data { try XCTUnwrap(page.thumbnail(of:CGSize(width:500,height:400),for:.mediaBox).tiffRepresentation) }
+        func savedPixels() throws -> Data {
+            let output=source.appendingPathExtension(UUID().uuidString + ".pdf")
+            defer { try? FileManager.default.removeItem(at:output) }
+            XCTAssertTrue(PDFRectangleWriter.write(document:doc,source:source,destination:output,pageLabels:[:],records:RectangleMarkupRecord.capture(doc)))
+            let saved=try XCTUnwrap(PDFDocument(url:output))
+            return try withExtendedLifetime(saved) { try pixels(saved.page(at:0)!) }
+        }
+        let before=try pixels(page)
+        _ = try XCTUnwrap(session.pasteSnapshot(payload,on:page,center:CGPoint(x:140,y:110)))
+        func difference(_ data:Data) throws -> Int {
+            let a=try XCTUnwrap(NSBitmapImageRep(data:before)), b=try XCTUnwrap(NSBitmapImageRep(data:data)); var count=0
+            for y in 0..<a.pixelsHigh { for x in 0..<a.pixelsWide {
+                let c=a.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!, d=b.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!
+                if abs(c.redComponent-d.redComponent)+abs(c.greenComponent-d.greenComponent)+abs(c.blueComponent-d.blueComponent)>0.1 { count += 1 }
+            } }
+            return count
+        }
+        let normalDifference=try difference(savedPixels()); XCTAssertGreaterThan(normalDifference,100,"Normal snapshot must cover the blue drawing")
+        session.styleSelectedSnapshot(SnapshotStyle(overlay:true))
+        let overlayDifference=try difference(savedPixels())
+        print("Overlay pixel differences",normalDifference,overlayDifference)
+        XCTAssertLessThan(overlayDifference,20,"White overlay must reveal the original blue drawing beneath")
+        let colorful=try capture(page)
+        let original=try raster(colorful.page!,size:colorful.size!)
+        for filter in [SnapshotStyle.Filter.grayscale,.colorize,.invert] {
+            let filtered=try SnapshotFilterRenderer.filtered(colorful.data,style:SnapshotStyle(filter:filter))
+            XCTAssertNotEqual(try raster(SnapshotPayload(data:filtered).page!,size:colorful.size!),original)
+        }
+    }
+
+    func testPasteInPlaceCommandRequiresCoordinatesAndShowsSnapshotInspector() throws {
+        _ = NSApplication.shared
+        let source=try fixture(); defer { try? FileManager.default.removeItem(at:source) }
+        let document=try XCTUnwrap(PDFDocument(url:source)), page=document.page(at:0)!
+        let controller=MainViewController(); _ = controller.view; controller.openDocumentURL=source
+        controller.pdfView.setMarkupDocument(document); controller.pdfView.go(to:page)
+        let item=NSMenuItem(title:"Paste in Place",action:#selector(MainViewController.commandPasteInPlace(_:)),keyEquivalent:"v")
+        NSPasteboard.general.clearContents(); XCTAssertFalse(controller.validateMenuItem(item))
+        let payload=try capture(page); SnapshotPayload(data:payload.data).copy()
+        XCTAssertFalse(controller.validateMenuItem(item))
+        payload.copy(); XCTAssertTrue(controller.validateMenuItem(item)); controller.commandPasteInPlace(nil)
+        let selected=try XCTUnwrap(controller.pdfView.rectangleMarkup.selected)
+        XCTAssertEqual(selected.bounds.minX,80,accuracy:0.00001); XCTAssertEqual(selected.bounds.minY,90,accuracy:0.00001)
+        let inspector=controller.rectangleToolbar.propertiesController; inspector.refresh()
+        XCTAssertFalse(inspector.snapshotFilter.isHiddenOrHasHiddenAncestor); XCTAssertTrue(inspector.snapshotFilter.isEnabled)
+        inspector.snapshotFilter.selectItem(withTitle:"Grayscale"); inspector.changeSnapshot(inspector.snapshotFilter)
+        XCTAssertEqual(SnapshotStyle.read(controller.pdfView.rectangleMarkup.selected!).filter,.grayscale)
+        XCTAssertTrue(inspector.stroke.isHiddenOrHasHiddenAncestor)
+    }
+
 }

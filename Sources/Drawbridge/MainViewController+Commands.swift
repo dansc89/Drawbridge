@@ -479,6 +479,13 @@ extension MainViewController {
         _ = session.pasteSnapshot(payload, on: page, center: center)
         view.window?.makeFirstResponder(pdfView)
     }
+    @objc func commandPasteInPlace(_ sender: Any?) {
+        guard !(view.window?.firstResponder is NSTextView), !(view.window?.firstResponder is NSTextField),
+              let payload = SnapshotPayload.clipboard(), payload.placement != nil, let page = pdfView.currentPage else { return }
+        let session = pdfView.rectangleMarkup; session.bind(to: pdfView.document)
+        _ = session.pasteSnapshot(payload, on: page, center: .zero, inPlace: true)
+        view.window?.makeFirstResponder(pdfView)
+    }
     @objc func commandDeleteMarkup(_ sender: Any?) { deleteSelectedMarkup() }
     @objc func commandBringMarkupToFront(_ sender: Any?) { reorderSelectedMarkups(.bringToFront) }
     @objc func commandSendMarkupToBack(_ sender: Any?) { reorderSelectedMarkups(.sendToBack) }
@@ -689,6 +696,8 @@ extension MainViewController {
             return hasDocument && !pagesTableView.selectedRowIndexes.isEmpty
         case #selector(deleteBookmarkFromSidebar):
             return hasDocument && !bookmarksOutlineView.selectedRowIndexes.isEmpty
+        case #selector(commandPasteInPlace(_:)):
+            return !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField) && hasDocument && pdfView.rectangleMarkup.canEdit() && SnapshotPayload.clipboard()?.placement != nil
         case #selector(commandCopy(_:)), #selector(commandPaste(_:)), #selector(commandSelectAll(_:)):
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField { return true }
             if action == #selector(commandPaste(_:)) { return hasDocument && pdfView.rectangleMarkup.canEdit() && SnapshotPayload.clipboard() != nil }

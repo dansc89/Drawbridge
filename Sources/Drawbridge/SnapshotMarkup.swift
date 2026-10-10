@@ -13,27 +13,42 @@ struct SnapshotPayload: Sendable {
     static let clipboardType = NSPasteboard.PasteboardType("com.drawbridge.vector-snapshot")
     static let maximumBytes = 32 * 1024 * 1024
     let data: Data
+    var placement: Placement? = nil
+    var style: SnapshotStyle = SnapshotStyle()
+    struct Placement: Codable, Sendable { var x: Double; var y: Double; var width: Double; var height: Double; var rotation: Int }
+    static let placementType = NSPasteboard.PasteboardType("com.drawbridge.snapshot-placement")
+    static let styleType = NSPasteboard.PasteboardType("com.drawbridge.snapshot-style")
     var page: CGPDFPage? {
         guard !data.isEmpty, data.count <= Self.maximumBytes,
               let provider = CGDataProvider(data: data as CFData), let pdf = CGPDFDocument(provider), pdf.numberOfPages == 1 else { return nil }
-        return pdf.page(at: 1)
+        guard let page = pdf.page(at: 1) else { return nil }
+        let size = page.getBoxRect(.mediaBox).size
+        guard size.width.isFinite, size.height.isFinite, (2...14400).contains(size.width), (2...14400).contains(size.height) else { return nil }
+        return page
     }
     var size: CGSize? { page?.getBoxRect(.mediaBox).size }
     static func read(_ annotation: PDFAnnotation) -> SnapshotPayload? {
         guard let string = annotation.value(forAnnotationKey: key) as? String,
               string.utf8.count <= maximumBytes * 2, let data = Data(base64Encoded: string) else { return nil }
-        let payload = Self(data: data)
+        var payload = Self(data: data)
+        let b = annotation.bounds
+        payload.placement = Placement(x: b.minX, y: b.minY, width: b.width, height: b.height, rotation: annotation.page?.rotation ?? 0)
+        payload.style = SnapshotStyle.read(annotation)
         return payload.page == nil ? nil : payload
     }
     @MainActor static func clipboard() -> SnapshotPayload? {
         guard let data = NSPasteboard.general.data(forType: clipboardType), data.count <= maximumBytes else { return nil }
-        let payload = Self(data: data)
+        var payload = Self(data: data)
+        if let data = NSPasteboard.general.data(forType: placementType), data.count < 2048 { payload.placement = try? JSONDecoder().decode(Placement.self, from: data) }
+        if let data = NSPasteboard.general.data(forType: styleType), data.count < 2048, let style = try? JSONDecoder().decode(SnapshotStyle.self, from: data), style.isValid { payload.style = style }
         return payload.page == nil ? nil : payload
     }
     @MainActor func copy() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setData(data, forType: Self.clipboardType)
         NSPasteboard.general.setData(data, forType: .pdf)
+        if let placement, let encoded = try? JSONEncoder().encode(placement) { NSPasteboard.general.setData(encoded, forType: Self.placementType) }
+        NSPasteboard.general.setString(style.json, forType: Self.styleType)
     }
     @MainActor static func capture(page: PDFPage, points: [CGPoint]) throws -> Self {
         guard points.count >= 3, points.count <= 512, points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }),
@@ -73,7 +88,9 @@ struct SnapshotPayload: Sendable {
             context.restoreGState()
         }
         context.endPDFPage(); context.closePDF()
-        let payload = Self(data: output as Data)
+        var payload = Self(data: output as Data)
+        let xs = points.map(\.x), ys = points.map(\.y)
+        payload.placement = Placement(x: xs.min()!, y: ys.min()!, width: xs.max()!-xs.min()!, height: ys.max()!-ys.min()!, rotation: rotation)
         guard payload.page != nil else { throw CocoaError(.fileWriteUnknown) }
         return payload
     }
@@ -93,15 +110,15 @@ struct SnapshotPayload: Sendable {
 @MainActor enum SnapshotStampFactory {
     private static let cache = NSCache<NSString, NSData>()
     private static let backing = NSMapTable<PDFAnnotation, PDFDocument>(keyOptions: .weakMemory, valueOptions: .strongMemory)
-    static func make(payload: SnapshotPayload, bounds: CGRect, rotation: Int) throws -> PDFAnnotation {
+    static func make(payload: SnapshotPayload, bounds: CGRect, rotation: Int, style: SnapshotStyle = SnapshotStyle()) throws -> PDFAnnotation {
         cache.totalCostLimit = 64 * 1024 * 1024
         let digest = SHA256.hash(data:payload.data).map { String(format:"%02x", $0) }.joined()
-        let key = (digest + ":\(rotation):\(bounds.width):\(bounds.height)") as NSString
+        let key = (digest + ":\(rotation):\(bounds.width):\(bounds.height):" + style.json) as NSString
         let data: Data
         if let cached = cache.object(forKey: key) { data = cached as Data }
         else {
             var objects: [String:Any] = [:], next = 5, forms: [Data:String] = [:]
-            let appearance = try SnapshotAppearance.install(data: payload.data, bounds: bounds, rotation: rotation, objects: &objects, next: &next, forms: &forms)
+            let appearance = try SnapshotAppearance.install(data: payload.data, bounds: bounds, rotation: rotation, style: style, objects: &objects, next: &next, forms: &forms)
             let ap = "\(next) 0 R"; objects["obj:" + ap] = appearance; next += 1
             objects["obj:1 0 R"] = ["value": ["/Type":"/Catalog", "/Pages":"2 0 R"]]
             objects["obj:2 0 R"] = ["value": ["/Type":"/Pages", "/Kids":["3 0 R"], "/Count":1]]
@@ -135,9 +152,10 @@ struct SnapshotPayload: Sendable {
 /// Copy only the fragment's reachable resource objects into the incremental save.
 /// No source page, catalog, filesystem path, or external reference is retained.
 enum SnapshotAppearance {
-    static func install(data: Data, bounds: CGRect, rotation: Int, objects: inout [String:Any], next: inout Int, forms: inout [Data:String]) throws -> [String:Any] {
+    static func install(data originalData: Data, bounds: CGRect, rotation: Int, style: SnapshotStyle = SnapshotStyle(), objects: inout [String:Any], next: inout Int, forms: inout [Data:String]) throws -> [String:Any] {
+        let data = try SnapshotFilterRenderer.filtered(originalData, style: style)
         guard SnapshotPayload(data: data).page != nil, let executable = PDFTKBookmarkWriter.executableURL() else { throw CocoaError(.fileReadCorruptFile) }
-        if let fragmentRef = forms[data], let size = SnapshotPayload(data: data).size { return wrapper(fragmentRef: fragmentRef, size: size, bounds: bounds, rotation: rotation) }
+        if let fragmentRef = forms[data], let size = SnapshotPayload(data: data).size { return wrapper(fragmentRef: fragmentRef, size: size, bounds: bounds, rotation: rotation, style: style) }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeSnapshot-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -182,13 +200,13 @@ enum SnapshotAppearance {
         let size = SnapshotPayload(data: data).size!
         let fragmentRef = "\(next) 0 R"; next += 1
         let resources = try remap(page["/Resources"] ?? [String:Any]())
-        objects["obj:" + fragmentRef] = ["stream": ["dict": ["/Type":"/XObject", "/Subtype":"/Form", "/BBox":[0,0,size.width,size.height], "/Resources":resources, "/DrawbridgeRectangleAppearance":true], "data":content.base64EncodedString()]]
+        objects["obj:" + fragmentRef] = ["stream": ["dict": ["/Type":"/XObject", "/Subtype":"/Form", "/BBox":[0,0,size.width,size.height], "/Group":["/S":"/Transparency", "/CS":"/DeviceRGB", "/I":true], "/Resources":resources, "/DrawbridgeRectangleAppearance":true], "data":content.base64EncodedString()]]
         forms[data] = fragmentRef
-        return wrapper(fragmentRef: fragmentRef, size: size, bounds: bounds, rotation: rotation)
+        return wrapper(fragmentRef: fragmentRef, size: size, bounds: bounds, rotation: rotation, style: style)
     }
-    private static func wrapper(fragmentRef: String, size: CGSize, bounds: CGRect, rotation: Int) -> [String:Any] {
+    private static func wrapper(fragmentRef: String, size: CGSize, bounds: CGRect, rotation: Int, style: SnapshotStyle) -> [String:Any] {
         let t = SnapshotPayload.transform(size: size, bounds: CGRect(origin: .zero, size: bounds.size), rotation: rotation)
-        let drawing = "q \(t.a) \(t.b) \(t.c) \(t.d) \(t.tx) \(t.ty) cm /Snapshot Do Q"
-        return ["stream":["dict":["/Type":"/XObject", "/Subtype":"/Form", "/BBox":[0,0,bounds.width,bounds.height], "/Resources":["/XObject":["/Snapshot":fragmentRef]], "/DrawbridgeRectangleAppearance":true], "data":Data(drawing.utf8).base64EncodedString()]]
+        let drawing = "q /SnapshotGS gs \(t.a) \(t.b) \(t.c) \(t.d) \(t.tx) \(t.ty) cm /Snapshot Do Q"
+        return ["stream":["dict":["/Type":"/XObject", "/Subtype":"/Form", "/BBox":[0,0,bounds.width,bounds.height], "/Resources":["/XObject":["/Snapshot":fragmentRef], "/ExtGState":["/SnapshotGS":["/Type":"/ExtGState", "/ca":style.opacity, "/CA":style.opacity, "/BM":style.overlay ? "/Multiply" : "/Normal"]]], "/DrawbridgeRectangleAppearance":true], "data":Data(drawing.utf8).base64EncodedString()]]
     }
 }

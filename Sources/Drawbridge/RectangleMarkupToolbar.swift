@@ -21,7 +21,6 @@ final class MarkupToolButton: NSButton {
 @MainActor
 final class RectangleMarkupToolbar: NSStackView {
     let snapshotButton = MarkupToolButton(title: "Snapshot", target: nil, action: nil)
-    let polygonSnapshotButton = MarkupToolButton(title: "Polygon Snapshot", target: nil, action: nil)
     let penButton = MarkupToolButton(title: "", target: nil, action: nil)
     let selectButton = MarkupToolButton(title: "Select", target: nil, action: nil)
     let rectangleButton = MarkupToolButton(title: "Rectangle", target: nil, action: nil)
@@ -51,7 +50,7 @@ final class RectangleMarkupToolbar: NSStackView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         orientation = .horizontal; spacing = 6; alignment = .centerY
-        for (button, symbol, name) in [(selectButton,"cursorarrow","Select markups (V)"),(penButton,"pencil","Pen (P)"),(rectangleButton,"rectangle","Draw Rectangle (R)"),(ellipseButton,"circle","Draw Ellipse (E)"),(lineButton,"line.diagonal","Draw Line (L)"),(arrowButton,"arrow.up.right","Draw Arrow (A)"),(polygonButton,"pentagon","Draw Polygon (Shift+P)"),(polylineButton,"point.topleft.down.to.point.bottomright.curvepath","Draw Polyline (Shift+N)"),(textButton,"textformat","Draw Text Box (T)"),(snapshotButton,"camera.viewfinder","Snapshot (G): drag a box, then paste with ⌘V"),(polygonSnapshotButton,"camera","Polygon Snapshot (Shift+G): click corners, double-click or press Return to finish"),(areaButton,"square.dashed","Measure Area (Shift+A)"),(perimeterButton,"ruler","Measure Perimeter or Length (Shift+L)"),(editTextButton,"square.and.pencil","Edit Text"),(deleteButton,"trash","Delete selected markup (Delete)"),(undoButton,"arrow.uturn.backward","Undo (⌘Z)"),(redoButton,"arrow.uturn.forward","Redo (⇧⌘Z)")] {
+        for (button, symbol, name) in [(selectButton,"cursorarrow","Select markups (V)"),(penButton,"pencil","Pen (P)"),(rectangleButton,"rectangle","Draw Rectangle (R)"),(ellipseButton,"circle","Draw Ellipse (E)"),(lineButton,"line.diagonal","Draw Line (L)"),(arrowButton,"arrow.up.right","Draw Arrow (A)"),(polygonButton,"pentagon","Draw Polygon (Shift+P)"),(polylineButton,"point.topleft.down.to.point.bottomright.curvepath","Draw Polyline (Shift+N)"),(textButton,"textformat","Draw Text Box (T)"),(snapshotButton,"camera","Snapshot (G): drag a box or click corners and double-click to finish"),(areaButton,"square.dashed","Measure Area (Shift+A)"),(perimeterButton,"ruler","Measure Perimeter or Length (Shift+L)"),(editTextButton,"square.and.pencil","Edit Text"),(deleteButton,"trash","Delete selected markup (Delete)"),(undoButton,"arrow.uturn.backward","Undo (⌘Z)"),(redoButton,"arrow.uturn.forward","Redo (⇧⌘Z)")] {
             button.bezelStyle = .texturedRounded; button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)
             button.imagePosition = .imageOnly; button.toolTip = name; button.setAccessibilityLabel(name)
             if button is MarkupToolButton {
@@ -133,7 +132,6 @@ extension MainViewController {
             let alert = NSAlert(); alert.messageText = "Could not complete Snapshot"; alert.informativeText = error.localizedDescription; alert.runModal()
         }
         rectangleToolbar.snapshotButton.target = self; rectangleToolbar.snapshotButton.action = #selector(snapshotCapture(_:))
-        rectangleToolbar.polygonSnapshotButton.target = self; rectangleToolbar.polygonSnapshotButton.action = #selector(polygonSnapshotCapture(_:))
         rectangleToolbar.scaleButton.target = self
         rectangleToolbar.scaleButton.action = #selector(commandSetPageDrawingScale(_:))
         rectangleToolbar.areaButton.target = self; rectangleToolbar.areaButton.action = #selector(areaMeasure(_:))
@@ -161,7 +159,7 @@ extension MainViewController {
             : "Edit Text"
         rectangleToolbar.propertiesButton.isEnabled = true
         rectangleToolbar.propertiesController.refresh()
-        for (button, tool) in [(rectangleToolbar.penButton, RectangleMarkupController.Tool.pen), (rectangleToolbar.selectButton, RectangleMarkupController.Tool.select), (rectangleToolbar.rectangleButton, .rectangle), (rectangleToolbar.ellipseButton, .ellipse), (rectangleToolbar.lineButton, .line), (rectangleToolbar.arrowButton, .arrow), (rectangleToolbar.polygonButton, .polygon), (rectangleToolbar.polylineButton, .polyline), (rectangleToolbar.textButton, .text), (rectangleToolbar.snapshotButton, .snapshotBox), (rectangleToolbar.polygonSnapshotButton, .snapshotPolygon), (rectangleToolbar.areaButton, .area), (rectangleToolbar.perimeterButton, .perimeter)] {
+        for (button, tool) in [(rectangleToolbar.penButton, RectangleMarkupController.Tool.pen), (rectangleToolbar.selectButton, RectangleMarkupController.Tool.select), (rectangleToolbar.rectangleButton, .rectangle), (rectangleToolbar.ellipseButton, .ellipse), (rectangleToolbar.lineButton, .line), (rectangleToolbar.arrowButton, .arrow), (rectangleToolbar.polygonButton, .polygon), (rectangleToolbar.polylineButton, .polyline), (rectangleToolbar.textButton, .text), (rectangleToolbar.snapshotButton, .snapshotBox), (rectangleToolbar.areaButton, .area), (rectangleToolbar.perimeterButton, .perimeter)] {
             button.isEnabled = enabled
             button.state = s.tool == tool ? .on : .off
             button.contentTintColor = s.tool == tool ? .systemBlue : .labelColor

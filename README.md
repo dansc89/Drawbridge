@@ -23,7 +23,7 @@ Version 1.0 starts the public release series. Earlier version numbers were devel
 - **Navigate drawing sets:** page thumbnails track the current sheet and refresh after markup changes. Switch to bookmarks, search sheet names, or use separate page and viewing-history controls.
 - **Index and link sheets:** generate sheet numbers/titles and bookmarks from title blocks, then batch-link sheet references. Processing dialogs report stages and page progress, with cancellation and review before applying bookmarks.
 - **Add vector markups:** pen, rectangle, ellipse, line, arrow, polygon, polyline, and on-page text boxes. The active tool is highlighted; a resizable right properties sidebar offers custom colors, six line patterns, lineweights, text sizes, and separate stroke and polygon fill opacity.
-- **Snapshot drawing regions:** capture a box or polygon and paste it onto another sheet at its original paper size. Vector linework stays sharp and snapshots are embedded in the saved PDF.
+- **Snapshot drawing regions:** capture a box or polygon and paste it onto another sheet at its original paper size. Use the right properties sidebar for overlay, opacity, grayscale, colorize, or invert. Original captures preserve vector linework; optional color filters use a bounded high-resolution image and can be reversed. Snapshots are embedded in the saved PDF.
 - **Measure drawings:** apply architectural or metric scales to several pages, calibrate against a known dimension, and trace area, perimeter, or open-path length. Measurement labels and page scales persist in the PDF.
 - **Review markups:** open the Markups List to see type, page, comment, and author. Click a row to jump to the annotation, search by text or author, and batch-delete selected markups with Undo. Links and form controls are excluded; locked annotations stay visible.
 - **Manage pages and bookmarks:** Shift/Command-select several entries, then press Backspace/Delete or right-click to delete with confirmation. Undo/redo also works after saving while the document remains open. Deleting bookmarks leaves PDF pages intact.
@@ -49,9 +49,9 @@ The [user manual](USER_MANUAL.md) covers navigation, page/bookmark deletion, sav
 
 | Tool | Shortcut |
 | --- | --- |
-| Snapshot box | G |
-| Snapshot polygon | Shift+G |
+| Snapshot: drag a box or click polygon corners | G |
 | Paste snapshot | Cmd+V |
+| Paste snapshot in place | Cmd+Shift+V |
 | Select | V |
 | Pen | P |
 | Rectangle | R |
