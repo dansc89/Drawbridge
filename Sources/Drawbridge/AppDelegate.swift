@@ -240,6 +240,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         redoItem.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: "Copy", action: #selector(MainViewController.commandCopy(_:)), keyEquivalent: "c").target = controller
+        editMenu.addItem(withTitle: "Snapshot (G)", action: #selector(MainViewController.snapshotCapture(_:)), keyEquivalent: "").target = controller
+        editMenu.addItem(withTitle: "Polygon Snapshot (Shift+G)", action: #selector(MainViewController.polygonSnapshotCapture(_:)), keyEquivalent: "").target = controller
         editMenu.addItem(withTitle: "Paste", action: #selector(MainViewController.commandPaste(_:)), keyEquivalent: "v").target = controller
         editMenu.addItem(withTitle: "Select All Text", action: #selector(MainViewController.commandSelectAll(_:)), keyEquivalent: "a").target = controller
         editMenu.addItem(NSMenuItem.separator())

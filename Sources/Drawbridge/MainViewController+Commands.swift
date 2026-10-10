@@ -456,6 +456,7 @@ extension MainViewController {
             NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: sender)
             return
         }
+        if let selected = pdfView.rectangleMarkup.selected, let payload = SnapshotPayload.read(selected) { payload.copy(); return }
         pdfView.copy(sender)
     }
     @objc func commandPaste(_ sender: Any?) {
@@ -464,6 +465,19 @@ extension MainViewController {
             NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: sender)
             return
         }
+        guard let payload = SnapshotPayload.clipboard(), let page = pdfView.currentPage else { return }
+        let session = pdfView.rectangleMarkup
+        session.bind(to: pdfView.document)
+        let visible = pdfView.convert(pdfView.bounds, to: page).intersection(page.bounds(for: pdfView.displayBox))
+        let center: CGPoint
+        if let window = view.window {
+            let location = pdfView.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+            if pdfView.page(for: location, nearest: false) === page {
+                center = pdfView.convert(location, to: page)
+            } else { center = CGPoint(x: visible.midX, y: visible.midY) }
+        } else { center = CGPoint(x: visible.midX, y: visible.midY) }
+        _ = session.pasteSnapshot(payload, on: page, center: center)
+        view.window?.makeFirstResponder(pdfView)
     }
     @objc func commandDeleteMarkup(_ sender: Any?) { deleteSelectedMarkup() }
     @objc func commandBringMarkupToFront(_ sender: Any?) { reorderSelectedMarkups(.bringToFront) }
@@ -677,8 +691,8 @@ extension MainViewController {
             return hasDocument && !bookmarksOutlineView.selectedRowIndexes.isEmpty
         case #selector(commandCopy(_:)), #selector(commandPaste(_:)), #selector(commandSelectAll(_:)):
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField { return true }
-            if action == #selector(commandPaste(_:)) { return false }
-            if action == #selector(commandCopy(_:)) { return pdfView.currentSelection != nil }
+            if action == #selector(commandPaste(_:)) { return hasDocument && pdfView.rectangleMarkup.canEdit() && SnapshotPayload.clipboard() != nil }
+            if action == #selector(commandCopy(_:)) { return pdfView.currentSelection != nil || pdfView.rectangleMarkup.selected.flatMap(SnapshotPayload.read) != nil }
             return hasDocument
         case #selector(commandSave(_:)), #selector(commandSaveCopy(_:)),
              #selector(commandAutoGenerateSheetNames(_:)), #selector(commandBatchLinkSheetNumbers(_:)),
@@ -686,7 +700,8 @@ extension MainViewController {
              #selector(commandPreviousPage(_:)), #selector(commandNextPage(_:)),
              #selector(commandActualSize(_:)), #selector(commandFitWidth(_:)), #selector(commandFitPage(_:)), #selector(commandGoToSheet(_:)), #selector(selectSelectionTool(_:)):
             return hasDocument
-        case #selector(commandSetPageDrawingScale(_:)), #selector(commandCalibrateDrawingScale(_:)),
+        case #selector(snapshotCapture(_:)), #selector(polygonSnapshotCapture(_:)),
+             #selector(commandSetPageDrawingScale(_:)), #selector(commandCalibrateDrawingScale(_:)),
              #selector(areaMeasure(_:)), #selector(perimeterMeasure(_:)):
             return hasDocument && pdfView.currentPage != nil && pdfView.rectangleMarkup.canEdit()
         case #selector(commandNavigateBack(_:)):

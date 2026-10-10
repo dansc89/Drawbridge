@@ -20,6 +20,8 @@ final class MarkupToolButton: NSButton {
 /// The first completed tools live in their own toolbar group, away from indexing.
 @MainActor
 final class RectangleMarkupToolbar: NSStackView {
+    let snapshotButton = MarkupToolButton(title: "Snapshot", target: nil, action: nil)
+    let polygonSnapshotButton = MarkupToolButton(title: "Polygon Snapshot", target: nil, action: nil)
     let penButton = MarkupToolButton(title: "", target: nil, action: nil)
     let selectButton = MarkupToolButton(title: "Select", target: nil, action: nil)
     let rectangleButton = MarkupToolButton(title: "Rectangle", target: nil, action: nil)
@@ -49,7 +51,7 @@ final class RectangleMarkupToolbar: NSStackView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         orientation = .horizontal; spacing = 6; alignment = .centerY
-        for (button, symbol, name) in [(selectButton,"cursorarrow","Select markups (V)"),(penButton,"pencil","Pen (P)"),(rectangleButton,"rectangle","Draw Rectangle (R)"),(ellipseButton,"circle","Draw Ellipse (E)"),(lineButton,"line.diagonal","Draw Line (L)"),(arrowButton,"arrow.up.right","Draw Arrow (A)"),(polygonButton,"pentagon","Draw Polygon (Shift+P)"),(polylineButton,"point.topleft.down.to.point.bottomright.curvepath","Draw Polyline (Shift+N)"),(textButton,"textformat","Draw Text Box (T)"),(areaButton,"square.dashed","Measure Area (Shift+A)"),(perimeterButton,"ruler","Measure Perimeter or Length (Shift+L)"),(editTextButton,"square.and.pencil","Edit Text"),(deleteButton,"trash","Delete selected markup (Delete)"),(undoButton,"arrow.uturn.backward","Undo (⌘Z)"),(redoButton,"arrow.uturn.forward","Redo (⇧⌘Z)")] {
+        for (button, symbol, name) in [(selectButton,"cursorarrow","Select markups (V)"),(penButton,"pencil","Pen (P)"),(rectangleButton,"rectangle","Draw Rectangle (R)"),(ellipseButton,"circle","Draw Ellipse (E)"),(lineButton,"line.diagonal","Draw Line (L)"),(arrowButton,"arrow.up.right","Draw Arrow (A)"),(polygonButton,"pentagon","Draw Polygon (Shift+P)"),(polylineButton,"point.topleft.down.to.point.bottomright.curvepath","Draw Polyline (Shift+N)"),(textButton,"textformat","Draw Text Box (T)"),(snapshotButton,"camera.viewfinder","Snapshot (G): drag a box, then paste with ⌘V"),(polygonSnapshotButton,"camera","Polygon Snapshot (Shift+G): click corners, double-click or press Return to finish"),(areaButton,"square.dashed","Measure Area (Shift+A)"),(perimeterButton,"ruler","Measure Perimeter or Length (Shift+L)"),(editTextButton,"square.and.pencil","Edit Text"),(deleteButton,"trash","Delete selected markup (Delete)"),(undoButton,"arrow.uturn.backward","Undo (⌘Z)"),(redoButton,"arrow.uturn.forward","Redo (⇧⌘Z)")] {
             button.bezelStyle = .texturedRounded; button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)
             button.imagePosition = .imageOnly; button.toolTip = name; button.setAccessibilityLabel(name)
             if button is MarkupToolButton {
@@ -77,7 +79,7 @@ final class RectangleMarkupToolbar: NSStackView {
         propertiesButton.toolTip = "Markup Properties"; propertiesButton.setAccessibilityLabel("Markup Properties")
         insertArrangedSubview(propertiesButton, at: 10)
         propertiesPopover.behavior = .transient
-        propertiesPopover.contentViewController = propertiesController
+        // The properties controller belongs to the persistent right sidebar.
         propertiesPopover.contentSize = NSSize(width: 260, height: 200)
         scaleButton.bezelStyle = .texturedRounded; scaleButton.controlSize = .small
         scaleButton.setAccessibilityLabel("Set drawing scale")
@@ -127,6 +129,11 @@ extension MainViewController {
         }
         session.onPresentationChanged = { [weak self] in self?.refreshRectangleToolbar() }
         rectangleToolbar.propertiesController.session = session
+        session.onSnapshotError = { error in
+            let alert = NSAlert(); alert.messageText = "Could not complete Snapshot"; alert.informativeText = error.localizedDescription; alert.runModal()
+        }
+        rectangleToolbar.snapshotButton.target = self; rectangleToolbar.snapshotButton.action = #selector(snapshotCapture(_:))
+        rectangleToolbar.polygonSnapshotButton.target = self; rectangleToolbar.polygonSnapshotButton.action = #selector(polygonSnapshotCapture(_:))
         rectangleToolbar.scaleButton.target = self
         rectangleToolbar.scaleButton.action = #selector(commandSetPageDrawingScale(_:))
         rectangleToolbar.areaButton.target = self; rectangleToolbar.areaButton.action = #selector(areaMeasure(_:))
@@ -140,20 +147,21 @@ extension MainViewController {
         refreshRectangleToolbar()
     }
     func refreshRectangleToolbar() {
+        revealMarkupPropertiesForInteraction()
         refreshMeasurementScaleDisplay()
         let s = pdfView.rectangleMarkup
         let enabled = s.canEdit()
         let importedSelected = s.selected.map(RectangleMarkupRecord.owns) == false
-        let styleEnabled = enabled && !importedSelected
+        let styleEnabled = enabled && !importedSelected && s.selected?.type != "Stamp"
         rectangleToolbar.propertiesButton.toolTip = importedSelected
             ? "Imported markup: move or delete; style editing is not yet supported"
             : "Markup Properties"
         rectangleToolbar.editTextButton.toolTip = importedSelected
             ? "Imported text editing is not yet supported"
             : "Edit Text"
-        rectangleToolbar.propertiesButton.isEnabled = styleEnabled && s.selected?.isReadOnly != true
-        if rectangleToolbar.propertiesPopover.isShown { rectangleToolbar.propertiesController.refresh() }
-        for (button, tool) in [(rectangleToolbar.penButton, RectangleMarkupController.Tool.pen), (rectangleToolbar.selectButton, RectangleMarkupController.Tool.select), (rectangleToolbar.rectangleButton, .rectangle), (rectangleToolbar.ellipseButton, .ellipse), (rectangleToolbar.lineButton, .line), (rectangleToolbar.arrowButton, .arrow), (rectangleToolbar.polygonButton, .polygon), (rectangleToolbar.polylineButton, .polyline), (rectangleToolbar.textButton, .text), (rectangleToolbar.areaButton, .area), (rectangleToolbar.perimeterButton, .perimeter)] {
+        rectangleToolbar.propertiesButton.isEnabled = true
+        rectangleToolbar.propertiesController.refresh()
+        for (button, tool) in [(rectangleToolbar.penButton, RectangleMarkupController.Tool.pen), (rectangleToolbar.selectButton, RectangleMarkupController.Tool.select), (rectangleToolbar.rectangleButton, .rectangle), (rectangleToolbar.ellipseButton, .ellipse), (rectangleToolbar.lineButton, .line), (rectangleToolbar.arrowButton, .arrow), (rectangleToolbar.polygonButton, .polygon), (rectangleToolbar.polylineButton, .polyline), (rectangleToolbar.textButton, .text), (rectangleToolbar.snapshotButton, .snapshotBox), (rectangleToolbar.polygonSnapshotButton, .snapshotPolygon), (rectangleToolbar.areaButton, .area), (rectangleToolbar.perimeterButton, .perimeter)] {
             button.isEnabled = enabled
             button.state = s.tool == tool ? .on : .off
             button.contentTintColor = s.tool == tool ? .systemBlue : .labelColor
@@ -190,13 +198,12 @@ extension MainViewController {
         display(rectangleToolbar.fontPopup, titles: rectangleToolbar.fontSizes.map { "\(Int($0)) pt" }, index: rectangleToolbar.fontSizes.firstIndex(of: font), custom: String(format: "%g pt", Double(font)))
         let fillIndex = fill.flatMap { color in rectangleToolbar.colors.firstIndex { $0.usingColorSpace(.deviceRGB) == color.usingColorSpace(.deviceRGB) }.map { $0 + 1 } } ?? (fill == nil ? 0 : nil)
         display(rectangleToolbar.fillPopup, titles: ["No Fill","Fill Red","Fill Blue","Fill Black","Fill Orange","Fill Green"], index: fillIndex, custom: "Custom Fill")
+        for popup in [rectangleToolbar.colorPopup, rectangleToolbar.widthPopup, rectangleToolbar.fontPopup, rectangleToolbar.fillPopup] { popup.isHidden = true }
     }
     @objc func showMarkupProperties(_ sender: NSButton) {
-        guard pdfView.rectangleMarkup.canEdit() else { return }
-        if rectangleToolbar.propertiesPopover.isShown { rectangleToolbar.propertiesPopover.close(); return }
         pdfView.rectangleMarkup.finishTextEditing()
         rectangleToolbar.propertiesController.refresh()
-        rectangleToolbar.propertiesPopover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minY)
+        toggleSidebar()
     }
     @objc func rectangleSelect(_ sender: Any?) { pdfView.rectangleMarkup.tool = .select; view.window?.makeFirstResponder(pdfView) }
     @objc func rectangleDraw(_ sender: Any?) {
@@ -207,6 +214,8 @@ extension MainViewController {
         guard pdfView.rectangleMarkup.canEdit() else { return }
         pdfView.rectangleMarkup.tool = tool; view.window?.makeFirstResponder(pdfView)
     }
+    @objc func snapshotCapture(_ sender: Any?) { chooseShape(.snapshotBox) }
+    @objc func polygonSnapshotCapture(_ sender: Any?) { chooseShape(.snapshotPolygon) }
     @objc func penDraw(_ sender: Any?) { chooseShape(.pen) }
     @objc func ellipseDraw(_ sender: Any?) { chooseShape(.ellipse) }
     @objc func lineDraw(_ sender: Any?) { chooseShape(.line) }

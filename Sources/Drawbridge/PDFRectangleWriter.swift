@@ -177,7 +177,9 @@ enum PDFRectangleWriter {
             guard try MarkupFileVersion.read(source) == sourceVersion else { print("Rectangle writer: source changed during save"); return false }
             stage = "candidate size verification"
             let size = try candidate.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-            guard size > 0, size <= original.count + max(5 * 1024 * 1024, records.count * 4096) else { print("Rectangle writer: size limit \(size) vs \(original.count)"); return false }
+            let snapshotAllowance = records.reduce(0) { total, record in total + (record.snapshotData?.count ?? 0) * 4 }
+            let maximumSize = original.count + max(5 * 1024 * 1024, records.count * 4096 + snapshotAllowance)
+            guard size > 0, size <= maximumSize else { print("Rectangle writer: size limit \(size) vs \(original.count)"); return false }
             profile("candidate verification")
             let verifiedCandidate = PDFMarkupSourceStamp.capture(candidate)
             stage = "file replacement"
@@ -430,6 +432,19 @@ enum PDFRectangleWriter {
     private static func update(_ json: inout [String: Any], records: [RectangleMarkupRecord]) throws {
         var qpdf = try tableArray(json); var objects = qpdf[1]
         var next = (qpdf[0]["maxobjectid"] as? Int ?? 0) + 1
+        var snapshotForms: [Data:String] = [:]
+        for object in objects.values {
+            guard let value = (object as? [String:Any])?["value"] as? [String:Any],
+                  let encoded = value["/DrawbridgeSnapshotPDF"] as? String, encoded.hasPrefix("u:"),
+                  let data = Data(base64Encoded: String(encoded.dropFirst(2))),
+                  let appearance = (value["/AP"] as? [String:Any])?["/N"] as? String,
+                  let stream = (objects["obj:" + appearance] as? [String:Any])?["stream"] as? [String:Any],
+                  let dictionary = stream["dict"] as? [String:Any],
+                  let resources = dictionary["/Resources"] as? [String:Any],
+                  let xobjects = resources["/XObject"] as? [String:Any],
+                  let fragment = xobjects["/Snapshot"] as? String, objects["obj:" + fragment] != nil else { continue }
+            snapshotForms[data] = fragment
+        }
         let references = try pages(json)
         guard records.allSatisfy({ $0.pageIndex < references.count }) else { throw CocoaError(.fileReadCorruptFile) }
         let recordsByPage = Dictionary(grouping: records, by: \.pageIndex)
@@ -448,6 +463,11 @@ enum PDFRectangleWriter {
                 let appearanceRef = "\(next) 0 R"; next += 1
                 let b = record.bounds
                 var annotation: [String:Any] = ["/Type": "/Annot", "/Subtype": subtype(record.kind), "/Rect": [b.minX,b.minY,b.maxX,b.maxY], "/T": "u:\(record.author)", "/NM": "u:\(record.id)", "/Contents": "u:\(record.kind.rawValue.capitalized)", "/F": 4, "/C": [record.red,record.green,record.blue], "/BS": ["/W":record.lineWidth,"/S":"/S"], "/AP": ["/N":appearanceRef]]
+                annotation["/DrawbridgeLinePattern"] = "u:" + record.linePattern.rawValue
+                annotation["/DrawbridgeStrokeOpacity"] = record.strokeOpacity
+                annotation["/DrawbridgeFillOpacity"] = record.fillOpacity
+                annotation["/BS"] = ["/W": record.lineWidth, "/S": record.linePattern == .solid ? "/S" : "/D", "/D": record.linePattern.dash(width: CGFloat(record.lineWidth))]
+                if record.kind == .snapshot { annotation["/DrawbridgeSnapshotPDF"] = "u:" + record.snapshotData!.base64EncodedString() }
                 if let scale = record.pageScale {
                     annotation["/DrawbridgePageScale"] = "u:" + MeasurementMetadata.json(scale)
                     annotation["/F"] = 98 // Hidden, NoView, ReadOnly; never printed.
@@ -490,8 +510,14 @@ enum PDFRectangleWriter {
                         continue
                     }
                 }
+                if record.kind == .snapshot {
+                    objects["obj:\(appearanceRef)"] = try SnapshotAppearance.install(data: record.snapshotData!, bounds: b, rotation: record.textRotation, objects: &objects, next: &next, forms: &snapshotForms)
+                    objects["obj:\(annotationRef)"] = ["value": annotation]; entries.append(annotationRef); continue
+                }
                 let drawing = appearanceDrawing(record)
-                objects["obj:\(appearanceRef)"] = ["stream": ["dict": ["/Type": "/XObject", "/Subtype": "/Form", "/BBox": [0,0,b.width,b.height], "/Resources": record.measurement == nil ? [String:Any]() : ["/Font": ["/MeasureFont": ["/Type": "/Font", "/Subtype": "/Type1", "/BaseFont": "/Helvetica"]]], "/DrawbridgeRectangleAppearance": true], "data": Data(drawing.utf8).base64EncodedString()]]
+                var resources: [String: Any] = ["/ExtGState": ["/MarkupGS": ["/Type": "/ExtGState", "/CA": record.strokeOpacity, "/ca": record.kind == .text ? record.strokeOpacity : record.fillOpacity]]]
+                if record.measurement != nil { resources["/Font"] = ["/MeasureFont": ["/Type": "/Font", "/Subtype": "/Type1", "/BaseFont": "/Helvetica"]] }
+                objects["obj:\(appearanceRef)"] = ["stream": ["dict": ["/Type": "/XObject", "/Subtype": "/Form", "/BBox": [0,0,b.width,b.height], "/Resources": resources, "/DrawbridgeRectangleAppearance": true], "data": Data(drawing.utf8).base64EncodedString()]]
                 objects["obj:\(annotationRef)"] = ["value": annotation]
                 entries.append(annotationRef)
             }
@@ -502,18 +528,20 @@ enum PDFRectangleWriter {
     }
 
     private static func subtype(_ kind: RectangleMarkupRecord.Kind) -> String {
-        switch kind { case .rectangle: return "/Square"; case .ellipse: return "/Circle"; case .line, .arrow: return "/Line"; case .text: return "/FreeText"; case .polyline: return "/Ink"; case .polygon: return "/Polygon" }
+        switch kind { case .snapshot: return "/Stamp"; case .rectangle: return "/Square"; case .ellipse: return "/Circle"; case .line, .arrow: return "/Line"; case .text: return "/FreeText"; case .polyline: return "/Ink"; case .polygon: return "/Polygon" }
     }
 
     /// Appearance coordinates are local to the annotation; page rotation is untouched.
     private static func appearanceDrawing(_ r: RectangleMarkupRecord) -> String {
         if r.pageScale != nil { return "" }
+        let style = "/MarkupGS gs [" + r.linePattern.dash(width: CGFloat(r.lineWidth)).map { String($0) }.joined(separator: " ") + "] 0 d"
         let half = r.lineWidth/2, w = max(0,Double(r.bounds.width)-r.lineWidth), h = max(0,Double(r.bounds.height)-r.lineWidth)
         var path: String
         switch r.kind {
+        case .snapshot: return ""
         case .polyline, .polygon:
             path = r.vertices.enumerated().map { i,p in "\(p.x-r.bounds.minX) \(p.y-r.bounds.minY) " + (i == 0 ? "m" : "l") }.joined(separator:" ")
-        case .text: return TextMarkupAppearance.drawing(r)
+        case .text: return "q /MarkupGS gs\n" + TextMarkupAppearance.drawing(r) + "\nQ"
         case .rectangle: path = "\(half) \(half) \(w) \(h) re"
         case .ellipse:
             let cx = Double(r.bounds.width)/2, cy = Double(r.bounds.height)/2, rx = w/2, ry = h/2, k = 0.5522847498307936
@@ -531,9 +559,9 @@ enum PDFRectangleWriter {
         }
         if r.kind == .polygon {
             path += " h"
-            if let fill = r.fill { return "q \(r.red) \(r.green) \(r.blue) RG \(fill[0]) \(fill[1]) \(fill[2]) rg \(r.lineWidth) w 1 j \(path) B Q\n" + MeasurementAppearance.pdf(r) }
+            if let fill = r.fill { return "q \(style) \(r.red) \(r.green) \(r.blue) RG \(fill[0]) \(fill[1]) \(fill[2]) rg \(r.lineWidth) w 1 j \(path) B Q\n" + MeasurementAppearance.pdf(r) }
         }
-        return "q \(r.red) \(r.green) \(r.blue) RG \(r.lineWidth) w 1 J 1 j \(path) S Q\n" + MeasurementAppearance.pdf(r)
+        return "q \(style) \(r.red) \(r.green) \(r.blue) RG \(r.lineWidth) w 1 J 1 j \(path) S Q\n" + MeasurementAppearance.pdf(r)
     }
 
     private static func ownedRecordsMatch(_ json: [String: Any], records: [RectangleMarkupRecord]) throws -> Bool {
@@ -553,6 +581,10 @@ enum PDFRectangleWriter {
                       let appearance = (value["/AP"] as? [String: Any])?["/N"] as? String,
                       (objects["obj:\(appearance)"] as? [String: Any])?["stream"] != nil,
                       found.insert(id).inserted else { return false }
+                guard value["/DrawbridgeLinePattern"] as? String == "u:" + expected.linePattern.rawValue,
+                      value["/DrawbridgeStrokeOpacity"] as? Double == expected.strokeOpacity,
+                      value["/DrawbridgeFillOpacity"] as? Double == expected.fillOpacity else { return false }
+                if value["/DrawbridgeSnapshotPDF"] as? String != expected.snapshotData.map({ "u:" + $0.base64EncodedString() }) { return false }
                 if value["/DrawbridgeMeasurement"] as? String != expected.measurement.map({ "u:" + MeasurementMetadata.json($0) }) { return false }
                 if value["/DrawbridgePageScale"] as? String != expected.pageScale.map({ "u:" + MeasurementMetadata.json($0) }) { return false }
                 if let scale = expected.pageScale, (!scale.isValid || value["/F"] as? Int != 98) { return false }
@@ -600,7 +632,7 @@ enum PDFRectangleWriter {
     }
     private static func owned(_ entry: Any, objects: [String:Any]) -> Bool {
         let d = dictionary(entry, objects: objects)
-        return ["/Square","/Circle","/Line","/FreeText","/Ink","/Polygon"].contains(d["/Subtype"] as? String ?? "") && ownedIdentity(d) != nil
+        return ["/Square","/Circle","/Line","/FreeText","/Ink","/Polygon","/Stamp"].contains(d["/Subtype"] as? String ?? "") && ownedIdentity(d) != nil
     }
 }
 

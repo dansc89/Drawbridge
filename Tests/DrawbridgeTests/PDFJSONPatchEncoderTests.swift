@@ -22,6 +22,11 @@ final class PDFJSONPatchEncoderTests: XCTestCase {
         XCTAssertEqual(String(decoding: large, as: UTF8.self), "25" + String(repeating: "0", count: 99))
     }
 
+    func testIncrementalStringsEscapeASCIIAndPreserveUnicode() throws {
+        XCTAssertEqual(try PDFIncrementalMarkupPatch.encode("u:Review (A)\\B"), "(Review \\(A\\)\\\\B)")
+        XCTAssertEqual(try PDFIncrementalMarkupPatch.encode("u:日本"), "<feff65e5672c>")
+        XCTAssertEqual(try PDFIncrementalMarkupPatch.encode("u:line\nnext"), "<feff006c0069006e0065000a006e006500780074>")
+    }
     func testRejectsUnboundedExpansionWithoutIntegerOverflow() {
         XCTAssertThrowsError(try PDFJSONPatchEncoder.expandingExponents(in: Data("1e-9223372036854775808".utf8)))
     }

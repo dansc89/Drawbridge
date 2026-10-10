@@ -168,6 +168,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var contentsSummaryPageCount = 0
     private let pdfContentsSummaryLabel = NSTextField(labelWithString: "No PDF loaded")
     private let splitView = NSSplitView(frame: .zero)
+    private let propertiesResizeHandle = NavigationResizeHandleView(frame: .zero)
+    private var propertiesWidthAtDragStart: CGFloat = 300
     private let emptyStateView = StartupDropView(frame: .zero)
     private let emptyStateTitle = NSTextField(labelWithString: "Open a drawing set to get started")
     private let emptyStateOpenButton = NSButton(title: "Open PDF", target: nil, action: nil)
@@ -410,6 +412,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var sidebarContainerView: NSView?
     private var lastSidebarExpandedWidth: CGFloat = 240
     private var isSidebarCollapsed = false
+    private var lastPropertiesTool: RectangleMarkupController.Tool = .select
+    private weak var lastPropertiesSelection: PDFAnnotation?
     private let toolSelector: NSSegmentedControl = {
         let control = NSSegmentedControl(labels: ["Select"], trackingMode: .selectOne, target: nil, action: nil)
         control.selectedSegment = 0
@@ -614,10 +618,20 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         splitView.dividerStyle = .thin
         splitView.delegate = self
         splitView.addArrangedSubview(pdfCanvasContainer)
-        // Scratch-reset mode: remove the right-side tool/settings pane entirely.
-        sidebarContainerView = nil
-        isSidebarCollapsed = true
-        collapsedSidebarRevealButton.isHidden = true
+        let inspector = rectangleToolbar.propertiesController
+        addChild(inspector)
+        sidebarContainerView = inspector.view
+        inspector.view.translatesAutoresizingMaskIntoConstraints = false
+        splitView.addArrangedSubview(inspector.view)
+        let preferredWidth = inspector.view.widthAnchor.constraint(equalToConstant: 300)
+        preferredWidth.priority = .defaultHigh
+        preferredWidth.isActive = true
+        sidebarPreferredWidthConstraint = preferredWidth
+        lastSidebarExpandedWidth = CGFloat(UserDefaults.standard.double(forKey: "DrawbridgeSidebarWidth"))
+        if lastSidebarExpandedWidth < 260 { lastSidebarExpandedWidth = 300 }
+        isSidebarCollapsed = UserDefaults.standard.bool(forKey: "DrawbridgeSidebarCollapsed")
+        inspector.onHide = { [weak self] in self?.toggleSidebar() }
+        collapsedSidebarRevealButton.isHidden = !isSidebarCollapsed
         configureEmptyStateView()
         pdfCanvasContainer.onOpenDroppedPDF = { [weak self] url in
             guard let self else { return }
@@ -671,6 +685,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfView.setHyperlinkHighlightsVisible(isHyperlinkHighlightsVisible)
 
         view.addSubview(splitView)
+        propertiesResizeHandle.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(propertiesResizeHandle)
+        NSLayoutConstraint.activate([
+            propertiesResizeHandle.centerXAnchor.constraint(equalTo: inspector.view.leadingAnchor),
+            propertiesResizeHandle.topAnchor.constraint(equalTo: splitView.topAnchor),
+            propertiesResizeHandle.bottomAnchor.constraint(equalTo: splitView.bottomAnchor),
+            propertiesResizeHandle.widthAnchor.constraint(equalToConstant: 12)
+        ])
+        propertiesResizeHandle.addGestureRecognizer(NSPanGestureRecognizer(target: self, action: #selector(handlePropertiesResizePan(_:))))
+        propertiesResizeHandle.isHidden = isSidebarCollapsed
         view.addSubview(documentTabsBar)
         view.addSubview(statusBar)
         configureMarkupsPanel()
@@ -709,6 +733,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             collapsedSidebarRevealButton.widthAnchor.constraint(equalToConstant: 28),
             collapsedSidebarRevealButton.heightAnchor.constraint(equalToConstant: 28)
         ])
+        view.layoutSubtreeIfNeeded()
+        applySplitLayoutIfPossible(force: true)
+        view.layoutSubtreeIfNeeded()
         requestChromeRefresh(immediate: true)
         updateEmptyStateVisibility()
         refreshDocumentTabs()
@@ -752,14 +779,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         } else if !hasDocument {
             // Keep startup focused on the open/create surface and constrain tool settings to a sidebar width.
             sidebar.isHidden = false
-            let startupSidebarWidth: CGFloat = min(max(lastSidebarExpandedWidth, 220), 260)
+            let startupSidebarWidth: CGFloat = min(max(lastSidebarExpandedWidth, 260), 420)
             sidebarPreferredWidthConstraint?.constant = startupSidebarWidth
-            splitView.setPosition(max(900, availableWidth - startupSidebarWidth), ofDividerAt: 0)
+            splitView.setPosition(max(700, availableWidth - startupSidebarWidth), ofDividerAt: 0)
         } else {
             sidebar.isHidden = false
-            let clampedSidebarWidth = min(max(lastSidebarExpandedWidth, 220), 280)
+            let clampedSidebarWidth = min(max(lastSidebarExpandedWidth, 260), 420)
             sidebarPreferredWidthConstraint?.constant = clampedSidebarWidth
-            splitView.setPosition(max(900, availableWidth - clampedSidebarWidth), ofDividerAt: 0)
+            splitView.setPosition(max(700, availableWidth - clampedSidebarWidth), ofDividerAt: 0)
         }
         didApplyInitialSplitLayout = true
     }
@@ -2437,7 +2464,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     func splitViewDidResizeSubviews(_ notification: Notification) {
         guard let sidebar = sidebarContainerView, !isSidebarCollapsed, sidebar.frame.width > 120 else { return }
-        lastSidebarExpandedWidth = min(max(sidebar.frame.width, 220), 280)
+        lastSidebarExpandedWidth = min(max(sidebar.frame.width, 260), 420)
+        sidebarPreferredWidthConstraint?.constant = lastSidebarExpandedWidth
         UserDefaults.standard.set(Double(lastSidebarExpandedWidth), forKey: "DrawbridgeSidebarWidth")
     }
 
@@ -2509,18 +2537,43 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         activateTool(mode)
     }
 
+    func revealMarkupPropertiesForInteraction() {
+        let session = pdfView.rectangleMarkup
+        let changedTool = session.tool != lastPropertiesTool && session.tool != .select
+        let changedSelection = session.selected != nil && session.selected !== lastPropertiesSelection
+        lastPropertiesTool = session.tool
+        lastPropertiesSelection = session.selected
+        if sidebarContainerView != nil, isSidebarCollapsed, changedTool || changedSelection {
+            toggleSidebar()
+        }
+    }
+
+    @objc private func handlePropertiesResizePan(_ recognizer: NSPanGestureRecognizer) {
+        guard !isSidebarCollapsed else { return }
+        if recognizer.state == .began {
+            propertiesWidthAtDragStart = sidebarContainerView?.frame.width ?? 300
+        }
+        if recognizer.state == .changed {
+            let width = min(max(propertiesWidthAtDragStart - recognizer.translation(in: splitView).x, 260), 420)
+            lastSidebarExpandedWidth = width
+            sidebarPreferredWidthConstraint?.constant = width
+            splitView.setPosition(splitView.bounds.width - width, ofDividerAt: 0)
+            view.layoutSubtreeIfNeeded()
+        }
+    }
+
     @objc func toggleSidebar() {
         guard let sidebar = sidebarContainerView else { return }
         if isSidebarCollapsed {
             sidebar.isHidden = false
-            sidebarPreferredWidthConstraint?.constant = min(max(lastSidebarExpandedWidth, 220), 280)
-            splitView.setPosition(max(900, view.bounds.width - lastSidebarExpandedWidth), ofDividerAt: 0)
+            sidebarPreferredWidthConstraint?.constant = min(max(lastSidebarExpandedWidth, 260), 420)
+            splitView.setPosition(max(700, splitView.bounds.width - lastSidebarExpandedWidth), ofDividerAt: 0)
             isSidebarCollapsed = false
             UserDefaults.standard.set(false, forKey: "DrawbridgeSidebarCollapsed")
         } else {
-            let width = max(220, sidebar.frame.width)
-            lastSidebarExpandedWidth = min(width, 280)
-            sidebarPreferredWidthConstraint?.constant = min(max(lastSidebarExpandedWidth, 220), 280)
+            let width = max(260, sidebar.frame.width)
+            lastSidebarExpandedWidth = min(width, 420)
+            sidebarPreferredWidthConstraint?.constant = min(max(lastSidebarExpandedWidth, 260), 420)
             UserDefaults.standard.set(Double(lastSidebarExpandedWidth), forKey: "DrawbridgeSidebarWidth")
             splitView.setPosition(view.bounds.width - 1, ofDividerAt: 0)
             sidebar.isHidden = true
@@ -2541,14 +2594,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             collapsedSidebarRevealButton.imagePosition = .noImage
         }
         collapsedSidebarRevealButton.isHidden = !isSidebarCollapsed
+        propertiesResizeHandle.isHidden = isSidebarCollapsed
     }
 
     func splitView(_ splitView: NSSplitView, constrainSplitPosition proposedPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
         guard splitView === self.splitView, dividerIndex == 0 else {
             return proposedPosition
         }
-        let minCanvasWidth: CGFloat = 900
-        let minSidebarWidth: CGFloat = isSidebarCollapsed ? 0 : 220
+        let minCanvasWidth: CGFloat = max(700, (bookmarksWidthConstraint?.constant ?? 0) + 350)
+        let minSidebarWidth: CGFloat = isSidebarCollapsed ? 0 : 260
         let dividerThickness = splitView.dividerThickness
         let maxCanvasWidth = splitView.bounds.width - dividerThickness - minSidebarWidth
         if maxCanvasWidth <= minCanvasWidth {
@@ -2561,9 +2615,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guard splitView === self.splitView, dividerIndex == 0 else {
             return proposedEffectiveRect
         }
-        // Disable mouse hit-testing on the right Tool Settings divider.
-        // We only allow resizing via the left Navigation grabber.
-        return .zero
+        return isSidebarCollapsed ? .zero : drawnRect.insetBy(dx: -4, dy: 0)
     }
 
     @objc func openPDF() {

@@ -90,9 +90,18 @@ enum PDFIncrementalMarkupPatch {
         }
         if let text = value as? String {
             if text.hasPrefix("u:") {
+                let value = text.dropFirst(2)
+                // PDFDocEncoding agrees with ASCII. Large portable snapshot
+                // payloads need no UTF-16 expansion or per-byte formatting.
+                if value.utf8.allSatisfy({ (32...126).contains($0) }) {
+                    return "(" + value.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "(", with: "\\(").replacingOccurrences(of: ")", with: "\\)") + ")"
+                }
                 var bytes = Data([0xfe, 0xff])
-                for unit in text.dropFirst(2).utf16 { bytes.append(UInt8(unit >> 8)); bytes.append(UInt8(unit & 255)) }
-                return "<" + bytes.map { String(format: "%02x", $0) }.joined() + ">"
+                for unit in value.utf16 { bytes.append(UInt8(unit >> 8)); bytes.append(UInt8(unit & 255)) }
+                let digits = Array("0123456789abcdef".utf8)
+                var hex = [UInt8](); hex.reserveCapacity(bytes.count * 2)
+                for byte in bytes { hex.append(digits[Int(byte >> 4)]); hex.append(digits[Int(byte & 15)]) }
+                return "<" + String(decoding: hex, as: UTF8.self) + ">"
             }
             if text.hasPrefix("b:") {
                 let hex = text.dropFirst(2)

@@ -44,7 +44,7 @@ Markup saving appends annotation changes without rasterizing the drawing pages. 
 
 The separate markup toolbar supports pen (`P`), rectangle (`R`), ellipse (`E`), line (`L`), arrow (`A`), polygon (`Shift+P`), polyline (`Shift+N`), and text (`T`). The active tool is highlighted. `V` returns to selection; Escape cancels an unfinished drawing. Click a line or arrow's start and then its end. Draw a text box and type on the page; double-click an existing Drawbridge text annotation to edit it.
 
-Select Drawbridge markups to move them, change their color or line weight, or delete them. Polygon and polyline handles follow their vertices. Polygons support fill; polylines remain open lines. Use `Cmd+Z` to undo and `Shift+Cmd+Z` to redo. Standard unlocked imported annotations can also be selected, moved, and deleted with Undo/Redo. Their original appearance and metadata are preserved when saving. Imported text, style, and node editing are not yet supported; those controls are disabled when an imported markup is selected. Flattened page content and locked annotations cannot be selected as editable markups. Snapshot pasting, page-combining, and page-conversion tools are not yet available.
+Select Drawbridge markups to move them, change their color or line weight, or delete them. Polygon and polyline handles follow their vertices. Polygons support fill; polylines remain open lines. Use `Cmd+Z` to undo and `Shift+Cmd+Z` to redo. Standard unlocked imported annotations can also be selected, moved, and deleted with Undo/Redo. Their original appearance and metadata are preserved when saving. Imported text, style, and node editing are not yet supported; those controls are disabled when an imported markup is selected. Flattened page content and locked annotations cannot be selected as editable markups. Page-combining and page-conversion tools are not yet available.
 
 ## Drawing measurements
 
@@ -61,11 +61,21 @@ Scale settings and measurement labels persist inside the PDF. Saved labels are v
 
 Each page has one scale. Reduced sheets and details at a different scale need verification. Automatic snapping to drawing geometry, multiple scale regions on one page, curved measurements, and takeoff exports are not implemented. Pages with non-default PDF `/UserUnit` are rejected rather than producing misleading values. A measurement can have up to 512 corners.
 
+## Snapshot
+
+Choose **Edit > Snapshot** (`G`) or the camera-viewfinder toolbar button, then drag a box around the area to copy. **Polygon Snapshot** (`Shift+G`) follows clicked corners; double-click, press Return, or click the first corner to finish. Escape cancels an unfinished capture.
+
+Move the pointer over the destination page and press **Cmd+V**. The snapshot is pasted at its original paper size, independent of zoom. Rotated destination sheets retain the captured orientation. Drag a pasted snapshot to move it, use **Cmd+C** to copy it again, or Delete to remove it. Undo and redo apply to pasting, moving, and deleting. Snapshots cannot be stretched by dragging selection corners, so their scale remains unchanged.
+
+Snapshots include the selected drawing content and visible markups. The area outside a polygon is transparent. Vector linework stays vector; source images retain their original resolution. Capture does not add a markup until you paste. Snapshots appear in the Markups List with their author and are embedded in the PDF, with no separate file required. Save before opening the result in another PDF editor.
+
+The original *paper size* is preserved. If sheets use different drawing scales, the same paper size can represent a different real-world distance on the destination sheet. Snapshot is a copying tool, not a redaction tool. PDFs using nonstandard physical page units are not supported for Snapshot.
+
 ## Markup Properties
 
-Click the sliders button in the markup toolbar to open a compact, nonmodal inspector. Choose a custom color, enter a line weight from 0.25 to 12 points, or enter a text size from 6 to 144 points. Polygon fill can be switched off or given a custom color. Fractional text sizes are retained through save and reopen. The current writer supports opaque colors; opacity and font-family controls are not part of this pass.
+The right sidebar shows properties for the selected Drawbridge markup, or defaults for the next markup when nothing is selected. Drag its divider to resize it. Use Hide or the toolbar properties button to collapse or reopen it. Choosing another markup tool or selecting a different markup reopens a hidden panel. Choose a custom stroke color, enter a line weight from 0.25 to 72 points, and choose solid, dashed, dotted, dash dot, dash dot dot, or long dash linework. Stroke opacity is independent of polygon fill color and fill opacity. Polygon and area fills can be switched off completely. Text boxes support sizes from 6 to 144 points. These settings are retained through save and reopen. Snapshot preserves the captured appearance, and imported markups currently support moving and deletion rather than style editing.
 
-When a markup is selected, these changes edit it and support Undo. When nothing is selected, they set defaults for your next markup. Editing a selection does not silently change drawing defaults. The toolbar displays custom values accurately instead of showing the nearest preset.
+When a markup is selected, these changes edit it and support Undo. When nothing is selected, they set defaults for your next markup. Editing a selection does not silently change drawing defaults. The sidebar displays custom values accurately instead of showing the nearest preset.
 
 ## Switching Tabs
 
