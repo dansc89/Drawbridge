@@ -35,6 +35,8 @@ extension MainViewController: NSTableViewDataSource, NSTableViewDelegate {
             } else {
                 text = MarkupListPresentation.typeName(item.annotation) + (item.annotation.isReadOnly ? " (Locked)" : "")
             }
+        } else if columnId == "layer" {
+            text = pdfView.rectangleMarkup.layerName(for: item.annotation) + (pdfView.rectangleMarkup.layerIsVisible(item.annotation) ? "" : " (Hidden)")
         } else if columnId == "author" {
             text = MarkupListPresentation.author(item.annotation)
         } else {

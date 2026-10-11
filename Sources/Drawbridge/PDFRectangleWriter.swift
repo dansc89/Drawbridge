@@ -133,6 +133,7 @@ enum PDFRectangleWriter {
                 }
                 try updateImported(&json, original: originalGraph, plan: importedPlan, arrays: &importedArrays, objects: &importedObjects)
             }
+            try refreshImportedLayerReferences(&json, authorized: &importedObjects)
             if try changedObjects(baseline: inspected, updated: json).isEmpty {
                 guard try MarkupFileVersion.read(source) == sourceVersion else { return false }
                 let verifiedInput = PDFMarkupSourceStamp.capture(input)
@@ -229,9 +230,10 @@ enum PDFRectangleWriter {
             guard old["stream"] == nil, let new = after[key] as? [String: Any] else { return false }
             if pageKeys.contains(key) || key == "obj:" + catalog {
                 guard var a = old["value"] as? [String: Any], var b = new["value"] as? [String: Any] else { return false }
-                let allowed = pageKeys.contains(key) ? ["/Annots"] : ["/Outlines", "/PageLabels"]
+                let allowed = pageKeys.contains(key) ? ["/Annots"] : ["/Outlines", "/PageLabels", "/OCProperties"]
                 for field in allowed { a.removeValue(forKey: field); b.removeValue(forKey: field) }
                 guard NSDictionary(dictionary: a).isEqual(to: b) else { return false }
+                if key == "obj:" + catalog && !PDFMarkupLayersPatch.preservesForeignLayers(before: before, after: after, root: catalog) { return false }
                 if pageKeys.contains(key) {
                     let a = old["value"] as! [String: Any], b = new["value"] as! [String: Any]
                     let importedBefore = annotations(a["/Annots"], objects: before).filter { !owned($0, objects: before) && !generated($0, before) }
@@ -406,6 +408,22 @@ enum PDFRectangleWriter {
                 let geometry = ["/Rect", "/L", "/Vertices", "/InkList", "/QuadPoints", "/CL"]
                 var a = value, b = existing
                 for field in geometry { a.removeValue(forKey: field); b.removeValue(forKey: field) }
+                // Previous saves may have assigned this imported annotation to a
+                // Drawbridge OCG. Validate that ownership before ignoring only
+                // those two membership fields in the immutable metadata check.
+                func withoutManagedLayer(_ dictionary: [String: Any], table: [String: Any]) throws -> [String: Any] {
+                    var result = dictionary
+                    if let id = dictionary["/DrawbridgeLayerID"] as? String {
+                        guard id.hasPrefix("u:"), UUID(uuidString: String(id.dropFirst(2))) != nil,
+                              let group = dictionary["/OC"] as? String,
+                              let definition = (table["obj:" + group] as? [String: Any])?["value"] as? [String: Any],
+                              definition["/DrawbridgeLayerID"] as? String == id else { throw CocoaError(.fileReadCorruptFile) }
+                        result.removeValue(forKey: "/DrawbridgeLayerID"); result.removeValue(forKey: "/OC")
+                    }
+                    return result
+                }
+                a = try withoutManagedLayer(a, table: originalObjects)
+                b = try withoutManagedLayer(b, table: objects)
                 guard NSDictionary(dictionary: a).isEqual(to: b), change.offset.x.isFinite, change.offset.y.isFinite else { throw CocoaError(.fileReadCorruptFile) }
                 func translated(_ raw: Any) throws -> [Double] {
                     guard let numbers = raw as? [NSNumber], numbers.count.isMultiple(of: 2) else { throw CocoaError(.fileReadCorruptFile) }
@@ -418,6 +436,13 @@ enum PDFRectangleWriter {
                         value[field] = try paths.map(translated)
                     } else { value[field] = try translated(raw) }
                 }
+                if change.layerChanged {
+                    if let id = change.layerID {
+                        guard let ref = PDFMarkupLayersPatch.references(objects)[id] else { throw CocoaError(.fileWriteUnknown) }
+                        guard value["/OC"] == nil || value["/DrawbridgeLayerID"] != nil else { throw CocoaError(.fileWriteUnknown) }
+                        value["/OC"] = ref; value["/DrawbridgeLayerID"] = "u:" + id
+                    } else if value["/DrawbridgeLayerID"] != nil { value.removeValue(forKey: "/OC"); value.removeValue(forKey: "/DrawbridgeLayerID") }
+                } else if let id = change.layerID, let ref = PDFMarkupLayersPatch.references(objects)[id] { value["/OC"] = ref }
                 let object: [String: Any] = ["value": value]
                 objects["obj:" + ref] = object; authorized["obj:" + ref] = object
             }
@@ -433,9 +458,28 @@ enum PDFRectangleWriter {
         tables[1] = objects; json["qpdf"] = tables
     }
 
+    private static func refreshImportedLayerReferences(_ json: inout [String: Any], authorized: inout [String: [String: Any]]) throws {
+        var tables = try tableArray(json), objects = tables[1]
+        let mapping = PDFMarkupLayersPatch.references(objects)
+        for ref in try pages(json) {
+            let page = dictionary(ref, objects: objects)
+            for entry in annotations(page["/Annots"], objects: objects) where !owned(entry, objects: objects) {
+                guard let ref = entry as? String, var object = objects["obj:" + ref] as? [String: Any], var value = object["value"] as? [String: Any],
+                      let rawID = value["/DrawbridgeLayerID"] as? String, rawID.hasPrefix("u:"), let group = mapping[String(rawID.dropFirst(2))] else { continue }
+                value["/OC"] = group; object["value"] = value
+                objects["obj:" + ref] = object; authorized["obj:" + ref] = object
+            }
+        }
+        tables[1] = objects; json["qpdf"] = tables
+    }
+
     private static func update(_ json: inout [String: Any], records: [RectangleMarkupRecord]) throws {
         var qpdf = try tableArray(json); var objects = qpdf[1]
         var next = (qpdf[0]["maxobjectid"] as? Int ?? 0) + 1
+        let layerCatalogs = records.compactMap(\.layerCatalog)
+        guard layerCatalogs.count <= 1 else { throw CocoaError(.fileWriteUnknown) }
+        let layerReferences = try PDFMarkupLayersPatch.install(catalogText: layerCatalogs.first, objects: &objects, next: &next)
+        guard records.allSatisfy({ $0.layerID == nil || layerReferences[$0.layerID!] != nil }) else { throw CocoaError(.fileWriteUnknown) }
         var snapshotForms: [Data:String] = [:]
         var snapshotPayloads: [Data:String] = [:]
         // Identical captures share one indirect PDF string rather than embedding
@@ -484,6 +528,9 @@ enum PDFRectangleWriter {
                 let appearanceRef = "\(next) 0 R"; next += 1
                 let b = record.bounds
                 var annotation: [String:Any] = ["/Type": "/Annot", "/Subtype": subtype(record.kind), "/Rect": [b.minX,b.minY,b.maxX,b.maxY], "/T": "u:\(record.author)", "/NM": "u:\(record.id)", "/Contents": "u:\(record.kind.rawValue.capitalized)", "/F": 4, "/C": [record.red,record.green,record.blue], "/BS": ["/W":record.lineWidth,"/S":"/S"], "/AP": ["/N":appearanceRef]]
+                if let id = record.layerID { annotation["/DrawbridgeLayerID"] = "u:" + id; annotation["/OC"] = layerReferences[id] }
+                else if let oldReference, let old = (objects["obj:" + oldReference] as? [String: Any])?["value"] as? [String: Any], old["/DrawbridgeLayerID"] == nil { annotation["/OC"] = old["/OC"] }
+                if let catalog = record.layerCatalog { annotation["/DrawbridgeLayerCatalog"] = "u:" + catalog; annotation["/F"] = 98 }
                 if let tool = record.inkTool { annotation["/DrawbridgeInkTool"] = "u:" + tool }
                 annotation["/DrawbridgeLinePattern"] = "u:" + record.linePattern.rawValue
                 annotation["/DrawbridgeStrokeOpacity"] = record.strokeOpacity
@@ -616,6 +663,9 @@ enum PDFRectangleWriter {
                 guard value["/DrawbridgeLinePattern"] as? String == "u:" + expected.linePattern.rawValue,
                       value["/DrawbridgeStrokeOpacity"] as? Double == expected.strokeOpacity,
                       value["/DrawbridgeFillOpacity"] as? Double == expected.fillOpacity else { return false }
+                if value["/DrawbridgeLayerID"] as? String != expected.layerID.map({ "u:" + $0 }) || value["/DrawbridgeLayerCatalog"] as? String != expected.layerCatalog.map({ "u:" + $0 }) { return false }
+                if let id = expected.layerID, value["/OC"] as? String != PDFMarkupLayersPatch.references(objects)[id] { return false }
+                if expected.layerCatalog != nil && value["/F"] as? Int != 98 { return false }
                 if let tool = expected.inkTool, value["/DrawbridgeInkTool"] as? String != "u:" + tool { return false }
                 if expected.kind == .snapshot, value["/DrawbridgeSnapshotStyle"] as? String != "u:" + expected.snapshotStyle.json { return false }
                 let payloadValue = value["/DrawbridgeSnapshotPDF"] as? String

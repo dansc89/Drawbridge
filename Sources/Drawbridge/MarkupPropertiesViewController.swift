@@ -5,6 +5,10 @@ import AppKit
 @MainActor
 final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegate {
     weak var session: RectangleMarkupController?
+    let tabs = NSSegmentedControl(labels: ["Properties", "Layers"], trackingMode: .selectOne, target: nil, action: nil)
+    let layersView = MarkupLayersView()
+    let membership = NSPopUpButton()
+    private var propertiesContent = NSStackView()
     var onHide: (() -> Void)?
     let setAsDefault = NSButton(title: "Set as Default", target: nil, action: nil)
     let defaultStatus = NSTextField(labelWithString: "")
@@ -101,15 +105,36 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         setAsDefault.target = self; setAsDefault.action = #selector(saveDefault(_:))
         setAsDefault.toolTip = "Remember this appearance for future markups made with this tool."
         defaultStatus.font = .systemFont(ofSize: 11); defaultStatus.textColor = .secondaryLabelColor
-        let stack = NSStackView(views: [header, editingContext, captureHint, snapshotRows, strokeRow, weightRow, patternRow, strokeOpacityRow, fontRow, fillRow, fillOpacityRow, note, setAsDefault, defaultStatus])
+        propertiesContent = NSStackView(views: [membership, editingContext, captureHint, snapshotRows, strokeRow, weightRow, patternRow, strokeOpacityRow, fontRow, fillRow, fillOpacityRow, note, setAsDefault, defaultStatus])
+        propertiesContent.orientation = .vertical; propertiesContent.alignment = .leading; propertiesContent.spacing = 10
+        tabs.selectedSegment = 0; tabs.target = self; tabs.action = #selector(changeTab(_:))
+        tabs.setAccessibilityLabel("Properties or Layers")
+        membership.target = self; membership.action = #selector(changeMembership(_:)); membership.setAccessibilityLabel("Assigned markup layer")
+        layersView.isHidden = true
+        let stack = NSStackView(views: [header, tabs, propertiesContent, layersView])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 10
         stack.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(stack)
         NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16), stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16), stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16)])
     }
+    @objc private func changeTab(_ sender: NSSegmentedControl) {
+        propertiesContent.isHidden = sender.selectedSegment == 1; layersView.isHidden = sender.selectedSegment == 0
+        refresh()
+    }
+    @objc private func changeMembership(_ sender: NSPopUpButton) {
+        guard let session else { return }; let index = sender.indexOfSelectedItem - 1
+        let id = session.layerCatalog.layers.indices.contains(index) ? session.layerCatalog.layers[index].id : nil
+        if let annotation = session.selected { session.assignLayer(id, to: [annotation]) } else { session.setActiveLayer(id) }
+    }
     func refresh() {
         _ = view
         guard let session else { return }
+        layersView.session = session; layersView.refresh()
+        membership.removeAllItems(); membership.addItems(withTitles: ["Unassigned"] + session.layerCatalog.layers.map(\.name))
+        let currentID = session.selected.flatMap(MarkupLayers.id) ?? (session.selected == nil ? session.layerCatalog.activeID : nil)
+        membership.selectItem(at: currentID.flatMap { id in session.layerCatalog.layers.firstIndex { $0.id == id }.map { $0 + 1 } } ?? 0)
+        membership.isEnabled = session.canEdit() && (session.selected.map(session.canAssignLayer) ?? true)
+        membership.toolTip = session.selected == nil ? "Layer for new markups" : "Selected markup's layer"
         if lastDefaultTool != session.defaultTool { defaultStatus.stringValue = ""; lastDefaultTool = session.defaultTool }
         setAsDefault.isEnabled = session.canEdit() && session.defaultTool != nil
         let selection = session.selected

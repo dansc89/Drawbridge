@@ -949,6 +949,15 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu(title: "PDF")
+        let location = convert(event.locationInWindow, from: nil)
+        if let page = page(for: location, nearest: false) {
+            let point = convert(location, to: page)
+            if let annotation = page.annotations.reversed().first(where: { $0.shouldDisplay && rectangleMarkup.layerIsVisible($0) && rectangleMarkup.canAssignLayer($0) && RectangleMarkupController.hitTest($0, at: point, tolerance: 8 / max(scaleFactor, 0.01)) }) {
+                rectangleMarkup.selectFromList(annotation)
+                let item = NSMenuItem(title: "Assign to Layer", action: nil, keyEquivalent: "")
+                item.submenu = rectangleMarkup.layerAssignmentMenu(for: [annotation]); menu.addItem(item); menu.addItem(.separator())
+            }
+        }
         let copyItem = menu.addItem(withTitle: "Copy Text", action: #selector(copy(_:)), keyEquivalent: "")
         copyItem.target = self
         let selectItem = menu.addItem(withTitle: "Select All Text", action: #selector(selectAll(_:)), keyEquivalent: "")

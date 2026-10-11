@@ -4,7 +4,7 @@ import PDFKit
 @MainActor
 enum MarkupListPresentation {
     static func includes(_ annotation: PDFAnnotation) -> Bool {
-        guard MeasurementMetadata.pageScale(annotation) == nil else { return false }
+        guard !MarkupLayers.isMetadata(annotation), MeasurementMetadata.pageScale(annotation) == nil else { return false }
         guard !["Link", "Widget", "Popup"].contains(annotation.type ?? "") else { return false }
         let author = (annotation.userName ?? "").lowercased()
         return !author.contains("autocad shx")
@@ -63,13 +63,14 @@ extension MainViewController {
         markupsTable.usesAlternatingRowBackgroundColors = true
         markupsTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         markupsTable.rowHeight = 24
-        for (id, name, width) in [("type", "Markup", 130.0), ("page", "Page", 220.0), ("contents", "Comment", 320.0), ("author", "Author", 220.0)] {
+        for (id, name, width) in [("type", "Markup", 130.0), ("page", "Page", 220.0), ("contents", "Comment", 320.0), ("author", "Author", 220.0), ("layer", "Layer", 160.0)] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
             column.title = name; column.width = width; column.minWidth = 80
             markupsTable.addTableColumn(column)
         }
         let menu = NSMenu()
         menu.addItem(withTitle: "Delete Selected Markups", action: #selector(deleteListedMarkups(_:)), keyEquivalent: "").target = self
+        menu.delegate = self
         markupsTable.menu = menu
         scroll.documentView = markupsTable
         markupsPanel.addSubview(header); markupsPanel.addSubview(scroll)
@@ -101,6 +102,12 @@ extension MainViewController {
         guard isMarkupsPanelVisible, !isPDFProcessingBusy, markupsTable.numberOfSelectedRows == 1,
               let item = currentSelectedMarkupItem(), let page = item.annotation.page,
               page.document === pdfView.document else { return }
+        if !pdfView.rectangleMarkup.layerIsVisible(item.annotation), let id = MarkupLayers.id(item.annotation) {
+            let alert = NSAlert(); alert.messageText = "This markup is on a hidden layer"; alert.informativeText = "Show the layer to navigate to this markup."
+            alert.addButton(withTitle: "Show Layer and Go"); alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            pdfView.rectangleMarkup.setLayerVisible(id, true)
+        }
         pdfView.rectangleMarkup.selectFromList(item.annotation)
         // A queued edit/filter refresh must not restore an older selection.
         if pendingMarkupsRefreshWorkItem != nil {
@@ -113,12 +120,22 @@ extension MainViewController {
         let items = markupsTable.selectedRowIndexes.compactMap { row -> MarkupItem? in
             markupItems.indices.contains(row) ? markupItems[row] : nil
         }
-        let eligible = items.filter { !$0.annotation.isReadOnly && (RectangleMarkupRecord.owns($0.annotation) || ImportedMarkupState.selectable($0.annotation)) }
+        let eligible = items.filter { !$0.annotation.isReadOnly && (RectangleMarkupRecord.owns($0.annotation) || ImportedMarkupState.selectable($0.annotation) || pdfView.rectangleMarkup.canAssignLayer($0.annotation)) }
         guard !eligible.isEmpty else { return }
         let session = pdfView.rectangleMarkup
         session.undo.beginUndoGrouping()
         for item in eligible { session.selectFromList(item.annotation); session.deleteSelected() }
         session.undo.setActionName("Delete Markups"); session.undo.endUndoGrouping()
         scheduleMarkupsRefresh(selecting: nil)
+    }
+}
+
+@MainActor extension MainViewController: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === markupsTable.menu else { return }
+        while menu.items.count > 1 { menu.removeItem(at: 1) }
+        let annotations = markupsTable.selectedRowIndexes.compactMap { row in markupItems.indices.contains(row) ? markupItems[row].annotation : nil }
+        let item = NSMenuItem(title: "Assign to Layer", action: nil, keyEquivalent: "")
+        item.submenu = pdfView.rectangleMarkup.layerAssignmentMenu(for: annotations); menu.addItem(item)
     }
 }

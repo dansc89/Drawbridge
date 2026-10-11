@@ -1470,6 +1470,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     private func refreshAfterPageStructureChange(document: PDFDocument, preferredIndex: Int) {
         pdfView.rectangleMarkup.cancelGesture()
+        pdfView.rectangleMarkup.ensureLayerCatalogMarker()
+        pdfView.rectangleMarkup.applyLayerVisibility()
         pdfView.clearNavigationHistory()
         clearMarkupCache()
         sidebarCurrentPageIndex = -1
@@ -4783,7 +4785,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         var addedText = false
         var addedLineEndpoints = false
         for item in selectedItems {
-            guard let page = item.annotation.page, page === pdfView.currentPage else { continue }
+            guard let page = item.annotation.page, page === pdfView.currentPage, item.annotation.shouldDisplay, pdfView.rectangleMarkup.layerIsVisible(item.annotation) else { continue }
             let bounds = item.annotation.bounds
             let p1 = pdfView.convert(bounds.origin, from: page)
             let p2 = pdfView.convert(NSPoint(x: bounds.maxX, y: bounds.maxY), from: page)

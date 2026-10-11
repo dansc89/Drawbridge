@@ -84,6 +84,8 @@ struct RectangleMarkupRecord: Sendable, Equatable {
     var linePattern: MarkupLinePattern = .solid
     var strokeOpacity: Double = 1
     var fillOpacity: Double = 1
+    var layerID: String? = nil
+    var layerCatalog: String? = nil
     var snapshotStyle = SnapshotStyle()
     var snapshotData: Data? = nil
     var measurement: DrawingMeasurement? = nil
@@ -191,6 +193,8 @@ struct RectangleMarkupRecord: Sendable, Equatable {
                 var record = Self(id: id, pageIndex: index, bounds: annotation.bounds,
                             red: Double(rgb.redComponent), green: Double(rgb.greenComponent), blue: Double(rgb.blueComponent),
                             lineWidth: Double(annotation.border?.lineWidth ?? 2))
+                record.layerID = MarkupLayers.id(annotation)
+                record.layerCatalog = annotation.value(forAnnotationKey: MarkupLayers.catalogKey) as? String
                 record.inkTool = annotation.type == "Ink" ? annotation.value(forAnnotationKey: inkToolKey) as? String : nil
                 record.linePattern = MarkupStyle.pattern(annotation)
                 record.strokeOpacity = MarkupStyle.strokeOpacity(annotation)
@@ -253,9 +257,10 @@ final class RectangleMarkupController {
     init(defaults: UserDefaults = .standard) { defaultPreferences = defaults }
     weak var view: PDFView?
     private weak var boundDocument: PDFDocument?
+    let layerStates = NSMapTable<PDFDocument, MarkupLayerState>(keyOptions: .weakMemory, valueOptions: .strongMemory)
     private let fallbackUndo = UndoManager()
     var undo: UndoManager { inlineText?.editor.undoManager ?? view?.window?.undoManager ?? fallbackUndo }
-    private(set) var selected: PDFAnnotation?
+    var selected: PDFAnnotation?
     private var gesture: Gesture?
     private var pendingLine: (page: PDFPage, start: CGPoint)?
     private var preview: (PDFPage, CGRect)?
@@ -271,7 +276,7 @@ final class RectangleMarkupController {
     }
     private let documentStates = NSMapTable<PDFDocument, DocumentState>.weakToStrongObjects()
     private let importedStates = NSMapTable<PDFDocument, ImportedMarkupState>.weakToStrongObjects()
-    private var importedState: ImportedMarkupState? { boundDocument.flatMap { importedStates.object(forKey: $0) } }
+    var importedState: ImportedMarkupState? { boundDocument.flatMap { importedStates.object(forKey: $0) } }
     var openingMarkupSourceStamp: PDFMarkupSourceStamp? {
         guard let document = boundDocument else { return nil }
         return readerSnapshots.object(forKey: document)?.stamp ?? importedState?.openingStamp ?? sourceStamp
@@ -371,7 +376,7 @@ final class RectangleMarkupController {
                 for original in page.annotations where RectangleMarkupRecord.owns(original) {
                     if original.type == "Stamp", !(original is DrawbridgeSnapshotAnnotation), let payload = SnapshotPayload.read(original),
                        let replacement = try? SnapshotStampFactory.make(payload: payload, bounds: original.bounds, rotation: page.rotation, style: SnapshotStyle.read(original)) {
-                        for key in [SnapshotPayload.key, SnapshotStyle.key, RectangleMarkupRecord.identityKey] {
+                        for key in [SnapshotPayload.key, SnapshotStyle.key, RectangleMarkupRecord.identityKey, MarkupLayers.membershipKey] {
                             if let value = original.value(forAnnotationKey: key) { replacement.setValue(value, forAnnotationKey: key) }
                         }
                         replacement.userName = original.userName
@@ -398,6 +403,7 @@ final class RectangleMarkupController {
                     if let measurement = MeasurementMetadata.measurement(original) { polygon.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey) }
                     polygon.setValue(original.userName ?? "",forAnnotationKey:PDFAnnotationKey(rawValue:"/T")); polygon.setValue(RectangleMarkupRecord.identity(original) ?? "", forAnnotationKey: RectangleMarkupRecord.identityKey); polygon.contents = original.contents; polygon.color = original.color; polygon.border = original.border
                     MarkupStyle.apply(pattern: MarkupStyle.pattern(original), opacity: MarkupStyle.strokeOpacity(original), to: polygon)
+                    if let id = MarkupLayers.id(original) { polygon.setValue(id, forAnnotationKey: MarkupLayers.membershipKey) }
                     polygon.shouldDisplay = original.shouldDisplay; polygon.shouldPrint = original.shouldPrint; polygon.isReadOnly = original.isReadOnly
                     RectangleMarkupRecord.setVertices(RectangleMarkupRecord.vertices(original),on:polygon)
                     RectangleMarkupRecord.setPolygonFill(RectangleMarkupRecord.polygonFill(original),on:polygon)
@@ -411,6 +417,7 @@ final class RectangleMarkupController {
         if let document, let state = documentStates.object(forKey: document) {
             hasUnsavedChanges = state.dirty; sourceStamp = state.stamp
         }
+        applyLayerVisibility()
         refresh()
     }
 
@@ -500,6 +507,7 @@ final class RectangleMarkupController {
             selected = hit; beginTextEditing(on:page,bounds:hit.bounds,annotation:hit); return true
         }
         if tool != .select {
+            selected = nil; onClickAway?()
             view.setCurrentSelection(nil, animate: false)
             gesture = .create(page, point); preview = (page, CGRect(origin: point, size: .zero)); refresh()
             return true
@@ -784,6 +792,7 @@ final class RectangleMarkupController {
         annotation.setValue(RectangleMarkupRecord.prefix + UUID().uuidString, forAnnotationKey: RectangleMarkupRecord.identityKey)
         annotation.userName = MarkupAuthorPreference.currentName; annotation.contents = "Snapshot"
         annotation.shouldDisplay = true; annotation.shouldPrint = true
+        assignNewMarkupLayer(annotation)
         tool = .select
         setPresence(true, annotation: annotation, page: page, action: "Paste Snapshot")
         return annotation
@@ -798,6 +807,7 @@ final class RectangleMarkupController {
             replacement.setValue(style.json, forAnnotationKey: SnapshotStyle.key)
             guard let identity = old.value(forAnnotationKey: RectangleMarkupRecord.identityKey) else { return }
             replacement.setValue(identity, forAnnotationKey: RectangleMarkupRecord.identityKey)
+            if let id = MarkupLayers.id(old) { replacement.setValue(id, forAnnotationKey: MarkupLayers.membershipKey) }
             replacement.userName = old.userName; replacement.contents = old.contents
             replacement.shouldDisplay = old.shouldDisplay; replacement.shouldPrint = old.shouldPrint
             replaceSnapshot(old, with: replacement, on: page)
@@ -814,6 +824,7 @@ final class RectangleMarkupController {
         (replacement as? DrawbridgeSnapshotAnnotation)?.isRetired = false
         replacement.shouldDisplay = true
         page.addAnnotation(replacement); selected = replacement
+        applyLayerVisibility()
         changed(page, importedAppearanceChanged: true)
     }
 
@@ -849,6 +860,7 @@ final class RectangleMarkupController {
         if kind == .polygon { RectangleMarkupRecord.setPolygonFill(fillColor,on:annotation) }
         if let measurement { annotation.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey); MeasurementMetadata.updateLabel(annotation) }
         annotation.shouldDisplay = true; annotation.shouldPrint = true
+        assignNewMarkupLayer(annotation)
         setPresence(true, annotation: annotation, page: page, action: "Add " + kind.rawValue.capitalized)
         return annotation
     }
@@ -921,7 +933,7 @@ final class RectangleMarkupController {
     }
 
     func deleteSelected() {
-        guard canEdit(), let selected, (RectangleMarkupRecord.owns(selected) || ImportedMarkupState.selectable(selected)), !selected.isReadOnly, let page = selected.page else { return }
+        guard canEdit(), let selected, (RectangleMarkupRecord.owns(selected) || ImportedMarkupState.selectable(selected) || canAssignLayer(selected)), !selected.isReadOnly, let page = selected.page else { return }
         cancelGesture(); setPresence(false, annotation: selected, page: page, action: "Delete Markup")
     }
 
@@ -1134,10 +1146,11 @@ final class RectangleMarkupController {
             if imported || snapshot { annotation.shouldDisplay = false }
             page.removeAnnotation(annotation); selected = nil
         }
+        applyLayerVisibility()
         changed(page, importedAppearanceChanged: imported || snapshot)
     }
 
-    private func changed(_ page: PDFPage, importedAppearanceChanged: Bool = false) {
+    func changed(_ page: PDFPage, importedAppearanceChanged: Bool = false) {
         if let selected, selected.page === page { MeasurementMetadata.updateLabel(selected) }
         // A real style mutation during drafting survives cancellation of the text.
         if var draft = inlineText { draft.wasDirty = true; inlineText = draft }

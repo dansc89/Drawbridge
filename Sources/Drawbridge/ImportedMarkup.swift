@@ -13,13 +13,15 @@ struct ImportedMarkupPlan: @unchecked Sendable {
         let originalBounds: CGRect
         let subtype: String
         let name: String?
+        var layerID: String? = nil
+        var layerChanged: Bool = false
     }
     let stamp: PDFMarkupSourceStamp
     let changes: [Change]
     var source: URL? { stamp.recoverySourceURL }
     func rebased(to stamp: PDFMarkupSourceStamp) -> ImportedMarkupPlan {
         ImportedMarkupPlan(stamp: stamp, changes: changes.map {
-            Change(sourcePage: $0.page, page: $0.page, slot: $0.slot, deleted: $0.deleted, offset: $0.offset, originalBounds: $0.originalBounds, subtype: $0.subtype, name: $0.name)
+            Change(sourcePage: $0.page, page: $0.page, slot: $0.slot, deleted: $0.deleted, offset: $0.offset, originalBounds: $0.originalBounds, subtype: $0.subtype, name: $0.name, layerID: $0.layerID, layerChanged: $0.layerChanged)
         })
     }
 }
@@ -32,6 +34,7 @@ final class ImportedMarkupState: NSObject {
         let sourcePage: Int
         let slot: Int
         let bounds: CGRect
+        var layerID: String? = nil
     }
     let entries: [Entry]
     let openingStamp: PDFMarkupSourceStamp?
@@ -42,7 +45,7 @@ final class ImportedMarkupState: NSObject {
             guard let page = document.page(at: index) else { return [] }
             return page.annotations.enumerated().compactMap { slot, annotation in
                 guard Self.selectable(annotation) && !RectangleMarkupRecord.owns(annotation) else { return nil }
-                return Entry(annotation: annotation, page: page, sourcePage: index, slot: slot, bounds: annotation.bounds)
+                return Entry(annotation: annotation, page: page, sourcePage: index, slot: slot, bounds: annotation.bounds, layerID: MarkupLayers.id(annotation))
             }
         }
     }
@@ -64,7 +67,7 @@ final class ImportedMarkupState: NSObject {
                          offset: CGPoint(x: entry.annotation.bounds.minX - entry.bounds.minX,
                                          y: entry.annotation.bounds.minY - entry.bounds.minY), originalBounds: entry.bounds,
                          subtype: entry.annotation.type ?? "",
-                         name: entry.annotation.value(forAnnotationKey: PDFAnnotationKey(rawValue: "/NM")) as? String)
+                         name: entry.annotation.value(forAnnotationKey: PDFAnnotationKey(rawValue: "/NM")) as? String, layerID: MarkupLayers.id(entry.annotation), layerChanged: MarkupLayers.id(entry.annotation) != entry.layerID)
         }
         return changes.isEmpty ? nil : ImportedMarkupPlan(stamp: stamp, changes: changes)
     }

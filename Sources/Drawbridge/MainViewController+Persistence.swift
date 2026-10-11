@@ -202,6 +202,7 @@ extension MainViewController {
         let startedAt = CFAbsoluteTimeGetCurrent()
         let rectangleSourceStamp = recoverySourceURL.flatMap(PDFMarkupSourceStamp.capture) ?? pdfView.rectangleMarkup.sourceStamp
         let captureStartedAt = CFAbsoluteTimeGetCurrent()
+        pdfView.rectangleMarkup.ensureLayerCatalogMarker()
         let capturedRectangles = RectangleMarkupRecord.capture(document)
         let structureState = pageStructureState?.document === document ? pageStructureState : nil
         let importedPlan = pdfView.rectangleMarkup.importedPlan()

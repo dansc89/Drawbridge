@@ -91,6 +91,16 @@ Choose **File > Print…** (`Cmd+P`) for the document, or **File > Print Current
 
 Printing starts at **100% actual size**, without automatic rotation or resizing. Check the dialog preview and choose sufficiently large paper or adjust scaling for smaller paper. Print output includes annotations marked for printing, including unsaved Drawbridge markups. It does not save or change the open PDF. **View > Invert** changes only the on-screen colors; printing uses the original colors.
 
+## Markup Layers
+
+Open **Layers** in the right properties sidebar. Create a named layer, then choose **New markups go on** to set the active layer for new markups and pasted Snapshots. Drawing on a hidden active layer shows it automatically so the new markup is visible.
+
+Right-click a markup or Snapshot and choose **Assign to Layer**. To assign several markups together, select their rows in the Markups List and use its right-click menu. The Properties tab also has a layer selector for the selected markup.
+
+Use the **Show** checkbox to hide or reveal a layer throughout the PDF. Hidden markups remain in the Markups List, marked **Hidden**, and count toward outstanding review items. Selecting a hidden markup asks whether to show its layer before navigating to it. Hidden layers are excluded from printing and Snapshot captures. Rename changes the layer name; Remove keeps its markups and moves them to Unassigned. Undo/redo applies to these actions. Locked annotations cannot be reassigned.
+
+Save to retain layer definitions, assignments, the active layer, and visibility, including empty layers. Drawbridge writes standard PDF optional-content groups for annotation layers. Other readers may display layer controls differently. Existing drawing-content layers are preserved; this panel manages Drawbridge markup layers, not the original drawing's content layers. Imported annotations already belonging to a foreign optional-content group cannot be reassigned here.
+
 ## Flatten Existing Markups
 
 Click the **Flatten PDF** toolbar button beside the hyperlink button, or choose **File > Flatten PDF…**, to flatten and save the PDF you have open. Flattening makes supported visible consultant markups part of the page content, so those markups cannot be edited individually while flattened. Pending bookmark/link changes are saved first. Drawbridge verifies the flattened result before replacing the file, then reloads it. Completion means the write has finished. The button then changes to **Unflatten PDF**: click it again to restore the original editable annotations and save the same file. Recovery is embedded in PDFs flattened by this version and survives closing/reopening. Bookmark, page-label, and hyperlink changes made in Drawbridge are preserved when unflattening. Older files flattened without recovery data cannot be unflattened. If page content or geometry was changed after flattening, Unflatten stops rather than overwrite those changes.
@@ -109,6 +119,6 @@ Use **Drawbridge > Keyboard Shortcuts…** to review shortcuts and **Drawbridge 
 
 ## Review Markups
 
-Choose **View > Markups List**, or click **Markups** in the bottom bar. The list shows markup type, page, comment, and author across the document. Click a row to navigate to that annotation. Search by text or author. Shift-click or Command-click to select multiple rows, then press Backspace/Delete or choose **Delete Selected**. Cmd+Z restores deleted markups. Links, form controls, and AutoCAD SHX text helpers are excluded from this review list. Locked annotations remain listed but cannot be deleted. Clear the search before checking whether any review markups remain.
+Choose **View > Markups List**, or click **Markups** in the bottom bar. The list shows markup type, page, comment, author, and layer across the document. Click a row to navigate to that annotation. Search by text or author. Shift-click or Command-click to select multiple rows, then press Backspace/Delete or choose **Delete Selected**. Cmd+Z restores deleted markups. Links, form controls, and AutoCAD SHX text helpers are excluded from this review list. Locked annotations remain listed but cannot be deleted. Clear the search before checking whether any review markups remain.
 
 Choose **Drawbridge > Markup Author…** to set the name recorded on new markups. The default is your Mac account’s full name. Existing annotations from other apps retain their authors.
