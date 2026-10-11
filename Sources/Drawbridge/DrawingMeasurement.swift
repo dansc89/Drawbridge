@@ -220,6 +220,7 @@ enum MeasurementAppearance {
 
 final class DrawbridgeMeasuredPathAnnotation: PDFAnnotation {
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        guard shouldDisplay else { return }
         super.draw(with: box, in: context)
         MeasurementAppearance.draw(self, box: box, context: context)
     }

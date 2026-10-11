@@ -23,6 +23,22 @@ import XCTest
     func grouped<T>(_ session: RectangleMarkupController, _ body: () throws -> T) rethrows -> T {
         session.undo.beginUndoGrouping(); defer { session.undo.endUndoGrouping() }; return try body()
     }
+    func testAllEditableGraphicalAnnotationTypesSupportLayerVisibility() throws {
+        let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source)), page = document.page(at: 0)!
+        let types = ["Square", "Circle", "Line", "FreeText", "Ink", "Polygon", "PolyLine", "Highlight", "Underline", "StrikeOut", "Squiggly", "Text", "Stamp", "Caret"]
+        let annotations = types.map { PDFAnnotation(bounds: CGRect(x:100,y:100,width:50,height:40), forType: PDFAnnotationSubtype(rawValue: "/" + $0), withProperties:nil) }
+        for a in annotations { a.userName = "Reviewer"; a.contents = "Review"; a.shouldDisplay = true; a.shouldPrint = true; page.addAnnotation(a) }
+        let authors = annotations.map(\.userName)
+        let view = session(document), c = view.rectangleMarkup
+        let id = try XCTUnwrap(grouped(c) { c.addLayer(named: "All review graphics") })
+        for a in annotations { XCTAssertTrue(c.canAssignLayer(a), a.type ?? "Unknown") }
+        grouped(c) { c.assignLayer(id, to:annotations) }
+        grouped(c) { c.setLayerVisible(id, false) }
+        for a in annotations { XCTAssertEqual(MarkupLayers.id(a), id); XCTAssertFalse(a.shouldDisplay); XCTAssertFalse(a.shouldPrint) }
+        grouped(c) { c.setLayerVisible(id, true) }
+        for (a, author) in zip(annotations, authors) { XCTAssertTrue(a.shouldDisplay); XCTAssertTrue(a.shouldPrint); XCTAssertEqual(a.userName, author); XCTAssertEqual(a.contents, "Review") }
+    }
     func testLayerNamesActiveLayerBatchVisibilityAndUndo() throws {
         let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
         let doc = try XCTUnwrap(PDFDocument(url: source)), view = session(doc), c = view.rectangleMarkup

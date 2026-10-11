@@ -372,7 +372,7 @@ final class RectangleMarkupController {
         if let document, documentStates.object(forKey: document) == nil {
             for index in 0..<document.pageCount {
                 guard let page = document.page(at:index) else { continue }
-                var replacedSnapshot = false
+                var replacedAppearance = false
                 for original in page.annotations where RectangleMarkupRecord.owns(original) {
                     if original.type == "Stamp", !(original is DrawbridgeSnapshotAnnotation), let payload = SnapshotPayload.read(original),
                        let replacement = try? SnapshotStampFactory.make(payload: payload, bounds: original.bounds, rotation: page.rotation, style: SnapshotStyle.read(original)) {
@@ -389,7 +389,7 @@ final class RectangleMarkupController {
                         original.shouldDisplay = false
                         page.removeAnnotation(original)
                         page.addAnnotation(replacement)
-                        replacedSnapshot = true
+                        replacedAppearance = true
                         continue
                     }
                     if original.type == "FreeText" {
@@ -407,9 +407,11 @@ final class RectangleMarkupController {
                     polygon.shouldDisplay = original.shouldDisplay; polygon.shouldPrint = original.shouldPrint; polygon.isReadOnly = original.isReadOnly
                     RectangleMarkupRecord.setVertices(RectangleMarkupRecord.vertices(original),on:polygon)
                     RectangleMarkupRecord.setPolygonFill(RectangleMarkupRecord.polygonFill(original),on:polygon)
+                    original.shouldDisplay = false
                     page.removeAnnotation(original); page.addAnnotation(polygon)
+                    replacedAppearance = true
                 }
-                if replacedSnapshot { (view as? MarkupPDFView)?.refreshAnnotationRendering(on: page, importedAppearanceChanged: true) }
+                if replacedAppearance { (view as? MarkupPDFView)?.refreshAnnotationRendering(on: page, importedAppearanceChanged: true) }
             }
         }
         selected = nil; hasUnsavedChanges = false; tool = .select
@@ -1135,22 +1137,26 @@ final class RectangleMarkupController {
         undo.registerUndo(withTarget: self) { target in target.setPresence(!exists, annotation: annotation, page: page, action: action) }
         undo.setActionName(action)
         let imported = !RectangleMarkupRecord.owns(annotation)
-        let snapshot = annotation is DrawbridgeSnapshotAnnotation
         if imported { importedState?.touch(annotation) }
         (annotation as? DrawbridgeSnapshotAnnotation)?.isRetired = !exists
         if exists {
             page.addAnnotation(annotation)
-            if imported || snapshot { annotation.shouldDisplay = true }
+            annotation.shouldDisplay = true
             selected = annotation
         } else {
-            if imported || snapshot { annotation.shouldDisplay = false }
+            annotation.shouldDisplay = false
             page.removeAnnotation(annotation); selected = nil
         }
         applyLayerVisibility()
-        changed(page, importedAppearanceChanged: imported || snapshot)
+        changed(page, importedAppearanceChanged: true)
     }
 
-    func changed(_ page: PDFPage, importedAppearanceChanged: Bool = false) {
+    func changed(_ page: PDFPage, importedAppearanceChanged: Bool = true) {
+        // Saved owned markups carry an AP stream. Once edited, regenerate from
+        // live geometry rather than retaining the old appearance underneath.
+        if let selected, selected.page === page, RectangleMarkupRecord.owns(selected), !(selected is DrawbridgeSnapshotAnnotation) {
+            selected.removeValue(forAnnotationKey: PDFAnnotationKey(rawValue: "/AP"))
+        }
         if let selected, selected.page === page { MeasurementMetadata.updateLabel(selected) }
         // A real style mutation during drafting survives cancellation of the text.
         if var draft = inlineText { draft.wasDirty = true; inlineText = draft }
@@ -1239,6 +1245,7 @@ final class RectangleMarkupController {
 /// Draw a closed annotation path; never draw or transform the underlying page.
 final class DrawbridgePolygonAnnotation: PDFAnnotation {
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        guard shouldDisplay else { return }
         let origin = page?.bounds(for:box).origin ?? .zero
         let points = RectangleMarkupRecord.vertices(self).map { CGPoint(x:$0.x-origin.x,y:$0.y-origin.y) }
         guard points.count >= 3 else { return }

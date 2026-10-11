@@ -370,6 +370,24 @@ import XCTest
         }
     }
 
+    func testChangeColorUsesChosenColorForDarkLineworkAndCanRestoreOriginal() throws {
+        let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url:source)), payload = try capture(document.page(at:0)!)
+        for color in [[0.2,0.7,0.4], [0.7,0.2,0.85], [0.0,0.0,0.0]] {
+            let filtered = try SnapshotFilterRenderer.filtered(payload.data, style: SnapshotStyle(filter:.colorize, color:color))
+            let page = try XCTUnwrap(SnapshotPayload(data:filtered).page)
+            XCTAssertEqual(page.getBoxRect(.mediaBox).size, payload.size)
+            let pixels = try raster(page, size:payload.size!)
+            var chosenColorPixels = 0, whitePixels = 0
+            for i in stride(from:0,to:pixels.count,by:4) where pixels[i+3] > 250 {
+                if (0..<3).allSatisfy({ abs(Double(pixels[i+$0])/255-color[$0]) < 0.04 }) { chosenColorPixels += 1 }
+                if (0..<3).allSatisfy({ pixels[i+$0] > 250 }) { whitePixels += 1 }
+            }
+            XCTAssertGreaterThan(chosenColorPixels, 20); XCTAssertGreaterThan(whitePixels, 1000)
+            XCTAssertEqual(try SnapshotFilterRenderer.filtered(payload.data,style:SnapshotStyle()), payload.data)
+        }
+    }
+
     func testOverlayRevealsUnderlyingDrawingAndFiltersChangePixels() throws {
         let source=try fixture(); defer { try? FileManager.default.removeItem(at:source) }
         let doc=try XCTUnwrap(PDFDocument(url:source)), page=doc.page(at:0)!
@@ -523,6 +541,15 @@ import XCTest
         XCTAssertFalse(inspector.snapshotFilter.isHiddenOrHasHiddenAncestor); XCTAssertTrue(inspector.snapshotFilter.isEnabled)
         inspector.snapshotFilter.selectItem(withTitle:"Grayscale"); inspector.changeSnapshot(inspector.snapshotFilter)
         XCTAssertEqual(SnapshotStyle.read(controller.pdfView.rectangleMarkup.selected!).filter,.grayscale)
+        XCTAssertTrue(inspector.snapshotColor.isEnabled)
+        controller.pdfView.rectangleMarkup.onSnapshotError = { XCTFail("Snapshot color failed: \($0)") }
+        inspector.snapshotColor.color = NSColor(deviceRed: 0.2, green: 0.7, blue: 0.4, alpha: 1)
+        inspector.changeSnapshot(inspector.snapshotColor)
+        let recolored = SnapshotStyle.read(controller.pdfView.rectangleMarkup.selected!)
+        XCTAssertEqual(recolored.filter, .colorize)
+        XCTAssertEqual(recolored.color[0], 0.2, accuracy: 0.0001)
+        XCTAssertEqual(recolored.color[1], 0.7, accuracy: 0.0001)
+        XCTAssertEqual(recolored.color[2], 0.4, accuracy: 0.0001)
         XCTAssertTrue(inspector.stroke.isHiddenOrHasHiddenAncestor)
     }
 

@@ -204,7 +204,7 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
     }
 
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
-        guard !isRetired else { return }
+        guard !isRetired, shouldDisplay else { return }
         guard let source = fragment?.page(at: 1) else {
             super.draw(with: box, in: context)
             return

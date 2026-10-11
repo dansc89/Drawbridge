@@ -5,7 +5,7 @@ import CryptoKit
 struct SnapshotStyle: Codable, Equatable, Sendable {
     enum Filter: String, Codable, CaseIterable, Sendable {
         case original, grayscale, colorize, invert
-        var title: String { switch self { case .original: return "Original"; case .grayscale: return "Grayscale"; case .colorize: return "Colorize"; case .invert: return "Invert" } }
+        var title: String { switch self { case .original: return "Original"; case .grayscale: return "Grayscale"; case .colorize: return "Change Color"; case .invert: return "Invert" } }
     }
     static let key = PDFAnnotationKey(rawValue: "DrawbridgeSnapshotStyle")
     var overlay = false

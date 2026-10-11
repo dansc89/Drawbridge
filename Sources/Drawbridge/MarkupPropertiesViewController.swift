@@ -90,15 +90,15 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         captureHint.widthAnchor.constraint(lessThanOrEqualToConstant: 265).isActive = true
         snapshotFilter.addItems(withTitles: SnapshotStyle.Filter.allCases.map(\.title))
         snapshotFilter.setAccessibilityLabel("Snapshot filter")
-        snapshotColor.setAccessibilityLabel("Snapshot tint color")
+        snapshotColor.setAccessibilityLabel("Snapshot linework color")
         snapshotOpacity.setAccessibilityLabel("Snapshot opacity"); snapshotOpacity.isContinuous = false
         snapshotColor.widthAnchor.constraint(equalToConstant: 85).isActive = true
         snapshotOpacity.widthAnchor.constraint(equalToConstant: 65).isActive = true
         for control in [snapshotOverlay, snapshotFilter, snapshotColor, snapshotOpacity] as [NSControl] { control.target = self; control.action = #selector(changeSnapshot(_:)) }
-        let snapshotNote = NSTextField(wrappingLabelWithString: "Overlay lets the drawing beneath show through white areas. Original keeps vector detail. Color filters use a high-resolution image; switch back to Original to restore the untouched capture.")
+        let snapshotNote = NSTextField(wrappingLabelWithString: "Change Color recolors dark linework and keeps white areas white. Overlay lets the drawing beneath show through white areas. Filters use a high-resolution image; Original restores untouched vector detail.")
         snapshotNote.textColor = .secondaryLabelColor; snapshotNote.font = .systemFont(ofSize: 11)
         snapshotNote.widthAnchor.constraint(lessThanOrEqualToConstant: 265).isActive = true
-        snapshotRows = NSStackView(views: [snapshotOverlay, row("Filter", snapshotFilter), row("Tint color", snapshotColor), row("Opacity", NSStackView(views: [snapshotOpacity, snapshotPercent])), snapshotNote])
+        snapshotRows = NSStackView(views: [snapshotOverlay, row("Filter", snapshotFilter), row("Change color", snapshotColor), row("Opacity", NSStackView(views: [snapshotOpacity, snapshotPercent])), snapshotNote])
         snapshotRows.orientation = .vertical; snapshotRows.alignment = .leading; snapshotRows.spacing = 10
         strokeRow = row("Stroke color", stroke)
         strokeOpacityRow = row("Stroke opacity", NSStackView(views: [strokeOpacity, strokePercent]))
@@ -154,7 +154,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
             snapshotPercent.stringValue = "\(Int(snapshotOpacity.doubleValue.rounded()))%"
             let editable = session.canEdit() && !selection.isReadOnly && RectangleMarkupRecord.owns(selection)
             for control in [snapshotOverlay, snapshotFilter, snapshotOpacity] as [NSControl] { control.isEnabled = editable }
-            snapshotColor.isEnabled = editable && style.filter == .colorize
+            snapshotColor.isEnabled = editable
         }
         let enabled = session.canEdit() && selection?.isReadOnly != true && selection?.type != "Stamp" && (selection == nil || selection.map(RectangleMarkupRecord.owns) == true)
         editingContext.stringValue = selection == nil ? "New markup defaults" : "Selected markup"
@@ -182,6 +182,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
     }
     @objc func changeSnapshot(_ sender: NSControl) {
         guard let session, let rgb = snapshotColor.color.usingColorSpace(.deviceRGB) else { return }
+        if sender === snapshotColor { snapshotFilter.selectItem(at: SnapshotStyle.Filter.allCases.firstIndex(of: .colorize)!) }
         let style = SnapshotStyle(overlay: snapshotOverlay.state == .on, opacity: snapshotOpacity.doubleValue / 100,
                                   filter: SnapshotStyle.Filter.allCases[max(0, snapshotFilter.indexOfSelectedItem)],
                                   color: [Double(rgb.redComponent), Double(rgb.greenComponent), Double(rgb.blueComponent)])
