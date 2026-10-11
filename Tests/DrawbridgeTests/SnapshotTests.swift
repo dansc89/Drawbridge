@@ -406,6 +406,79 @@ import XCTest
         }
     }
 
+    func testLocalPhotoOpacity() throws {
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_OPACITY_FIXTURE"] else { throw XCTSkip("Local photo fixture") }
+        let doc = try XCTUnwrap(PDFDocument(url:URL(fileURLWithPath:path))), page=doc.page(at:0)!
+        let stamp = try XCTUnwrap(page.annotations.first { SnapshotPayload.read($0)?.size?.width ?? 0 > 600 })
+        let payload = try XCTUnwrap(SnapshotPayload.read(stamp))
+        let white = PDFPage(); white.setBounds(CGRect(x:0,y:0,width:800,height:800),for:.mediaBox)
+        let testDoc=PDFDocument(); testDoc.insert(white,at:0)
+        let view=MarkupPDFView(); view.document=testDoc
+        let session=view.rectangleMarkup; session.bind(to:testDoc); session.canEdit={true}
+        _ = try session.pasteSnapshot(payload,on:white,center:CGPoint(x:400,y:400))
+        func darkness() throws -> Double {
+            let rep=try XCTUnwrap(NSBitmapImageRep(data:try XCTUnwrap(white.thumbnail(of:CGSize(width:400,height:400),for:.mediaBox).tiffRepresentation)))
+            var total=0.0
+            for y in 100..<300 { for x in 100..<300 {
+                let c=rep.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!
+                total += 3-Double(c.redComponent+c.greenComponent+c.blueComponent)
+            } }
+            return total
+        }
+        let before=try darkness(); session.styleSelectedSnapshot(SnapshotStyle(opacity:0.28)); let after=try darkness()
+        XCTAssertLessThan(after,before*0.4)
+    }
+
+    func testSnapshotOpacityChangesRenderedAppearance() throws {
+        _ = NSApplication.shared
+        let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
+        let doc = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(doc.page(at: 0))
+        let payload = try capture(page)
+        let view = MarkupPDFView(); view.document = doc
+        let session = view.rectangleMarkup; session.bind(to: doc); session.canEdit = { true }
+        session.undo.groupsByEvent = false
+        session.undo.beginUndoGrouping()
+        let initial = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: CGPoint(x: 350, y: 250)))
+        session.undo.endUndoGrouping()
+        func darkness() throws -> Double {
+            let image = page.thumbnail(of: CGSize(width: 500, height: 400), for: .mediaBox)
+            let rep = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
+            // The pasted capture is on otherwise white paper.
+            var total = 0.0
+            for y in 110..<190 { for x in 260..<380 {
+                let color = try XCTUnwrap(rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+                total += 3 - Double(color.redComponent + color.greenComponent + color.blueComponent)
+            } }
+            return total
+        }
+        let opaque = try darkness()
+        session.undo.beginUndoGrouping()
+        session.styleSelectedSnapshot(SnapshotStyle(opacity: 0.28))
+        session.undo.endUndoGrouping()
+        let faded = try darkness()
+        XCTAssertGreaterThan(opaque, 100)
+        XCTAssertLessThan(faded, opaque * 0.4)
+        XCTAssertGreaterThan(faded, opaque * 0.15)
+        XCTAssertFalse(initial.shouldDisplay)
+        let fadedAnnotation = try XCTUnwrap(session.selected)
+        XCTAssertTrue(fadedAnnotation.shouldDisplay)
+        session.undo.undo()
+        XCTAssertTrue(initial.shouldDisplay)
+        XCTAssertFalse(fadedAnnotation.shouldDisplay)
+        XCTAssertEqual(try darkness(), opaque, accuracy: 1)
+        session.undo.redo()
+        XCTAssertFalse(initial.shouldDisplay)
+        XCTAssertEqual(try darkness(), faded, accuracy: 1)
+        session.undo.beginUndoGrouping()
+        session.deleteSelected()
+        session.undo.endUndoGrouping()
+        XCTAssertFalse(fadedAnnotation.shouldDisplay)
+        XCTAssertLessThan(try darkness(), 1)
+        session.undo.undo()
+        XCTAssertTrue(fadedAnnotation.shouldDisplay)
+        XCTAssertEqual(try darkness(), faded, accuracy: 1)
+    }
+
     func testPasteInPlaceKeyMonitorPlacesCaptureAtSourceCoordinates() throws {
         _ = NSApplication.shared
         let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }

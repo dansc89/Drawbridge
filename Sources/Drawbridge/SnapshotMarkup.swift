@@ -105,47 +105,14 @@ struct SnapshotPayload: Sendable {
     }
 }
 
-/// Use PDFKit's standard Stamp appearance for both the live view and other readers.
-/// Custom drawing contexts differ between PDFView and PDFPage thumbnails on rotated pages.
+/// Draw the captured fragment directly while editing. The incremental writer
+/// installs a standard Stamp appearance for saved PDFs and other readers.
 @MainActor enum SnapshotStampFactory {
-    private static let cache = NSCache<NSString, NSData>()
-    private static let backing = NSMapTable<PDFAnnotation, PDFDocument>(keyOptions: .weakMemory, valueOptions: .strongMemory)
     static func make(payload: SnapshotPayload, bounds: CGRect, rotation: Int, style: SnapshotStyle = SnapshotStyle()) throws -> PDFAnnotation {
-        cache.totalCostLimit = 64 * 1024 * 1024
-        let digest = SHA256.hash(data:payload.data).map { String(format:"%02x", $0) }.joined()
-        let key = (digest + ":\(rotation):\(bounds.width):\(bounds.height):" + style.json) as NSString
-        let data: Data
-        if let cached = cache.object(forKey: key) { data = cached as Data }
-        else {
-            var objects: [String:Any] = [:], next = 5, forms: [Data:String] = [:]
-            let appearance = try SnapshotAppearance.install(data: payload.data, bounds: bounds, rotation: rotation, style: style, objects: &objects, next: &next, forms: &forms)
-            let ap = "\(next) 0 R"; objects["obj:" + ap] = appearance; next += 1
-            objects["obj:1 0 R"] = ["value": ["/Type":"/Catalog", "/Pages":"2 0 R"]]
-            objects["obj:2 0 R"] = ["value": ["/Type":"/Pages", "/Kids":["3 0 R"], "/Count":1]]
-            objects["obj:3 0 R"] = ["value": ["/Type":"/Page", "/Parent":"2 0 R", "/MediaBox":[0,0,bounds.width,bounds.height], "/Annots":["4 0 R"]]]
-            objects["obj:4 0 R"] = ["value": ["/Type":"/Annot", "/Subtype":"/Stamp", "/Rect":[0,0,bounds.width,bounds.height], "/AP":["/N":ap], "/F":4, "/C":[0,0,0], "/Border":[0,0,2]]]
-            var output = Data("%PDF-1.7\n".utf8), offsets = [0]
-            for number in 1..<next {
-                offsets.append(output.count)
-                let object = objects["obj:\(number) 0 R"] as! [String:Any]
-                output.append(Data("\(number) 0 obj\n".utf8))
-                if let value = object["value"] { output.append(Data(try PDFIncrementalMarkupPatch.encode(value).utf8)) }
-                else if let stream = object["stream"] as? [String:Any], var dict = stream["dict"] as? [String:Any], let encoded = stream["data"] as? String, let bytes = Data(base64Encoded:encoded) {
-                    dict["/Length"] = bytes.count
-                    output.append(Data(try PDFIncrementalMarkupPatch.encode(dict).utf8)); output.append(Data("\nstream\n".utf8)); output.append(bytes); output.append(Data("\nendstream".utf8))
-                } else { throw CocoaError(.fileReadCorruptFile) }
-                output.append(Data("\nendobj\n".utf8))
-            }
-            let xref = output.count
-            output.append(Data("xref\n0 \(next)\n0000000000 65535 f \n".utf8))
-            for offset in offsets.dropFirst() { output.append(Data(String(format:"%010d 00000 n \n",offset).utf8)) }
-            output.append(Data("trailer\n<< /Size \(next) /Root 1 0 R >>\nstartxref\n\(xref)\n%%EOF\n".utf8))
-            data = output; cache.setObject(data as NSData, forKey:key, cost:data.count + key.length*2)
-        }
-        guard let document = PDFDocument(data:data), let page = document.page(at:0), let annotation = page.annotations.first else { throw CocoaError(.fileReadCorruptFile) }
-        backing.setObject(document, forKey: annotation)
-        page.removeAnnotation(annotation); annotation.bounds = bounds
-        return annotation
+        let data = try SnapshotFilterRenderer.filtered(payload.data, style: style)
+        guard let provider = CGDataProvider(data: data as CFData), let document = CGPDFDocument(provider),
+              document.page(at: 1) != nil else { throw CocoaError(.fileReadCorruptFile) }
+        return DrawbridgeSnapshotAnnotation(bounds: bounds, document: document, rotation: rotation, style: style)
     }
 }
 
@@ -208,5 +175,57 @@ enum SnapshotAppearance {
         let t = SnapshotPayload.transform(size: size, bounds: CGRect(origin: .zero, size: bounds.size), rotation: rotation)
         let drawing = "q /SnapshotGS gs \(t.a) \(t.b) \(t.c) \(t.d) \(t.tx) \(t.ty) cm /Snapshot Do Q"
         return ["stream":["dict":["/Type":"/XObject", "/Subtype":"/Form", "/BBox":[0,0,bounds.width,bounds.height], "/Resources":["/XObject":["/Snapshot":fragmentRef], "/ExtGState":["/SnapshotGS":["/Type":"/ExtGState", "/ca":style.opacity, "/CA":style.opacity, "/BM":style.overlay ? "/Multiply" : "/Normal"]]], "/DrawbridgeRectangleAppearance":true], "data":Data(drawing.utf8).base64EncodedString()]]
+    }
+}
+
+/// Live rendering uses the same fragment and transform as the saved appearance,
+/// without PDFKit's imported Stamp appearance cache.
+final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
+    private let fragment: CGPDFDocument?
+    private let captureRotation: Int
+    private let style: SnapshotStyle
+    var isRetired = false
+
+    init(bounds: CGRect, document: CGPDFDocument, rotation: Int, style: SnapshotStyle) {
+        fragment = document
+        captureRotation = rotation
+        self.style = style
+        super.init(bounds: bounds, forType: .stamp, withProperties: nil)
+        color = .clear
+        shouldDisplay = true
+        shouldPrint = true
+    }
+
+    required init?(coder: NSCoder) {
+        fragment = nil
+        captureRotation = 0
+        style = SnapshotStyle()
+        super.init(coder: coder)
+    }
+
+    override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        guard !isRetired else { return }
+        guard let source = fragment?.page(at: 1) else {
+            super.draw(with: box, in: context)
+            return
+        }
+        context.saveGState()
+        context.setAlpha(style.opacity)
+        context.setBlendMode(style.overlay ? .multiply : .normal)
+        context.beginTransparencyLayer(auxiliaryInfo: nil)
+        let pageBounds = page?.bounds(for: box) ?? .zero
+        let pageRotation = (((page?.rotation ?? 0) % 360) + 360) % 360
+        let pageTransform: CGAffineTransform
+        switch pageRotation {
+        case 90: pageTransform = CGAffineTransform(a: 0, b: -1, c: 1, d: 0, tx: -pageBounds.minY, ty: pageBounds.maxX)
+        case 180: pageTransform = CGAffineTransform(a: -1, b: 0, c: 0, d: -1, tx: pageBounds.maxX, ty: pageBounds.maxY)
+        case 270: pageTransform = CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: pageBounds.maxY, ty: -pageBounds.minX)
+        default: pageTransform = CGAffineTransform(translationX: -pageBounds.minX, y: -pageBounds.minY)
+        }
+        context.concatenate(pageTransform)
+        context.concatenate(SnapshotPayload.transform(size: source.getBoxRect(.mediaBox).size, bounds: bounds, rotation: captureRotation))
+        context.drawPDFPage(source)
+        context.endTransparencyLayer()
+        context.restoreGState()
     }
 }

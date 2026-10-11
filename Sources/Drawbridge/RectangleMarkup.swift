@@ -367,7 +367,26 @@ final class RectangleMarkupController {
         if let document, documentStates.object(forKey: document) == nil {
             for index in 0..<document.pageCount {
                 guard let page = document.page(at:index) else { continue }
+                var replacedSnapshot = false
                 for original in page.annotations where RectangleMarkupRecord.owns(original) {
+                    if original.type == "Stamp", !(original is DrawbridgeSnapshotAnnotation), let payload = SnapshotPayload.read(original),
+                       let replacement = try? SnapshotStampFactory.make(payload: payload, bounds: original.bounds, rotation: page.rotation, style: SnapshotStyle.read(original)) {
+                        for key in [SnapshotPayload.key, SnapshotStyle.key, RectangleMarkupRecord.identityKey] {
+                            if let value = original.value(forAnnotationKey: key) { replacement.setValue(value, forAnnotationKey: key) }
+                        }
+                        replacement.userName = original.userName
+                        replacement.contents = original.contents
+                        replacement.shouldDisplay = original.shouldDisplay
+                        replacement.shouldPrint = original.shouldPrint
+                        replacement.isReadOnly = original.isReadOnly
+                        // Retire the imported AP before removal; PDFKit otherwise
+                        // keeps its opaque image underneath later replacements.
+                        original.shouldDisplay = false
+                        page.removeAnnotation(original)
+                        page.addAnnotation(replacement)
+                        replacedSnapshot = true
+                        continue
+                    }
                     if original.type == "FreeText" {
                         let size = RectangleMarkupRecord.textFontSize(original)
                         if size != original.font?.pointSize { RectangleMarkupRecord.setTextFontSize(size, on: original) }
@@ -384,6 +403,7 @@ final class RectangleMarkupController {
                     RectangleMarkupRecord.setPolygonFill(RectangleMarkupRecord.polygonFill(original),on:polygon)
                     page.removeAnnotation(original); page.addAnnotation(polygon)
                 }
+                if replacedSnapshot { (view as? MarkupPDFView)?.refreshAnnotationRendering(on: page, importedAppearanceChanged: true) }
             }
         }
         selected = nil; hasUnsavedChanges = false; tool = .select
@@ -787,7 +807,14 @@ final class RectangleMarkupController {
         guard canEdit(), page.document === boundDocument else { return }
         undo.registerUndo(withTarget: self) { target in target.replaceSnapshot(replacement, with: old, on: page) }
         undo.setActionName("Change Snapshot Appearance")
-        page.removeAnnotation(old); page.addAnnotation(replacement); selected = replacement; changed(page)
+        // PDFKit may render a removed annotation while retiring its cache.
+        (old as? DrawbridgeSnapshotAnnotation)?.isRetired = true
+        old.shouldDisplay = false
+        page.removeAnnotation(old)
+        (replacement as? DrawbridgeSnapshotAnnotation)?.isRetired = false
+        replacement.shouldDisplay = true
+        page.addAnnotation(replacement); selected = replacement
+        changed(page, importedAppearanceChanged: true)
     }
 
     @discardableResult
@@ -1096,16 +1123,18 @@ final class RectangleMarkupController {
         undo.registerUndo(withTarget: self) { target in target.setPresence(!exists, annotation: annotation, page: page, action: action) }
         undo.setActionName(action)
         let imported = !RectangleMarkupRecord.owns(annotation)
+        let snapshot = annotation is DrawbridgeSnapshotAnnotation
         if imported { importedState?.touch(annotation) }
+        (annotation as? DrawbridgeSnapshotAnnotation)?.isRetired = !exists
         if exists {
             page.addAnnotation(annotation)
-            if imported { annotation.shouldDisplay = true }
+            if imported || snapshot { annotation.shouldDisplay = true }
             selected = annotation
         } else {
-            if imported { annotation.shouldDisplay = false }
+            if imported || snapshot { annotation.shouldDisplay = false }
             page.removeAnnotation(annotation); selected = nil
         }
-        changed(page, importedAppearanceChanged: imported)
+        changed(page, importedAppearanceChanged: imported || snapshot)
     }
 
     private func changed(_ page: PDFPage, importedAppearanceChanged: Bool = false) {
