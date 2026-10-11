@@ -4,6 +4,12 @@ import CoreText
 import XCTest
 @testable import Drawbridge
 
+// Command-line tests do not own the foreground application. Model an active
+// document window without stealing focus from a user's open editor.
+@MainActor private final class SnapshotKeyWindow: NSWindow {
+    override var isKeyWindow: Bool { true }
+}
+
 @MainActor final class SnapshotTests: XCTestCase {
     func fixture(rotation: Int = 0) throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("SnapshotFixture-\(UUID().uuidString).pdf")
@@ -264,6 +270,69 @@ import XCTest
             session.cancelGesture(); XCTAssertEqual(page.annotations.count,2)
         }
     }
+    func testLocalArchitecturalSnapshotFiltersSaveReopen() throws {
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_FILTER_FIXTURE"] else {
+            throw XCTSkip("Provide a local architectural PDF for filtered Snapshot integration testing")
+        }
+        let source = URL(fileURLWithPath: path)
+        let original = try Data(contentsOf: source, options: .mappedIfSafe)
+        let doc = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(doc.page(at: 0))
+        let box = page.bounds(for: .cropBox)
+        let crop = CGRect(x: box.midX - box.width / 8, y: box.midY - box.height / 8, width: box.width / 4, height: box.height / 4)
+        let payload = try SnapshotPayload.capture(page: page, points: [
+            CGPoint(x: crop.minX, y: crop.minY), CGPoint(x: crop.maxX, y: crop.minY),
+            CGPoint(x: crop.maxX, y: crop.maxY), CGPoint(x: crop.minX, y: crop.maxY)
+        ])
+        let view = MarkupPDFView(); view.document = doc
+        let session = view.rectangleMarkup; session.bind(to: doc); session.canEdit = { true }
+        _ = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: CGPoint(x: crop.midX, y: crop.midY)))
+        for filter in SnapshotStyle.Filter.allCases {
+            let style = SnapshotStyle(overlay: true, opacity: 0.65, filter: filter, color: [0, 0.5, 1])
+            session.styleSelectedSnapshot(style)
+            let output = FileManager.default.temporaryDirectory.appendingPathComponent("ArchitecturalFilter-\(UUID().uuidString).pdf")
+            defer { try? FileManager.default.removeItem(at: output) }
+            let start = Date()
+            XCTAssertTrue(PDFRectangleWriter.write(document: doc, source: source, destination: output, pageLabels: [:], records: RectangleMarkupRecord.capture(doc)))
+            print("Architectural filter", filter.rawValue, "save seconds", Date().timeIntervalSince(start))
+            XCTAssertTrue(try Data(contentsOf: output, options: .mappedIfSafe).starts(with: original))
+            let reopened = try XCTUnwrap(PDFDocument(url: output))
+            XCTAssertEqual(reopened.pageCount, doc.pageCount)
+            let saved = try XCTUnwrap(reopened.page(at: 0)?.annotations.first { SnapshotPayload.read($0) != nil })
+            XCTAssertEqual(SnapshotStyle.read(saved), style)
+            XCTAssertEqual(SnapshotPayload.read(saved)?.data, payload.data)
+        }
+    }
+
+    func testLargeFilteredSnapshotSavePreservesOriginalAndReopens() throws {
+        _ = NSApplication.shared
+        let source = try fixture()
+        let output = source.deletingLastPathComponent().appendingPathComponent("LargeFiltered-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
+        let doc = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(doc.page(at: 0))
+        let box = page.bounds(for: .mediaBox)
+        let payload = try SnapshotPayload.capture(page: page, points: [
+            CGPoint(x: box.minX, y: box.minY), CGPoint(x: box.maxX, y: box.minY),
+            CGPoint(x: box.maxX, y: box.maxY), CGPoint(x: box.minX, y: box.maxY)
+        ])
+        let view = MarkupPDFView(); view.document = doc
+        let session = view.rectangleMarkup; session.bind(to: doc); session.canEdit = { true }
+        _ = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: CGPoint(x: box.midX, y: box.midY)))
+        let style = SnapshotStyle(filter: .grayscale)
+        session.styleSelectedSnapshot(style)
+        XCTAssertEqual(SnapshotStyle.read(try XCTUnwrap(session.selected)), style)
+        let original = try Data(contentsOf: source)
+        XCTAssertTrue(PDFRectangleWriter.write(document: doc, source: source, destination: output, pageLabels: [:], records: RectangleMarkupRecord.capture(doc)))
+        guard FileManager.default.fileExists(atPath: output.path) else { return }
+        let written = try Data(contentsOf: output)
+        XCTAssertTrue(written.starts(with: original))
+        XCTAssertGreaterThan(written.count - original.count, 5 * 1024 * 1024, "Exercise the former compressed-payload size ceiling")
+        let reopened = try XCTUnwrap(PDFDocument(url: output))
+        let saved = try XCTUnwrap(reopened.page(at: 0)?.annotations.first)
+        XCTAssertEqual(SnapshotStyle.read(saved), style)
+        XCTAssertEqual(SnapshotPayload.read(saved)?.data, payload.data)
+        XCTAssertTrue(PDFRectangleWriter.write(document: reopened, source: output, destination: output, pageLabels: [:], records: RectangleMarkupRecord.capture(reopened)))
+    }
+
     func testSnapshotFiltersOverlayOpacitySaveReopenAndUndo() throws {
         _ = NSApplication.shared
         for rotation in [0,90,180,270] {
@@ -335,6 +404,33 @@ import XCTest
             let filtered=try SnapshotFilterRenderer.filtered(colorful.data,style:SnapshotStyle(filter:filter))
             XCTAssertNotEqual(try raster(SnapshotPayload(data:filtered).page!,size:colorful.size!),original)
         }
+    }
+
+    func testPasteInPlaceKeyMonitorPlacesCaptureAtSourceCoordinates() throws {
+        _ = NSApplication.shared
+        let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(document.page(at: 0))
+        let controller = MainViewController(); _ = controller.view; controller.openDocumentURL = source
+        let window = SnapshotKeyWindow(contentRect: CGRect(x: 0, y: 0, width: 1000, height: 800), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = controller
+        controller.pdfView.setMarkupDocument(document); controller.pdfView.go(to: page)
+        try capture(page).copy()
+        let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [.command, .shift], timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "V", charactersIgnoringModifiers: "v", isARepeat: false, keyCode: 9))
+        window.makeFirstResponder(controller.pdfView)
+        XCTAssertTrue(window.isKeyWindow)
+        XCTAssertNil(controller.routeKeyDownEvent(event))
+        let selected = try XCTUnwrap(controller.pdfView.rectangleMarkup.selected)
+        XCTAssertEqual(selected.bounds.minX, 80, accuracy: 0.00001)
+        XCTAssertEqual(selected.bounds.minY, 90, accuracy: 0.00001)
+        XCTAssertEqual(page.annotations.count, 1)
+        XCTAssertNil(controller.routeKeyDownEvent(event))
+        XCTAssertEqual(page.annotations.count, 2)
+        XCTAssertEqual(controller.pdfView.rectangleMarkup.selected?.bounds, selected.bounds)
+        let text = NSTextField(frame: CGRect(x: 0, y: 0, width: 100, height: 24))
+        controller.view.addSubview(text)
+        window.makeFirstResponder(text)
+        XCTAssertNotNil(controller.routeKeyDownEvent(event))
+        XCTAssertEqual(page.annotations.count, 2)
     }
 
     func testPasteInPlaceCommandRequiresCoordinatesAndShowsSnapshotInspector() throws {

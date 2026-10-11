@@ -105,10 +105,11 @@ extension MainViewController {
         if modifiers == [.command, .shift],
            event.charactersIgnoringModifiers?.lowercased() == "v" {
             lastUserInteractionAt = Date()
-            // Keep paste shortcuts available to text fields, never the PDF canvas.
+            // Text fields retain their own paste behavior; the canvas pastes the capture in place.
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField {
                 return event
             }
+            commandPasteInPlace(nil)
             return nil
         }
         if modifiers == [.command, .shift],

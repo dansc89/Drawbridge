@@ -156,7 +156,7 @@ enum PDFRectangleWriter {
             stage = "original content verification"
             guard try preservesOriginalObjects(baseline: inspected, updated: json, changed: changed, importedArrays: importedArrays, importedObjects: importedObjects) else { return false }
             stage = "incremental serialization"
-            try PDFIncrementalMarkupPatch.append(original: original, baseline: inspected, updated: json, snapshot: input, to: candidate)
+            let expectedSize = try PDFIncrementalMarkupPatch.append(original: original, baseline: inspected, updated: json, snapshot: input, to: candidate)
             profile("candidate write")
             // Check object relationships without decoding the original images.
             let verificationURL = directory.appendingPathComponent("changed.json")
@@ -177,9 +177,13 @@ enum PDFRectangleWriter {
             guard try MarkupFileVersion.read(source) == sourceVersion else { print("Rectangle writer: source changed during save"); return false }
             stage = "candidate size verification"
             let size = try candidate.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-            let snapshotAllowance = records.reduce(0) { total, record in total + (record.snapshotData?.count ?? 0) * 4 }
-            let maximumSize = original.count + max(5 * 1024 * 1024, records.count * 4096 + snapshotAllowance)
-            guard size > 0, size <= maximumSize else { print("Rectangle writer: size limit \(size) vs \(original.count)"); return false }
+            // Filtered captures may expand a tiny compressed source into a large
+            // bounded raster appearance. Verify the exact serialized revision,
+            // rather than estimating its size from the compressed source payload.
+            guard size == expectedSize, size > original.count else {
+                print("Rectangle writer: serialized size mismatch \(size) vs \(expectedSize)")
+                return false
+            }
             profile("candidate verification")
             let verifiedCandidate = PDFMarkupSourceStamp.capture(candidate)
             stage = "file replacement"

@@ -5,7 +5,7 @@ import Darwin
 /// Append an incremental PDF revision. Existing stream objects cannot be replaced.
 enum PDFIncrementalMarkupPatch {
     @discardableResult
-    static func append(original: Data, baseline: [String: Any], updated: [String: Any], snapshot: URL? = nil, to url: URL) throws -> [String] {
+    static func append(original: Data, baseline: [String: Any], updated: [String: Any], snapshot: URL? = nil, to url: URL) throws -> Int {
         guard let before = (baseline["qpdf"] as? [[String: Any]])?.last,
               let tables = updated["qpdf"] as? [[String: Any]], let after = tables.last,
               let maximum = tables.first?["maxobjectid"] as? Int,
@@ -17,7 +17,6 @@ enum PDFIncrementalMarkupPatch {
               previous >= 0, previous < original.count else { throw CocoaError(.fileReadCorruptFile) }
         var appended = Data("\n".utf8)
         var entries: [(number: Int, generation: Int, offset: Int)] = []
-        var changed = [String]()
         for key in after.keys.sorted() where key.hasPrefix("obj:") {
             guard let object = after[key] as? [String: Any] else { throw CocoaError(.fileWriteUnknown) }
             if let old = before[key] as? NSDictionary, old.isEqual(object as NSDictionary) { continue }
@@ -26,7 +25,6 @@ enum PDFIncrementalMarkupPatch {
                   let generation = Int(components[1]), number > 0, generation >= 0, generation < 65536 else { throw CocoaError(.fileWriteUnknown) }
             // Original raster, font and page content stream objects are immutable.
             guard (before[key] as? [String: Any])?["stream"] == nil else { throw CocoaError(.fileWriteUnknown) }
-            changed.append(key)
             entries.append((number, generation, original.count + appended.count))
             appended.append(Data("\(number) \(generation) obj\n".utf8))
             if let value = object["value"] {
@@ -79,7 +77,7 @@ enum PDFIncrementalMarkupPatch {
         defer { try? handle.close() }
         guard try handle.seekToEnd() == UInt64(original.count) else { throw CocoaError(.fileWriteUnknown) }
         try handle.write(contentsOf: appended)
-        return changed
+        return original.count + appended.count
     }
 
     static func encode(_ value: Any) throws -> String {

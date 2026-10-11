@@ -242,7 +242,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenu.addItem(withTitle: "Copy", action: #selector(MainViewController.commandCopy(_:)), keyEquivalent: "c").target = controller
         editMenu.addItem(withTitle: "Snapshot (G)", action: #selector(MainViewController.snapshotCapture(_:)), keyEquivalent: "").target = controller
         editMenu.addItem(withTitle: "Paste", action: #selector(MainViewController.commandPaste(_:)), keyEquivalent: "v").target = controller
-        let pasteInPlace = editMenu.addItem(withTitle: "Paste in Place", action: #selector(MainViewController.commandPasteInPlace(_:)), keyEquivalent: "v")
+        let pasteInPlace = editMenu.addItem(withTitle: "Paste in Place", action: #selector(MainViewController.commandPasteInPlace(_:)), keyEquivalent: "V")
         pasteInPlace.keyEquivalentModifierMask = [.command, .shift]; pasteInPlace.target = controller
         editMenu.addItem(withTitle: "Select All Text", action: #selector(MainViewController.commandSelectAll(_:)), keyEquivalent: "a").target = controller
         editMenu.addItem(NSMenuItem.separator())
