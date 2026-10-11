@@ -312,7 +312,7 @@ enum StressHarness {
             ($0 is PDFSnapshotAnnotation) || ($0 is ImageMarkupAnnotation)
         }
         let renderedPixels = nonWhitePixelCount(
-            image: reloadedPage.thumbnail(of: NSSize(width: 900, height: 640), for: .mediaBox)
+            image: reloadedPage.drawbridgeThumbnail(of: NSSize(width: 900, height: 640), for: .mediaBox)
         )
         let renderedVisible = renderedPixels > 1_000
         print(

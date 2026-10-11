@@ -148,7 +148,7 @@ final class SidebarDeletionTests: XCTestCase {
     }
 
     private func previewPixels(_ page: PDFPage) throws -> Data {
-        let tiff = try XCTUnwrap(page.thumbnail(of: NSSize(width: 160, height: 120), for: .mediaBox).tiffRepresentation)
+        let tiff = try XCTUnwrap(page.drawbridgeThumbnail(of: NSSize(width: 160, height: 120), for: .mediaBox).tiffRepresentation)
         let image = try XCTUnwrap(NSBitmapImageRep(data: tiff)?.cgImage)
         let context = try XCTUnwrap(CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
             bytesPerRow: image.width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))

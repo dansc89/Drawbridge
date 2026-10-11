@@ -23,7 +23,7 @@ final class ToolbarPresentationTests: XCTestCase {
         controller.updateStatusBar()
         // PDFKit serializations generate fresh document IDs. Compare the actual
         // page rendering and geometry instead of those nondeterministic IDs.
-        let before = page.thumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox).tiffRepresentation
+        let before = page.drawbridgeThumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox).tiffRepresentation
         let bounds = page.bounds(for: .mediaBox)
         let scale = controller.pdfView.scaleFactor
         XCTAssertTrue(button.isEnabled)
@@ -31,7 +31,7 @@ final class ToolbarPresentationTests: XCTestCase {
         XCTAssertTrue(controller.pdfView.isColorInverted)
         XCTAssertEqual(button.state, .on)
         XCTAssertEqual(controller.pdfView.contentFilters.first?.name, "CIColorInvert")
-        XCTAssertEqual(page.thumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox).tiffRepresentation, before)
+        XCTAssertEqual(page.drawbridgeThumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox).tiffRepresentation, before)
         XCTAssertEqual(page.bounds(for: .mediaBox), bounds)
         XCTAssertTrue(page.annotations.isEmpty)
         XCTAssertFalse(controller.pdfView.rectangleMarkup.hasUnsavedChanges)
@@ -42,7 +42,7 @@ final class ToolbarPresentationTests: XCTestCase {
         XCTAssertFalse(controller.pdfView.isColorInverted)
         XCTAssertEqual(button.state, .off)
         XCTAssertTrue(controller.pdfView.contentFilters.isEmpty)
-        XCTAssertEqual(page.thumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox).tiffRepresentation, before)
+        XCTAssertEqual(page.drawbridgeThumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox).tiffRepresentation, before)
     }
 
     func testMarkupPropertyMenusKeepTheirChoicesEnabled() {

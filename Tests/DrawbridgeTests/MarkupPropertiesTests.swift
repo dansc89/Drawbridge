@@ -12,6 +12,86 @@ final class MarkupPropertiesTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("Properties-\(UUID().uuidString).pdf")
         try (data as Data).write(to: url); return url
     }
+    func testExactOpacityEntryAndLayersRemainVisible() throws {
+        _ = NSApplication.shared
+        let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(document.page(at: 0))
+        let session = RectangleMarkupController(); session.bind(to: document); session.canEdit = { true }; session.tool = .polygon
+        let inspector = MarkupPropertiesViewController(); inspector.session = session; inspector.refresh()
+        XCTAssertFalse(inspector.layersView.isHidden)
+        XCTAssertTrue(inspector.layersView.isDescendant(of: inspector.view))
+        inspector.strokeOpacity.stringValue = "50"
+        inspector.changeNumber(inspector.strokeOpacity)
+        XCTAssertEqual(session.strokeOpacity, 0.5)
+        let polygon = try XCTUnwrap(session.createPolyline(on: page, points: [CGPoint(x: 40,y: 40), CGPoint(x: 220,y: 40), CGPoint(x: 130,y: 180)], closed: true))
+        session.fillSelected(.red); inspector.refresh()
+        inspector.fillOpacity.stringValue = "50"; inspector.changeNumber(inspector.fillOpacity)
+        XCTAssertEqual(RectangleMarkupRecord.polygonFill(polygon)?.alphaComponent, 0.5)
+        inspector.strokeOpacity.doubleValue = 101; inspector.changeNumber(inspector.strokeOpacity)
+        XCTAssertEqual(MarkupStyle.strokeOpacity(polygon), 0.5, "Invalid values must not change opacity")
+        let payload = try SnapshotPayload.capture(page: page, points: [CGPoint(x: 40,y: 40), CGPoint(x: 220,y: 40), CGPoint(x: 220,y: 180), CGPoint(x: 40,y: 180)])
+        _ = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: CGPoint(x: 200,y: 150)))
+        inspector.refresh(); inspector.snapshotOpacity.stringValue = "50"; inspector.changeNumber(inspector.snapshotOpacity)
+        XCTAssertEqual(SnapshotStyle.read(try XCTUnwrap(session.selected)).opacity, 0.5)
+        for percent in [0.0, 100.0, 37.25] {
+            inspector.snapshotOpacity.doubleValue = percent; inspector.changeNumber(inspector.snapshotOpacity)
+            XCTAssertEqual(SnapshotStyle.read(try XCTUnwrap(session.selected)).opacity, percent / 100)
+        }
+    }
+
+    func testRectangleAndEllipseHavePolygonFillControlsAndRoundTrip() throws {
+        _ = NSApplication.shared
+        for kind in [RectangleMarkupRecord.Kind.rectangle, .ellipse] {
+            let source = try fixture(), output = source.appendingPathExtension("filled.pdf")
+            defer { [source, output].forEach { try? FileManager.default.removeItem(at: $0) } }
+            let original = try Data(contentsOf: source)
+            let document = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(document.page(at: 0))
+            let session = RectangleMarkupController(); session.bind(to: document); session.canEdit = { true }
+            session.tool = kind == .rectangle ? .rectangle : .ellipse
+            let inspector = MarkupPropertiesViewController(); inspector.session = session; inspector.refresh()
+            XCTAssertEqual(inspector.filled.superview?.isHidden, false); XCTAssertEqual(inspector.fillOpacity.superview?.isHidden, false)
+            let shape = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 60,y: 60,width: 200,height: 160), kind: kind))
+            session.styleSelected(color: .blue, width: 6)
+            session.setLineAppearance(pattern: .dashDot, opacity: 0.6)
+            session.fillSelected(.red); inspector.refresh()
+            inspector.fillOpacity.stringValue = "50"; inspector.changeNumber(inspector.fillOpacity)
+            XCTAssertEqual(RectangleMarkupRecord.polygonFill(shape)?.alphaComponent, 0.5)
+            XCTAssertEqual(MarkupStyle.strokeOpacity(shape), 0.6)
+            session.undo.removeAllActions(); session.undo.groupsByEvent = false
+            session.undo.beginUndoGrouping(); inspector.filled.state = .off; inspector.changeFill(inspector.filled); session.undo.endUndoGrouping()
+            XCTAssertNil(RectangleMarkupRecord.polygonFill(shape))
+            session.undo.undo(); XCTAssertEqual(RectangleMarkupRecord.polygonFill(shape)?.alphaComponent, 0.5)
+            session.undo.redo(); XCTAssertNil(RectangleMarkupRecord.polygonFill(shape))
+            session.undo.beginUndoGrouping(); session.fillSelected(NSColor.red.withAlphaComponent(0.5)); session.undo.endUndoGrouping()
+            func centerColor(_ page: PDFPage) throws -> NSColor {
+                let image = page.drawbridgeThumbnail(of: NSSize(width: 400,height: 300), for: .mediaBox)
+                let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
+                return try XCTUnwrap(bitmap.colorAt(x: 160,y: 160)?.usingColorSpace(.deviceRGB))
+            }
+            let live = try centerColor(page)
+            XCTAssertGreaterThan(live.redComponent, 0.95); XCTAssertLessThan(live.greenComponent, 0.9); XCTAssertGreaterThan(live.greenComponent, 0.4)
+            let records = RectangleMarkupRecord.capture(document)
+            XCTAssertEqual(records.first?.fill, [1, 0, 0]); XCTAssertEqual(records.first?.fillOpacity, 0.5)
+            XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: output, pageLabels: [:], records: records))
+            let reopened = try XCTUnwrap(PDFDocument(url: output)), reopenedPage = try XCTUnwrap(reopened.page(at: 0))
+            XCTAssertEqual(RectangleMarkupRecord.capture(reopened), records)
+            let saved = try centerColor(reopenedPage)
+            XCTAssertEqual(saved.greenComponent, live.greenComponent, accuracy: 0.04)
+            let restored = RectangleMarkupController(); restored.bind(to: reopened)
+            XCTAssertTrue(reopenedPage.annotations.first is DrawbridgeShapeAnnotation)
+            XCTAssertEqual(RectangleMarkupRecord.capture(reopened), records)
+            let bound = try centerColor(reopenedPage)
+            XCTAssertEqual(bound.greenComponent, live.greenComponent, accuracy: 0.04)
+            let capture = try SnapshotPayload.capture(page: reopenedPage, points: [CGPoint(x: 100,y: 100), CGPoint(x: 220,y: 100), CGPoint(x: 220,y: 180), CGPoint(x: 100,y: 180)])
+            let capturedDocument = try XCTUnwrap(PDFDocument(data: capture.data))
+            let capturedPage = try XCTUnwrap(capturedDocument.page(at: 0))
+            let thumbnail = capturedPage.drawbridgeThumbnail(of: NSSize(width: 120,height: 80), for: .mediaBox)
+            let pixels = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(thumbnail.tiffRepresentation)))
+            XCTAssertLessThan(try XCTUnwrap(pixels.colorAt(x: 60,y: 40)).greenComponent, 0.9)
+            XCTAssertEqual(try Data(contentsOf: source), original)
+        }
+    }
+
     func testCustomPropertiesRoundTripUndoAndDoNotChangeDrawingDefaults() throws {
         let source = try fixture(), output = source.appendingPathExtension("saved.pdf")
         defer { [source,output].forEach { try? FileManager.default.removeItem(at: $0) } }
@@ -112,7 +192,7 @@ final class MarkupPropertiesTests: XCTestCase {
         let session = RectangleMarkupController(); session.bind(to: document)
         _ = try XCTUnwrap(session.createPolyline(on: page, points: [CGPoint(x: 40, y: 100), CGPoint(x: 360, y: 100)], closed: false))
         func darkPixels(_ page: PDFPage) throws -> Int {
-            let image = page.thumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox)
+            let image = page.drawbridgeThumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox)
             let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
             var count = 0
             for y in 0..<bitmap.pixelsHigh { for x in 0..<bitmap.pixelsWide {
@@ -180,7 +260,7 @@ final class MarkupPropertiesTests: XCTestCase {
         session.setLineAppearance(pattern: .dashDot, opacity: 0.6)
         session.fillSelected(NSColor.red.withAlphaComponent(0.25))
         func checkFill(_ page: PDFPage) throws -> NSColor {
-            let image = page.thumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox)
+            let image = page.drawbridgeThumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox)
             let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
             let colors = [100, 200].compactMap { bitmap.colorAt(x: 130, y: $0)?.usingColorSpace(.deviceRGB) }
             let fill = try XCTUnwrap(colors.min { $0.greenComponent < $1.greenComponent })

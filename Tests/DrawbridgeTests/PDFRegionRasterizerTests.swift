@@ -13,7 +13,7 @@ final class PDFRegionRasterizerTests: XCTestCase {
         context.interpolationQuality = .high; context.setFillColor(NSColor.white.cgColor)
         context.fill(CGRect(x: 0, y: 0, width: full.width * scale, height: full.height * scale))
         context.scaleBy(x: scale, y: scale); context.translateBy(x: -full.minX, y: -full.minY)
-        page.draw(with: .cropBox, to: context)
+        page.drawbridgeDraw(with: .cropBox, to: context)
         let crop = rect.applying(transform).standardized.intersection(full)
         let image = try XCTUnwrap(context.makeImage())
         return try XCTUnwrap(CIContext().createCGImage(CIImage(cgImage: image), from: CGRect(x: (crop.minX-full.minX)*scale, y: (crop.minY-full.minY)*scale, width: crop.width*scale, height: crop.height*scale)))

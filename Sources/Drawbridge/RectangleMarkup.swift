@@ -199,6 +199,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
                 record.linePattern = MarkupStyle.pattern(annotation)
                 record.strokeOpacity = MarkupStyle.strokeOpacity(annotation)
                 record.fillOpacity = MarkupStyle.fillOpacity(annotation)
+                if ["Square", "Circle", "Polygon"].contains(annotation.type ?? ""), let rgb = polygonFill(annotation)?.usingColorSpace(.deviceRGB) { record.fill = [Double(rgb.redComponent), Double(rgb.greenComponent), Double(rgb.blueComponent)] }
                 record.measurement = MeasurementMetadata.measurement(annotation)
                 record.pageScale = MeasurementMetadata.pageScale(annotation)
                 if record.measurement != nil { record.textRotation = (((annotation.page?.rotation ?? 0) % 360) + 360) % 360 }
@@ -211,7 +212,6 @@ struct RectangleMarkupRecord: Sendable, Equatable {
                 }
                 if annotation.type == "Ink" || annotation.type == "Polygon" {
                     record.kind = annotation.type == "Polygon" ? .polygon : .polyline; record.vertices = vertices(annotation)
-                    if let rgb = polygonFill(annotation)?.usingColorSpace(.deviceRGB), record.kind == .polygon { record.fill = [Double(rgb.redComponent),Double(rgb.greenComponent),Double(rgb.blueComponent)] }
                 }
                 if annotation.type == "Stamp" { record.kind = .snapshot; record.snapshotStyle = SnapshotStyle.read(annotation); record.snapshotData = SnapshotPayload.read(annotation)?.data; record.textRotation = (((annotation.page?.rotation ?? 0) % 360) + 360) % 360 }
                 if annotation.type == "Circle" { record.kind = .ellipse }
@@ -235,7 +235,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
         bounds.width >= 2 && bounds.height >= 2 &&
         [red, green, blue].allSatisfy { $0.isFinite && (0...1).contains($0) } &&
         (kind != .text || (!text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && text.utf8.count <= 100000 && fontSize.isFinite && (6...144).contains(fontSize))) &&
-        (fill == nil || (kind == .polygon && fill!.count == 3 && fill!.allSatisfy { $0.isFinite && (0...1).contains($0) })) &&
+        (fill == nil || ([.rectangle, .ellipse, .polygon].contains(kind) && fill!.count == 3 && fill!.allSatisfy { $0.isFinite && (0...1).contains($0) })) &&
         (!(kind == .polyline || kind == .polygon) || (vertices.count >= (kind == .polygon ? 3 : 2) && vertices.count <= 10000 && vertices.allSatisfy { $0.x.isFinite && $0.y.isFinite && bounds.contains($0) })) &&
         lineWidth.isFinite && (0.25...72).contains(lineWidth) && strokeOpacity.isFinite && (0...1).contains(strokeOpacity) && fillOpacity.isFinite && (0...1).contains(fillOpacity) &&
         (!(kind == .line || kind == .arrow) || (start != nil && end != nil && [start!.x,start!.y,end!.x,end!.y].allSatisfy { $0.isFinite } && bounds.contains(start!) && bounds.contains(end!) && hypot(start!.x-end!.x,start!.y-end!.y) >= 2))
@@ -374,6 +374,7 @@ final class RectangleMarkupController {
                 guard let page = document.page(at:index) else { continue }
                 var replacedAppearance = false
                 for original in page.annotations where RectangleMarkupRecord.owns(original) {
+                    if MarkupLayers.isMetadata(original) || MeasurementMetadata.pageScale(original) != nil { continue }
                     if original.type == "Stamp", !(original is DrawbridgeSnapshotAnnotation), let payload = SnapshotPayload.read(original),
                        let replacement = try? SnapshotStampFactory.make(payload: payload, bounds: original.bounds, rotation: page.rotation, style: SnapshotStyle.read(original)) {
                         for key in [SnapshotPayload.key, SnapshotStyle.key, RectangleMarkupRecord.identityKey, MarkupLayers.membershipKey] {
@@ -398,8 +399,9 @@ final class RectangleMarkupController {
                         continue
                     }
                     let measuredPath = original.type == "Ink" && MeasurementMetadata.measurement(original) != nil
-                    guard (original.type == "Polygon" && !(original is DrawbridgePolygonAnnotation)) || (measuredPath && !(original is DrawbridgeMeasuredPathAnnotation)) else { continue }
-                    let polygon: PDFAnnotation = measuredPath ? DrawbridgeMeasuredPathAnnotation(bounds: original.bounds, forType: .ink, withProperties: nil) : DrawbridgePolygonAnnotation(bounds:original.bounds,forType:PDFAnnotationSubtype(rawValue:"/Polygon"),withProperties:nil)
+                    let closedShape = ["Square", "Circle"].contains(original.type ?? "")
+                    guard (closedShape && !(original is DrawbridgeShapeAnnotation)) || (original.type == "Polygon" && !(original is DrawbridgePolygonAnnotation)) || (measuredPath && !(original is DrawbridgeMeasuredPathAnnotation)) else { continue }
+                    let polygon: PDFAnnotation = closedShape ? DrawbridgeShapeAnnotation(bounds: original.bounds, forType: original.type == "Circle" ? .circle : .square, withProperties: nil) : measuredPath ? DrawbridgeMeasuredPathAnnotation(bounds: original.bounds, forType: .ink, withProperties: nil) : DrawbridgePolygonAnnotation(bounds:original.bounds,forType:PDFAnnotationSubtype(rawValue:"/Polygon"),withProperties:nil)
                     if let measurement = MeasurementMetadata.measurement(original) { polygon.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey) }
                     polygon.setValue(original.userName ?? "",forAnnotationKey:PDFAnnotationKey(rawValue:"/T")); polygon.setValue(RectangleMarkupRecord.identity(original) ?? "", forAnnotationKey: RectangleMarkupRecord.identityKey); polygon.contents = original.contents; polygon.color = original.color; polygon.border = original.border
                     MarkupStyle.apply(pattern: MarkupStyle.pattern(original), opacity: MarkupStyle.strokeOpacity(original), to: polygon)
@@ -844,7 +846,7 @@ final class RectangleMarkupController {
         if type == .line {
             guard let (a,b) = endpoints, [a.x,a.y,b.x,b.y].allSatisfy({ $0.isFinite }), bounds.contains(a), bounds.contains(b), hypot(a.x-b.x,a.y-b.y) >= 2 else { return nil }
         }
-        let annotation: PDFAnnotation = kind == .polygon ? DrawbridgePolygonAnnotation(bounds:bounds,forType:type,withProperties:nil) : measurement != nil ? DrawbridgeMeasuredPathAnnotation(bounds: bounds, forType: type, withProperties: nil) : PDFAnnotation(bounds: bounds, forType: type, withProperties: nil)
+        let annotation: PDFAnnotation = kind == .polygon ? DrawbridgePolygonAnnotation(bounds:bounds,forType:type,withProperties:nil) : measurement != nil ? DrawbridgeMeasuredPathAnnotation(bounds: bounds, forType: type, withProperties: nil) : (kind == .rectangle || kind == .ellipse) ? DrawbridgeShapeAnnotation(bounds: bounds, forType: type, withProperties: nil) : PDFAnnotation(bounds: bounds, forType: type, withProperties: nil)
         if let (a,b) = endpoints {
             annotation.startPoint = CGPoint(x:a.x-bounds.minX,y:a.y-bounds.minY)
             annotation.endPoint = CGPoint(x:b.x-bounds.minX,y:b.y-bounds.minY)
@@ -859,7 +861,7 @@ final class RectangleMarkupController {
         let border = PDFBorder(); border.lineWidth = kind == .text ? 0 : lineWidth; annotation.border = border
         MarkupStyle.apply(pattern: linePattern, opacity: strokeOpacity, to: annotation)
         if kind == .polyline || kind == .polygon { RectangleMarkupRecord.setVertices(vertices,on:annotation) }
-        if kind == .polygon { RectangleMarkupRecord.setPolygonFill(fillColor,on:annotation) }
+        if kind == .polygon || kind == .rectangle || kind == .ellipse { RectangleMarkupRecord.setPolygonFill(fillColor,on:annotation) }
         if let measurement { annotation.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey); MeasurementMetadata.updateLabel(annotation) }
         annotation.shouldDisplay = true; annotation.shouldPrint = true
         assignNewMarkupLayer(annotation)
@@ -942,14 +944,14 @@ final class RectangleMarkupController {
     func fillSelected(_ color: NSColor?) {
         guard canEdit() else { return }
         guard let annotation = selected else { fillColor = color; refresh(); return }
-        guard annotation.type == "Polygon", !annotation.isReadOnly, let page = annotation.page else { return }
+        guard ["Square", "Circle", "Polygon"].contains(annotation.type ?? ""), !annotation.isReadOnly, let page = annotation.page else { return }
         setFill(color,on:annotation,page:page)
     }
     private func setFill(_ color: NSColor?, on annotation: PDFAnnotation, page: PDFPage) {
         guard canEdit(), page.document === boundDocument, RectangleMarkupRecord.owns(annotation) else { return }
         let old = RectangleMarkupRecord.polygonFill(annotation)
         guard old != color else { return }
-        undo.registerUndo(withTarget:self) { target in target.setFill(old,on:annotation,page:page) }; undo.setActionName("Polygon Fill")
+        undo.registerUndo(withTarget:self) { target in target.setFill(old,on:annotation,page:page) }; undo.setActionName("Fill")
         RectangleMarkupRecord.setPolygonFill(color,on:annotation); selected = annotation; changed(page)
     }
 
@@ -1239,6 +1241,25 @@ final class RectangleMarkupController {
     static func clamped(_ p: CGPoint, to r: CGRect) -> CGPoint { CGPoint(x: min(max(p.x,r.minX),r.maxX), y: min(max(p.y,r.minY),r.maxY)) }
     static func cornerPoint(_ c: Corner, in r: CGRect) -> CGPoint {
         switch c { case .lowerLeft: return CGPoint(x:r.minX,y:r.minY); case .lowerRight: return CGPoint(x:r.maxX,y:r.minY); case .upperLeft: return CGPoint(x:r.minX,y:r.maxY); case .upperRight: return CGPoint(x:r.maxX,y:r.maxY) }
+    }
+}
+
+/// Closed shapes share independent stroke and fill opacity with polygons.
+final class DrawbridgeShapeAnnotation: PDFAnnotation {
+    override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        guard shouldDisplay else { return }
+        let origin = page?.bounds(for: box).origin ?? .zero
+        let width = border?.lineWidth ?? 2
+        let rect = bounds.offsetBy(dx: -origin.x, dy: -origin.y).insetBy(dx: width / 2, dy: width / 2)
+        guard rect.width > 0, rect.height > 0 else { return }
+        context.saveGState(); defer { context.restoreGState() }
+        context.beginPath()
+        if type == "Circle" { context.addEllipse(in: rect) } else { context.addRect(rect) }
+        context.setStrokeColor(color.cgColor)
+        context.setLineWidth(width); context.setLineJoin(.round)
+        context.setLineDash(phase: 0, lengths: MarkupStyle.pattern(self).dash(width: width).map { CGFloat($0) })
+        if let fill = RectangleMarkupRecord.polygonFill(self) { context.setFillColor(fill.cgColor); context.drawPath(using: .fillStroke) }
+        else { context.strokePath() }
     }
 }
 

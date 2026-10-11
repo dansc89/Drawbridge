@@ -22,7 +22,7 @@ import PDFKit
             let column = NSTableColumn(identifier: .init(id)); column.title = title; column.width = width; column.minWidth = width; table.addTableColumn(column)
         }
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
-        scroll.widthAnchor.constraint(equalToConstant: 250).isActive = true; scroll.heightAnchor.constraint(equalToConstant: 250).isActive = true
+        scroll.widthAnchor.constraint(equalToConstant: 250).isActive = true; scroll.heightAnchor.constraint(equalToConstant: 150).isActive = true
         addArrangedSubview(scroll)
         newLayerButton.target = self; newLayerButton.action = #selector(newLayer(_:))
         rename.target = self; rename.action = #selector(renameLayer(_:)); remove.target = self; remove.action = #selector(removeLayer(_:))

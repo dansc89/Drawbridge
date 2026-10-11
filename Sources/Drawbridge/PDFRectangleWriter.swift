@@ -562,8 +562,8 @@ enum PDFRectangleWriter {
                 if record.kind == .polygon {
                     annotation["/Vertices"] = record.vertices.flatMap { [Double($0.x),Double($0.y)] }
                     annotation["/DrawbridgePolylineVertices"] = record.vertices.flatMap { [Double($0.x),Double($0.y)] }
-                    if let fill = record.fill { annotation["/IC"] = fill; annotation["/DrawbridgePolygonFill"] = fill }
                 }
+                if [.rectangle, .ellipse, .polygon].contains(record.kind), let fill = record.fill { annotation["/IC"] = fill; annotation["/DrawbridgePolygonFill"] = fill }
                 if record.kind == .polyline {
                     let values = record.vertices.flatMap { [Double($0.x),Double($0.y)] }
                     annotation["/InkList"] = [values]
@@ -636,8 +636,8 @@ enum PDFRectangleWriter {
                 path += " \(left.x) \(left.y) m \(b.x) \(b.y) l \(right.x) \(right.y) l"
             }
         }
-        if r.kind == .polygon {
-            path += " h"
+        if r.kind == .polygon { path += " h" }
+        if [.rectangle, .ellipse, .polygon].contains(r.kind) {
             if let fill = r.fill { return "q \(style) \(r.red) \(r.green) \(r.blue) RG \(fill[0]) \(fill[1]) \(fill[2]) rg \(r.lineWidth) w 1 j \(path) B Q\n" + MeasurementAppearance.pdf(r) }
         }
         return "q \(style) \(r.red) \(r.green) \(r.blue) RG \(r.lineWidth) w 1 J 1 j \(path) S Q\n" + MeasurementAppearance.pdf(r)
@@ -678,9 +678,9 @@ enum PDFRectangleWriter {
                 if let scale = expected.pageScale, (!scale.isValid || value["/F"] as? Int != 98) { return false }
                 if let measurement = expected.measurement, value["/Contents"] as? String != "u:" + measurement.label(points: expected.vertices) { return false }
                 if expected.kind == .polygon {
-                    guard value["/Vertices"] as? [Double] == expected.vertices.flatMap({ [Double($0.x),Double($0.y)] }),
-                          value["/IC"] as? [Double] == expected.fill else { return false }
+                    guard value["/Vertices"] as? [Double] == expected.vertices.flatMap({ [Double($0.x),Double($0.y)] }) else { return false }
                 }
+                if [.rectangle, .ellipse, .polygon].contains(expected.kind), value["/IC"] as? [Double] != expected.fill { return false }
                 if expected.kind == .polyline {
                     let expectedVertices = expected.vertices.flatMap { [Double($0.x),Double($0.y)] }
                     guard let ink = value["/InkList"] as? [[Double]], ink.count == 1,

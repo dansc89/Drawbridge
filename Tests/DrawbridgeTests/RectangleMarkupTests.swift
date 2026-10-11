@@ -893,7 +893,7 @@ final class RectangleMarkupTests: XCTestCase {
             context.scaleBy(x: scale, y: scale)
             // Render current annotation state into a fresh, explicit sRGB context.
             // Avoid PDFKit thumbnail caching and implicit image color profiles.
-            page.draw(with: .cropBox, to: context)
+            page.drawbridgeDraw(with: .cropBox, to: context)
             return true
         }
         XCTAssertTrue(drawn)

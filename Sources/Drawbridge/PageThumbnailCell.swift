@@ -118,7 +118,7 @@ final class PageThumbnailCache {
                   let page = cell.representedPage, page.document === document else { continue }
             if let image = images.object(forKey: page) { cell.preview.image = image; continue }
             let before = generation
-            let image = page.thumbnail(of: NSSize(width: 360, height: 252), for: .cropBox)
+            let image = page.drawbridgeThumbnail(of: NSSize(width: 360, height: 252), for: .cropBox)
             guard before == generation, cell.representedPage === page else { continue }
             images.setObject(image, forKey: page, cost: 360 * 252 * 4)
             cell.preview.image = image

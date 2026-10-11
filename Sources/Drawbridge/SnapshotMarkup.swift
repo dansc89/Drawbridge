@@ -81,7 +81,7 @@ struct SnapshotPayload: Sendable {
         let origin = page.bounds(for: .mediaBox).origin
         for annotation in page.annotations where annotation.shouldDisplay && annotation.type != "Link" {
             context.saveGState()
-            if annotation is DrawbridgePolygonAnnotation || annotation is DrawbridgeMeasuredPathAnnotation {
+            if annotation is DrawbridgeSnapshotAnnotation || annotation is DrawbridgeShapeAnnotation || annotation is DrawbridgePolygonAnnotation || annotation is DrawbridgeMeasuredPathAnnotation {
                 context.concatenate(transform); context.translateBy(x: origin.x, y: origin.y)
                 annotation.draw(with: .mediaBox, in: context)
             } else { annotation.draw(with: .cropBox, in: context) }
@@ -214,18 +214,41 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         context.setBlendMode(style.overlay ? .multiply : .normal)
         context.beginTransparencyLayer(auxiliaryInfo: nil)
         let pageBounds = page?.bounds(for: box) ?? .zero
-        let pageRotation = (((page?.rotation ?? 0) % 360) + 360) % 360
-        let pageTransform: CGAffineTransform
-        switch pageRotation {
-        case 90: pageTransform = CGAffineTransform(a: 0, b: -1, c: 1, d: 0, tx: -pageBounds.minY, ty: pageBounds.maxX)
-        case 180: pageTransform = CGAffineTransform(a: -1, b: 0, c: 0, d: -1, tx: pageBounds.maxX, ty: pageBounds.maxY)
-        case 270: pageTransform = CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: pageBounds.maxY, ty: -pageBounds.minX)
-        default: pageTransform = CGAffineTransform(translationX: -pageBounds.minX, y: -pageBounds.minY)
+        // PDFView supplies page-space contexts. Whole-page PDFKit previews instead
+        // draw custom annotations in display space; that entry point scopes this flag.
+        if SnapshotPageRendering.isPreview {
+            context.concatenate(page?.transform(for: box) ?? .identity)
+        } else {
+            context.translateBy(x: -pageBounds.minX, y: -pageBounds.minY)
         }
-        context.concatenate(pageTransform)
         context.concatenate(SnapshotPayload.transform(size: source.getBoxRect(.mediaBox).size, bounds: bounds, rotation: captureRotation))
         context.drawPDFPage(source)
         context.endTransparencyLayer()
         context.restoreGState()
+    }
+}
+
+/// Keep PDFKit's whole-page preview contract separate from PDFView's page-space
+/// annotation contract. Thread-local scope also covers nested/background previews.
+enum SnapshotPageRendering {
+    private static let key = "DrawbridgeSnapshotPagePreview"
+    static var isPreview: Bool { (Thread.current.threadDictionary[key] as? Int ?? 0) > 0 }
+    static func preview<T>(_ body: () -> T) -> T {
+        let depth = Thread.current.threadDictionary[key] as? Int ?? 0
+        Thread.current.threadDictionary[key] = depth + 1
+        defer {
+            if depth == 0 { Thread.current.threadDictionary.removeObject(forKey: key) }
+            else { Thread.current.threadDictionary[key] = depth }
+        }
+        return body()
+    }
+}
+
+extension PDFPage {
+    func drawbridgeThumbnail(of size: NSSize, for box: PDFDisplayBox) -> NSImage {
+        SnapshotPageRendering.preview { thumbnail(of: size, for: box) }
+    }
+    func drawbridgeDraw(with box: PDFDisplayBox, to context: CGContext) {
+        SnapshotPageRendering.preview { draw(with: box, to: context) }
     }
 }

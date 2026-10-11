@@ -3703,7 +3703,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             width: max(1, (bounds.width * scale).rounded(.up)),
             height: max(1, (bounds.height * scale).rounded(.up))
         )
-        let thumb = page.thumbnail(of: targetSize, for: displayBox)
+        let thumb = page.drawbridgeThumbnail(of: targetSize, for: displayBox)
         if let cgImage = thumb.cgImage(forProposedRect: nil, context: nil, hints: nil) {
             return cgImage
         }
@@ -6452,7 +6452,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         context.scaleBy(x: scale, y: scale)
         context.translateBy(x: -orientedFullBox.minX, y: -orientedFullBox.minY)
-        page.draw(with: displayBox, to: context)
+        page.drawbridgeDraw(with: displayBox, to: context)
         guard let image = context.makeImage() else { return [] }
 
         let request = VNRecognizeTextRequest()
@@ -6571,7 +6571,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         context.scaleBy(x: scale, y: scale)
         context.translateBy(x: -orientedTile.minX, y: -orientedTile.minY)
-        page.draw(with: .mediaBox, to: context)
+        page.drawbridgeDraw(with: .mediaBox, to: context)
         guard let image = context.makeImage() else { return [] }
 
         let request = VNRecognizeTextRequest()

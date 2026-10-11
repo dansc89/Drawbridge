@@ -110,7 +110,7 @@ final class PDFPrintingTests: XCTestCase {
         XCTAssertFalse(CGPDFDictionaryGetDictionary(try XCTUnwrap(resources), "XObject", &images), "Vector-only fixture must not become a raster image")
         // Printing bakes the visible unsaved markup into the job, leaving the
         // source annotation editable and the original document intact.
-        let raster = try XCTUnwrap(printedPage.thumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox).cgImage(forProposedRect: nil, context: nil, hints: nil))
+        let raster = try XCTUnwrap(printedPage.drawbridgeThumbnail(of: NSSize(width: 400, height: 300), for: .mediaBox).cgImage(forProposedRect: nil, context: nil, hints: nil))
         let bitmap = NSBitmapImageRep(cgImage: raster)
         var redPixels = 0
         for y in 0..<bitmap.pixelsHigh {

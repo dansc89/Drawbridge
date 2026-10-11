@@ -37,7 +37,7 @@ import XCTest
             let target = reopened.page(at: 1)!, a = try XCTUnwrap(target.annotations.first { RectangleMarkupRecord.owns($0) })
             c.selectFromList(a)
             func ink(_ page: PDFPage, in region: CGRect) throws -> Int {
-                let bitmap = try XCTUnwrap(NSBitmapImageRep(data: page.thumbnail(of:media.size, for:.mediaBox).tiffRepresentation!))
+                let bitmap = try XCTUnwrap(NSBitmapImageRep(data: page.drawbridgeThumbnail(of:media.size, for:.mediaBox).tiffRepresentation!))
                 var count = 0
                 for y in Int(region.minY)..<Int(region.maxY) { for x in Int(region.minX)..<Int(region.maxX) {
                     let color = try XCTUnwrap(bitmap.colorAt(x:x,y:399-y)?.usingColorSpace(.deviceRGB))

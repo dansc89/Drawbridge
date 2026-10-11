@@ -23,7 +23,7 @@ enum PDFRegionRasterizer {
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         context.scaleBy(x: scale, y: scale)
         context.translateBy(x: -full.minX - x / scale, y: -full.minY - y / scale)
-        page.draw(with: box, to: context)
+        page.drawbridgeDraw(with: box, to: context)
         return context.makeImage()
     }
 }

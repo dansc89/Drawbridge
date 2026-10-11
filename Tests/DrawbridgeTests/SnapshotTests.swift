@@ -30,6 +30,125 @@ import XCTest
     func capture(_ page:PDFPage, polygon:Bool = false) throws -> SnapshotPayload {
         try SnapshotPayload.capture(page:page,points:polygon ? [CGPoint(x:80,y:90),CGPoint(x:200,y:90),CGPoint(x:80,y:170)] : [CGPoint(x:80,y:90),CGPoint(x:200,y:90),CGPoint(x:200,y:170),CGPoint(x:80,y:170)])
     }
+    func testLivePageSpaceDrawingKeepsEntireSnapshotInsideItsBounds() throws {
+        let sourceURL = try fixture()
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        let sourceDocument = try XCTUnwrap(PDFDocument(url: sourceURL))
+        let payload = try capture(try XCTUnwrap(sourceDocument.page(at: 0)))
+        let fragment = try XCTUnwrap(payload.page)
+        for rotation in [0, 90, 180, 270] {
+            let destinationURL = try fixture(rotation: rotation)
+            defer { try? FileManager.default.removeItem(at: destinationURL) }
+            let destination = try XCTUnwrap(PDFDocument(url: destinationURL))
+            let page = try XCTUnwrap(destination.page(at: 0))
+            let raw = CGRect(x: 250, y: 200, width: rotation % 180 == 0 ? 120 : 80, height: rotation % 180 == 0 ? 80 : 120)
+            let stamp = try SnapshotStampFactory.make(payload: payload, bounds: raw, rotation: rotation)
+            page.addAnnotation(stamp)
+            let size = rotation % 180 == 0 ? CGSize(width: 500, height: 400) : CGSize(width: 400, height: 500)
+            let transform = try XCTUnwrap(page.pageRef).getDrawingTransform(.mediaBox, rect: CGRect(origin: .zero, size: size), rotate: 0, preserveAspectRatio: true)
+            let displayBounds = raw.applying(transform).standardized
+            func bitmap(_ draw: (CGContext) -> Void) throws -> NSBitmapImageRep {
+                let context = try XCTUnwrap(CGContext(data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                context.setFillColor(NSColor.white.cgColor); context.fill(CGRect(origin: .zero, size: size))
+                draw(context)
+                return NSBitmapImageRep(cgImage: try XCTUnwrap(context.makeImage()))
+            }
+            let actual = try bitmap { context in
+                context.concatenate(transform)
+                context.clip(to: raw)
+                context.translateBy(x: page.bounds(for: .mediaBox).minX, y: page.bounds(for: .mediaBox).minY)
+                stamp.draw(with: .mediaBox, in: context)
+            }
+            let expected = try bitmap { context in
+                context.translateBy(x: displayBounds.minX, y: displayBounds.minY)
+                context.drawPDFPage(fragment)
+            }
+            var differences = 0
+            for y in 0..<actual.pixelsHigh { for x in 0..<actual.pixelsWide {
+                let a = try XCTUnwrap(actual.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+                let b = try XCTUnwrap(expected.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+                if abs(a.redComponent-b.redComponent)+abs(a.greenComponent-b.greenComponent)+abs(a.blueComponent-b.blueComponent) > 0.1 { differences += 1 }
+            } }
+            XCTAssertLessThan(differences, 100, "Live annotation clipping must preserve the complete upright capture, rotation \(rotation)")
+        }
+    }
+
+    func testEmbeddedRasterCaptureIsNotBlankAfterPasteAndSave() throws {
+        _ = NSApplication.shared
+        for rotation in [0, 90, 180, 270] {
+            let source = FileManager.default.temporaryDirectory.appendingPathComponent("RasterSnapshot-\(UUID().uuidString).pdf")
+            let output = source.deletingLastPathComponent().appendingPathComponent("RasterSnapshotSaved-\(UUID().uuidString).pdf")
+            defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
+            let imageContext = try XCTUnwrap(CGContext(data: nil, width: 240, height: 160, bitsPerComponent: 8, bytesPerRow: 960, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            imageContext.setFillColor(NSColor.red.cgColor)
+            imageContext.fill(CGRect(x: 0, y: 0, width: 120, height: 160))
+            imageContext.setFillColor(NSColor.blue.cgColor)
+            imageContext.fill(CGRect(x: 120, y: 0, width: 120, height: 160))
+            let image = try XCTUnwrap(imageContext.makeImage())
+            var media = CGRect(x: 0, y: 0, width: 500, height: 400)
+            let context = try XCTUnwrap(CGContext(source as CFURL, mediaBox: &media, nil))
+            context.beginPDFPage(nil)
+            context.draw(image, in: CGRect(x: 80, y: 90, width: 120, height: 80))
+            context.endPDFPage(); context.closePDF()
+            let setup = try XCTUnwrap(PDFDocument(url: source))
+            try XCTUnwrap(setup.page(at: 0)).rotation = rotation
+            XCTAssertTrue(setup.write(to: source))
+            let document = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(document.page(at: 0))
+            let payload = try capture(page)
+            let pixels = try raster(try XCTUnwrap(payload.page), size: try XCTUnwrap(payload.size))
+            let colored = stride(from: 0, to: pixels.count, by: 4).filter { pixels[$0] > 180 && pixels[$0+1] < 80 || pixels[$0+2] > 180 && pixels[$0+1] < 80 }.count
+            XCTAssertGreaterThan(colored, pixels.count / 8, "Embedded raster capture must contain image pixels, rotation \(rotation)")
+            let view = MarkupPDFView(); view.document = document
+            let session = view.rectangleMarkup; session.bind(to: document); session.canEdit = { true }
+            let pasted = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: CGPoint(x: 300, y: 250)))
+            let bounds = pasted.bounds
+            let recaptured = try SnapshotPayload.capture(page: page, points: [CGPoint(x: bounds.minX, y: bounds.minY), CGPoint(x: bounds.maxX, y: bounds.minY), CGPoint(x: bounds.maxX, y: bounds.maxY), CGPoint(x: bounds.minX, y: bounds.maxY)])
+            let recapturedPixels = try raster(try XCTUnwrap(recaptured.page), size: try XCTUnwrap(recaptured.size))
+            let recapturedColor = stride(from: 0, to: recapturedPixels.count, by: 4).filter { recapturedPixels[$0] > 180 && recapturedPixels[$0+1] < 80 || recapturedPixels[$0+2] > 180 && recapturedPixels[$0+1] < 80 }.count
+            XCTAssertGreaterThan(recapturedColor, recapturedPixels.count / 8, "Capturing a pasted raster annotation must not be blank, rotation \(rotation)")
+            XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: output, pageLabels: [:], records: RectangleMarkupRecord.capture(document)))
+            let reopened = try XCTUnwrap(PDFDocument(url: output))
+            let stamp = try XCTUnwrap(reopened.page(at: 0)?.annotations.first { SnapshotPayload.read($0) != nil })
+            XCTAssertEqual(SnapshotPayload.read(stamp)?.data, payload.data)
+            let savedPage = try XCTUnwrap(reopened.page(at: 0))
+            let rendered = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(savedPage.drawbridgeThumbnail(of: CGSize(width: 1000, height: 1000), for: .mediaBox).tiffRepresentation)))
+            var coloredCount = 0
+            for y in 0..<rendered.pixelsHigh { for x in 0..<rendered.pixelsWide {
+                if let color = rendered.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB), color.greenComponent < 0.3 && max(color.redComponent, color.blueComponent) > 0.7 { coloredCount += 1 }
+            } }
+            XCTAssertGreaterThan(coloredCount, 60000, "Source image and pasted image must both render after saving, rotation \(rotation)")
+        }
+    }
+    func testLocalPhotoCaptureContainsVisiblePixels() throws {
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_RASTER_FIXTURE"] else { throw XCTSkip("Provide a local photo PDF") }
+        let document = try XCTUnwrap(PDFDocument(url: URL(fileURLWithPath: path)))
+        let page = try XCTUnwrap(document.page(at: 0))
+        let box = page.bounds(for: .cropBox)
+        let region = CGRect(x: box.midX - box.width / 8, y: box.midY - box.height / 8, width: box.width / 4, height: box.height / 4)
+        for polygon in [false, true] {
+            let points = polygon ? [CGPoint(x: region.minX, y: region.minY), CGPoint(x: region.maxX, y: region.minY), CGPoint(x: region.maxX, y: region.maxY)] : [CGPoint(x: region.minX, y: region.minY), CGPoint(x: region.maxX, y: region.minY), CGPoint(x: region.maxX, y: region.maxY), CGPoint(x: region.minX, y: region.maxY)]
+            let payload = try SnapshotPayload.capture(page: page, points: points)
+            let pixels = try raster(try XCTUnwrap(payload.page), size: try XCTUnwrap(payload.size))
+            let source = try XCTUnwrap(page.pageRef)
+            let rotation = ((page.rotation % 360) + 360) % 360
+            let size = rotation % 180 == 0 ? box.size : CGSize(width: box.height, height: box.width)
+            let transform = source.getDrawingTransform(.cropBox, rect: CGRect(origin: .zero, size: size), rotate: 0, preserveAspectRatio: true)
+            let vertices = points.map { $0.applying(transform) }
+            let minX = vertices.map(\.x).min()!, minY = vertices.map(\.y).min()!
+            let expected = try raster(source, size: try XCTUnwrap(payload.size)) { context in
+                let path = CGMutablePath()
+                for (index, vertex) in vertices.enumerated() {
+                    let local = CGPoint(x: vertex.x - minX, y: vertex.y - minY)
+                    if index == 0 { path.move(to: local) } else { path.addLine(to: local) }
+                }
+                path.closeSubpath(); context.addPath(path); context.clip()
+                context.setFillColor(NSColor.white.cgColor); context.fill(CGRect(origin: .zero, size: payload.size!))
+                context.translateBy(x: -minX, y: -minY); context.concatenate(transform); context.drawPDFPage(source)
+            }
+            let difference = zip(pixels, expected).reduce(0.0) { $0 + Double(abs(Int($1.0) - Int($1.1))) } / Double(pixels.count)
+            XCTAssertLessThan(difference, 5, "Snapshot must match a direct rendering of the source image, rather than paste blank")
+        }
+    }
     func raster(_ page:CGPDFPage, size:CGSize, draw: ((CGContext)->Void)? = nil) throws -> [UInt8] {
         let w=Int(size.width*2), h=Int(size.height*2)
         var bytes = [UInt8](repeating:0,count:w*h*4)
@@ -82,9 +201,9 @@ import XCTest
         XCTAssertTrue(try Data(contentsOf:output).starts(with:original))
         if ProcessInfo.processInfo.environment["DRAWBRIDGE_SNAPSHOT_QA"] != nil { try? FileManager.default.removeItem(at:URL(fileURLWithPath:"/tmp/Drawbridge-Snapshot-QA.pdf")); try FileManager.default.copyItem(at:output,to:URL(fileURLWithPath:"/tmp/Drawbridge-Snapshot-QA.pdf")) }
         for index in 1..<doc.pageCount {
-            let live = doc.page(at:index)!.thumbnail(of:CGSize(width:500,height:500),for:.mediaBox)
+            let live = doc.page(at:index)!.drawbridgeThumbnail(of:CGSize(width:500,height:500),for:.mediaBox)
             let savedDoc = PDFDocument(url:output)!
-            let saved = savedDoc.page(at:index)!.thumbnail(of:CGSize(width:500,height:500),for:.mediaBox)
+            let saved = savedDoc.page(at:index)!.drawbridgeThumbnail(of:CGSize(width:500,height:500),for:.mediaBox)
             let a = NSBitmapImageRep(data:live.tiffRepresentation!)!, b = NSBitmapImageRep(data:saved.tiffRepresentation!)!
             var differences = 0
             for y in 0..<a.pixelsHigh { for x in 0..<a.pixelsWide {
@@ -100,8 +219,8 @@ import XCTest
             XCTAssertEqual(stamp.type, "Stamp")
             let rawDocument=PDFDocument(url:output)!
             let raw=rawDocument.page(at:index)!
-            let expected = try XCTUnwrap(NSBitmapImageRep(data:p.thumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation!))
-            let actual = try XCTUnwrap(NSBitmapImageRep(data:raw.thumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation!))
+            let expected = try XCTUnwrap(NSBitmapImageRep(data:p.drawbridgeThumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation!))
+            let actual = try XCTUnwrap(NSBitmapImageRep(data:raw.drawbridgeThumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation!))
             XCTAssertEqual(expected.pixelsWide, actual.pixelsWide); XCTAssertEqual(expected.pixelsHigh, actual.pixelsHigh)
             var differences = 0
             for y in 0..<expected.pixelsHigh { for x in 0..<expected.pixelsWide {
@@ -188,7 +307,10 @@ import XCTest
         let start=Date()
         XCTAssertTrue(PDFRectangleWriter.write(document:document,source:source,destination:output,pageLabels:[:],records:RectangleMarkupRecord.capture(document)))
         let elapsed=Date().timeIntervalSince(start); print("Twenty snapshots first save seconds",elapsed)
-        XCTAssertLessThan(elapsed,5)
+        // The first save copies the source PDF as well as the new appearance.
+        // Keep a five-second floor, with a 40 MiB/s budget for large permit sets.
+        let sourceBytes = try source.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        XCTAssertLessThan(elapsed, max(5, Double(sourceBytes) / (40 * 1024 * 1024)))
         let reopened=try XCTUnwrap(PDFDocument(url:output)); XCTAssertEqual(RectangleMarkupRecord.capture(reopened).filter { $0.kind == .snapshot }.count,20)
         let savedData=try Data(contentsOf:output,options:.mappedIfSafe), originalData=try Data(contentsOf:source,options:.mappedIfSafe)
         XCTAssertTrue(savedData.starts(with:originalData))
@@ -246,13 +368,13 @@ import XCTest
             XCTAssertTrue(session.pointerDown(at:point(80,170),clickCount:2)); _ = session.pointerUp(at:point(80,170))
             let payload=try XCTUnwrap(SnapshotPayload.clipboard())
             XCTAssertTrue(page.annotations.isEmpty)
-            let before=try XCTUnwrap(page.thumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation)
+            let before=try XCTUnwrap(page.drawbridgeThumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation)
             let stamp=try XCTUnwrap(session.pasteSnapshot(payload,on:page,center:.zero,inPlace:true))
             let output=source.appendingPathExtension(UUID().uuidString + ".pdf")
             defer { try? FileManager.default.removeItem(at:output) }
             XCTAssertTrue(PDFRectangleWriter.write(document:doc,source:source,destination:output,pageLabels:[:],records:RectangleMarkupRecord.capture(doc)))
             let restored=try XCTUnwrap(PDFDocument(url:output))
-            let after=try XCTUnwrap(restored.page(at:0)!.thumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation)
+            let after=try XCTUnwrap(restored.page(at:0)!.drawbridgeThumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation)
             let a=try XCTUnwrap(NSBitmapImageRep(data:before)), b=try XCTUnwrap(NSBitmapImageRep(data:after)); var changedPixels=0
             for y in 0..<a.pixelsHigh { for x in 0..<a.pixelsWide {
                 let c=a.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!, d=b.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!
@@ -285,7 +407,8 @@ import XCTest
         ])
         let view = MarkupPDFView(); view.document = doc
         let session = view.rectangleMarkup; session.bind(to: doc); session.canEdit = { true }
-        _ = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: CGPoint(x: crop.midX, y: crop.midY)))
+        let pasted = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: CGPoint(x: crop.midX, y: crop.midY)))
+        let identity = try XCTUnwrap(RectangleMarkupRecord.identity(pasted))
         for filter in SnapshotStyle.Filter.allCases {
             let style = SnapshotStyle(overlay: true, opacity: 0.65, filter: filter, color: [0, 0.5, 1])
             session.styleSelectedSnapshot(style)
@@ -297,7 +420,7 @@ import XCTest
             XCTAssertTrue(try Data(contentsOf: output, options: .mappedIfSafe).starts(with: original))
             let reopened = try XCTUnwrap(PDFDocument(url: output))
             XCTAssertEqual(reopened.pageCount, doc.pageCount)
-            let saved = try XCTUnwrap(reopened.page(at: 0)?.annotations.first { SnapshotPayload.read($0) != nil })
+            let saved = try XCTUnwrap(reopened.page(at: 0)?.annotations.first { RectangleMarkupRecord.identity($0) == identity })
             XCTAssertEqual(SnapshotStyle.read(saved), style)
             XCTAssertEqual(SnapshotPayload.read(saved)?.data, payload.data)
         }
@@ -353,8 +476,8 @@ import XCTest
                 XCTAssertTrue(PDFRectangleWriter.write(document:doc,source:source,destination:out,pageLabels:[:],records:RectangleMarkupRecord.capture(doc)))
                 let saved=try XCTUnwrap(PDFDocument(url:out)), savedStamp=try XCTUnwrap(saved.page(at:0)!.annotations.first)
                 XCTAssertEqual(SnapshotStyle.read(savedStamp),style); XCTAssertEqual(SnapshotPayload.read(savedStamp)?.data,payload.data)
-                let a=try XCTUnwrap(NSBitmapImageRep(data:page.thumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation!))
-                let b=try XCTUnwrap(NSBitmapImageRep(data:saved.page(at:0)!.thumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation!))
+                let a=try XCTUnwrap(NSBitmapImageRep(data:page.drawbridgeThumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation!))
+                let b=try XCTUnwrap(NSBitmapImageRep(data:saved.page(at:0)!.drawbridgeThumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation!))
                 var differences=0
                 for y in 0..<a.pixelsHigh { for x in 0..<a.pixelsWide {
                     let c=a.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!, d=b.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!
@@ -393,7 +516,7 @@ import XCTest
         let doc=try XCTUnwrap(PDFDocument(url:source)), page=doc.page(at:0)!
         let payload=try SnapshotPayload.capture(page:page,points:[CGPoint(x:220,y:220),CGPoint(x:240,y:220),CGPoint(x:240,y:240),CGPoint(x:220,y:240)])
         let view=MarkupPDFView(); view.document=doc; let session=view.rectangleMarkup; session.bind(to:doc); session.canEdit={true}
-        func pixels(_ page:PDFPage) throws -> Data { try XCTUnwrap(page.thumbnail(of:CGSize(width:500,height:400),for:.mediaBox).tiffRepresentation) }
+        func pixels(_ page:PDFPage) throws -> Data { try XCTUnwrap(page.drawbridgeThumbnail(of:CGSize(width:500,height:400),for:.mediaBox).tiffRepresentation) }
         func savedPixels() throws -> Data {
             let output=source.appendingPathExtension(UUID().uuidString + ".pdf")
             defer { try? FileManager.default.removeItem(at:output) }
@@ -427,15 +550,20 @@ import XCTest
     func testLocalPhotoOpacity() throws {
         guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_OPACITY_FIXTURE"] else { throw XCTSkip("Local photo fixture") }
         let doc = try XCTUnwrap(PDFDocument(url:URL(fileURLWithPath:path))), page=doc.page(at:0)!
-        let stamp = try XCTUnwrap(page.annotations.first { SnapshotPayload.read($0)?.size?.width ?? 0 > 600 })
-        let payload = try XCTUnwrap(SnapshotPayload.read(stamp))
+        let payload: SnapshotPayload
+        if let stamp = page.annotations.first(where: { SnapshotPayload.read($0)?.size?.width ?? 0 > 600 }), let saved = SnapshotPayload.read(stamp) {
+            payload = saved
+        } else {
+            let crop = page.bounds(for: .cropBox).insetBy(dx: 400, dy: 400)
+            payload = try SnapshotPayload.capture(page: page, points: [CGPoint(x: crop.minX, y: crop.minY), CGPoint(x: crop.maxX, y: crop.minY), CGPoint(x: crop.maxX, y: crop.maxY), CGPoint(x: crop.minX, y: crop.maxY)])
+        }
         let white = PDFPage(); white.setBounds(CGRect(x:0,y:0,width:800,height:800),for:.mediaBox)
         let testDoc=PDFDocument(); testDoc.insert(white,at:0)
         let view=MarkupPDFView(); view.document=testDoc
         let session=view.rectangleMarkup; session.bind(to:testDoc); session.canEdit={true}
         _ = try session.pasteSnapshot(payload,on:white,center:CGPoint(x:400,y:400))
         func darkness() throws -> Double {
-            let rep=try XCTUnwrap(NSBitmapImageRep(data:try XCTUnwrap(white.thumbnail(of:CGSize(width:400,height:400),for:.mediaBox).tiffRepresentation)))
+            let rep=try XCTUnwrap(NSBitmapImageRep(data:try XCTUnwrap(white.drawbridgeThumbnail(of:CGSize(width:400,height:400),for:.mediaBox).tiffRepresentation)))
             var total=0.0
             for y in 100..<300 { for x in 100..<300 {
                 let c=rep.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!
@@ -443,7 +571,7 @@ import XCTest
             } }
             return total
         }
-        let before=try darkness(); session.styleSelectedSnapshot(SnapshotStyle(opacity:0.28)); let after=try darkness()
+        let before=try darkness(); XCTAssertGreaterThan(before, 100); session.styleSelectedSnapshot(SnapshotStyle(opacity:0.28)); let after=try darkness()
         XCTAssertLessThan(after,before*0.4)
     }
 
@@ -459,7 +587,7 @@ import XCTest
         let initial = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: CGPoint(x: 350, y: 250)))
         session.undo.endUndoGrouping()
         func darkness() throws -> Double {
-            let image = page.thumbnail(of: CGSize(width: 500, height: 400), for: .mediaBox)
+            let image = page.drawbridgeThumbnail(of: CGSize(width: 500, height: 400), for: .mediaBox)
             let rep = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
             // The pasted capture is on otherwise white paper.
             var total = 0.0

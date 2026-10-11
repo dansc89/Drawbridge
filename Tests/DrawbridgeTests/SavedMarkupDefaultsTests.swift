@@ -56,6 +56,26 @@ final class SavedMarkupDefaultsTests: XCTestCase {
         session.tool = .line; session.tool = .select
         inspector.refresh(); XCTAssertFalse(inspector.setAsDefault.isEnabled)
     }
+    func testRectangleAndEllipseSaveFillDefaultsIndependently() throws {
+        let (name, prefs) = preferences(); defer { prefs.removePersistentDomain(forName: name) }
+        let document = PDFDocument(), page = PDFPage(); document.insert(page, at: 0)
+        let session = RectangleMarkupController(defaults: prefs); session.bind(to: document)
+        for (kind, tool, opacity) in [(RectangleMarkupRecord.Kind.rectangle, RectangleMarkupController.Tool.rectangle, 0.5), (.ellipse, .ellipse, 0.25)] {
+            session.tool = tool
+            let annotation = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 30,y: 30,width: 70,height: 70), kind: kind))
+            session.fillSelected(NSColor.blue.withAlphaComponent(CGFloat(opacity)))
+            XCTAssertTrue(session.saveCurrentAsDefault())
+            XCTAssertEqual(RectangleMarkupRecord.polygonFill(annotation).map { Double($0.alphaComponent) }, opacity)
+        }
+        let restored = RectangleMarkupController(defaults: prefs); restored.bind(to: document)
+        for (kind, tool, opacity) in [(RectangleMarkupRecord.Kind.rectangle, RectangleMarkupController.Tool.rectangle, 0.5), (.ellipse, .ellipse, 0.25)] {
+            restored.tool = tool
+            let shape = try XCTUnwrap(restored.create(on: page, bounds: CGRect(x: 130,y: 30,width: 70,height: 70), kind: kind))
+            XCTAssertEqual(RectangleMarkupRecord.polygonFill(shape).map { Double($0.alphaComponent) }, opacity)
+            XCTAssertEqual(RectangleMarkupRecord.polygonFill(shape)?.blueComponent, 1)
+        }
+    }
+
     func testTextAndPenHaveSeparateDefaultsAndPenSelectionTargetsPen() throws {
         let (name, prefs) = preferences(); defer { prefs.removePersistentDomain(forName: name) }
         let session = RectangleMarkupController(defaults: prefs)
