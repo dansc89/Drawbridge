@@ -174,6 +174,25 @@ import XCTest
         XCTAssertTrue(controller.validateMenuItem(menu))
         annotation.isReadOnly = true; XCTAssertFalse(controller.validateMenuItem(menu))
     }
+    func testDetachedLayerRefreshDoesNotQueuePageRotation() throws {
+        let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(document.page(at: 0))
+        let view = session(document), controller = view.rectangleMarkup
+        XCTAssertNil(view.window)
+        let notifications = LayerRotationNotifications()
+        let observer = NotificationCenter.default.addObserver(forName: nil, object: page, queue: nil) { note in
+            if note.name.rawValue.lowercased().contains("rotat") { notifications.record() }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        let layer = try XCTUnwrap(grouped(controller) { controller.addLayer(named: "Detached") })
+        let annotation = try XCTUnwrap(grouped(controller) { controller.create(on: page, bounds: CGRect(x: 100, y: 100, width: 70, height: 40)) })
+        grouped(controller) { controller.assignLayer(layer, to: [annotation]); controller.setLayerVisible(layer, false) }
+        XCTAssertFalse(annotation.shouldDisplay)
+        grouped(controller) { controller.setLayerVisible(layer, true) }
+        XCTAssertTrue(annotation.shouldDisplay)
+        XCTAssertEqual(page.rotation, 0)
+        XCTAssertEqual(notifications.count, 0, "Detached PDF views must not schedule PDFKit rotation layout callbacks")
+    }
     func testLargeDrawingLayerSaveAndVisibility() throws {
         guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_LAYERS_FIXTURE"] else { throw XCTSkip("Optional architectural set") }
         let source = URL(fileURLWithPath: path), doc = try XCTUnwrap(PDFDocument(url: source)), view = session(doc), c = view.rectangleMarkup
@@ -188,4 +207,11 @@ import XCTest
         XCTAssertEqual(reopened.pageCount, doc.pageCount); XCTAssertEqual(c.layerCatalog.layers.first?.id, id)
         XCTAssertTrue((0..<doc.pageCount).flatMap { reopened.page(at: $0)?.annotations ?? [] }.filter { MarkupLayers.id($0) == id }.allSatisfy { !$0.shouldDisplay })
     }
+}
+
+private final class LayerRotationNotifications: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func record() { lock.lock(); defer { lock.unlock() }; value += 1 }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return value }
 }

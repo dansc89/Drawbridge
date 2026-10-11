@@ -521,7 +521,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     /// PDFKit draws pages in nested views/layers; invalidating only PDFView can
     /// leave a cached annotation image visible after the annotation is removed.
     func refreshAnnotationRendering(on page: PDFPage, importedAppearanceChanged: Bool = false) {
-        if importedAppearanceChanged {
+        if importedAppearanceChanged && window != nil {
+            // Detached views have no on-screen tiles to clear. Rotating their
+            // pages queues PDFKit layout work that can outlive the view.
             // PDFKit bakes external AP streams into page tiles. A geometry
             // invalidation clears those tiles. Restore rotation synchronously;
             // the document and viewport retain their original orientation.
