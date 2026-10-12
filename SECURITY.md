@@ -14,4 +14,4 @@ Use [GitHub private vulnerability reporting](https://github.com/dansc89/Drawbrid
 
 ## Scope
 
-The released macOS application and the optional `Backend/` prototype are separate. The backend is not a production collaboration service and must not be publicly deployed without a separate security review. Developer ID signatures intentionally identify the publisher; public signing certificates are not private signing keys.
+Developer ID signatures intentionally identify the publisher; public signing certificates are not private signing keys.

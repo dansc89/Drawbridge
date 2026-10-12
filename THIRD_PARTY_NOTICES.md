@@ -15,6 +15,6 @@ The root MIT License applies to Drawbridge’s original code and documentation. 
 - Creator: https://www.freefarmhouse.com/
 - License: https://creativecommons.org/licenses/by-sa/4.0/
 
-## Optional backend and website dependencies
+## Website dependencies
 
-Dependencies referenced by package manifests, lockfiles, or externally loaded website resources retain their respective licenses. The MIT License for Drawbridge does not relicense those dependencies. Preserve their notices when distributing them.
+Dependencies referenced by package manifests or externally loaded website resources retain their respective licenses. The MIT License for Drawbridge does not relicense those dependencies. Preserve their notices when distributing them.

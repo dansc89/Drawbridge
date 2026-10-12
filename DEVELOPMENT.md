@@ -2,27 +2,12 @@
 
 Technical scripts and workflows for local development and release management. Replace `/path/to/Drawbridge` with your checkout location. Keep client PDFs, logs, and credentials outside tracked files.
 
-The optional `Backend/` prototype is separate from the released macOS app and is not a production collaboration service.
-
 ## Run In Dev Mode
 
 ```bash
 cd /path/to/Drawbridge
 swift run
 ```
-
-## Optional Experimental Backend
-
-```bash
-cd /path/to/Drawbridge/Backend
-cp .env.example .env
-npm install
-npm run start
-```
-
-Backend docs:
-
-[Backend instructions](Backend/README.md)
 
 ## Build A Launchable `.app` Bundle
 
@@ -240,7 +225,7 @@ cd /path/to/Drawbridge
 
 ## Compatibility Gate (Internal)
 
-Run backend-only compatibility and save-performance validation:
+Run compatibility and save-performance validation:
 
 ```bash
 cd /path/to/Drawbridge
@@ -260,7 +245,7 @@ Notes:
 
 ## Link Compatibility Variant Export (Internal)
 
-Generate backend-only hyperlink destination variants for external viewer A/B checks:
+Generate hyperlink destination variants for external viewer A/B checks:
 
 ```bash
 cd /path/to/Drawbridge

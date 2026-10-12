@@ -7,11 +7,6 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
-Backend/node_modules/
-Backend/data/
-Backend/storage/
-Backend/minio-data/
-Backend/.env
 
 # macOS / Xcode local files
 *.xcuserstate

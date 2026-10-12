@@ -100,7 +100,7 @@ Third-party components and demo drawings retain their own licenses. See [third-p
 
 ## Privacy and security
 
-PDF viewing, markup editing, and sheet indexing run locally on your Mac. The optional backend prototype is separate from the released app. See [SECURITY.md](SECURITY.md) for private vulnerability reporting and contribution guidelines.
+PDF viewing, markup editing, and sheet indexing run locally on your Mac. See [SECURITY.md](SECURITY.md) for private vulnerability reporting and contribution guidelines.
 
 ## Support and development
 
