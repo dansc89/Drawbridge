@@ -90,6 +90,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
     var snapshotData: Data? = nil
     var measurement: DrawingMeasurement? = nil
     var pageScale: DrawingScale? = nil
+    var pageScaleCleared: Bool = false
     var author: String = ""
     var kind: Kind = .rectangle
     var text: String = ""
@@ -201,7 +202,8 @@ struct RectangleMarkupRecord: Sendable, Equatable {
                 record.fillOpacity = MarkupStyle.fillOpacity(annotation)
                 if ["Square", "Circle", "Polygon"].contains(annotation.type ?? ""), let rgb = polygonFill(annotation)?.usingColorSpace(.deviceRGB) { record.fill = [Double(rgb.redComponent), Double(rgb.greenComponent), Double(rgb.blueComponent)] }
                 record.measurement = MeasurementMetadata.measurement(annotation)
-                record.pageScale = MeasurementMetadata.pageScale(annotation)
+                record.pageScale = MeasurementMetadata.isPageScaleMetadata(annotation) ? (MeasurementMetadata.scale(on: document.page(at: index)!) ?? MeasurementMetadata.pageScale(annotation)) : nil
+                record.pageScaleCleared = record.pageScale == nil && annotation.value(forAnnotationKey: MeasurementMetadata.clearedScaleKey) as? Bool == true
                 if record.measurement != nil { record.textRotation = (((annotation.page?.rotation ?? 0) % 360) + 360) % 360 }
                 let author = annotation.userName ?? ""
                 record.author = author.hasPrefix(prefix) ? MarkupAuthorPreference.currentName : author
@@ -230,6 +232,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
         (inkTool == nil || (kind == .polyline && ["pen", "polyline"].contains(inkTool!))) &&
         (kind != .snapshot || (snapshotStyle.isValid && snapshotData != nil && SnapshotPayload(data: snapshotData!).page != nil)) &&
         (pageScale == nil || (kind == .rectangle && pageScale!.isValid && measurement == nil)) &&
+        (!pageScaleCleared || (kind == .rectangle && pageScale == nil && measurement == nil)) &&
         (measurement == nil || (measurement!.valid(points: vertices) && (kind == .polygon || kind == .polyline) && (measurement!.closed == (kind == .polygon)))) &&
         [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy { $0.isFinite } &&
         bounds.width >= 2 && bounds.height >= 2 &&
@@ -400,7 +403,7 @@ final class RectangleMarkupController {
                 let originalOrder = page.annotations
                 var replacements: [ObjectIdentifier: PDFAnnotation] = [:]
                 for original in originalOrder where RectangleMarkupRecord.owns(original) {
-                    if MarkupLayers.isMetadata(original) || MeasurementMetadata.pageScale(original) != nil { continue }
+                    if MarkupLayers.isMetadata(original) || MeasurementMetadata.isPageScaleMetadata(original) { continue }
                     if original.type == "Stamp", !(original is DrawbridgeSnapshotAnnotation), let payload = SnapshotPayload.read(original),
                        let replacement = try? SnapshotStampFactory.make(payload: payload, bounds: original.bounds, rotation: page.rotation, style: SnapshotStyle.read(original)) {
                         for key in [SnapshotPayload.key, SnapshotStyle.key, RectangleMarkupRecord.identityKey, MarkupLayers.membershipKey] {
@@ -687,16 +690,18 @@ final class RectangleMarkupController {
         }
         undo.setActionName("Set Page Scales")
         for (page, scale) in updates {
-            for carrier in page.annotations where MeasurementMetadata.pageScale(carrier) != nil { page.removeAnnotation(carrier) }
-            if let scale {
+            for carrier in page.annotations where MeasurementMetadata.isPageScaleMetadata(carrier) { page.removeAnnotation(carrier) }
+            do {
                 let origin = page.bounds(for: .mediaBox).origin
                 let marker = PDFAnnotation(bounds: CGRect(origin: origin, size: CGSize(width: 2,height: 2)), forType: .square, withProperties: nil)
                 marker.setValue(RectangleMarkupRecord.prefix + UUID().uuidString, forAnnotationKey: RectangleMarkupRecord.identityKey)
-                marker.setValue(MeasurementMetadata.json(scale), forAnnotationKey: MeasurementMetadata.pageScaleKey)
+                if let scale { marker.setValue(MeasurementMetadata.json(scale), forAnnotationKey: MeasurementMetadata.pageScaleKey) }
+                else { marker.setValue(true, forAnnotationKey: MeasurementMetadata.clearedScaleKey) }
+                marker.setValue(true, forAnnotationKey: MeasurementMetadata.pendingScaleKey)
                 marker.color = .clear; marker.shouldDisplay = false; marker.shouldPrint = false; marker.isReadOnly = true
                 page.addAnnotation(marker)
                 for annotation in page.annotations {
-                    if var measurement = MeasurementMetadata.measurement(annotation) {
+                    if let scale, var measurement = MeasurementMetadata.measurement(annotation) {
                         measurement.scale = scale
                         annotation.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey)
                         MeasurementMetadata.updateLabel(annotation)

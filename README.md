@@ -16,7 +16,7 @@ Download the **DMG**, open it, and drag **Drawbridge.app** into **Applications**
 
 Requires **macOS 13 or newer** on an **Apple Silicon Mac (M1 or newer)**. Intel builds are not currently provided.
 
-Version 1.0 starts the public release series. Earlier version numbers were development releases; their tags remain available for reference.
+Version 1.0 starts the public release series. Fixes use patch versions such as 1.0.1; new features use 1.1, 1.2, and so on. Published releases are preserved. Earlier development tags remain available for reference.
 
 ## What it does
 
@@ -25,7 +25,7 @@ Version 1.0 starts the public release series. Earlier version numbers were devel
 - **Add vector markups:** pen, rectangle, ellipse, line, arrow, polygon, polyline, and on-page text boxes. The active tool is highlighted; a resizable right properties sidebar offers custom colors, six line patterns, lineweights, text sizes, and separate stroke and fill opacity for rectangles, ellipses, and polygons. **Set as Default** remembers each tool’s appearance across app restarts.
 - **Select and arrange markups:** Shift-click to add or remove individual selections. Drag left to right to select enclosed markups, or right to left to select touched markups. Move or delete the selection together. Right-click for Bring to Front or Send to Back.
 - **Snapshot drawing regions:** capture a box or polygon and paste it onto another sheet at its original paper size. Use the right properties sidebar for overlay, opacity, grayscale, Change Color, or invert. Original captures preserve vector linework; optional color filters use a bounded high-resolution image and can be reversed. Snapshots are embedded in the saved PDF.
-- **Measure drawings:** apply architectural or metric scales to several pages, calibrate against a known dimension, and trace area, perimeter, or open-path length. Measurement labels and page scales persist in the PDF.
+- **Measure drawings:** apply architectural or metric scales to several pages, calibrate against a known dimension, and trace area, perimeter, or open-path length. Measurement labels and page scales persist in the PDF. Whole-page scales use PDF viewport measurement metadata, with current-page, all-page, and custom-range options. Existing named detail viewports are preserved; separate X/Y scales are not currently supported.
 - **Review markups:** open the Markups List to see type, page, comment, author, and layer. Click a row to jump to the annotation, search by text or author, and batch-delete selected markups with Undo. Links and form controls are excluded; locked annotations stay visible.
 - **Organize markup layers:** assign markups and Snapshots through their right-click menu or the Markups List. Create, rename, show/hide, and remove layers in the right sidebar; choose an active layer for new markups. Assignments and visibility persist in the PDF. Use the Lock column to protect a layer’s markups from editing and deletion in Drawbridge.
 - **Manage pages and bookmarks:** Shift/Command-select several entries, then press Backspace/Delete or right-click to delete with confirmation. Undo/redo also works after saving while the document remains open. Deleting bookmarks leaves PDF pages intact.

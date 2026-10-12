@@ -138,9 +138,10 @@ enum PDFLosslessReducer {
                 guard (CFGetTypeID(a) == CFBooleanGetTypeID()) == (CFGetTypeID(b) == CFBooleanGetTypeID()) else { return false }
                 if a != b {
                     // Foundation may parse the same JSON number as a decimal or
-                    // binary NSNumber. Compare their canonical JSON spelling;
-                    // do not use a tolerance that could conceal a content change.
-                    guard try JSONSerialization.data(withJSONObject: a, options: .fragmentsAllowed) == JSONSerialization.data(withJSONObject: b, options: .fragmentsAllowed) else { return false }
+                    // binary NSNumber. Compare canonical JSON spelling with
+                    // exponents expanded; do not use a numeric tolerance that
+                    // could conceal a changed conversion factor.
+                    guard try PDFJSONPatchEncoder.data(withJSONObject: a, options: .fragmentsAllowed) == PDFJSONPatchEncoder.data(withJSONObject: b, options: .fragmentsAllowed) else { return false }
                 }
             } else if !(a is NSNull && b is NSNull) { return false }
         }

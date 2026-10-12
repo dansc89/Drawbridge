@@ -27,6 +27,14 @@ final class PDFJSONPatchEncoderTests: XCTestCase {
         XCTAssertEqual(try PDFIncrementalMarkupPatch.encode("u:日本"), "<feff65e5672c>")
         XCTAssertEqual(try PDFIncrementalMarkupPatch.encode("u:line\nnext"), "<feff006c0069006e0065000a006e006500780074>")
     }
+    func testGraphComparisonAcceptsEquivalentTinyDecimalsButRejectsChangedCalibration() throws {
+        func graph(_ number: NSNumber) -> [String: Any] {
+            ["qpdf": [["maxobjectid": 1], ["trailer": ["value": ["/Root": "1 0 R"]], "obj:1 0 R": ["value": ["/C": number]]]]]
+        }
+        XCTAssertTrue(try PDFLosslessReducer.semanticGraphsMatch(graph(NSNumber(value: 1e-9)), graph(try XCTUnwrap(JSONSerialization.jsonObject(with: Data("0.000000001".utf8), options: .fragmentsAllowed) as? NSNumber))))
+        XCTAssertFalse(try PDFLosslessReducer.semanticGraphsMatch(graph(NSNumber(value: 1e-9)), graph(try XCTUnwrap(JSONSerialization.jsonObject(with: Data("0.000000001000001".utf8), options: .fragmentsAllowed) as? NSNumber))))
+        XCTAssertFalse(try PDFLosslessReducer.semanticGraphsMatch(graph(NSNumber(value: 1e-9)), graph(NSNumber(value: 0))))
+    }
     func testRejectsUnboundedExpansionWithoutIntegerOverflow() {
         XCTAssertThrowsError(try PDFJSONPatchEncoder.expandingExponents(in: Data("1e-9223372036854775808".utf8)))
     }

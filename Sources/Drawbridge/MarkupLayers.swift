@@ -75,7 +75,7 @@ enum MarkupLayers {
         layerCatalog.layers.first { $0.id == layerCatalog.activeID }?.locked ?? false
     }
     func canAssignLayer(_ annotation: PDFAnnotation) -> Bool {
-        guard !annotation.isReadOnly, !layerIsLocked(annotation), !MarkupLayers.isMetadata(annotation), MeasurementMetadata.pageScale(annotation) == nil else { return false }
+        guard !annotation.isReadOnly, !layerIsLocked(annotation), !MarkupLayers.isMetadata(annotation), !MeasurementMetadata.isPageScaleMetadata(annotation) else { return false }
         // Preserve foreign OCG/OCMD relationships instead of flattening them.
         guard annotation.value(forAnnotationKey: PDFAnnotationKey(rawValue: "/OC")) == nil || MarkupLayers.id(annotation) != nil else { return false }
         return RectangleMarkupRecord.owns(annotation) || ImportedMarkupState.selectable(annotation) ||

@@ -19,8 +19,8 @@ if [[ ! -f "$DMG_PATH" ]]; then
 fi
 
 if gh release view "$TAG" --repo "dansc89/Drawbridge" >/dev/null 2>&1; then
-  echo "Release $TAG already exists. Uploading/replacing asset..."
-  gh release upload "$TAG" "$DMG_PATH" --clobber --repo "dansc89/Drawbridge"
+  echo "Release $TAG already exists. Publish a new version instead of replacing its assets."
+  exit 1
 else
   echo "Creating release $TAG and uploading DMG..."
   gh release create "$TAG" "$DMG_PATH" --generate-notes --repo "dansc89/Drawbridge"

@@ -4,7 +4,7 @@ import PDFKit
 @MainActor
 enum MarkupListPresentation {
     static func includes(_ annotation: PDFAnnotation) -> Bool {
-        guard !(annotation is SnapshotViewportTileAnnotation), !MarkupLayers.isMetadata(annotation), MeasurementMetadata.pageScale(annotation) == nil else { return false }
+        guard !(annotation is SnapshotViewportTileAnnotation), !MarkupLayers.isMetadata(annotation), !MeasurementMetadata.isPageScaleMetadata(annotation) else { return false }
         guard !["Link", "Widget", "Popup"].contains(annotation.type ?? "") else { return false }
         let author = (annotation.userName ?? "").lowercased()
         return !author.contains("autocad shx")

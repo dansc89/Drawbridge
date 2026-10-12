@@ -24,8 +24,8 @@ ICON_ICNS_PATH="$RESOURCES_DIR/$ICON_FILE_NAME.icns"
 QPDF_VENDOR_DIR="ThirdParty/QPDF/arm64"
 VERSION_TAG="${DRAWBRIDGE_VERSION_TAG:-v1.0}"
 APP_VERSION="${VERSION_TAG#v}"
-if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]$ ]]; then
-  echo "Release versions must use the major.minor sequence (for example v2.1 through v2.9, then v3.0)."
+if [[ ! "$APP_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+  echo "Release versions must use major.minor or major.minor.patch (for example v1.1 or v1.0.1)."
   exit 1
 fi
 BUILD_NUMBER="${DRAWBRIDGE_BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo "1")}"

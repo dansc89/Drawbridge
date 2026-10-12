@@ -7,14 +7,29 @@ private final class DrawingScaleForm: NSView {
     let paper = NSTextField(string: "1/8")
     let real = NSTextField(string: "1")
     let pages = NSTextField(string: "1")
+    let scope = NSPopUpButton()
+    let currentPage: Int
+    let pageCount: Int
+    var pageIndices: [Int]? {
+        switch scope.indexOfSelectedItem {
+        case 0: return [currentPage]
+        case 1: return Array(0..<pageCount)
+        default: return MeasurementGeometry.pages(pages.stringValue, count: pageCount)
+        }
+    }
     let presets: [(String, DrawingScale)]
-    init(presets: [(String, DrawingScale)], current: DrawingScale?, pageText: String) {
+    init(presets: [(String, DrawingScale)], current: DrawingScale?, pageText: String, currentPage: Int, pageCount: Int) {
         self.presets = presets
-        super.init(frame: CGRect(x: 0, y: 0, width: 420, height: 155))
+        self.currentPage = currentPage; self.pageCount = pageCount
+        super.init(frame: CGRect(x: 0, y: 0, width: 420, height: 195))
         preset.addItems(withTitles: presets.map(\.0) + ["Custom architectural scale…"])
-        let selected = presets.firstIndex { $0.1 == current } ?? presets.firstIndex { abs($0.1.unitsPerPoint - (current?.unitsPerPoint ?? 1.0/9)) < 1e-9 && $0.1.unit == (current?.unit ?? "ft") }
+        let selected = presets.firstIndex { $0.1 == current } ?? presets.firstIndex { abs($0.1.unitsPerPoint - (current?.unitsPerPoint ?? 1.0/9)) < max($0.1.unitsPerPoint, 1e-9) * 1e-6 && $0.1.unit == (current?.unit ?? "ft") }
         preset.selectItem(at: selected ?? presets.count)
         if let current, current.unit == "ft" { paper.stringValue = String(format: "%.8g", 1 / (72 * current.unitsPerPoint)) }
+        scope.addItems(withTitles: ["Current page (\(currentPage + 1))", "All pages (1-\(pageCount))", "Custom range"])
+        scope.selectItem(at: pageText == String(currentPage + 1) ? 0 : 2)
+        scope.setAccessibilityLabel("Scale page scope")
+        scope.target = self; scope.action = #selector(changed)
         pages.stringValue = pageText
         pages.setAccessibilityLabel("Pages to apply scale to")
         paper.setAccessibilityLabel("Drawing inches")
@@ -25,7 +40,7 @@ private final class DrawingScaleForm: NSView {
         custom.spacing = 6
         paper.widthAnchor.constraint(equalToConstant: 75).isActive = true
         real.widthAnchor.constraint(equalToConstant: 75).isActive = true
-        let row = NSStackView(views: [NSTextField(labelWithString: "Apply to pages"), pages]); row.spacing = 8
+        let row = NSStackView(views: [NSTextField(labelWithString: "Apply to"), scope, pages]); row.spacing = 8
         let helper = NSTextField(wrappingLabelWithString: "Page numbers: 1, 3-6, 9. Use a known dimension to verify the sheet scale; resized drawings and details may use a different scale.")
         helper.font = .systemFont(ofSize: 11); helper.textColor = .secondaryLabelColor
         let stack = NSStackView(views: [preset, custom, row, helper])
@@ -35,7 +50,7 @@ private final class DrawingScaleForm: NSView {
         changed()
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    @objc private func changed() { paper.isEnabled = preset.indexOfSelectedItem == presets.count; real.isEnabled = paper.isEnabled }
+    @objc private func changed() { paper.isEnabled = preset.indexOfSelectedItem == presets.count; real.isEnabled = paper.isEnabled; pages.isEnabled = scope.indexOfSelectedItem == 2 }
     var scale: DrawingScale? {
         let index = preset.indexOfSelectedItem
         if presets.indices.contains(index) { return presets[index].1 }
@@ -57,13 +72,13 @@ extension MainViewController {
         let current = document.index(for: page)
         let selected = pagesTableView.selectedRowIndexes
         let numbers = selected.count > 1 ? selected.map { String($0+1) }.joined(separator: ", ") : String(current+1)
-        let form = DrawingScaleForm(presets: architectural+metric, current: MeasurementMetadata.scale(on: page), pageText: numbers)
+        let form = DrawingScaleForm(presets: architectural+metric, current: MeasurementMetadata.scale(on: page), pageText: numbers, currentPage: current, pageCount: document.pageCount)
         let alert = NSAlert(); alert.messageText = "Set Drawing Scale"
         alert.informativeText = "Apply a scale to one or several sheets. Existing measurements on these pages will be recalculated."
         alert.accessoryView = form; alert.addButton(withTitle: "Apply Scale"); alert.addButton(withTitle: "Cancel")
         while alert.runModal() == .alertFirstButtonReturn {
             guard pdfView.document === document else { return }
-            guard let scale = form.scale, let indices = MeasurementGeometry.pages(form.pages.stringValue, count: document.pageCount) else {
+            guard let scale = form.scale, let indices = form.pageIndices else {
                 runAlert(title: "Check the scale and page numbers", informativeText: "Enter a positive scale and valid page numbers, such as 1, 3-6. No pages have been changed.", style: .warning)
                 continue
             }

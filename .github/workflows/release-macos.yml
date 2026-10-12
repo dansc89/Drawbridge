@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing version tag to build (for example v1.1 or v1.0.1)
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -14,12 +19,31 @@ jobs:
     permissions:
       contents: write
     runs-on: macos-15
+    env:
+      DRAWBRIDGE_VERSION_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+
+      - name: Validate new release version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ! "$DRAWBRIDGE_VERSION_TAG" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "Use v1.1 for features or v1.0.1 for fixes."
+            exit 1
+          fi
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName > "$RUNNER_TEMP/published-releases.json"
+          python3 - "$RUNNER_TEMP/published-releases.json" <<'PYCHECK'
+          import json, os, sys
+          tags = {item["tagName"] for item in json.load(open(sys.argv[1]))}
+          if os.environ["DRAWBRIDGE_VERSION_TAG"] in tags:
+              sys.exit("This release already exists. Choose a new version.")
+          PYCHECK
 
       - name: Select Xcode
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
@@ -58,8 +82,7 @@ jobs:
 
       - name: Build app bundle
         env:
-          DRAWBRIDGE_VERSION_TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v1.0' }}
-          DRAWBRIDGE_BUILD_NUMBER: "183"
+          DRAWBRIDGE_BUILD_NUMBER: "184"
         run: ./Scripts/package-app.sh
 
       - name: Notarize app before packaging
@@ -74,7 +97,7 @@ jobs:
 
       - name: Prepare release artifacts
         run: |
-          VERSION_TAG="${GITHUB_REF_NAME:-manual}"
+          VERSION_TAG="$DRAWBRIDGE_VERSION_TAG"
           APP_NAME="Drawbridge"
           DMG_PATH="dist/${APP_NAME}-${VERSION_TAG}.dmg"
           ZIP_PATH="dist/${APP_NAME}-${VERSION_TAG}.zip"
@@ -101,7 +124,7 @@ jobs:
 
       - name: Rebuild ZIP from stapled app
         run: |
-          VERSION_TAG="${GITHUB_REF_NAME:-manual}"
+          VERSION_TAG="$DRAWBRIDGE_VERSION_TAG"
           APP_NAME="Drawbridge"
           ZIP_PATH="dist/${APP_NAME}-${VERSION_TAG}.zip"
           rm -f "$ZIP_PATH"
@@ -110,7 +133,7 @@ jobs:
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: drawbridge-macos-${{ github.ref_name || 'manual' }}
+          name: drawbridge-macos-${{ env.DRAWBRIDGE_VERSION_TAG }}
           path: |
             ${{ env.DMG_PATH }}
             ${{ env.ZIP_PATH }}

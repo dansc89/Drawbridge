@@ -135,6 +135,11 @@ enum MeasurementGeometry {
 enum MeasurementMetadata {
     static let measurementKey = PDFAnnotationKey(rawValue: "DrawbridgeMeasurement")
     static let pageScaleKey = PDFAnnotationKey(rawValue: "DrawbridgePageScale")
+    static let pendingScaleKey = PDFAnnotationKey(rawValue: "DrawbridgePageScalePending")
+    static let clearedScaleKey = PDFAnnotationKey(rawValue: "DrawbridgePageScaleCleared")
+    static func isPageScaleMetadata(_ annotation: PDFAnnotation) -> Bool {
+        pageScale(annotation) != nil || (RectangleMarkupRecord.owns(annotation) && annotation.value(forAnnotationKey: clearedScaleKey) as? Bool == true)
+    }
     static func json<T: Encodable>(_ value: T) -> String {
         let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
         return (try? encoder.encode(value)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
@@ -151,7 +156,17 @@ enum MeasurementMetadata {
         guard RectangleMarkupRecord.owns(annotation), let value = decode(DrawingScale.self, from: annotation, key: pageScaleKey), value.isValid else { return nil }
         return value
     }
-    static func scale(on page: PDFPage) -> DrawingScale? { page.annotations.compactMap(pageScale).last }
+    static func scale(on page: PDFPage) -> DrawingScale? {
+        if let pending = page.annotations.last(where: { isPageScaleMetadata($0) && $0.value(forAnnotationKey: pendingScaleKey) as? Bool == true }) { return pageScale(pending) }
+        let standard = PDFPageScaleMetadata.read(page)
+        if standard.present {
+            if let value = standard.scale, let legacy = page.annotations.compactMap(pageScale).last,
+               value.unit == legacy.unit, abs(value.unitsPerPoint - legacy.unitsPerPoint) < 1e-12 { return legacy }
+            return standard.scale
+        }
+        if page.annotations.contains(where: { $0.value(forAnnotationKey: clearedScaleKey) as? Bool == true && RectangleMarkupRecord.owns($0) }) { return nil }
+        return page.annotations.compactMap(pageScale).last
+    }
     static func updateLabel(_ annotation: PDFAnnotation) {
         guard let measurement = measurement(annotation) else { return }
         annotation.contents = measurement.label(points: RectangleMarkupRecord.vertices(annotation))

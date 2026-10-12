@@ -119,7 +119,7 @@ enum PDFRectangleWriter {
             try reuseUnchangedNavigation(baseline: inspected, updated: &json)
             profile("navigation changes")
             stage = "annotation update"
-            try update(&json, records: records)
+            let scaleViewports = try update(&json, records: records, document: document)
             var importedArrays: [Int: [Any]] = [:]
             var importedObjects: [String: [String: Any]] = [:]
             if let importedPlan {
@@ -155,7 +155,7 @@ enum PDFRectangleWriter {
             let candidate = directory.appendingPathComponent("candidate.pdf")
             let changed = try changedObjects(baseline: inspected, updated: json)
             stage = "original content verification"
-            guard try preservesOriginalObjects(baseline: inspected, updated: json, changed: changed, importedArrays: importedArrays, importedObjects: importedObjects) else { return false }
+            guard try preservesOriginalObjects(baseline: inspected, updated: json, changed: changed, importedArrays: importedArrays, importedObjects: importedObjects, scaleViewports: scaleViewports) else { return false }
             stage = "incremental serialization"
             let expectedSize = try PDFIncrementalMarkupPatch.append(original: original, baseline: inspected, updated: json, snapshot: input, to: candidate)
             profile("candidate write")
@@ -213,9 +213,9 @@ enum PDFRectangleWriter {
     }
 
     /// Check the mutation boundary before serializing. Only navigation, annotation
-    /// arrays and owned annotations may change; base page dictionaries and all
-    /// original streams/resources stay immutable.
-    static func preservesOriginalObjects(baseline: [String: Any], updated: [String: Any], changed: [String], importedArrays: [Int: [Any]] = [:], importedObjects: [String: [String: Any]] = [:]) throws -> Bool {
+    /// arrays, owned annotations, and explicitly authorized scale viewports may
+    /// change. Original streams/resources and other page fields stay immutable.
+    static func preservesOriginalObjects(baseline: [String: Any], updated: [String: Any], changed: [String], importedArrays: [Int: [Any]] = [:], importedObjects: [String: [String: Any]] = [:], scaleViewports: [String: Any] = [:]) throws -> Bool {
         let before = try objectTable(baseline), after = try objectTable(updated)
         let pageRefs = try pages(baseline)
         let pageKeys = Set(pageRefs.map { "obj:" + $0 })
@@ -230,7 +230,11 @@ enum PDFRectangleWriter {
             guard old["stream"] == nil, let new = after[key] as? [String: Any] else { return false }
             if pageKeys.contains(key) || key == "obj:" + catalog {
                 guard var a = old["value"] as? [String: Any], var b = new["value"] as? [String: Any] else { return false }
-                let allowed = pageKeys.contains(key) ? ["/Annots"] : ["/Outlines", "/PageLabels", "/OCProperties"]
+                var allowed = pageKeys.contains(key) ? ["/Annots"] : ["/Outlines", "/PageLabels", "/OCProperties"]
+                if let expected = scaleViewports[key], pageKeys.contains(key) {
+                    guard NSArray(array: [expected]).isEqual(to: [b["/VP"] ?? NSNull()]) else { return false }
+                    allowed.append("/VP")
+                }
                 for field in allowed { a.removeValue(forKey: field); b.removeValue(forKey: field) }
                 guard NSDictionary(dictionary: a).isEqual(to: b) else { return false }
                 if key == "obj:" + catalog && !PDFMarkupLayersPatch.preservesForeignLayers(before: before, after: after, root: catalog) { return false }
@@ -500,7 +504,8 @@ enum PDFRectangleWriter {
         tables[1] = objects; json["qpdf"] = tables
     }
 
-    private static func update(_ json: inout [String: Any], records: [RectangleMarkupRecord]) throws {
+    private static func update(_ json: inout [String: Any], records: [RectangleMarkupRecord], document: PDFDocument) throws -> [String: Any] {
+        var scaleViewports: [String: Any] = [:]
         var qpdf = try tableArray(json); var objects = qpdf[1]
         var next = (qpdf[0]["maxobjectid"] as? Int ?? 0) + 1
         let layerCatalogs = records.compactMap(\.layerCatalog)
@@ -574,6 +579,7 @@ enum PDFRectangleWriter {
                     annotation["/DrawbridgeSnapshotPDF"] = payloadRef
                     annotation["/DrawbridgeSnapshotStyle"] = "u:" + record.snapshotStyle.json
                 }
+                if record.pageScaleCleared { annotation["/DrawbridgePageScaleCleared"] = true; annotation["/F"] = 98 }
                 if let scale = record.pageScale {
                     annotation["/DrawbridgePageScale"] = "u:" + MeasurementMetadata.json(scale)
                     annotation["/F"] = 98 // Hidden, NoView, ReadOnly; never printed.
@@ -628,9 +634,22 @@ enum PDFRectangleWriter {
                 entries.append(annotationRef)
             }
             if entries.isEmpty { page.removeValue(forKey: "/Annots") } else { page["/Annots"] = entries }
+            let carriers = (recordsByPage[index] ?? []).filter { $0.pageScale != nil || $0.pageScaleCleared }
+            guard carriers.count <= 1 else { throw CocoaError(.fileWriteUnknown) }
+            if let carrier = carriers.first {
+                let standard = PDFPageScaleMetadata.scale(page: page, objects: objects)
+                let desired = carrier.pageScale
+                let equivalent = standard != nil && desired != nil && standard!.unit == desired!.unit && abs(standard!.unitsPerPoint - desired!.unitsPerPoint) <= desired!.unitsPerPoint * 1e-12
+                let pending = document.page(at: index)?.annotations.contains { RectangleMarkupRecord.identity($0) == carrier.id && $0.value(forAnnotationKey: MeasurementMetadata.pendingScaleKey) as? Bool == true } == true
+                let hasWhole = PDFPageScaleMetadata.entries(page, objects: objects).contains { PDFPageScaleMetadata.wholePage(PDFPageScaleMetadata.dictionary($0, objects: objects), page: PDFPageScaleMetadata.effectivePage(page, objects: objects)) }
+                if !equivalent && (pending || !hasWhole) {
+                    scaleViewports["obj:" + reference] = PDFPageScaleMetadata.install(scale: desired, page: &page, objects: &objects, next: &next)
+                }
+            }
             object["value"] = page; objects["obj:\(reference)"] = object
         }
         qpdf[0]["maxobjectid"] = next - 1; qpdf[1] = objects; json["qpdf"] = qpdf
+        return scaleViewports
     }
 
     private static func subtype(_ kind: RectangleMarkupRecord.Kind) -> String {
@@ -639,7 +658,7 @@ enum PDFRectangleWriter {
 
     /// Appearance coordinates are local to the annotation; page rotation is untouched.
     private static func appearanceDrawing(_ r: RectangleMarkupRecord) -> String {
-        if r.pageScale != nil { return "" }
+        if r.pageScale != nil || r.pageScaleCleared { return "" }
         let style = "/MarkupGS gs [" + r.linePattern.dash(width: CGFloat(r.lineWidth)).map { String($0) }.joined(separator: " ") + "] 0 d"
         let half = r.lineWidth/2, w = max(0,Double(r.bounds.width)-r.lineWidth), h = max(0,Double(r.bounds.height)-r.lineWidth)
         var path: String
@@ -703,6 +722,7 @@ enum PDFRectangleWriter {
                 if value["/DrawbridgeMeasurement"] as? String != expected.measurement.map({ "u:" + MeasurementMetadata.json($0) }) { return false }
                 if value["/DrawbridgePageScale"] as? String != expected.pageScale.map({ "u:" + MeasurementMetadata.json($0) }) { return false }
                 if let scale = expected.pageScale, (!scale.isValid || value["/F"] as? Int != 98) { return false }
+                if (value["/DrawbridgePageScaleCleared"] as? Bool ?? false) != expected.pageScaleCleared { return false }
                 if let measurement = expected.measurement, value["/Contents"] as? String != "u:" + measurement.label(points: expected.vertices) { return false }
                 if expected.kind == .polygon {
                     guard value["/Vertices"] as? [Double] == expected.vertices.flatMap({ [Double($0.x),Double($0.y)] }) else { return false }
