@@ -215,11 +215,13 @@ final class SavedMarkupDefaultsTests: XCTestCase {
         XCTAssertTrue(session.pointerDown(at: location(80, 90)))
         XCTAssertTrue(session.pointerDragged(at: location(200, 170)))
         XCTAssertTrue(session.pointerUp(at: location(200, 170)))
+        SnapshotTests().waitForCapture(session)
         XCTAssertEqual(try XCTUnwrap(SnapshotPayload.clipboard()).style, appearance.snapshot)
         session.tool = .snapshotBox
         XCTAssertTrue(session.pointerDown(at: location(80, 90))); _ = session.pointerUp(at: location(80, 90))
         XCTAssertTrue(session.pointerDown(at: location(200, 90))); _ = session.pointerUp(at: location(200, 90))
         XCTAssertTrue(session.pointerDown(at: location(80, 170), clickCount: 2)); _ = session.pointerUp(at: location(80, 170))
+        SnapshotTests().waitForCapture(session)
         let payload = try XCTUnwrap(SnapshotPayload.clipboard())
         XCTAssertEqual(payload.style, appearance.snapshot)
         let annotation = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: .zero, inPlace: true))

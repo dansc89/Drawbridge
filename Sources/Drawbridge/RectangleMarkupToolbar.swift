@@ -119,6 +119,10 @@ extension MainViewController {
         }
         session.onPresentationChanged = { [weak self] in self?.refreshRectangleToolbar() }
         rectangleToolbar.propertiesController.session = session
+        session.onSnapshotCaptureChanged = { [weak self] in
+            self?.updateStatusBar()
+            self?.refreshRectangleToolbar()
+        }
         session.onSnapshotError = { error in
             let alert = NSAlert(); alert.messageText = "Could not complete Snapshot"; alert.informativeText = error.localizedDescription; alert.runModal()
         }

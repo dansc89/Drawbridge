@@ -308,6 +308,9 @@ final class RectangleMarkupController {
     var onMeasurementNeedsScale: (() -> Void)?
     var onCalibrationCompleted: ((PDFPage, CGPoint, CGPoint) -> Void)?
     var onSnapshotError: ((Error) -> Void)?
+    var onSnapshotCaptureChanged: (() -> Void)?
+    private(set) var isCapturingSnapshot = false
+    private var snapshotCaptureID: UUID?
     var onInvalidMeasurement: (() -> Void)?
     var canEdit: () -> Bool = { true }
     var tool: Tool = .select {
@@ -360,6 +363,7 @@ final class RectangleMarkupController {
 
     func bind(to document: PDFDocument?) {
         guard boundDocument !== document else { return }
+        cancelSnapshotCapture()
         finishTextEditing()
         if let previous = boundDocument {
             documentStates.setObject(DocumentState(dirty: hasUnsavedChanges, stamp: sourceStamp), forKey: previous)
@@ -445,6 +449,7 @@ final class RectangleMarkupController {
     func acceptPersistedSource(at url: URL, stamp: PDFMarkupSourceStamp? = nil) { sourceStamp = stamp ?? PDFMarkupSourceStamp.capture(url) }
 
     func pointerDown(at location: CGPoint, clickCount: Int = 1, modifiers: NSEvent.ModifierFlags = []) -> Bool {
+        guard !isCapturingSnapshot else { return true }
         finishTextEditing()
         guard let view else { return false }
         guard let page = view.page(for: location, nearest: false) else {
@@ -765,17 +770,44 @@ final class RectangleMarkupController {
         refresh(); return true
     }
 
+    private func setSnapshotCaptureBusy(_ busy: Bool) {
+        isCapturingSnapshot = busy
+        (view as? MarkupPDFView)?.setSnapshotCaptureBusy(busy)
+        onSnapshotCaptureChanged?()
+    }
+    func cancelSnapshotCapture() {
+        guard isCapturingSnapshot else { return }
+        snapshotCaptureID = nil
+        setSnapshotCaptureBusy(false)
+    }
     private func captureSnapshot(page: PDFPage, points: [CGPoint]) {
-        do {
-            var payload = try SnapshotPayload.capture(page: page, points: points)
-            payload.style = SavedMarkupAppearance.load(.snapshotBox, from: defaultPreferences)?.snapshot ?? SnapshotStyle()
-            payload.copy(); tool = .select
+        guard !isCapturingSnapshot, canEdit(), page.document === boundDocument else { return }
+        let captureID = UUID()
+        let style = SavedMarkupAppearance.load(.snapshotBox, from: defaultPreferences)?.snapshot ?? SnapshotStyle()
+        snapshotCaptureID = captureID
+        setSnapshotCaptureBusy(true)
+        // Give AppKit a frame to show the indicator before PDFKit renders. Keep
+        // the live document and its annotations on the main thread.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self, self.snapshotCaptureID == captureID else { return }
+            guard page.document === self.boundDocument else { self.cancelSnapshotCapture(); return }
+            do {
+                var payload = try SnapshotPayload.capture(page: page, points: points)
+                payload.style = style
+                payload.copy()
+                self.snapshotCaptureID = nil
+                self.setSnapshotCaptureBusy(false)
+                self.tool = .select
+            } catch {
+                self.snapshotCaptureID = nil
+                self.setSnapshotCaptureBusy(false)
+                self.onSnapshotError?(error)
+            }
         }
-        catch { onSnapshotError?(error) }
     }
     @discardableResult
     func pasteSnapshot(_ payload: SnapshotPayload, on page: PDFPage, center: CGPoint, inPlace: Bool = false) -> PDFAnnotation? {
-        guard canEdit(), !activeLayerIsLocked, page.document === boundDocument, let size = payload.size else { return nil }
+        guard !isCapturingSnapshot, canEdit(), !activeLayerIsLocked, page.document === boundDocument, let size = payload.size else { return nil }
         guard MeasurementMetadata.supportedPage(page) else { onSnapshotError?(SnapshotError.unsupportedPageUnits); return nil }
         let rotated = page.rotation % 180 != 0
         let paperSize = rotated ? CGSize(width:size.height,height:size.width) : size
@@ -1174,7 +1206,7 @@ final class RectangleMarkupController {
         return true
     }
     func cancelGesture() { penConstraintAnchor = nil; pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
-    func escape() { cancelGesture(); selected = nil; onClickAway?(); tool = .select; refresh() }
+    func escape() { cancelSnapshotCapture(); cancelGesture(); selected = nil; onClickAway?(); tool = .select; refresh() }
     func refresh(presentationChanged: Bool = true) {
         positionTextEditor()
         CATransaction.begin(); CATransaction.setDisableActions(true)

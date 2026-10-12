@@ -315,7 +315,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var pendingCalibrationDistanceInPoints: CGFloat?
     let rectangleToolbar = RectangleMarkupToolbar()
 
-    var isPDFProcessingBusy: Bool { busyOperationDepth > 0 || isSavingDocumentOperation || isSwitchingDocument }
+    var isPDFProcessingBusy: Bool { busyOperationDepth > 0 || isSavingDocumentOperation || isSwitchingDocument || pdfView.rectangleMarkup.isCapturingSnapshot }
     private var isSwitchingDocument = false
     private var busyOperationDepth = 0
     var markupChangeVersion = 0

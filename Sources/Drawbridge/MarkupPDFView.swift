@@ -53,6 +53,58 @@ private final class PDFOverscrollClipView: NSClipView {
 }
 
 final class MarkupPDFView: PDFView, NSTextFieldDelegate {
+    private lazy var snapshotCaptureIndicator = NSVisualEffectView()
+    private lazy var snapshotCaptureSpinner = NSProgressIndicator()
+    private var hasSnapshotCaptureIndicator = false
+
+    var isSnapshotCaptureIndicatorVisible: Bool { hasSnapshotCaptureIndicator && !snapshotCaptureIndicator.isHidden }
+
+    func setSnapshotCaptureBusy(_ busy: Bool) {
+        if busy && !hasSnapshotCaptureIndicator { installSnapshotCaptureIndicator() }
+        guard hasSnapshotCaptureIndicator else { return }
+        snapshotCaptureIndicator.isHidden = !busy
+        if busy {
+            snapshotCaptureSpinner.startAnimation(nil)
+            layoutSubtreeIfNeeded()
+            snapshotCaptureIndicator.displayIfNeeded()
+        } else {
+            snapshotCaptureSpinner.stopAnimation(nil)
+        }
+    }
+
+    private func installSnapshotCaptureIndicator() {
+        hasSnapshotCaptureIndicator = true
+        let panel = snapshotCaptureIndicator
+        panel.material = .hudWindow
+        panel.blendingMode = .withinWindow
+        panel.wantsLayer = true
+        panel.layer?.cornerRadius = 10
+        panel.layer?.zPosition = 3000
+        panel.isHidden = true
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        snapshotCaptureSpinner.style = .spinning
+        snapshotCaptureSpinner.controlSize = .small
+        snapshotCaptureSpinner.usesThreadedAnimation = true
+        snapshotCaptureSpinner.setAccessibilityLabel("Capturing Snapshot")
+        let label = NSTextField(labelWithString: "Capturing Snapshot…")
+        let stack = NSStackView(views: [snapshotCaptureSpinner, label])
+        stack.orientation = .horizontal
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        panel.addSubview(stack)
+        addSubview(panel)
+        NSLayoutConstraint.activate([
+            panel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            panel.topAnchor.constraint(equalTo: topAnchor, constant: 16),
+            stack.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
+            stack.topAnchor.constraint(equalTo: panel.topAnchor, constant: 10),
+            stack.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10),
+            snapshotCaptureSpinner.widthAnchor.constraint(equalToConstant: 16),
+            snapshotCaptureSpinner.heightAnchor.constraint(equalToConstant: 16)
+        ])
+    }
+
     let rectangleMarkup = RectangleMarkupController()
     // Keep PDFView.document inherited: PDFKit reads it from its formFillingQueue.
     // Overriding it here gives the ObjC getter a main-actor assertion and crashes

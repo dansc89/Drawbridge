@@ -63,7 +63,7 @@ Each page has one scale. Reduced sheets and details at a different scale need ve
 
 ## Snapshot
 
-Choose **Edit > Snapshot** (`G`) or the camera toolbar button. Drag a box and release to capture a rectangle, or click polygon corners and double-click the final corner to capture a polygon. Return or clicking the first corner also finishes a polygon. Escape cancels an unfinished capture.
+Choose **Edit > Snapshot** (`G`) or the camera toolbar button. Drag a box and release to capture a rectangle, or click polygon corners and double-click the final corner to capture a polygon. Return or clicking the first corner also finishes a polygon. Escape cancels an unfinished capture. A small **Capturing Snapshot…** spinner appears after you finish the selection. When it disappears, the capture is ready to paste. Paste is disabled while capture is in progress.
 
 Move the pointer over the destination page and press **Cmd+V**. Use **Cmd+Shift+V** (Paste in Place) to paste at the stored capture or copied snapshot coordinates on the current page. The snapshot is pasted at its original paper size, independent of zoom. Rotated destination sheets retain the captured orientation. Drag a pasted snapshot to move it, use **Cmd+C** to copy it again, or Delete to remove it. Undo and redo apply to pasting, moving, and deleting. Snapshots cannot be stretched by dragging selection corners, so their scale remains unchanged.
 

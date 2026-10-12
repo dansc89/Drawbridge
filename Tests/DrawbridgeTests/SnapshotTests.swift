@@ -11,6 +11,13 @@ import XCTest
 }
 
 @MainActor final class SnapshotTests: XCTestCase {
+    func waitForCapture(_ session: RectangleMarkupController, file: StaticString = #filePath, line: UInt = #line) {
+        let deadline = Date().addingTimeInterval(10)
+        while session.isCapturingSnapshot && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        XCTAssertFalse(session.isCapturingSnapshot, "Capture did not finish", file: file, line: line)
+    }
     func fixture(rotation: Int = 0) throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("SnapshotFixture-\(UUID().uuidString).pdf")
         var box = CGRect(x: 30,y: 40,width: 500,height: 400)
@@ -256,6 +263,77 @@ import XCTest
         XCTAssertEqual(try raster(low.page!,size:low.size!), try raster(high.page!,size:high.size!))
         XCTAssertNotEqual(actual,try raster(low.page!,size:low.size!))
     }
+    func testCaptureIndicatorReadinessCancellationAndDocumentSwitch() throws {
+        _ = NSApplication.shared
+        let source = try fixture()
+        defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source))
+        let page = try XCTUnwrap(document.page(at: 0))
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1000, height: 900), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let view = MarkupPDFView(frame: window.contentView!.bounds)
+        window.contentView!.addSubview(view)
+        view.setMarkupDocument(document); view.go(to: page)
+        window.layoutIfNeeded(); view.layoutSubtreeIfNeeded()
+        let session = view.rectangleMarkup
+        session.canEdit = { true }
+        let previous = try capture(page); previous.copy()
+        var states: [Bool] = []
+        session.onSnapshotCaptureChanged = { states.append(session.isCapturingSnapshot) }
+        func start() {
+            session.tool = .snapshotBox
+            let a = view.convert(CGPoint(x: 90, y: 100), from: page)
+            let b = view.convert(CGPoint(x: 180, y: 160), from: page)
+            XCTAssertTrue(session.pointerDown(at: a))
+            XCTAssertTrue(session.pointerDragged(at: b))
+            XCTAssertTrue(session.pointerUp(at: b))
+        }
+        start()
+        XCTAssertTrue(session.isCapturingSnapshot)
+        XCTAssertTrue(view.isSnapshotCaptureIndicatorVisible)
+        XCTAssertEqual(SnapshotPayload.clipboard()?.data, previous.data)
+        XCTAssertNil(session.pasteSnapshot(previous, on: page, center: .zero))
+        waitForCapture(session)
+        XCTAssertEqual(states, [true, false])
+        XCTAssertFalse(view.isSnapshotCaptureIndicatorVisible)
+        let completed = try XCTUnwrap(SnapshotPayload.clipboard())
+        XCTAssertNotEqual(completed.data, previous.data)
+        XCTAssertNotNil(session.pasteSnapshot(completed, on: page, center: .zero))
+        start(); session.escape()
+        XCTAssertFalse(session.isCapturingSnapshot)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(SnapshotPayload.clipboard()?.data, completed.data)
+        start(); view.setMarkupDocument(PDFDocument())
+        XCTAssertFalse(session.isCapturingSnapshot)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(SnapshotPayload.clipboard()?.data, completed.data)
+        XCTAssertEqual(states, [true, false, true, false, true, false])
+        XCTAssertFalse(view.isSnapshotCaptureIndicatorVisible)
+        // A page without a PDF backing object cannot be captured. Its failure
+        // must release the busy state before presenting the error to the user.
+        let empty = PDFDocument(), blank = PDFPage()
+        empty.insert(blank, at: 0)
+        view.setMarkupDocument(empty); view.go(to: blank)
+        window.layoutIfNeeded(); view.layoutSubtreeIfNeeded()
+        var reportedError = false
+        session.onSnapshotError = { _ in
+            reportedError = true
+            XCTAssertFalse(session.isCapturingSnapshot)
+            XCTAssertFalse(view.isSnapshotCaptureIndicatorVisible)
+        }
+        session.tool = .snapshotBox
+        let a = view.convert(CGPoint(x: 90, y: 100), from: blank)
+        let b = view.convert(CGPoint(x: 180, y: 160), from: blank)
+        XCTAssertTrue(session.pointerDown(at: a)); XCTAssertTrue(session.pointerDragged(at: b)); XCTAssertTrue(session.pointerUp(at: b))
+        waitForCapture(session)
+        XCTAssertTrue(reportedError)
+        XCTAssertEqual(SnapshotPayload.clipboard()?.data, completed.data)
+        session.onSnapshotCaptureChanged = nil
+        session.onSnapshotError = nil
+        view.setMarkupDocument(nil)
+        window.close()
+    }
+
     func testBoxPolygonCaptureCancelAndFixedSizeThroughController() throws {
         _ = NSApplication.shared
         let window = NSWindow(contentRect:CGRect(x:0,y:0,width:1000,height:900),styleMask:[.titled],backing:.buffered,defer:false)
@@ -270,12 +348,14 @@ import XCTest
             XCTAssertTrue(session.pointerDown(at:location(CGPoint(x:80,y:90))))
             XCTAssertTrue(session.pointerDragged(at:location(CGPoint(x:200,y:170))))
             XCTAssertTrue(session.pointerUp(at:location(CGPoint(x:200,y:170))))
+            waitForCapture(session)
             let box = try XCTUnwrap(SnapshotPayload.clipboard())
             XCTAssertEqual(box.size,rotation%180 == 0 ? CGSize(width:120,height:80) : CGSize(width:80,height:120))
             XCTAssertTrue(page.annotations.isEmpty)
             session.tool = .snapshotPolygon
             for p in [CGPoint(x:80,y:90),CGPoint(x:200,y:90),CGPoint(x:80,y:170)] { XCTAssertTrue(session.pointerDown(at:location(p))) }
             XCTAssertTrue(session.finishPolyline())
+            waitForCapture(session)
             let triangle = try XCTUnwrap(SnapshotPayload.clipboard()); XCTAssertNotEqual(triangle.data,box.data)
             session.tool = .snapshotBox; XCTAssertTrue(session.pointerDown(at:location(CGPoint(x:80,y:90))))
             session.cancelGesture(); XCTAssertEqual(SnapshotPayload.clipboard()?.data,triangle.data)
@@ -366,6 +446,7 @@ import XCTest
             XCTAssertTrue(session.pointerDown(at:point(80,90))); XCTAssertTrue(session.pointerUp(at:point(80,90)))
             XCTAssertTrue(session.pointerDown(at:point(200,90))); XCTAssertTrue(session.pointerUp(at:point(200,90)))
             XCTAssertTrue(session.pointerDown(at:point(80,170),clickCount:2)); _ = session.pointerUp(at:point(80,170))
+            waitForCapture(session)
             let payload=try XCTUnwrap(SnapshotPayload.clipboard())
             XCTAssertTrue(page.annotations.isEmpty)
             let before=try XCTUnwrap(page.drawbridgeThumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation)
