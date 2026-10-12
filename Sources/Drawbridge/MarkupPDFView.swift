@@ -1214,8 +1214,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let point = convert(location, to: page)
         if event.clickCount == 1, let link = linkAnnotation(at: point, on: page) {
             if followLinkIfPossible(link) { return }
-            if let action = link.action as? PDFActionURL {
-                perform(action)
+            if let action = link.action as? PDFActionURL, let url = action.url {
+                requestExternalLink(url)
                 return
             }
             if let action = link.action as? PDFActionRemoteGoTo {
@@ -2211,8 +2211,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func isLinkAnnotation(_ annotation: PDFAnnotation) -> Bool {
-        let type = (annotation.type ?? "").lowercased()
-        if type == PDFAnnotationSubtype.link.rawValue.lowercased() {
+        let type = (annotation.type ?? "").trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+        if type == "link" || annotation.action is PDFActionURL {
             return true
         }
         if annotation.destination != nil {
@@ -2229,6 +2229,48 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             return true
         }
         return false
+    }
+
+    var externalLinkPresenter: ((NSAlert, @escaping (NSApplication.ModalResponse) -> Void) -> Void)?
+    var externalLinkOpener: (URL) -> Bool = { NSWorkspace.shared.open($0) }
+    private var externalLinkConfirmationPending = false
+
+    // PDFKit also invokes actions through accessibility and keyboard activation.
+    override func perform(_ action: PDFAction) {
+        if let action = action as? PDFActionURL, let url = action.url {
+            requestExternalLink(url)
+        } else {
+            super.perform(action)
+        }
+    }
+
+    func requestExternalLink(_ url: URL) {
+        guard !externalLinkConfirmationPending else { return }
+        let appURL = NSWorkspace.shared.urlForApplication(toOpen: url)
+        let appName = appURL.map { FileManager.default.displayName(atPath: $0.path).replacingOccurrences(of: ".app", with: "") }
+        let fallback = url.scheme?.lowercased() == "mailto" ? "your email app" : "your default browser"
+        let alert = NSAlert()
+        alert.messageText = url.absoluteString
+        alert.informativeText = "Drawbridge will open this link in \(appName ?? fallback)."
+        alert.addButton(withTitle: appName.map { "Open in \($0)" } ?? "Open Link")
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        externalLinkConfirmationPending = true
+        let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self else { return }
+            self.externalLinkConfirmationPending = false
+            guard response == .alertFirstButtonReturn else { return }
+            if !self.externalLinkOpener(url) {
+                let failure = NSAlert()
+                failure.messageText = "Could Not Open Link"
+                failure.informativeText = "No application could open \(url.absoluteString)."
+                failure.addButton(withTitle: "OK")
+                if let window = self.window { failure.beginSheetModal(for: window) }
+                else { failure.runModal() }
+            }
+        }
+        if let externalLinkPresenter { externalLinkPresenter(alert, completion) }
+        else if let window { alert.beginSheetModal(for: window, completionHandler: completion) }
+        else { completion(alert.runModal()) }
     }
 
     private func linkAnnotation(at pointInPage: NSPoint, on page: PDFPage) -> PDFAnnotation? {

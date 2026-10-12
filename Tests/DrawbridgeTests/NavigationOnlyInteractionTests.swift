@@ -5,6 +5,45 @@ import XCTest
 
 @MainActor
 final class NavigationOnlyInteractionTests: XCTestCase {
+    func testWebsiteAndEmailLinkClicksRequireConfirmationAndPreserveURL() throws {
+        for (address, rotation) in [("https://example.com/drawing?q=review#notes", 0), ("mailto:reviewer@example.com?subject=Drawing%20review", 90)] {
+            let (window, view, page) = try makeView(rotation: rotation)
+            let url = try XCTUnwrap(URL(string: address))
+            let link = PDFAnnotation(bounds: CGRect(x: 160, y: 160, width: 100, height: 60), forType: .link, withProperties: nil)
+            link.action = PDFActionURL(url: url); page.addAnnotation(link)
+            view.rectangleMarkup.canEdit = { true }
+            var alerts = [NSAlert](), opened = [URL]()
+            var respond: ((NSApplication.ModalResponse) -> Void)?
+            view.externalLinkPresenter = { alert, completion in alerts.append(alert); respond = completion }
+            view.externalLinkOpener = { opened.append($0); return true }
+            view.rectangleMarkup.bind(to: view.document)
+            drainMainQueue()
+            let event = try mouse(.leftMouseDown, pagePoint: CGPoint(x: 200, y: 190), page: page, view: view, window: window)
+            view.mouseDown(with: event)
+            XCTAssertEqual(alerts.count, 1); XCTAssertTrue(opened.isEmpty)
+            let alert = try XCTUnwrap(alerts.first)
+            XCTAssertEqual(alert.messageText, address)
+            XCTAssertTrue(alert.buttons[0].title.hasPrefix("Open"))
+            XCTAssertEqual(alert.buttons[1].title, "Cancel")
+            XCTAssertTrue(alert.informativeText.contains("Drawbridge will open this link"))
+            view.mouseDown(with: event)
+            XCTAssertEqual(alerts.count, 1, "Repeated clicks must not stack confirmation dialogs")
+            try XCTUnwrap(respond)(.alertSecondButtonReturn)
+            XCTAssertTrue(opened.isEmpty)
+            view.mouseDown(with: event)
+            XCTAssertEqual(alerts.count, 2)
+            try XCTUnwrap(respond)(.alertFirstButtonReturn)
+            XCTAssertEqual(opened, [url])
+            XCTAssertEqual(page.annotations.count, 1)
+            XCTAssertTrue(view.rectangleMarkup.selectedItems.isEmpty)
+            XCTAssertTrue(view.currentPage === page)
+            view.perform(PDFActionURL(url: url))
+            XCTAssertEqual(alerts.count, 3, "PDFKit action activation must also require confirmation")
+            try XCTUnwrap(respond)(.alertSecondButtonReturn)
+            XCTAssertEqual(opened, [url])
+        }
+    }
+
     func testAllLegacyToolsAndEditingGesturesLeaveAnnotationsAndRotationUntouched() throws {
         let (window, view, page) = try makeView(rotation: 270)
         let note = PDFAnnotation(bounds: NSRect(x: 180, y: 180, width: 150, height: 70), forType: .freeText, withProperties: nil)
