@@ -29,7 +29,7 @@ Version 1.0 starts the public release series. Earlier version numbers were devel
 - **Organize markup layers:** assign markups and Snapshots through their right-click menu or the Markups List. Create, rename, show/hide, and remove layers in the right sidebar; choose an active layer for new markups. Assignments and visibility persist in the PDF. Use the Lock column to protect a layer’s markups from editing and deletion in Drawbridge.
 - **Manage pages and bookmarks:** Shift/Command-select several entries, then press Backspace/Delete or right-click to delete with confirmation. Undo/redo also works after saving while the document remains open. Deleting bookmarks leaves PDF pages intact.
 - **Save PDF changes:** save the open file or a separate copy. Markup saves append annotation changes rather than rasterizing or rebuilding drawing pages.
-- **Flatten and unflatten:** flatten supported consultant annotations into page content. Drawbridge embeds recovery information so its flattened PDFs can be unflattened after reopening.
+- **Flatten and unflatten:** flatten supported imported annotations into page content. Drawbridge embeds recovery information so its flattened PDFs can be unflattened after reopening.
 - **Reduce file size:** lossless compression with content verification. Image resolution is preserved; already-compressed images may not get smaller.
 - **Read and print:** document text search, text selection/copy, fit-page/fit-width views, and native macOS printing. Invert changes on-screen colors only, leaving saved and printed colors unchanged.
 

@@ -41,7 +41,7 @@
   - Uploaded files: `./storage/documents/...`
 - Docker compose includes MinIO for next-step object-store migration.
 
-## Orange Pi 5 Deployment Shape
+## Small Self-Hosted Development Deployment Shape
 - Run backend under systemd or Docker Compose.
 - Reverse proxy with Caddy/Nginx for TLS and stable DNS.
 - Keep `data/` and `storage/` on persistent disk (not tmpfs).

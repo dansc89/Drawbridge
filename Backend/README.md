@@ -112,7 +112,7 @@ docker compose up -d --build
 ```
 
 ## Notes
-- V1 uses SQLite for fast setup and low ops overhead on Orange Pi.
+- V1 uses SQLite for fast setup and low operational overhead in small self-hosted development deployments.
 - For higher concurrency, migrate to PostgreSQL + Redis while keeping the same API contract.
 
 ## Private configuration

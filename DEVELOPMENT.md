@@ -145,22 +145,6 @@ cd /path/to/Drawbridge
 ./Scripts/checkpoint.sh restore-source <checkpoint-name>
 ```
 
-## Sync To Google Drive
-
-Safe sync (no deletes in target):
-
-```bash
-cd /path/to/Drawbridge
-DRAWBRIDGE_SYNC_ROOT="/path/to/Google Drive/My Drive" ./Scripts/sync-to-gdrive.sh
-```
-
-Mirror sync (deletes removed local files from target):
-
-```bash
-cd /path/to/Drawbridge
-DRAWBRIDGE_SYNC_ROOT="/path/to/Google Drive/My Drive" ./Scripts/sync-to-gdrive.sh /path/to/Drawbridge --mirror
-```
-
 ## GitHub Releases
 
 Release workflow publishes macOS artifacts when pushing a version tag:
