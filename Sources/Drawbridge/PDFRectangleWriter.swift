@@ -455,6 +455,33 @@ enum PDFRectangleWriter {
             if entries.isEmpty { page.removeValue(forKey: "/Annots") } else { page["/Annots"] = entries }
             pageObject["value"] = page; objects[pageKey] = pageObject; arrays[pageIndex] = imported
         }
+        // Reorder references only. Every imported object and appearance remains
+        // immutable, and all current annotation references must be retained once.
+        for order in plan.orders {
+            guard currentPages.indices.contains(order.page), originalPages.indices.contains(order.sourcePage) else { throw CocoaError(.fileReadCorruptFile) }
+            let originalPage = dictionary(originalPages[order.sourcePage], objects: originalObjects)
+            let originals = annotations(originalPage["/Annots"], objects: originalObjects)
+            let pageKey = "obj:" + currentPages[order.page]
+            guard var object = objects[pageKey] as? [String: Any], var page = object["value"] as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
+            let current = annotations(page["/Annots"], objects: objects)
+            guard let references = current as? [String] else { throw CocoaError(.fileReadCorruptFile) }
+            var ordered: [String] = []
+            for item in order.items {
+                let ref: String?
+                switch item {
+                case .original(let slot):
+                    guard originals.indices.contains(slot) else { throw CocoaError(.fileReadCorruptFile) }
+                    ref = originals[slot] as? String
+                case .owned(let id):
+                    ref = references.first { ownedIdentity(dictionary($0, objects: objects)) == "u:" + id }
+                }
+                if let ref, references.contains(ref), !ordered.contains(ref) { ordered.append(ref) }
+            }
+            ordered += references.filter { !ordered.contains($0) }
+            guard ordered.count == references.count, Set(ordered) == Set(references) else { throw CocoaError(.fileReadCorruptFile) }
+            page["/Annots"] = ordered; object["value"] = page; objects[pageKey] = object
+            arrays[order.page] = ordered.filter { !owned($0, objects: objects) && !generated($0, objects) }
+        }
         tables[1] = objects; json["qpdf"] = tables
     }
 

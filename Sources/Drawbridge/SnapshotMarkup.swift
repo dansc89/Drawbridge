@@ -85,7 +85,7 @@ struct SnapshotPayload: Sendable {
         context.drawPDFPage(source); context.restoreGState()
         // The source's current annotations belong in the captured appearance too.
         let origin = page.bounds(for: .mediaBox).origin
-        for annotation in page.annotations where annotation.shouldDisplay && annotation.type != "Link" {
+        for annotation in page.annotations where annotation.shouldDisplay && annotation.type != "Link" && !(annotation is SnapshotViewportTileAnnotation) {
             context.saveGState()
             if annotation is DrawbridgeSnapshotAnnotation || annotation is DrawbridgeShapeAnnotation || annotation is DrawbridgePolygonAnnotation || annotation is DrawbridgeMeasuredPathAnnotation {
                 context.concatenate(transform); context.translateBy(x: origin.x, y: origin.y)
@@ -222,6 +222,7 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
     private var previewViewport: CGRect?
     private var previewDeviceScale: Double?
     var isRetired = false
+    var usesViewportTiles = false
 
     func updatePreviewViewport(_ region: CGRect, deviceScale: Double = 1) {
         guard let source = fragment?.page(at: 1) else { return }
@@ -264,6 +265,7 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
 
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
         guard !isRetired, shouldDisplay else { return }
+        if usesViewportTiles && NSGraphicsContext.current?.isDrawingToScreen != false && !SnapshotPageRendering.isViewportTile && !SnapshotPageRendering.isPreview && !SnapshotPageRendering.isVectorOutput { return }
         guard let source = fragment?.page(at: 1) else {
             super.draw(with: box, in: context)
             return
@@ -303,7 +305,7 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         context.clip(to: media)
         guard !context.boundingBoxOfClipPath.isEmpty else { context.restoreGState(); return }
         let grouped = style.overlay || style.opacity < 1
-        if grouped { context.beginTransparencyLayer(in: media, auxiliaryInfo: nil) }
+        if grouped { context.beginTransparencyLayer(in: context.boundingBoxOfClipPath, auxiliaryInfo: nil) }
         // PDFKit's annotation CGLayers have neither bitmap dimensions nor an
         // NSGraphicsContext. Their clip is the annotation's page-space bounds.
         // Printing contexts and whole-page vector previews keep the PDF path.
@@ -311,7 +313,7 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
             && abs(clip.minX - bounds.minX) < 1 && abs(clip.minY - bounds.minY) < 1
             && abs(clip.width - bounds.width) < 3 && abs(clip.height - bounds.height) < 3
         let screenContext = NSGraphicsContext.current?.isDrawingToScreen != false
-            && (context.width > 0 || NSGraphicsContext.current?.isDrawingToScreen == true || localAppearance || internalPreview)
+            && (context.width > 0 || NSGraphicsContext.current?.isDrawingToScreen == true || localAppearance || internalPreview || SnapshotPageRendering.isViewportTile)
         if !SnapshotPageRendering.isPreview, !SnapshotPageRendering.isVectorOutput, screenContext, let previewData, let previewKey, let screenPreview {
             viewportLock.lock(); let viewport = previewViewport; let deviceScale = previewDeviceScale; viewportLock.unlock()
             let fragmentViewport = viewport.map {
@@ -324,10 +326,54 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
     }
 }
 
+
+/// Disposable screen tiles keep PDFKit from allocating a sheet-sized Stamp
+/// surface at high zoom. They have no persistent markup identity and never print.
+final class SnapshotViewportTileAnnotation: PDFAnnotation {
+    weak var snapshot: DrawbridgeSnapshotAnnotation?
+    init(snapshot: DrawbridgeSnapshotAnnotation, bounds: CGRect) {
+        self.snapshot = snapshot
+        super.init(bounds: bounds, forType: .stamp, withProperties: nil)
+        color = .clear
+        isReadOnly = true
+        shouldPrint = false
+    }
+    required init?(coder: NSCoder) { super.init(coder: coder) }
+    /// PDFKit fallback serialization must not persist editing-only tiles.
+    static func withoutScreenTiles<T>(in document: PDFDocument, _ body: () -> T) -> T {
+        var removed = [(PDFPage, [PDFAnnotation])]()
+        for index in 0..<document.pageCount {
+            guard let page = document.page(at: index), page.annotations.contains(where: { $0 is SnapshotViewportTileAnnotation }) else { continue }
+            let order = page.annotations
+            removed.append((page, order))
+            order.filter { $0 is SnapshotViewportTileAnnotation }.forEach(page.removeAnnotation)
+        }
+        defer {
+            for (page, order) in removed {
+                page.annotations.forEach(page.removeAnnotation)
+                order.forEach(page.addAnnotation)
+            }
+        }
+        return SnapshotPageRendering.vector { body() }
+    }
+    override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        guard shouldDisplay, NSGraphicsContext.current?.isDrawingToScreen != false, !SnapshotPageRendering.isPreview, !SnapshotPageRendering.isVectorOutput,
+              let snapshot, snapshot.page === page, snapshot.usesViewportTiles else { return }
+        SnapshotPageRendering.viewportTile { snapshot.draw(with: box, in: context) }
+    }
+}
+
 /// Keep PDFKit's whole-page preview contract separate from PDFView's page-space
 /// annotation contract. Thread-local scope also covers nested/background previews.
 enum SnapshotPageRendering {
     private static let key = "DrawbridgeSnapshotPagePreview"
+    static var isViewportTile: Bool { (Thread.current.threadDictionary["DrawbridgeSnapshotViewportTile"] as? Bool) == true }
+    static func viewportTile<T>(_ body: () -> T) -> T {
+        let old = Thread.current.threadDictionary["DrawbridgeSnapshotViewportTile"]
+        Thread.current.threadDictionary["DrawbridgeSnapshotViewportTile"] = true
+        defer { Thread.current.threadDictionary["DrawbridgeSnapshotViewportTile"] = old }
+        return body()
+    }
     static var isVectorOutput: Bool { (Thread.current.threadDictionary["DrawbridgeSnapshotVectorOutput"] as? Bool) == true }
     static func vector<T>(_ body: () -> T) -> T {
         let old = Thread.current.threadDictionary["DrawbridgeSnapshotVectorOutput"]

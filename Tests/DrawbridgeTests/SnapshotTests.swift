@@ -14,6 +14,18 @@ import XCTest
     override var isVisible: Bool { true }
 }
 
+@MainActor private final class SnapshotNotificationCounter {
+    var value = 0
+}
+
+private final class SnapshotRefreshTrackingPage: PDFPage {
+    var removalCount = 0
+    override func removeAnnotation(_ annotation: PDFAnnotation) {
+        removalCount += 1
+        super.removeAnnotation(annotation)
+    }
+}
+
 @MainActor final class SnapshotTests: XCTestCase {
     func waitForCapture(_ session: RectangleMarkupController, file: StaticString = #filePath, line: UInt = #line) {
         let deadline = Date().addingTimeInterval(10)
@@ -388,6 +400,88 @@ import XCTest
         }
     }
 
+    func testHighZoomTilesStayBoundedPreserveStackingAndDoNotPersistOrRecapture() throws {
+        let sourceURL = try fixture()
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        let document = try XCTUnwrap(PDFDocument(url: sourceURL))
+        let page = try XCTUnwrap(document.page(at: 0))
+        let bytes = NSMutableData(), consumer = try XCTUnwrap(CGDataConsumer(data: bytes))
+        var media = CGRect(x: 0, y: 0, width: 200, height: 200)
+        let source = try XCTUnwrap(CGContext(consumer: consumer, mediaBox: &media, nil))
+        source.beginPDFPage(nil); source.setFillColor(NSColor.red.cgColor); source.fill(media); source.endPDFPage(); source.closePDF()
+        let payload = SnapshotPayload(data: bytes as Data)
+        let stamp = try XCTUnwrap(SnapshotStampFactory.make(payload: payload, bounds: CGRect(x: 250, y: 200, width: 200, height: 200), rotation: 0, style: SnapshotStyle(overlay: true, opacity: 0.5)) as? DrawbridgeSnapshotAnnotation)
+        let above = PDFAnnotation(bounds: CGRect(x: 250, y: 200, width: 20, height: 20), forType: .square, withProperties: nil)
+        let window = SnapshotPreviewWindow(contentRect: CGRect(x: 0, y: 0, width: 900, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = MarkupPDFView(frame: window.contentView!.bounds); window.contentView?.addSubview(view)
+        view.setMarkupDocument(document)
+        page.addAnnotation(stamp); page.addAnnotation(above)
+        func capturedCenterGreen() throws -> CGFloat {
+            let capture = try SnapshotPayload.capture(page: page, points: [CGPoint(x: 250, y: 200), CGPoint(x: 450, y: 200), CGPoint(x: 450, y: 400), CGPoint(x: 250, y: 400)])
+            let context = try XCTUnwrap(CGContext(data: nil, width: 200, height: 200, bitsPerComponent: 8, bytesPerRow: 800, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.drawPDFPage(try XCTUnwrap(capture.page))
+            return try XCTUnwrap(NSBitmapImageRep(cgImage: try XCTUnwrap(context.makeImage())).colorAt(x: 100, y: 100)?.usingColorSpace(.deviceRGB)).greenComponent
+        }
+        let baselineGreen = try capturedCenterGreen()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        view.autoScales = false; view.maxScaleFactor = 64; view.scaleFactor = 24
+        window.layoutIfNeeded(); view.layoutSubtreeIfNeeded(); view.revealMarkup(stamp)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        view.updateSnapshotViewportTiles()
+        let tiles = page.annotations.compactMap { $0 as? SnapshotViewportTileAnnotation }
+        XCTAssertTrue(stamp.usesViewportTiles); XCTAssertFalse(tiles.isEmpty)
+        for tile in tiles {
+            XCTAssertTrue(tile.snapshot === stamp); XCTAssertFalse(tile.shouldPrint)
+            XCTAssertFalse(ImportedMarkupState.selectable(tile)); XCTAssertFalse(RectangleMarkupRecord.owns(tile))
+            XCTAssertFalse(MarkupListPresentation.includes(tile))
+            XCTAssertLessThanOrEqual(max(tile.bounds.width, tile.bounds.height) * view.scaleFactor * (window.backingScaleFactor), 1024.01)
+            XCTAssertLessThan(page.annotations.firstIndex(where: { $0 === tile })!, page.annotations.firstIndex(where: { $0 === above })!)
+        }
+        let before = page.annotations
+        let savedURL = FileManager.default.temporaryDirectory.appendingPathComponent("SnapshotTileSave-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: savedURL) }
+        XCTAssertTrue(SnapshotViewportTileAnnotation.withoutScreenTiles(in: document) {
+            XCTAssertEqual(page.annotations.count, 2)
+            XCTAssertTrue(SnapshotPageRendering.isVectorOutput)
+            return document.write(to: savedURL)
+        })
+        XCTAssertEqual(page.annotations.count, before.count)
+        XCTAssertTrue(zip(before, page.annotations).allSatisfy { $0 === $1 })
+        XCTAssertEqual(try XCTUnwrap(PDFDocument(url: savedURL)?.page(at: 0)).annotations.count, 2)
+        XCTAssertEqual(try capturedCenterGreen(), baselineGreen, accuracy: 0.01, "Recapture must include the original once, without display tiles")
+        let originalScale = view.scaleFactor
+        let anchor = view.convert(CGPoint(x: view.bounds.midX, y: view.bounds.midY), to: page)
+        page.removeAnnotation(stamp)
+        view.refreshAnnotationRendering(on: page, importedAppearanceChanged: true, region: stamp.bounds)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertEqual(view.scaleFactor, originalScale, accuracy: 0.000001)
+        let restoredAnchor = view.convert(CGPoint(x: view.bounds.midX, y: view.bounds.midY), to: page)
+        XCTAssertEqual(restoredAnchor.x, anchor.x, accuracy: 0.1)
+        XCTAssertEqual(restoredAnchor.y, anchor.y, accuracy: 0.1)
+        XCTAssertFalse(page.annotations.contains { $0 is SnapshotViewportTileAnnotation })
+        XCTAssertTrue(page.annotations.contains { $0 === above })
+    }
+
+    func testSnapshotRemainsVisibleAtExtremeZoom() throws {
+        let bytes = NSMutableData()
+        let consumer = try XCTUnwrap(CGDataConsumer(data: bytes))
+        var media = CGRect(x: 0, y: 0, width: 2000, height: 2000)
+        let sourceContext = try XCTUnwrap(CGContext(consumer: consumer, mediaBox: &media, nil))
+        sourceContext.beginPDFPage(nil); sourceContext.setFillColor(NSColor.red.cgColor); sourceContext.fill(media); sourceContext.endPDFPage(); sourceContext.closePDF()
+        let payload = SnapshotPayload(data: bytes as Data)
+        let stamp = try SnapshotStampFactory.make(payload: payload, bounds: media, rotation: 0)
+        for scale in [20.0, 24.0, 40.0, 80.0] {
+            let context = try XCTUnwrap(CGContext(data: nil, width: 256, height: 256, bitsPerComponent: 8, bytesPerRow: 1024, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.setFillColor(NSColor.white.cgColor); context.fill(CGRect(x: 0, y: 0, width: 256, height: 256))
+            context.translateBy(x: 128, y: 128); context.scaleBy(x: scale, y: scale); context.translateBy(x: -1000, y: -1000)
+            stamp.draw(with: .mediaBox, in: context)
+            let bitmap = NSBitmapImageRep(cgImage: try XCTUnwrap(context.makeImage()))
+            let color = try XCTUnwrap(bitmap.colorAt(x: 128, y: 128)?.usingColorSpace(.deviceRGB))
+            XCTAssertGreaterThan(color.redComponent, 0.8)
+            XCTAssertLessThan(color.greenComponent, 0.2, "Bounded Snapshot drawing must stay visible at \(scale * 100)%")
+        }
+    }
+
     func testSnapshotPreviewSharpensWithoutReplacingOriginalPDF() throws {
         let url = try fixture()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -437,10 +531,86 @@ import XCTest
         let before = page.annotations
         let key = try XCTUnwrap((stamp as? DrawbridgeSnapshotAnnotation)?.previewKey)
         view.perform(NSSelectorFromString("snapshotPreviewReady:"), with: Notification(name: SnapshotPreviewCache.ready, userInfo: ["captureKeys": Set([key])]) as NSNotification)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.35))
         XCTAssertEqual(page.annotations.count, before.count)
         XCTAssertTrue(zip(page.annotations, before).allSatisfy { $0 === $1 }, "Detail refresh must retain annotation order and identities")
         XCTAssertTrue(session.selected === stamp)
         XCTAssertEqual(SnapshotPayload.read(stamp)?.data, payload.data)
+    }
+
+    func testSnapshotDetailRefreshWaitsUntilZoomingStops() throws {
+        let url = try fixture(); defer { try? FileManager.default.removeItem(at: url) }
+        let source = try XCTUnwrap(PDFDocument(url: url)), payload = try capture(try XCTUnwrap(source.page(at: 0)))
+        let document = PDFDocument(), page = SnapshotRefreshTrackingPage()
+        page.setBounds(CGRect(x: 0, y: 0, width: 500, height: 400), for: .mediaBox)
+        document.insert(page, at: 0)
+        let window = SnapshotPreviewWindow(contentRect: CGRect(x: 0, y: 0, width: 800, height: 600), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = MarkupPDFView(frame: window.contentView!.bounds); window.contentView!.addSubview(view)
+        view.setMarkupDocument(document); view.go(to: page); window.layoutIfNeeded(); view.layoutSubtreeIfNeeded()
+        let session = view.rectangleMarkup; session.canEdit = { true }
+        let stamp = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: CGPoint(x: 200, y: 200)))
+        let key = try XCTUnwrap((stamp as? DrawbridgeSnapshotAnnotation)?.previewKey)
+        let before = page.removalCount
+        for _ in 0..<8 {
+            _ = view.zoom(by: 1.02)
+            view.perform(NSSelectorFromString("snapshotPreviewReady:"), with: Notification(name: SnapshotPreviewCache.ready, userInfo: ["captureKeys": Set([key])]) as NSNotification)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+            XCTAssertEqual(page.removalCount, before, "Sharpening must not rebuild PDFKit annotations during zoom")
+        }
+        let deadline = Date().addingTimeInterval(3)
+        while page.removalCount == before && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        XCTAssertGreaterThan(page.removalCount, before, "The settled view must still receive sharp detail")
+        XCTAssertTrue(session.selected === stamp)
+        XCTAssertEqual(page.annotations.count, 1)
+        XCTAssertEqual(SnapshotPayload.read(stamp)?.data, payload.data)
+    }
+
+    func testSnapshotTilesWaitForLatestViewportAndStillSharpen() throws {
+        let url = try fixture(); defer { try? FileManager.default.removeItem(at: url) }
+        let source = try XCTUnwrap(PDFDocument(url: url))
+        let original = try capture(try XCTUnwrap(source.page(at: 0)))
+        let payload = SnapshotPayload(data: original.data + Data(("\n%gesture-" + UUID().uuidString + "\n").utf8))
+        let stamp = try XCTUnwrap(try SnapshotStampFactory.make(payload: payload, bounds: CGRect(x: 80, y: 90, width: 120, height: 80), rotation: 0) as? DrawbridgeSnapshotAnnotation)
+        let key = try XCTUnwrap(stamp.previewKey)
+        let notifications = SnapshotNotificationCounter()
+        let token = NotificationCenter.default.addObserver(forName: SnapshotPreviewCache.ready, object: nil, queue: .main) { notification in
+            if (notification.userInfo?["captureKeys"] as? Set<String>)?.contains(key) == true {
+                MainActor.assumeIsolated { notifications.value += 1 }
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+        for step in 0..<20 {
+            stamp.updatePreviewViewport(stamp.bounds, deviceScale: 6 + Double(step) * 0.05)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.08))
+        XCTAssertEqual(notifications.value, 0, "Old zoom steps must not trigger tile refreshes during the gesture")
+        let deadline = Date().addingTimeInterval(5)
+        while notifications.value == 0 && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        XCTAssertGreaterThan(notifications.value, 0, "Detail for the final zoom level must load after settling")
+    }
+
+    func testSavedLocalSnapshotsRestoreBoundedEditingPreviews() throws {
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_SAVE_FIXTURE"] else { throw XCTSkip("Provide a saved Snapshot PDF for preview restoration testing") }
+        let document = try XCTUnwrap(PDFDocument(url: URL(fileURLWithPath: path)))
+        let saved = (0..<document.pageCount).flatMap { document.page(at: $0)?.annotations ?? [] }.filter { RectangleMarkupRecord.owns($0) && $0.type == "Stamp" }
+        guard !saved.isEmpty else { throw XCTSkip("The fixture must contain a saved Snapshot") }
+        for stamp in saved { XCTAssertNotNil(SnapshotPayload.read(stamp)) }
+        let view = MarkupPDFView()
+        let importedLayers = SnapshotNotificationCounter()
+        let token = NotificationCenter.default.addObserver(forName: .PDFViewDocumentChanged, object: view, queue: .main) { _ in
+            MainActor.assumeIsolated {
+                importedLayers.value += (0..<document.pageCount).flatMap { document.page(at: $0)?.annotations ?? [] }.filter {
+                    RectangleMarkupRecord.owns($0) && $0.type == "Stamp" && !($0 is DrawbridgeSnapshotAnnotation)
+                }.count
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+        view.setMarkupDocument(document)
+        XCTAssertEqual(importedLayers.value, 0, "PDFView must never build layers for the original heavy saved Stamp")
+        let restored = (0..<document.pageCount).flatMap { document.page(at: $0)?.annotations ?? [] }.filter { RectangleMarkupRecord.owns($0) && $0.type == "Stamp" }
+        XCTAssertEqual(restored.count, saved.count)
+        XCTAssertTrue(restored.allSatisfy { $0 is DrawbridgeSnapshotAnnotation }, "Reopened Snapshots must use bounded editing previews rather than PDFKit's full vector appearance")
     }
 
     func testLocalSnapshotEditingPreviewStillSavesVectorAppearance() throws {

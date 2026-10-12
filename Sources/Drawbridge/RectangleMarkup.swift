@@ -260,7 +260,30 @@ final class RectangleMarkupController {
     let layerStates = NSMapTable<PDFDocument, MarkupLayerState>(keyOptions: .weakMemory, valueOptions: .strongMemory)
     private let fallbackUndo = UndoManager()
     var undo: UndoManager { inlineText?.editor.undoManager ?? view?.window?.undoManager ?? fallbackUndo }
-    var selected: PDFAnnotation?
+    var selected: PDFAnnotation? { didSet { additionalSelection = [] } }
+    private var additionalSelection: [PDFAnnotation] = []
+    var selectedItems: [PDFAnnotation] { (selected.map { [$0] } ?? []) + additionalSelection }
+    private var groupMove: (page: PDFPage, start: CGPoint, originals: [(PDFAnnotation, CGRect)], offset: CGPoint)?
+    private var selectionWindow: (page: PDFPage, start: CGPoint, end: CGPoint, additive: Bool, original: [PDFAnnotation])?
+
+    func setSelectedItems(_ items: [PDFAnnotation]) {
+        var seen = Set<ObjectIdentifier>()
+        let valid = items.filter { $0.page?.document === boundDocument && !$0.isReadOnly && !layerIsLocked($0) && $0.shouldDisplay && layerIsVisible($0) && seen.insert(ObjectIdentifier($0)).inserted }
+        selected = valid.first
+        additionalSelection = Array(valid.dropFirst())
+        refresh()
+    }
+
+    func selectWindow(on page: PDFPage, from start: CGPoint, to end: CGPoint, extending original: [PDFAnnotation] = []) {
+        let region = Self.rect(start, end)
+        let crossing = end.x < start.x
+        let hits = page.annotations.filter {
+            (RectangleMarkupRecord.owns($0) || ImportedMarkupState.selectable($0)) &&
+            Self.windowSelects($0, in: region, crossing: crossing)
+        }
+        setSelectedItems(original + hits)
+    }
+
     private var gesture: Gesture?
     private var pendingLine: (page: PDFPage, start: CGPoint)?
     private var preview: (PDFPage, CGRect)?
@@ -361,23 +384,22 @@ final class RectangleMarkupController {
         return true
     }
 
-    func bind(to document: PDFDocument?) {
-        guard boundDocument !== document else { return }
-        cancelSnapshotCapture()
-        finishTextEditing()
-        if let previous = boundDocument {
-            documentStates.setObject(DocumentState(dirty: hasUnsavedChanges, stamp: sourceStamp), forKey: previous)
-        }
-        cancelGesture()
-        undo.removeAllActions(withTarget: self)
-        fallbackUndo.removeAllActions()
-        boundDocument = document
-        if let document, importedStates.object(forKey: document) == nil { importedStates.setObject(ImportedMarkupState(document: document), forKey: document) }
-        if let document, documentStates.object(forKey: document) == nil {
+    private let preparedDocuments = NSHashTable<PDFDocument>.weakObjects()
+
+    /// Restore owned annotations before PDFView creates layers for imported AP
+    /// streams. Otherwise PDFKit can retain the expensive original Stamp layer
+    /// even after replacing the annotation with its bounded editing preview.
+    func prepareForDisplay(_ document: PDFDocument?) {
+        guard let document, !preparedDocuments.contains(document) else { return }
+        preparedDocuments.add(document)
+        if importedStates.object(forKey: document) == nil { importedStates.setObject(ImportedMarkupState(document: document), forKey: document) }
+        do {
             for index in 0..<document.pageCount {
                 guard let page = document.page(at:index) else { continue }
                 var replacedAppearance = false
-                for original in page.annotations where RectangleMarkupRecord.owns(original) {
+                let originalOrder = page.annotations
+                var replacements: [ObjectIdentifier: PDFAnnotation] = [:]
+                for original in originalOrder where RectangleMarkupRecord.owns(original) {
                     if MarkupLayers.isMetadata(original) || MeasurementMetadata.pageScale(original) != nil { continue }
                     if original.type == "Stamp", !(original is DrawbridgeSnapshotAnnotation), let payload = SnapshotPayload.read(original),
                        let replacement = try? SnapshotStampFactory.make(payload: payload, bounds: original.bounds, rotation: page.rotation, style: SnapshotStyle.read(original)) {
@@ -394,6 +416,7 @@ final class RectangleMarkupController {
                         original.shouldDisplay = false
                         page.removeAnnotation(original)
                         page.addAnnotation(replacement)
+                        replacements[ObjectIdentifier(original)] = replacement
                         replacedAppearance = true
                         continue
                     }
@@ -415,11 +438,31 @@ final class RectangleMarkupController {
                     RectangleMarkupRecord.setPolygonFill(RectangleMarkupRecord.polygonFill(original),on:polygon)
                     original.shouldDisplay = false
                     page.removeAnnotation(original); page.addAnnotation(polygon)
+                    replacements[ObjectIdentifier(original)] = polygon
                     replacedAppearance = true
                 }
-                if replacedAppearance { (view as? MarkupPDFView)?.refreshAnnotationRendering(on: page, importedAppearanceChanged: true) }
+                if replacedAppearance {
+                    page.annotations.forEach(page.removeAnnotation)
+                    originalOrder.map { replacements[ObjectIdentifier($0)] ?? $0 }.forEach(page.addAnnotation)
+                }
+                if replacedAppearance && view?.document === document { (view as? MarkupPDFView)?.refreshAnnotationRendering(on: page, importedAppearanceChanged: true) }
             }
         }
+    }
+
+    func bind(to document: PDFDocument?) {
+        guard boundDocument !== document else { return }
+        cancelSnapshotCapture()
+        finishTextEditing()
+        if let previous = boundDocument {
+            documentStates.setObject(DocumentState(dirty: hasUnsavedChanges, stamp: sourceStamp), forKey: previous)
+        }
+        cancelGesture()
+        undo.removeAllActions(withTarget: self)
+        fallbackUndo.removeAllActions()
+        boundDocument = document
+        if let document, importedStates.object(forKey: document) == nil { importedStates.setObject(ImportedMarkupState(document: document), forKey: document) }
+        prepareForDisplay(document)
         selected = nil; hasUnsavedChanges = false; tool = .select
         sourceStamp = document?.documentURL.flatMap(PDFMarkupSourceStamp.capture)
         if let document, let state = documentStates.object(forKey: document) {
@@ -521,6 +564,17 @@ final class RectangleMarkupController {
             gesture = .create(page, point); preview = (page, CGRect(origin: point, size: .zero)); refresh()
             return true
         }
+        if modifiers.contains(.shift) {
+            if let hit = page.annotations.reversed().first(where: { (RectangleMarkupRecord.owns($0) || ImportedMarkupState.selectable($0)) && !$0.isReadOnly && !layerIsLocked($0) && layerIsVisible($0) && $0.shouldDisplay && Self.hitTest($0, at: point, tolerance: 8 / max(view.scaleFactor, 0.01)) }) {
+                let items = selectedItems
+                setSelectedItems(items.contains(where: { $0 === hit }) ? items.filter { $0 !== hit } : items + [hit])
+                return true
+            }
+        }
+        if selectedItems.count > 1, selectedItems.contains(where: { $0.page === page && Self.hitTest($0, at: point, tolerance: 8 / max(view.scaleFactor, 0.01)) }) {
+            groupMove = (page, point, selectedItems.filter { $0.page === page }.map { ($0, $0.bounds) }, .zero)
+            return true
+        }
         if let selected, selected.page === page, RectangleMarkupRecord.owns(selected), !selected.isReadOnly, !layerIsLocked(selected) {
             let vertices = RectangleMarkupRecord.vertices(selected)
             if let index = vertices.indices.first(where: { i in
@@ -544,7 +598,14 @@ final class RectangleMarkupController {
             selected = hit; view.setCurrentSelection(nil, animate: false)
             gesture = .edit(page, hit, hit.bounds, point, nil); preview = (page, hit.bounds); refresh(); return true
         }
-        deselectForClickAway(); return false
+        if page.annotations.contains(where: { $0.type == "Link" && $0.bounds.contains(point) && $0.shouldDisplay }) { deselectForClickAway(); return false }
+        guard view is MarkupPDFView else { deselectForClickAway(); return false }
+        let original = modifiers.contains(.shift) ? selectedItems : []
+        deselectForClickAway()
+        setSelectedItems(original)
+        selectionWindow = (page, location, location, modifiers.contains(.shift), original)
+        view.setCurrentSelection(nil, animate: false)
+        return true
     }
 
     private func deselectForClickAway() {
@@ -652,6 +713,18 @@ final class RectangleMarkupController {
 
     @discardableResult
     func pointerDragged(at location: CGPoint, modifiers: NSEvent.ModifierFlags = []) -> Bool {
+        if var move = groupMove, let view {
+            var end = view.convert(location, to: move.page)
+            if modifiers.contains(.shift) { end = MeasurementGeometry.constrained(end, from: move.start) }
+            let union = move.originals.reduce(CGRect.null) { $0.union($1.1) }
+            let crop = move.page.bounds(for: view.displayBox)
+            move.offset = CGPoint(x: min(max(end.x-move.start.x, crop.minX-union.minX), crop.maxX-union.maxX), y: min(max(end.y-move.start.y, crop.minY-union.minY), crop.maxY-union.maxY))
+            groupMove = move; refresh(presentationChanged: false); return true
+        }
+        if var window = selectionWindow {
+            window.end = location; selectionWindow = window
+            refresh(presentationChanged: false); return true
+        }
         if tool == .pen, let view, let page = polylinePage {
             var point = view.convert(location, to: page)
             if modifiers.contains(.shift), !polylinePoints.isEmpty {
@@ -726,6 +799,27 @@ final class RectangleMarkupController {
     }
 
     func pointerUp(at location: CGPoint, modifiers: NSEvent.ModifierFlags = []) -> Bool {
+        if let move = groupMove {
+            _ = pointerDragged(at: location, modifiers: modifiers)
+            let offset = groupMove?.offset ?? .zero
+            groupMove = nil
+            undo.beginUndoGrouping()
+            for (annotation, original) in move.originals { setGeometry(original.offsetBy(dx: offset.x, dy: offset.y), endpoints: nil, of: annotation, on: move.page, action: "Move Markups") }
+            undo.endUndoGrouping()
+            setSelectedItems(move.originals.map { $0.0 }); return true
+        }
+        if let window = selectionWindow, let view {
+            selectionWindow = nil
+            if hypot(location.x-window.start.x, location.y-window.start.y) >= 3 {
+                let a = view.convert(window.start, to: window.page), b = view.convert(location, to: window.page)
+                // Direction is measured in screen space even on rotated pages.
+                let region = Self.rect(a, b)
+                let crossing = location.x < window.start.x
+                let hits = window.page.annotations.filter { (RectangleMarkupRecord.owns($0) || ImportedMarkupState.selectable($0)) && Self.windowSelects($0, in: region, crossing: crossing) }
+                setSelectedItems(window.original + hits)
+            } else { setSelectedItems(window.original) }
+            refresh(); return true
+        }
         if tool == .pen, let page = polylinePage {
             _ = pointerDragged(at: location, modifiers: modifiers)
             let points = polylinePoints
@@ -968,9 +1062,38 @@ final class RectangleMarkupController {
         selected = layerIsLocked(annotation) ? nil : annotation; refresh()
     }
 
+    func reorderSelected(toFront: Bool) {
+        guard canEdit(), let page = selected?.page else { return }
+        let items = selectedItems.filter { $0.page === page && !$0.isReadOnly && !layerIsLocked($0) }
+        let original = page.annotations
+        let moving = original.filter { a in items.contains { $0 === a } }
+        guard !moving.isEmpty else { return }
+        let remaining = original.filter { a in !items.contains { $0 === a } }
+        restoreAnnotationOrder(toFront ? remaining + moving : moving + remaining, on: page)
+        setSelectedItems(items)
+        undo.setActionName(toFront ? "Bring to Front" : "Send to Back")
+    }
+
+    private func restoreAnnotationOrder(_ order: [PDFAnnotation], on page: PDFPage) {
+        let previous = page.annotations
+        undo.registerUndo(withTarget: self) { target in target.restoreAnnotationOrder(previous, on: page) }
+        previous.forEach(page.removeAnnotation)
+        order.forEach(page.addAnnotation)
+        importedState?.reordered(page)
+        changed(page)
+    }
+
     func deleteSelected() {
-        guard canEdit(), let selected, (RectangleMarkupRecord.owns(selected) || ImportedMarkupState.selectable(selected) || canAssignLayer(selected)), !selected.isReadOnly, !layerIsLocked(selected), let page = selected.page else { return }
-        cancelGesture(); setPresence(false, annotation: selected, page: page, action: "Delete Markup")
+        guard canEdit() else { return }
+        let items = selectedItems.filter { (RectangleMarkupRecord.owns($0) || ImportedMarkupState.selectable($0) || canAssignLayer($0)) && !$0.isReadOnly && !layerIsLocked($0) }
+        guard !items.isEmpty else { return }
+        cancelGesture()
+        undo.beginUndoGrouping()
+        for annotation in items {
+            if let page = annotation.page { setPresence(false, annotation: annotation, page: page, action: "Delete Markups") }
+        }
+        undo.endUndoGrouping()
+        selected = nil; refresh()
     }
 
     func fillSelected(_ color: NSColor?) {
@@ -1112,6 +1235,39 @@ final class RectangleMarkupController {
         selected = annotation; changed(page)
     }
 
+    static func windowSelects(_ annotation: PDFAnnotation, in region: CGRect, crossing: Bool) -> Bool {
+        var points = RectangleMarkupRecord.vertices(annotation)
+        if annotation.type == "Line" {
+            let origin = annotation.bounds.origin
+            points = [CGPoint(x: origin.x + annotation.startPoint.x, y: origin.y + annotation.startPoint.y),
+                      CGPoint(x: origin.x + annotation.endPoint.x, y: origin.y + annotation.endPoint.y)]
+        }
+        guard points.count >= 2 else { return crossing ? region.intersects(annotation.bounds) : region.contains(annotation.bounds) }
+        if !crossing { return points.allSatisfy(region.contains) }
+        if points.contains(where: region.contains) { return true }
+        let closed = annotation.type == "Polygon"
+        let edges = Array(zip(points, points.dropFirst())) + (closed ? [(points.last!, points[0])] : [])
+        func intersects(_ a: CGPoint, _ b: CGPoint) -> Bool {
+            // Clip the actual segment, rather than its bounding box. A diagonal
+            // must not be selected by a window that only touches an empty corner.
+            var lower: CGFloat = 0, upper: CGFloat = 1
+            let dx = b.x-a.x, dy = b.y-a.y
+            for (p, q) in [(-dx, a.x-region.minX), (dx, region.maxX-a.x), (-dy, a.y-region.minY), (dy, region.maxY-a.y)] {
+                if p == 0 { if q < 0 { return false }; continue }
+                let t = q/p
+                if p < 0 { lower = max(lower, t) } else { upper = min(upper, t) }
+                if lower > upper { return false }
+            }
+            return true
+        }
+        if edges.contains(where: { intersects($0.0, $0.1) }) { return true }
+        if closed && RectangleMarkupRecord.polygonFill(annotation) != nil {
+            let path = CGMutablePath(); path.move(to: points[0]); points.dropFirst().forEach { path.addLine(to: $0) }; path.closeSubpath()
+            return path.contains(CGPoint(x: region.midX, y: region.midY))
+        }
+        return false
+    }
+
     static func hitTest(_ annotation: PDFAnnotation, at point: CGPoint, tolerance: CGFloat) -> Bool {
         let points = RectangleMarkupRecord.vertices(annotation)
         let radius = max(tolerance,(annotation.border?.lineWidth ?? 2)/2)
@@ -1205,7 +1361,7 @@ final class RectangleMarkupController {
         refresh(presentationChanged: false)
         return true
     }
-    func cancelGesture() { penConstraintAnchor = nil; pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
+    func cancelGesture() { groupMove = nil; selectionWindow = nil; penConstraintAnchor = nil; pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
     func escape() { cancelSnapshotCapture(); cancelGesture(); selected = nil; onClickAway?(); tool = .select; refresh() }
     func refresh(presentationChanged: Bool = true) {
         positionTextEditor()
@@ -1250,8 +1406,22 @@ final class RectangleMarkupController {
             }
             if tool == .polygon || tool == .area || tool == .snapshotPolygon || tool == .snapshotBox { path.closeSubpath() }
         }
+        if let view {
+            for annotation in additionalSelection where annotation.page === view.currentPage {
+                if let page = annotation.page { path.addRect(view.convert(annotation.bounds, from: page).standardized) }
+            }
+        }
+        if let move = groupMove, let view {
+            for (_, original) in move.originals { path.addRect(view.convert(original.offsetBy(dx: move.offset.x, dy: move.offset.y), from: move.page)) }
+        }
+        if let window = selectionWindow {
+            path.addRect(Self.rect(window.start, window.end))
+        }
         overlay.strokeColor = (tool == .pen && polylinePage != nil ? strokeColor.withAlphaComponent(strokeOpacity) : NSColor.systemBlue).cgColor
         overlay.lineDashPattern = tool == .pen && polylinePage != nil ? linePattern.dash(width: lineWidth).map { NSNumber(value: $0 * Double(view?.scaleFactor ?? 1)) } : nil
+        if let window = selectionWindow {
+            overlay.lineDashPattern = window.end.x < window.start.x ? [6, 4] : nil
+        }
         overlay.lineWidth = tool == .pen && polylinePage != nil ? lineWidth * (view?.scaleFactor ?? 1) : 2
         overlay.lineCap = .round; overlay.lineJoin = .round
         overlay.path = path

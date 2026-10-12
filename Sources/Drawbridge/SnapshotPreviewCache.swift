@@ -12,6 +12,15 @@ final class SnapshotPreviewCache: @unchecked Sendable {
     private let lock = NSLock()
     private var pending = Set<String>()
     private var latestResolution = [String: Double]()
+    private struct ViewportRequest {
+        let region: CGRect
+        let scale: Double
+        let generation: UInt
+        let readyAt: CFAbsoluteTime
+    }
+    private var viewports = [String: ViewportRequest]()
+    private var viewportGeneration: UInt = 0
+    private let viewportQuietInterval: CFAbsoluteTime = 0.18
     // Detail work must yield to user gestures. These parsers belong exclusively
     // to this serial queue, so tiles can reuse decoded fonts and image resources.
     private let queue = DispatchQueue(label: "com.drawbridge.snapshot-preview", qos: .utility)
@@ -42,7 +51,9 @@ final class SnapshotPreviewCache: @unchecked Sendable {
     func draw(data: Data, key: String, preview: CGImage, page: CGPDFPage, visibleRegion: CGRect? = nil, deviceScale: Double? = nil, in context: CGContext) {
         let media = page.getBoxRect(.mediaBox)
         let ctm = context.ctm
-        let scale = max(max(hypot(ctm.a, ctm.b), hypot(ctm.c, ctm.d)), deviceScale ?? 0)
+        // PDFKit may oversample a cached annotation layer. The viewport density
+        // is authoritative when available; its internal CTM is not the zoom.
+        let scale: Double = deviceScale ?? Double(max(hypot(ctm.a, ctm.b), hypot(ctm.c, ctm.d)))
         context.interpolationQuality = .high
         context.draw(preview, in: media)
         requestTiles(data: data, key: key, preview: preview, media: media,
@@ -52,18 +63,40 @@ final class SnapshotPreviewCache: @unchecked Sendable {
 
     func prepareVisible(data: Data, key: String, preview: CGImage, page: CGPDFPage, region: CGRect, scale: Double) {
         let media = page.getBoxRect(.mediaBox)
-        requestTiles(data: data, key: key, preview: preview, media: media,
-                     visible: region.intersection(media), scale: scale, context: nil)
+        let visible = region.intersection(media)
+        lock.lock()
+        if let old = viewports[key], old.region == visible, old.scale == scale {
+            lock.unlock()
+            return
+        }
+        if viewports.count > 64 { viewports.removeAll(keepingCapacity: true) }
+        viewportGeneration &+= 1
+        let generation = viewportGeneration
+        viewports[key] = ViewportRequest(region: visible, scale: scale, generation: generation,
+                                        readyAt: CFAbsoluteTimeGetCurrent() + viewportQuietInterval)
+        latestResolution[key] = ceil(scale * 4) / 4
+        lock.unlock()
+        // Tiny zoom steps otherwise queue expensive traversals for resolutions
+        // that have already gone out of view. Render only the settled viewport.
+        queue.asyncAfter(deadline: .now() + viewportQuietInterval) { [self] in
+            lock.lock()
+            let current = viewports[key]?.generation == generation
+            lock.unlock()
+            guard current else { return }
+            requestTiles(data: data, key: key, preview: preview, media: media,
+                         visible: visible, scale: scale, context: nil)
+        }
     }
 
     private func requestTiles(data: Data, key: String, preview: CGImage, media: CGRect, visible: CGRect, scale: Double, context: CGContext?) {
         let previewScale = Double(preview.width) / media.width
-        guard scale.isFinite, scale > previewScale * 1.2, scale <= 64,
+        guard scale.isFinite, scale > previewScale * 1.2, scale <= 512,
               !visible.isNull, !visible.isEmpty else { return }
         let resolution = ceil(scale * 4) / 4
         lock.lock()
         if latestResolution.count > 64 { latestResolution.removeAll(keepingCapacity: true) }
         latestResolution[key] = resolution
+        let mayRequest = viewports[key].map { CFAbsoluteTimeGetCurrent() >= $0.readyAt } ?? true
         lock.unlock()
         let span = 1024 / resolution
         let minX = Int(floor(visible.minX / span)), maxX = Int(floor(visible.maxX / span))
@@ -75,7 +108,7 @@ final class SnapshotPreviewCache: @unchecked Sendable {
             let tileKey = "\(key):\(resolution):\(x):\(y)"
             if let image = images.object(forKey: tileKey as NSString) {
                 context?.draw(image, in: region)
-            } else if requested < 8 {
+            } else if mayRequest && requested < 8 {
                 request(data: data, key: tileKey, captureKey: key, region: region, scale: resolution)
                 requested += 1
             }
@@ -88,7 +121,7 @@ final class SnapshotPreviewCache: @unchecked Sendable {
         pending.insert(key); lock.unlock()
         queue.async { [self] in
             lock.lock()
-            let relevant = latestResolution[captureKey] == scale
+            let relevant = isRelevant(captureKey: captureKey, region: region, scale: scale)
             if !relevant { pending.remove(key) }
             lock.unlock()
             guard relevant else { return }
@@ -99,9 +132,20 @@ final class SnapshotPreviewCache: @unchecked Sendable {
                 store(image, key: key)
                 rendered = true
             }
-            lock.lock(); pending.remove(key); lock.unlock()
-            if rendered { announce(captureKey) }
+            lock.lock()
+            pending.remove(key)
+            let stillRelevant = isRelevant(captureKey: captureKey, region: region, scale: scale)
+            lock.unlock()
+            if rendered && stillRelevant { announce(captureKey) }
         }
+    }
+
+    // Caller holds lock. Discard old-resolution and offscreen work before drawing
+    // and avoid announcing a completed tile in the middle of another gesture.
+    private func isRelevant(captureKey: String, region: CGRect, scale: Double) -> Bool {
+        guard latestResolution[captureKey] == scale else { return false }
+        guard let viewport = viewports[captureKey] else { return true }
+        return CFAbsoluteTimeGetCurrent() >= viewport.readyAt && viewport.region.intersects(region)
     }
 
     // Called only on the serial rendering queue. Retain at most four captures.

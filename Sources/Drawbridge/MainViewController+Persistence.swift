@@ -627,7 +627,7 @@ extension MainViewController {
         }
         let preservedPageRotations = pageRotations(in: document)
         // `write(to:withOptions:)` is materially faster than `write(to:)` on large drawing sets.
-        guard document.write(to: url, withOptions: options) else {
+        guard SnapshotViewportTileAnnotation.withoutScreenTiles(in: document, { document.write(to: url, withOptions: options) }) else {
             return false
         }
         restorePageRotations(preservedPageRotations, to: document)

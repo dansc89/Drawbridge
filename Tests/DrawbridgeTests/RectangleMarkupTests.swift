@@ -17,6 +17,157 @@ private final class BackgroundPDFDocumentRead: @unchecked Sendable {
 
 @MainActor
 final class RectangleMarkupTests: XCTestCase {
+    func testDirectionalWindowSelectionAndBatchDeleteUndo() throws {
+        _ = NSApplication.shared
+        let document = PDFDocument(), page = PDFPage()
+        page.setBounds(CGRect(x: 0, y: 0, width: 600, height: 400), for: .mediaBox)
+        document.insert(page, at: 0)
+        let view = MarkupPDFView(frame: CGRect(x: 0, y: 0, width: 600, height: 400))
+        view.setMarkupDocument(document)
+        let session = view.rectangleMarkup; session.canEdit = { true }; session.undo.groupsByEvent = false
+        session.undo.beginUndoGrouping()
+        let a = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 100, y: 100, width: 60, height: 60)))
+        let b = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 180, y: 100, width: 60, height: 60)))
+        session.undo.endUndoGrouping()
+        session.selectWindow(on: page, from: CGPoint(x: 90, y: 90), to: CGPoint(x: 200, y: 170))
+        XCTAssertEqual(session.selectedItems.count, 1); XCTAssertTrue(session.selected === a)
+        session.selectWindow(on: page, from: CGPoint(x: 200, y: 170), to: CGPoint(x: 90, y: 90))
+        XCTAssertEqual(session.selectedItems.count, 2)
+        session.deleteSelected(); XCTAssertTrue(page.annotations.isEmpty)
+        session.undo.undo(); XCTAssertEqual(page.annotations.count, 2)
+        session.setSelectedItems([a, b]); session.setSelectedItems([a, a, b])
+        XCTAssertEqual(session.selectedItems.count, 2)
+        b.isReadOnly = true; session.setSelectedItems([a, b]); XCTAssertEqual(session.selectedItems.count, 1)
+    }
+
+    func testShiftClickTogglesSelectionWithoutMovingMarkups() throws {
+        _ = NSApplication.shared
+        let document = PDFDocument(), page = PDFPage(); page.setBounds(CGRect(x: 0, y: 0, width: 600, height: 400), for: .mediaBox); document.insert(page, at: 0)
+        let view = MarkupPDFView(frame: CGRect(x: 0, y: 0, width: 600, height: 400)); view.setMarkupDocument(document)
+        let session = view.rectangleMarkup; session.canEdit = { true }
+        let a = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 100, y: 100, width: 60, height: 60)))
+        let b = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 200, y: 100, width: 60, height: 60)))
+        session.setSelectedItems([a])
+        let point = view.convert(CGPoint(x: 230, y: 130), from: page)
+        let original = b.bounds
+        XCTAssertTrue(session.pointerDown(at: point, modifiers: [.shift]))
+        _ = session.pointerUp(at: point, modifiers: [.shift])
+        XCTAssertEqual(session.selectedItems.count, 2); XCTAssertEqual(b.bounds, original)
+        XCTAssertTrue(session.pointerDown(at: point, modifiers: [.shift]))
+        XCTAssertEqual(session.selectedItems.count, 1); XCTAssertTrue(session.selected === a)
+    }
+
+    func testStackingOrderPreservesIdentityAndUndo() throws {
+        _ = NSApplication.shared
+        let document = PDFDocument(), page = PDFPage(); document.insert(page, at: 0)
+        page.setBounds(CGRect(x: 0, y: 0, width: 600, height: 400), for: .mediaBox)
+        let view = MarkupPDFView(frame: CGRect(x: 0, y: 0, width: 600, height: 400)); view.setMarkupDocument(document)
+        let session = view.rectangleMarkup; session.canEdit = { true }; session.undo.groupsByEvent = false
+        session.undo.beginUndoGrouping()
+        let a = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 100, y: 100, width: 60, height: 60)))
+        let b = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 110, y: 110, width: 60, height: 60)))
+        session.undo.endUndoGrouping()
+        session.setSelectedItems([a]); session.undo.beginUndoGrouping(); session.reorderSelected(toFront: true); session.undo.endUndoGrouping()
+        XCTAssertTrue(page.annotations.last === a)
+        session.undo.undo(); XCTAssertTrue(page.annotations.last === b)
+        session.undo.redo(); XCTAssertTrue(page.annotations.last === a)
+        session.undo.beginUndoGrouping(); session.reorderSelected(toFront: false); session.undo.endUndoGrouping(); XCTAssertTrue(page.annotations.first === a)
+    }
+
+    func testStackingOrderSurvivesSaveAndReopen() throws {
+        let source = try fixture(rotation: 0)
+        let output = source.deletingLastPathComponent().appendingPathComponent("Stacking-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
+        let document = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(document.page(at: 0))
+        let session = RectangleMarkupController(); session.bind(to: document); session.canEdit = { true }
+        let a = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 100, y: 100, width: 60, height: 60)))
+        let b = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 110, y: 110, width: 60, height: 60)))
+        session.setSelectedItems([a]); session.reorderSelected(toFront: true)
+        let expected = RectangleMarkupRecord.capture(document)
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: output, pageLabels: [:], records: expected))
+        let reopened = try XCTUnwrap(PDFDocument(url: output))
+        let actual = RectangleMarkupRecord.capture(reopened)
+        XCTAssertEqual(actual.map(\.id), expected.map(\.id))
+        XCTAssertTrue(page.annotations.last === a); XCTAssertTrue(page.annotations.filter(RectangleMarkupRecord.owns).first === b)
+    }
+
+    func testImportedAndOwnedStackingPersistsWithoutChangingImportedAppearance() throws {
+        let source = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("Imported-stack-\(UUID().uuidString).pdf")
+        let output = source.deletingLastPathComponent().appendingPathComponent("Ordered-\(UUID().uuidString).pdf")
+        defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }
+        let original = PDFDocument(), sheet = PDFPage()
+        sheet.setBounds(CGRect(x: 0, y: 0, width: 600, height: 400), for: .mediaBox); original.insert(sheet, at: 0)
+        let external = PDFAnnotation(bounds: CGRect(x: 100, y: 100, width: 60, height: 60), forType: .square, withProperties: nil)
+        external.contents = "External markup"; external.color = .green; sheet.addAnnotation(external)
+        XCTAssertTrue(original.write(to: source))
+        let document = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(document.page(at: 0))
+        let imported = try XCTUnwrap(page.annotations.first)
+        let controller = RectangleMarkupController(); controller.bind(to: document); controller.canEdit = { true }
+        let owned = try XCTUnwrap(controller.create(on: page, bounds: CGRect(x: 110, y: 110, width: 60, height: 60)))
+        controller.setSelectedItems([imported]); controller.reorderSelected(toFront: true)
+        XCTAssertTrue(page.annotations.last === imported)
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: output, pageLabels: [:], records: RectangleMarkupRecord.capture(document), importedPlan: controller.importedPlan()))
+        let reopened = try XCTUnwrap(PDFDocument(url: output)), savedPage = try XCTUnwrap(reopened.page(at: 0))
+        XCTAssertEqual(savedPage.annotations.last?.contents, "External markup")
+        XCTAssertEqual(RectangleMarkupRecord.identity(try XCTUnwrap(savedPage.annotations.first)), RectangleMarkupRecord.identity(owned))
+        XCTAssertEqual(savedPage.annotations.last?.bounds, imported.bounds)
+        let reopenedController = RectangleMarkupController(); reopenedController.bind(to: reopened)
+        XCTAssertEqual(savedPage.annotations.last?.contents, "External markup", "Restoring custom appearances must retain stacking order")
+        XCTAssertEqual(RectangleMarkupRecord.identity(try XCTUnwrap(savedPage.annotations.first)), RectangleMarkupRecord.identity(owned))
+        controller.undo.undo()
+        XCTAssertTrue(page.annotations.first === imported)
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: output, pageLabels: [:], records: RectangleMarkupRecord.capture(document), importedPlan: controller.importedPlan()))
+        let undone = try XCTUnwrap(PDFDocument(url: output))
+        XCTAssertEqual(undone.page(at: 0)?.annotations.first?.contents, "External markup")
+    }
+
+    func testCrossingSelectionTestsActualLineAndContainedNodes() throws {
+        let line = PDFAnnotation(bounds: CGRect(x: 0, y: 0, width: 100, height: 100), forType: .line, withProperties: nil)
+        line.startPoint = .zero; line.endPoint = CGPoint(x: 100, y: 100)
+        XCTAssertFalse(RectangleMarkupController.windowSelects(line, in: CGRect(x: 0, y: 80, width: 10, height: 10), crossing: true))
+        XCTAssertTrue(RectangleMarkupController.windowSelects(line, in: CGRect(x: 45, y: 45, width: 10, height: 10), crossing: true))
+        XCTAssertFalse(RectangleMarkupController.windowSelects(line, in: CGRect(x: 45, y: 45, width: 10, height: 10), crossing: false))
+        XCTAssertTrue(RectangleMarkupController.windowSelects(line, in: CGRect(x: -1, y: -1, width: 102, height: 102), crossing: false))
+    }
+
+    func testPointerWindowSelectionDoesNotSelectEmptyCornerOfDiagonalLine() throws {
+        _ = NSApplication.shared
+        let document = PDFDocument(), page = PDFPage()
+        page.setBounds(CGRect(x: 0, y: 0, width: 600, height: 400), for: .mediaBox)
+        document.insert(page, at: 0)
+        let view = MarkupPDFView(frame: CGRect(x: 0, y: 0, width: 600, height: 400))
+        view.setMarkupDocument(document)
+        let line = PDFAnnotation(bounds: CGRect(x: 100, y: 100, width: 100, height: 100), forType: .line, withProperties: nil)
+        line.startPoint = .zero; line.endPoint = CGPoint(x: 100, y: 100)
+        page.addAnnotation(line)
+        let session = view.rectangleMarkup; session.canEdit = { true }
+        let start = view.convert(CGPoint(x: 120, y: 190), from: page)
+        let end = view.convert(CGPoint(x: 100, y: 170), from: page)
+        XCTAssertTrue(session.pointerDown(at: start))
+        XCTAssertTrue(session.pointerDragged(at: end))
+        XCTAssertTrue(session.pointerUp(at: end))
+        XCTAssertTrue(session.selectedItems.isEmpty)
+    }
+
+    func testMultiSelectionMovesTogetherAndUndoesTogether() throws {
+        _ = NSApplication.shared
+        let document = PDFDocument(), page = PDFPage(); page.setBounds(CGRect(x: 0, y: 0, width: 600, height: 400), for: .mediaBox); document.insert(page, at: 0)
+        let view = MarkupPDFView(frame: CGRect(x: 0, y: 0, width: 600, height: 400)); view.setMarkupDocument(document)
+        let session = view.rectangleMarkup; session.canEdit = { true }
+        let a = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 100, y: 100, width: 60, height: 60)))
+        let b = try XCTUnwrap(session.create(on: page, bounds: CGRect(x: 200, y: 100, width: 60, height: 60)))
+        session.undo.removeAllActions(); session.setSelectedItems([a, b])
+        let originals = [a.bounds, b.bounds]
+        let start = view.convert(CGPoint(x: 130, y: 130), from: page), end = view.convert(CGPoint(x: 160, y: 150), from: page)
+        XCTAssertTrue(session.pointerDown(at: start)); XCTAssertTrue(session.pointerDragged(at: end)); XCTAssertTrue(session.pointerUp(at: end))
+        for (annotation, original) in zip([a, b], originals) {
+            XCTAssertEqual(annotation.bounds.minX, original.minX + 30, accuracy: 0.0001)
+            XCTAssertEqual(annotation.bounds.minY, original.minY + 20, accuracy: 0.0001)
+            XCTAssertEqual(annotation.bounds.size, original.size)
+        }
+        session.undo.undo(); XCTAssertEqual(a.bounds, originals[0]); XCTAssertEqual(b.bounds, originals[1])
+    }
+
     func testMarkupsListNavigationSearchBatchDeleteUndoAndSave() throws {
         _ = NSApplication.shared
         let source = try fixture(rotation: 0)

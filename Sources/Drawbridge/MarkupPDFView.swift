@@ -111,6 +111,12 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     // those legitimate framework callbacks on macOS 26.
     func setMarkupDocument(_ document: PDFDocument?) {
         rectangleMarkup.finishTextEditing()
+        for page in tiledSnapshotPages.allObjects {
+            page.annotations.filter { $0 is SnapshotViewportTileAnnotation }.forEach(page.removeAnnotation)
+            page.annotations.compactMap { $0 as? DrawbridgeSnapshotAnnotation }.forEach { $0.usesViewportTiles = false }
+        }
+        tiledSnapshotPages.removeAllObjects()
+        rectangleMarkup.prepareForDisplay(document)
         self.document = document
         rectangleMarkup.bind(to:document)
     }
@@ -539,8 +545,46 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         NotificationCenter.default.addObserver(self, selector: #selector(snapshotPreviewReady(_:)), name: SnapshotPreviewCache.ready, object: nil)
     }
 
+    private var pendingSnapshotDetailKeys = Set<String>()
+    private var snapshotDetailRefreshWorkItem: DispatchWorkItem?
+    private var snapshotDetailRefreshGeneration: UInt = 0
+    private var lastSnapshotViewportActivity: CFAbsoluteTime = 0
+    private let snapshotViewportQuietInterval: CFAbsoluteTime = 0.25
+
     @objc private func snapshotPreviewReady(_ notification: Notification) {
         guard window?.isVisible == true, let keys = notification.userInfo?["captureKeys"] as? Set<String> else { return }
+        pendingSnapshotDetailKeys.formUnion(keys)
+        scheduleSnapshotDetailRefresh()
+    }
+
+    private func noteSnapshotViewportActivity() {
+        lastSnapshotViewportActivity = CFAbsoluteTimeGetCurrent()
+        scheduleSnapshotViewportTiles()
+        if !pendingSnapshotDetailKeys.isEmpty { scheduleSnapshotDetailRefresh() }
+    }
+
+    private func scheduleSnapshotDetailRefresh() {
+        snapshotDetailRefreshWorkItem?.cancel()
+        snapshotDetailRefreshGeneration &+= 1
+        let generation = snapshotDetailRefreshGeneration
+        let delay = max(0.02, snapshotViewportQuietInterval - (CFAbsoluteTimeGetCurrent() - lastSnapshotViewportActivity))
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.snapshotDetailRefreshGeneration == generation else { return }
+            self.snapshotDetailRefreshWorkItem = nil
+            if CFAbsoluteTimeGetCurrent() - self.lastSnapshotViewportActivity < self.snapshotViewportQuietInterval {
+                self.scheduleSnapshotDetailRefresh()
+                return
+            }
+            self.refreshSettledSnapshotDetails()
+        }
+        snapshotDetailRefreshWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func refreshSettledSnapshotDetails() {
+        let keys = pendingSnapshotDetailKeys
+        pendingSnapshotDetailKeys.removeAll(keepingCapacity: true)
+        guard window?.isVisible == true, !keys.isEmpty else { return }
         for page in visiblePages {
             let region = Self.snapshotPreviewBounds(on: page, keys: keys)
             guard let region else { continue }
@@ -602,7 +646,70 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     /// leave a cached annotation image visible after the annotation is removed.
     private let snapshotPreviewPages = NSHashTable<PDFPage>.weakObjects()
 
+    private var updatingSnapshotTiles = false
+    private var snapshotTilesWorkItem: DispatchWorkItem?
+    private let tiledSnapshotPages = NSHashTable<PDFPage>.weakObjects()
+
+    private func scheduleSnapshotViewportTiles() {
+        guard !updatingSnapshotTiles else { return }
+        snapshotTilesWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.updateSnapshotViewportTiles() }
+        snapshotTilesWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
+    }
+
+    func updateSnapshotViewportTiles() {
+        guard !updatingSnapshotTiles else { return }
+        updatingSnapshotTiles = true
+        defer { updatingSnapshotTiles = false }
+        let pages = tiledSnapshotPages.allObjects + visiblePages.filter { candidate in
+            !tiledSnapshotPages.allObjects.contains(where: { $0 === candidate })
+        }
+        let density = scaleFactor * (window?.backingScaleFactor ?? 1)
+        for page in pages {
+            let visible = visiblePages.contains(where: { $0 === page })
+            let originals = page.annotations.filter { !($0 is SnapshotViewportTileAnnotation) }
+            let snapshots = originals.compactMap { $0 as? DrawbridgeSnapshotAnnotation }
+            let viewport = convert(contentClipView.map { convert($0.bounds, from: $0) } ?? bounds, to: page)
+            var tilesByOwner = [ObjectIdentifier: [SnapshotViewportTileAnnotation]]()
+            for snapshot in snapshots {
+                let needsTiles = visible && snapshot.shouldDisplay && !snapshot.isRetired
+                    && max(snapshot.bounds.width, snapshot.bounds.height) * density > 4096
+                snapshot.usesViewportTiles = needsTiles
+                guard needsTiles else { continue }
+                let region = viewport.intersection(snapshot.bounds).intersection(page.bounds(for: displayBox))
+                guard !region.isNull, !region.isEmpty else { continue }
+                let span = 1024 / max(density, 1)
+                var tiles = [SnapshotViewportTileAnnotation]()
+                for y in Int(floor(region.minY / span))...Int(floor(region.maxY / span)) {
+                    for x in Int(floor(region.minX / span))...Int(floor(region.maxX / span)) {
+                        let tileBounds = CGRect(x: CGFloat(x) * span, y: CGFloat(y) * span, width: span, height: span).intersection(region)
+                        if !tileBounds.isEmpty { tiles.append(SnapshotViewportTileAnnotation(snapshot: snapshot, bounds: tileBounds)) }
+                    }
+                }
+                tilesByOwner[ObjectIdentifier(snapshot)] = tiles
+            }
+            let oldTiles = page.annotations.compactMap { $0 as? SnapshotViewportTileAnnotation }
+            let newTiles = originals.flatMap { tilesByOwner[ObjectIdentifier($0)] ?? [] }
+            let unchanged = oldTiles.count == newTiles.count && zip(oldTiles, newTiles).allSatisfy {
+                $0.snapshot === $1.snapshot && $0.bounds == $1.bounds
+            }
+            if !unchanged && (!oldTiles.isEmpty || !newTiles.isEmpty) {
+                oldTiles.forEach { $0.shouldDisplay = false }
+                // Retain the original stacking order. Tiles immediately follow
+                // their source, below every annotation originally above it.
+                page.annotations.forEach(page.removeAnnotation)
+                for annotation in originals {
+                    page.addAnnotation(annotation)
+                    tilesByOwner[ObjectIdentifier(annotation)]?.forEach(page.addAnnotation)
+                }
+                tiledSnapshotPages.add(page)
+            }
+        }
+    }
+
     private func updateSnapshotPreviewViewports() {
+        scheduleSnapshotViewportTiles()
         for page in visiblePages {
             let region = convert(bounds, to: page).intersection(page.bounds(for: displayBox))
             for snapshot in page.annotations.compactMap({ $0 as? DrawbridgeSnapshotAnnotation }) {
@@ -613,6 +720,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     func refreshAnnotationRendering(on page: PDFPage, importedAppearanceChanged: Bool = false, region: CGRect? = nil) {
+        let hadViewportTiles = page.annotations.contains { $0 is SnapshotViewportTileAnnotation }
+        // Retire stale display tiles before PDFKit invalidates the page. Doing
+        // this later can leave a deleted Snapshot cached until the next zoom.
+        updateSnapshotViewportTiles()
         updateSnapshotPreviewViewports()
         if importedAppearanceChanged && window?.isVisible == true && !snapshotPreviewPages.contains(page) {
             // Detached or hidden views have no on-screen tiles to clear.
@@ -642,6 +753,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             for child in target.subviews { invalidate(child) }
         }
         invalidate(self)
+        if hadViewportTiles && window?.isVisible == true {
+            // PDFKit retains a composited high-zoom surface after Stamp removal.
+            // Retile at an adjacent scale, then restore the exact scale and anchor.
+            // Plain needsDisplay and page rotation do not retire that surface.
+            _ = zoom(by: 0.999)
+            _ = zoom(by: 1 / 0.999)
+        }
     }
 
     private func installOverscrollClipViewIfNeeded() {
@@ -778,13 +896,19 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     @objc private func handlePDFViewportChangedNotification(_ notification: Notification) {
-        _ = notification
+        if notification.name == .PDFViewDocumentChanged {
+            snapshotDetailRefreshWorkItem?.cancel()
+            snapshotDetailRefreshGeneration &+= 1
+            pendingSnapshotDetailKeys.removeAll(keepingCapacity: true)
+        }
+        noteSnapshotViewportActivity()
         updateHyperlinkOverlayIfNeeded()
         rectangleMarkup.refresh(presentationChanged: false)
     }
 
     @objc private func handleClipViewBoundsDidChange(_ notification: Notification) {
         _ = notification
+        noteSnapshotViewportActivity()
         updateHyperlinkOverlayIfNeeded()
         rectangleMarkup.refresh(presentationChanged: false)
         onViewportChanged?()
@@ -1043,15 +1167,23 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         if usesPenCursor { Self.penCursor.set() }
     }
 
+    @objc private func bringSelectedMarkupToFront(_ sender: Any?) { rectangleMarkup.reorderSelected(toFront: true) }
+    @objc private func sendSelectedMarkupToBack(_ sender: Any?) { rectangleMarkup.reorderSelected(toFront: false) }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu(title: "PDF")
         let location = convert(event.locationInWindow, from: nil)
         if let page = page(for: location, nearest: false) {
             let point = convert(location, to: page)
             if let annotation = page.annotations.reversed().first(where: { $0.shouldDisplay && rectangleMarkup.layerIsVisible($0) && rectangleMarkup.canAssignLayer($0) && RectangleMarkupController.hitTest($0, at: point, tolerance: 8 / max(scaleFactor, 0.01)) }) {
-                rectangleMarkup.selectFromList(annotation)
+                if !rectangleMarkup.selectedItems.contains(where: { $0 === annotation }) { rectangleMarkup.selectFromList(annotation) }
                 let item = NSMenuItem(title: "Assign to Layer", action: nil, keyEquivalent: "")
-                item.submenu = rectangleMarkup.layerAssignmentMenu(for: [annotation]); menu.addItem(item); menu.addItem(.separator())
+                item.submenu = rectangleMarkup.layerAssignmentMenu(for: rectangleMarkup.selectedItems); menu.addItem(item)
+                let front = menu.addItem(withTitle: "Bring to Front", action: #selector(bringSelectedMarkupToFront(_:)), keyEquivalent: "")
+                front.target = self; front.isEnabled = !rectangleMarkup.layerIsLocked(annotation) && !annotation.isReadOnly
+                let back = menu.addItem(withTitle: "Send to Back", action: #selector(sendSelectedMarkupToBack(_:)), keyEquivalent: "")
+                back.target = self; back.isEnabled = front.isEnabled
+                menu.addItem(.separator())
             }
         }
         let copyItem = menu.addItem(withTitle: "Copy Text", action: #selector(copy(_:)), keyEquivalent: "")
@@ -2759,6 +2891,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         autoScales = false
         let targetScale = min(max(minScaleFactor, scaleFactor * factor), maxScaleFactor)
         guard targetScale != scaleFactor else { return false }
+        noteSnapshotViewportActivity()
 
         let anchorPointInView = clampPointToBounds(resolvedZoomAnchorPoint(fromWindowPoint: windowPoint))
         guard contentClipView != nil else {
@@ -2781,14 +2914,19 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         forceZoomLayout()
 
         if let anchorPage, let anchorPagePoint {
-            correctZoomAnchor(page: anchorPage, pagePoint: anchorPagePoint, desiredWindowPoint: desiredAnchorPointInWindow)
+            let desiredPoint: NSPoint
+            if windowPoint == nil, let clip = contentClipView {
+                desiredPoint = clip.convert(NSPoint(x: clip.bounds.midX, y: clip.bounds.midY), to: nil)
+            } else { desiredPoint = desiredAnchorPointInWindow }
+            correctZoomAnchor(page: anchorPage, pagePoint: anchorPagePoint, desiredWindowPoint: desiredPoint)
             scheduleZoomAnchorCorrection(
                 page: anchorPage,
                 pagePoint: anchorPagePoint,
                 desiredWindowPoint: desiredAnchorPointInWindow,
                 targetScale: targetScale,
                 generation: generation,
-                remainingPasses: 3
+                remainingPasses: 3,
+                trackViewportCenter: windowPoint == nil
             )
         }
         emitInteractiveViewportFeedback()
@@ -2863,9 +3001,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         if let windowPoint {
             return convert(windowPoint, from: nil)
         }
-        if let window {
-            let mouseInWindow = window.convertPoint(fromScreen: NSEvent.mouseLocation)
-            return convert(mouseInWindow, from: nil)
+        if let clip = contentClipView {
+            return convert(NSPoint(x: clip.bounds.midX, y: clip.bounds.midY), from: clip)
         }
         return NSPoint(x: bounds.midX, y: bounds.midY)
     }

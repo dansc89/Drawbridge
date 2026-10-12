@@ -40,6 +40,34 @@ final class MarkupPDFViewZoomTests: XCTestCase {
         assert(pagePoint: anchoredPagePoint, on: page, remainsAt: pointerInWindow, in: pdfView)
     }
 
+    func testRepeatedZoomRemainsAnchoredPastTwoThousandPercent() throws {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = MarkupPDFView(frame: window.contentView!.bounds); window.contentView?.addSubview(view)
+        let document = PDFDocument(), page = try XCTUnwrap(PDFPage(image: makePageImage()))
+        document.insert(page, at: 0); view.setMarkupDocument(document); view.autoScales = false; view.maxScaleFactor = 64; view.scaleFactor = 1
+        window.layoutIfNeeded(); view.layoutSubtreeIfNeeded(); drainMainQueue()
+        let anchor = view.convert(NSPoint(x: 450, y: 350), to: nil)
+        let point = view.convert(NSPoint(x: 450, y: 350), to: page)
+        for _ in 0..<30 { XCTAssertTrue(view.zoom(by: 1.12, anchoredAtWindowPoint: anchor)); drainMainQueue() }
+        XCTAssertGreaterThan(view.scaleFactor, 20)
+        assert(pagePoint: point, on: page, remainsAt: anchor, in: view)
+    }
+
+    func testKeyboardZoomOnRotatedArchitecturalPageKeepsViewportCenter() throws {
+        let window = NSWindow(contentRect: NSRect(x: 10000, y: 10000, width: 900, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = MarkupPDFView(frame: window.contentView!.bounds); window.contentView?.addSubview(view)
+        let document = PDFDocument(), page = PDFPage()
+        page.setBounds(CGRect(x: 0, y: 0, width: 2592, height: 3456), for: .mediaBox); page.rotation = 90
+        document.insert(page, at: 0); view.setMarkupDocument(document); view.autoScales = false; view.maxScaleFactor = 64; view.scaleFactor = 0.2
+        window.layoutIfNeeded(); view.layoutSubtreeIfNeeded(); drainMainQueue()
+        let before = try XCTUnwrap(view.normalizedVisibleCenter(on: page))
+        for _ in 0..<42 { XCTAssertTrue(view.zoom(by: 1.12)); drainMainQueue() }
+        XCTAssertGreaterThan(view.scaleFactor, 20)
+        let after = try XCTUnwrap(view.normalizedVisibleCenter(on: page))
+        XCTAssertEqual(after.x, before.x, accuracy: 0.0001)
+        XCTAssertEqual(after.y, before.y, accuracy: 0.0001)
+    }
+
     func testVisibleCenterNormalizationUsesViewportOnCroppedRotatedPage() throws {
         let pdfView = MarkupPDFView(frame: NSRect(x: 0, y: 0, width: 800, height: 600))
         let document = PDFDocument()
