@@ -122,3 +122,7 @@ Use **Drawbridge > Keyboard Shortcuts…** to review shortcuts and **Drawbridge 
 Choose **View > Markups List**, or click **Markups** in the bottom bar. The list shows markup type, page, comment, author, and layer across the document. Click a row to navigate to that annotation. Search by text or author. Shift-click or Command-click to select multiple rows, then press Backspace/Delete or choose **Delete Selected**. Cmd+Z restores deleted markups. Links, form controls, and AutoCAD SHX text helpers are excluded from this review list. Locked annotations remain listed but cannot be deleted. Clear the search before checking whether any review markups remain.
 
 Choose **Drawbridge > Markup Author…** to set the name recorded on new markups. The default is your Mac account’s full name. Existing annotations from other apps retain their authors.
+
+### Locking markup layers
+
+Use the **Lock** column in Layers to protect a layer’s markups from moving, editing, deletion, and reassignment in Drawbridge. Show/Hide remains independent. Unlock the layer to edit its markups again. Lock state is retained when saving and reopening and supports Undo/Redo. Locking the active layer changes the destination for new markups to Unassigned. Locked layers cannot receive new markups or be removed until unlocked. This is an editing safeguard in Drawbridge, not password protection of the PDF.

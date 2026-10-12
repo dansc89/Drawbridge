@@ -120,7 +120,7 @@ extension MainViewController {
         let items = markupsTable.selectedRowIndexes.compactMap { row -> MarkupItem? in
             markupItems.indices.contains(row) ? markupItems[row] : nil
         }
-        let eligible = items.filter { !$0.annotation.isReadOnly && (RectangleMarkupRecord.owns($0.annotation) || ImportedMarkupState.selectable($0.annotation) || pdfView.rectangleMarkup.canAssignLayer($0.annotation)) }
+        let eligible = items.filter { !$0.annotation.isReadOnly && !pdfView.rectangleMarkup.layerIsLocked($0.annotation) && (RectangleMarkupRecord.owns($0.annotation) || ImportedMarkupState.selectable($0.annotation) || pdfView.rectangleMarkup.canAssignLayer($0.annotation)) }
         guard !eligible.isEmpty else { return }
         let session = pdfView.rectangleMarkup
         session.undo.beginUndoGrouping()

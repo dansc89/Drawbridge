@@ -507,7 +507,7 @@ final class RectangleMarkupController {
             if clickCount >= 2 { finishPolyline() } else { refresh() }
             return true
         }
-        if clickCount >= 2, let hit = page.annotations.reversed().first(where:{ RectangleMarkupRecord.owns($0) && $0.type == "FreeText" && !$0.isReadOnly && $0.bounds.contains(point) }) {
+        if clickCount >= 2, let hit = page.annotations.reversed().first(where:{ RectangleMarkupRecord.owns($0) && $0.type == "FreeText" && !$0.isReadOnly && !layerIsLocked($0) && $0.bounds.contains(point) }) {
             selected = hit; beginTextEditing(on:page,bounds:hit.bounds,annotation:hit); return true
         }
         if tool != .select {
@@ -516,7 +516,7 @@ final class RectangleMarkupController {
             gesture = .create(page, point); preview = (page, CGRect(origin: point, size: .zero)); refresh()
             return true
         }
-        if let selected, selected.page === page, RectangleMarkupRecord.owns(selected) {
+        if let selected, selected.page === page, RectangleMarkupRecord.owns(selected), !selected.isReadOnly, !layerIsLocked(selected) {
             let vertices = RectangleMarkupRecord.vertices(selected)
             if let index = vertices.indices.first(where: { i in
                 let p = view.convert(vertices[i],from:page)
@@ -535,7 +535,7 @@ final class RectangleMarkupController {
                 preview = (page, selected.bounds); refresh(); return true
             }
         }
-        if let hit = page.annotations.reversed().first(where: { (RectangleMarkupRecord.owns($0) || ImportedMarkupState.selectable($0)) && !$0.isReadOnly && $0.shouldDisplay && Self.hitTest($0,at:point,tolerance:8 / max(view.scaleFactor,0.01)) }) {
+        if let hit = page.annotations.reversed().first(where: { (RectangleMarkupRecord.owns($0) || ImportedMarkupState.selectable($0)) && !$0.isReadOnly && !layerIsLocked($0) && $0.shouldDisplay && Self.hitTest($0,at:point,tolerance:8 / max(view.scaleFactor,0.01)) }) {
             selected = hit; view.setCurrentSelection(nil, animate: false)
             gesture = .edit(page, hit, hit.bounds, point, nil); preview = (page, hit.bounds); refresh(); return true
         }
@@ -775,7 +775,7 @@ final class RectangleMarkupController {
     }
     @discardableResult
     func pasteSnapshot(_ payload: SnapshotPayload, on page: PDFPage, center: CGPoint, inPlace: Bool = false) -> PDFAnnotation? {
-        guard canEdit(), page.document === boundDocument, let size = payload.size else { return nil }
+        guard canEdit(), !activeLayerIsLocked, page.document === boundDocument, let size = payload.size else { return nil }
         guard MeasurementMetadata.supportedPage(page) else { onSnapshotError?(SnapshotError.unsupportedPageUnits); return nil }
         let rotated = page.rotation % 180 != 0
         let paperSize = rotated ? CGSize(width:size.height,height:size.width) : size
@@ -803,7 +803,7 @@ final class RectangleMarkupController {
     }
 
     func styleSelectedSnapshot(_ style: SnapshotStyle) {
-        guard canEdit(), style.isValid, let old = selected, RectangleMarkupRecord.owns(old), !old.isReadOnly,
+        guard canEdit(), style.isValid, let old = selected, RectangleMarkupRecord.owns(old), !old.isReadOnly, !layerIsLocked(old),
               let page = old.page, let payload = SnapshotPayload.read(old), SnapshotStyle.read(old) != style else { return }
         do {
             let replacement = try SnapshotStampFactory.make(payload: payload, bounds: old.bounds, rotation: page.rotation, style: style)
@@ -834,7 +834,7 @@ final class RectangleMarkupController {
 
     @discardableResult
     func create(on page: PDFPage, bounds: CGRect, kind: RectangleMarkupRecord.Kind = .rectangle, endpoints: (CGPoint,CGPoint)? = nil, text: String = "", vertices: [CGPoint] = [], measurement: DrawingMeasurement? = nil) -> PDFAnnotation? {
-        guard canEdit(), bounds.width >= 2, bounds.height >= 2,
+        guard canEdit(), !activeLayerIsLocked, bounds.width >= 2, bounds.height >= 2,
               page.document === boundDocument, [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy({ $0.isFinite }) else { return nil }
         if kind == .text && (text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || text.utf8.count > 100000) { return nil }
         if (kind == .polyline || kind == .polygon) && (vertices.count < (kind == .polygon ? 3 : 2) || vertices.count > 10000 || !vertices.allSatisfy({ $0.x.isFinite && $0.y.isFinite && bounds.contains($0) })) { return nil }
@@ -872,7 +872,7 @@ final class RectangleMarkupController {
     func beginTextEditing(on page:PDFPage, bounds:CGRect, annotation:PDFAnnotation? = nil) {
         finishTextEditing()
         guard canEdit(), page.document === boundDocument, let view else { return }
-        if let annotation, !RectangleMarkupRecord.owns(annotation) || annotation.type != "FreeText" || annotation.isReadOnly { return }
+        if let annotation, !RectangleMarkupRecord.owns(annotation) || annotation.type != "FreeText" || annotation.isReadOnly || layerIsLocked(annotation) { return }
         let storage = NSTextStorage(), layout = NSLayoutManager()
         storage.addLayoutManager(layout)
         let container = NSTextContainer(containerSize:CGSize(width:500,height:500)); layout.addTextContainer(container)
@@ -933,18 +933,18 @@ final class RectangleMarkupController {
     func selectFromList(_ annotation: PDFAnnotation) {
         finishTextEditing(); cancelGesture(); tool = .select
         guard annotation.page?.document === boundDocument else { return }
-        selected = annotation; refresh()
+        selected = layerIsLocked(annotation) ? nil : annotation; refresh()
     }
 
     func deleteSelected() {
-        guard canEdit(), let selected, (RectangleMarkupRecord.owns(selected) || ImportedMarkupState.selectable(selected) || canAssignLayer(selected)), !selected.isReadOnly, let page = selected.page else { return }
+        guard canEdit(), let selected, (RectangleMarkupRecord.owns(selected) || ImportedMarkupState.selectable(selected) || canAssignLayer(selected)), !selected.isReadOnly, !layerIsLocked(selected), let page = selected.page else { return }
         cancelGesture(); setPresence(false, annotation: selected, page: page, action: "Delete Markup")
     }
 
     func fillSelected(_ color: NSColor?) {
         guard canEdit() else { return }
         guard let annotation = selected else { fillColor = color; refresh(); return }
-        guard ["Square", "Circle", "Polygon"].contains(annotation.type ?? ""), !annotation.isReadOnly, let page = annotation.page else { return }
+        guard ["Square", "Circle", "Polygon"].contains(annotation.type ?? ""), !annotation.isReadOnly, !layerIsLocked(annotation), let page = annotation.page else { return }
         setFill(color,on:annotation,page:page)
     }
     private func setFill(_ color: NSColor?, on annotation: PDFAnnotation, page: PDFPage) {
@@ -960,14 +960,14 @@ final class RectangleMarkupController {
         let opaque = color.withAlphaComponent(1)
         let width = min(max(width, 0.25), 72)
         guard let selected else { strokeColor = opaque; lineWidth = width; refresh(); return }
-        guard !selected.isReadOnly, selected.type != "Stamp", let page = selected.page else { return }
+        guard !selected.isReadOnly, !layerIsLocked(selected), selected.type != "Stamp", let page = selected.page else { return }
         setStyle(selected, page: page, color: opaque, width: width)
     }
 
     func setLineAppearance(pattern: MarkupLinePattern, opacity: Double) {
         guard canEdit(), opacity.isFinite, (0...1).contains(opacity) else { return }
         guard let annotation = selected else { linePattern = pattern; strokeOpacity = opacity; refresh(); return }
-        guard RectangleMarkupRecord.owns(annotation), !annotation.isReadOnly, annotation.type != "Stamp", let page = annotation.page else { return }
+        guard RectangleMarkupRecord.owns(annotation), !annotation.isReadOnly, !layerIsLocked(annotation), annotation.type != "Stamp", let page = annotation.page else { return }
         setLineAppearance(pattern: pattern, opacity: opacity, annotation: annotation, page: page)
     }
     private func setLineAppearance(pattern: MarkupLinePattern, opacity: Double, annotation: PDFAnnotation, page: PDFPage) {
@@ -1008,7 +1008,7 @@ final class RectangleMarkupController {
     }
 
     func editSelectedText(_ text: String, size: CGFloat) {
-        guard canEdit(), let annotation = selected, annotation.type == "FreeText", RectangleMarkupRecord.owns(annotation), let page = annotation.page,
+        guard canEdit(), let annotation = selected, !annotation.isReadOnly, !layerIsLocked(annotation), annotation.type == "FreeText", RectangleMarkupRecord.owns(annotation), let page = annotation.page,
               !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty, text.utf8.count <= 100000, size.isFinite, (6...144).contains(size) else { return }
         let oldText = annotation.contents ?? "", oldSize = RectangleMarkupRecord.textFontSize(annotation)
         guard oldText != text || oldSize != size else { return }
@@ -1025,7 +1025,7 @@ final class RectangleMarkupController {
         setGeometry(bounds, endpoints:nil, of:annotation, on:page, action:action)
     }
     func setGeometry(_ bounds: CGRect, endpoints: (CGPoint,CGPoint)?, of annotation: PDFAnnotation, on page: PDFPage, action: String) {
-        guard canEdit(), page.document === boundDocument, (RectangleMarkupRecord.owns(annotation) || ImportedMarkupState.selectable(annotation)), !annotation.isReadOnly, bounds.width >= 2, bounds.height >= 2, [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy({ $0.isFinite }) else { return }
+        guard canEdit(), page.document === boundDocument, (RectangleMarkupRecord.owns(annotation) || ImportedMarkupState.selectable(annotation)), !annotation.isReadOnly, !layerIsLocked(annotation), bounds.width >= 2, bounds.height >= 2, [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy({ $0.isFinite }) else { return }
         if let (a,b) = endpoints {
             guard [a.x,a.y,b.x,b.y].allSatisfy({ $0.isFinite }), bounds.contains(a), bounds.contains(b), hypot(a.x-b.x,a.y-b.y) >= 2 else { return }
         }
@@ -1068,7 +1068,7 @@ final class RectangleMarkupController {
     func setVertexPositions(_ points: [CGPoint], of annotation: PDFAnnotation, on page: PDFPage) {
         let previous = RectangleMarkupRecord.vertices(annotation)
         guard canEdit(), page.document === boundDocument, RectangleMarkupRecord.owns(annotation),
-              !annotation.isReadOnly, !previous.isEmpty, points.count == previous.count,
+              !annotation.isReadOnly, !layerIsLocked(annotation), !previous.isEmpty, points.count == previous.count,
               points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }), points != previous else { return }
         if let measurement = MeasurementMetadata.measurement(annotation), !measurement.valid(points: points) { onInvalidMeasurement?(); return }
         undo.registerUndo(withTarget:self) { target in target.setVertexPositions(previous,of:annotation,on:page) }

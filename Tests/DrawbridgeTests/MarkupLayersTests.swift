@@ -23,6 +23,82 @@ import XCTest
     func grouped<T>(_ session: RectangleMarkupController, _ body: () throws -> T) rethrows -> T {
         session.undo.beginUndoGrouping(); defer { session.undo.endUndoGrouping() }; return try body()
     }
+    func testLegacyLayerCatalogDefaultsToUnlocked() throws {
+        let id = UUID().uuidString
+        let data = Data("{\"layers\":[{\"id\":\"\(id)\",\"name\":\"Old Layer\",\"visible\":true}],\"activeID\":\"\(id)\"}".utf8)
+        let catalog = try JSONDecoder().decode(MarkupLayerCatalog.self, from: data)
+        XCTAssertTrue(catalog.isValid); XCTAssertFalse(catalog.layers[0].locked)
+    }
+    func testLayerLockProtectsShapesTextPathsSnapshotsAndImportedMarkups() throws {
+        let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
+        let doc = try XCTUnwrap(PDFDocument(url: source)), view = session(doc), c = view.rectangleMarkup, page = doc.page(at: 0)!
+        let id = try XCTUnwrap(grouped(c) { c.addLayer(named: "Protected") })
+        grouped(c) { c.setActiveLayer(id) }
+        var annotations: [PDFAnnotation] = []
+        for kind in [RectangleMarkupRecord.Kind.rectangle, .ellipse, .text, .polygon, .polyline] {
+            let points = [CGPoint(x: 100,y:100), CGPoint(x:180,y:100), CGPoint(x:180,y:160)]
+            annotations.append(try XCTUnwrap(grouped(c) { c.create(on: page, bounds: CGRect(x:90,y:90,width:110,height:90), kind:kind, text:"Review", vertices: points) }))
+        }
+        let payload = try SnapshotPayload.capture(page: page, points: [CGPoint(x:80,y:100),CGPoint(x:160,y:100),CGPoint(x:160,y:150),CGPoint(x:80,y:150)])
+        annotations.append(try XCTUnwrap(grouped(c) { c.pasteSnapshot(payload,on:page,center:CGPoint(x:300,y:250)) }))
+        let external = PDFAnnotation(bounds:CGRect(x:250,y:100,width:80,height:40),forType:.freeText,withProperties:nil)
+        external.contents = "Consultant"; page.addAnnotation(external)
+        grouped(c) { c.assignLayer(id,to:[external]) }; annotations.append(external)
+        grouped(c) { c.setLayerLocked(id,true) }
+        XCTAssertNil(c.selected); XCTAssertNil(c.layerCatalog.activeID)
+        XCTAssertTrue(annotations.allSatisfy { c.layerIsLocked($0) && $0.shouldDisplay && !$0.isReadOnly })
+        grouped(c) { c.setActiveLayer(id) }; XCTAssertNil(c.layerCatalog.activeID)
+        let other = try XCTUnwrap(grouped(c) { c.addLayer(named:"Other") })
+        for a in annotations {
+            let bounds = a.bounds, color = RectangleMarkupRecord.markupColor(a), contents = a.contents
+            let fill = RectangleMarkupRecord.polygonFill(a), points = RectangleMarkupRecord.vertices(a)
+            c.selectFromList(a); XCTAssertNil(c.selected)
+            c.selected = a // Exercise mutation guards independently of selection/hit testing.
+            grouped(c) {
+                c.deleteSelected(); c.styleSelected(color:.blue,width:10); c.fillSelected(.green)
+                c.setLineAppearance(pattern:.dotted,opacity:0.3); c.editSelectedText("Changed",size:24)
+                c.setBounds(bounds.offsetBy(dx:30,dy:20),of:a,on:page,action:"Move")
+                c.setVertexPositions(points.map { CGPoint(x:$0.x+10,y:$0.y) },of:a,on:page)
+                var style = SnapshotStyle.read(a); style.opacity = 0.25; c.styleSelectedSnapshot(style)
+                c.assignLayer(nil,to:[a]); c.assignLayer(other,to:[a])
+            }
+            XCTAssertTrue(a.page === page); XCTAssertEqual(a.bounds,bounds); XCTAssertEqual(a.contents,contents)
+            XCTAssertEqual(RectangleMarkupRecord.markupColor(a),color); XCTAssertEqual(RectangleMarkupRecord.polygonFill(a),fill)
+            XCTAssertEqual(RectangleMarkupRecord.vertices(a),points); XCTAssertEqual(MarkupLayers.id(a),id)
+            XCTAssertFalse(c.canAssignLayer(a))
+        }
+        let unassigned = try XCTUnwrap(grouped(c) { c.create(on:page,bounds:CGRect(x:330,y:100,width:40,height:30)) })
+        grouped(c) { c.assignLayer(id,to:[unassigned]); c.removeLayer(id) }
+        XCTAssertNil(MarkupLayers.id(unassigned)); XCTAssertTrue(c.layerCatalog.layers.contains { $0.id == id })
+        grouped(c) { c.setLayerVisible(id,false) }; XCTAssertTrue(annotations.allSatisfy { !$0.shouldDisplay })
+        grouped(c) { c.setLayerVisible(id,true); c.setLayerLocked(id,false) }
+        c.selectFromList(annotations[0]); grouped(c) { c.deleteSelected() }; XCTAssertNil(annotations[0].page)
+    }
+    func testLockColumnUndoAndSaveReopen() throws {
+        let source = try fixture(); defer { try? FileManager.default.removeItem(at:source) }
+        let doc = try XCTUnwrap(PDFDocument(url:source)), view = session(doc), c = view.rectangleMarkup
+        let id = try XCTUnwrap(grouped(c) { c.addLayer(named:"Locked notes") })
+        grouped(c) { c.setActiveLayer(id) }
+        let annotation = try XCTUnwrap(grouped(c) { c.create(on:doc.page(at:2)!,bounds:CGRect(x:100,y:100,width:60,height:40)) })
+        grouped(c) { c.setLayerLocked(id,true) }; XCTAssertTrue(c.layerIsLocked(annotation))
+        c.undo.undo(); XCTAssertFalse(c.layerIsLocked(annotation)); XCTAssertEqual(c.layerCatalog.activeID,id)
+        c.undo.redo(); XCTAssertTrue(c.layerIsLocked(annotation)); XCTAssertNil(c.layerCatalog.activeID)
+        let panel = MarkupLayersView(); panel.session = c; panel.refresh()
+        XCTAssertEqual(panel.table.tableColumns.map { $0.identifier.rawValue },["visible","name","locked","count"])
+        let column = try XCTUnwrap(panel.table.tableColumns.first { $0.identifier.rawValue == "locked" })
+        let check = try XCTUnwrap(panel.tableView(panel.table,viewFor:column,row:0) as? NSButton)
+        XCTAssertEqual(check.state,.on)
+        let output = source.deletingPathExtension().appendingPathExtension("locked.pdf")
+        defer { try? FileManager.default.removeItem(at:output) }
+        XCTAssertTrue(PDFRectangleWriter.write(document:doc,source:source,destination:output,pageLabels:[:],records:RectangleMarkupRecord.capture(doc)))
+        let reopened = try XCTUnwrap(PDFDocument(url:output)); view.document = reopened; c.bind(to:reopened)
+        let saved = try XCTUnwrap(reopened.page(at:2)?.annotations.first { MarkupLayers.id($0) == id })
+        XCTAssertTrue(c.layerIsLocked(saved)); XCTAssertTrue(saved.shouldDisplay); XCTAssertFalse(saved.isReadOnly)
+        c.selected = saved; grouped(c) { c.deleteSelected() }; XCTAssertNotNil(saved.page)
+        grouped(c) { c.setLayerLocked(id,false) }; c.selectFromList(saved)
+        grouped(c) { c.setBounds(saved.bounds.offsetBy(dx:20,dy:0),of:saved,on:saved.page!,action:"Move") }
+        XCTAssertEqual(saved.bounds.minX,120)
+    }
     func testAllEditableGraphicalAnnotationTypesSupportLayerVisibility() throws {
         let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
         let document = try XCTUnwrap(PDFDocument(url: source)), page = document.page(at: 0)!
@@ -188,6 +264,8 @@ import XCTest
         controller.markupsTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         let menu = NSMenuItem(title: "Delete Selected Markups", action: #selector(MainViewController.deleteListedMarkups(_:)), keyEquivalent: "")
         XCTAssertTrue(controller.validateMenuItem(menu))
+        grouped(c) { c.setLayerLocked(id, true) }; XCTAssertFalse(controller.validateMenuItem(menu))
+        grouped(c) { c.setLayerLocked(id, false) }; XCTAssertTrue(controller.validateMenuItem(menu))
         annotation.isReadOnly = true; XCTAssertFalse(controller.validateMenuItem(menu))
     }
     func testDetachedLayerRefreshDoesNotQueuePageRotation() throws {
@@ -217,10 +295,10 @@ import XCTest
         for index in Set([0, doc.pageCount / 2, doc.pageCount - 1]) {
             _ = grouped(c) { c.create(on: doc.page(at: index)!, bounds: CGRect(x: 100,y:100,width:100,height:50)) }
         }
-        grouped(c) { c.setLayerVisible(id, false) }
+        grouped(c) { c.setLayerVisible(id, false); c.setLayerLocked(id, true) }
         XCTAssertTrue(PDFRectangleWriter.write(document: doc, source: source, destination: output, pageLabels: [:], records: RectangleMarkupRecord.capture(doc)))
         let reopened = try XCTUnwrap(PDFDocument(url: output)); view.document = reopened; c.bind(to: reopened)
-        XCTAssertEqual(reopened.pageCount, doc.pageCount); XCTAssertEqual(c.layerCatalog.layers.first?.id, id)
+        XCTAssertEqual(reopened.pageCount, doc.pageCount); XCTAssertEqual(c.layerCatalog.layers.first?.id, id); XCTAssertEqual(c.layerCatalog.layers.first?.locked, true)
         XCTAssertTrue((0..<doc.pageCount).flatMap { reopened.page(at: $0)?.annotations ?? [] }.filter { MarkupLayers.id($0) == id }.allSatisfy { !$0.shouldDisplay })
     }
 }

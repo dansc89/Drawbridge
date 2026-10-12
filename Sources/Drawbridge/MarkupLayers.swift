@@ -5,6 +5,16 @@ struct MarkupLayer: Codable, Equatable, Sendable {
     var id = UUID().uuidString
     var name: String
     var visible = true
+    var locked = false
+}
+extension MarkupLayer {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        visible = try values.decode(Bool.self, forKey: .visible)
+        locked = try values.decodeIfPresent(Bool.self, forKey: .locked) ?? false
+    }
 }
 struct MarkupLayerCatalog: Codable, Equatable, Sendable {
     var layers: [MarkupLayer] = []
@@ -58,8 +68,14 @@ enum MarkupLayers {
     func layerIsVisible(_ annotation: PDFAnnotation) -> Bool {
         layerCatalog.layers.first { $0.id == MarkupLayers.id(annotation) }?.visible ?? true
     }
+    func layerIsLocked(_ annotation: PDFAnnotation) -> Bool {
+        layerCatalog.layers.first { $0.id == MarkupLayers.id(annotation) }?.locked ?? false
+    }
+    var activeLayerIsLocked: Bool {
+        layerCatalog.layers.first { $0.id == layerCatalog.activeID }?.locked ?? false
+    }
     func canAssignLayer(_ annotation: PDFAnnotation) -> Bool {
-        guard !annotation.isReadOnly, !MarkupLayers.isMetadata(annotation), MeasurementMetadata.pageScale(annotation) == nil else { return false }
+        guard !annotation.isReadOnly, !layerIsLocked(annotation), !MarkupLayers.isMetadata(annotation), MeasurementMetadata.pageScale(annotation) == nil else { return false }
         // Preserve foreign OCG/OCMD relationships instead of flattening them.
         guard annotation.value(forAnnotationKey: PDFAnnotationKey(rawValue: "/OC")) == nil || MarkupLayers.id(annotation) != nil else { return false }
         return RectangleMarkupRecord.owns(annotation) || ImportedMarkupState.selectable(annotation) ||
@@ -84,13 +100,23 @@ enum MarkupLayers {
         guard let index = catalog.layers.firstIndex(where: { $0.id == id }) else { return }
         catalog.layers[index].visible = visible; setLayerCatalog(catalog, action: "Layer Visibility")
     }
+    func setLayerLocked(_ id: String, _ locked: Bool) {
+        guard canEdit() else { return }
+        finishTextEditing(); cancelGesture()
+        var catalog = layerCatalog
+        guard let index = catalog.layers.firstIndex(where: { $0.id == id }) else { return }
+        catalog.layers[index].locked = locked
+        if locked && catalog.activeID == id { catalog.activeID = nil }
+        setLayerCatalog(catalog, action: locked ? "Lock Layer" : "Unlock Layer")
+    }
     func setActiveLayer(_ id: String?) {
+        guard id == nil || layerCatalog.layers.contains(where: { $0.id == id && !$0.locked }) else { return }
         var catalog = layerCatalog; catalog.activeID = id; setLayerCatalog(catalog, action: "Active Layer")
     }
     func removeLayer(_ id: String) {
         guard let document = view?.document else { return }
         let annotations = (0..<document.pageCount).flatMap { document.page(at: $0)?.annotations ?? [] }.filter { MarkupLayers.id($0) == id }
-        guard canEdit(), annotations.allSatisfy(canAssignLayer) else { NSSound.beep(); return }
+        guard canEdit(), !layerCatalog.layers.contains(where: { $0.id == id && $0.locked }), annotations.allSatisfy(canAssignLayer) else { NSSound.beep(); return }
         undo.beginUndoGrouping()
         assignLayer(nil, to: annotations)
         var catalog = layerCatalog; catalog.layers.removeAll { $0.id == id }; if catalog.activeID == id { catalog.activeID = nil }
@@ -123,7 +149,7 @@ enum MarkupLayers {
         for duplicate in markers.dropFirst() { duplicate.page?.removeAnnotation(duplicate) }
     }
     func assignLayer(_ id: String?, to annotations: [PDFAnnotation]) {
-        guard canEdit(), id == nil || layerCatalog.layers.contains(where: { $0.id == id }) else { return }
+        guard canEdit(), id == nil || layerCatalog.layers.contains(where: { $0.id == id && !$0.locked }) else { return }
         undo.beginUndoGrouping()
         for annotation in annotations where canAssignLayer(annotation) { setLayerMembership(id, on: annotation) }
         undo.endUndoGrouping(); undo.setActionName("Assign to Layer")
@@ -160,7 +186,7 @@ enum MarkupLayers {
             }
             if changedVisibility { (view as? MarkupPDFView)?.refreshAnnotationRendering(on: page, importedAppearanceChanged: true); onMutation?(page) }
         }
-        if let selected, !layerIsVisible(selected) { self.selected = nil; onClickAway?() }
+        if let selected, !layerIsVisible(selected) || layerIsLocked(selected) { self.selected = nil; onClickAway?() }
         refresh()
     }
     func layerAssignmentMenu(for annotations: [PDFAnnotation]) -> NSMenu {
@@ -169,7 +195,7 @@ enum MarkupLayers {
             let item = NSMenuItem(title: title, action: #selector(assignLayerMenu(_:)), keyEquivalent: "")
             item.target = self; item.representedObject = LayerMenuAssignment(id: id, annotations: annotations)
             item.state = !annotations.isEmpty && annotations.allSatisfy { MarkupLayers.id($0) == id } ? .on : .off
-            item.isEnabled = canEdit() && !annotations.isEmpty && annotations.allSatisfy(canAssignLayer); menu.addItem(item)
+            item.isEnabled = canEdit() && !annotations.isEmpty && annotations.allSatisfy(canAssignLayer) && !layerCatalog.layers.contains(where: { $0.id == id && $0.locked }); menu.addItem(item)
         }
         menu.addItem(.separator())
         let item = NSMenuItem(title: "New Layer…", action: #selector(newLayerMenu(_:)), keyEquivalent: "")

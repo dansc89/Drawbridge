@@ -698,7 +698,7 @@ extension MainViewController {
             return hasDocument && !bookmarksOutlineView.selectedRowIndexes.isEmpty
         case #selector(deleteListedMarkups(_:)):
             return hasDocument && pdfView.rectangleMarkup.canEdit() && currentSelectedMarkupItems().contains {
-                !$0.annotation.isReadOnly && (RectangleMarkupRecord.owns($0.annotation) || ImportedMarkupState.selectable($0.annotation) || pdfView.rectangleMarkup.canAssignLayer($0.annotation))
+                !$0.annotation.isReadOnly && !pdfView.rectangleMarkup.layerIsLocked($0.annotation) && (RectangleMarkupRecord.owns($0.annotation) || ImportedMarkupState.selectable($0.annotation) || pdfView.rectangleMarkup.canAssignLayer($0.annotation))
             }
         case #selector(commandPasteInPlace(_:)):
             return !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField) && hasDocument && pdfView.rectangleMarkup.canEdit() && SnapshotPayload.clipboard()?.placement != nil

@@ -18,7 +18,7 @@ import PDFKit
         table.delegate = self; table.dataSource = self; table.headerView = NSTableHeaderView()
         table.rowHeight = 26; table.allowsMultipleSelection = false
         table.intercellSpacing = CGSize(width: 3, height: 2); table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
-        for (id, title, width) in [("visible", "Show", 36.0), ("name", "Layer", 125.0), ("count", "Items", 40.0)] {
+        for (id, title, width) in [("visible", "Show", 36.0), ("name", "Layer", 98.0), ("locked", "Lock", 36.0), ("count", "Items", 40.0)] {
             let column = NSTableColumn(identifier: .init(id)); column.title = title; column.width = width; column.minWidth = width; table.addTableColumn(column)
         }
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
@@ -27,7 +27,7 @@ import PDFKit
         newLayerButton.target = self; newLayerButton.action = #selector(newLayer(_:))
         rename.target = self; rename.action = #selector(renameLayer(_:)); remove.target = self; remove.action = #selector(removeLayer(_:))
         addArrangedSubview(NSStackView(views: [newLayerButton, rename, remove]))
-        let note = NSTextField(wrappingLabelWithString: "Layers apply across the PDF. Hidden markups remain in the Markups List. Removing a layer moves its markups to Unassigned.")
+        let note = NSTextField(wrappingLabelWithString: "Locked layers protect markups from editing or deletion. Hidden markups remain in the Markups List. Removing a layer moves its markups to Unassigned.")
         note.font = .systemFont(ofSize: 11); note.textColor = .secondaryLabelColor; note.widthAnchor.constraint(equalToConstant: 250).isActive = true
         addArrangedSubview(note)
     }
@@ -37,6 +37,7 @@ import PDFKit
         active.removeAllItems(); active.addItems(withTitles: ["Unassigned"] + (session?.layerCatalog.layers.map(\.name) ?? []))
         let catalog = session?.layerCatalog ?? .init()
         active.selectItem(at: catalog.activeID.flatMap { id in catalog.layers.firstIndex { $0.id == id }.map { $0 + 1 } } ?? 0)
+        for (index, layer) in catalog.layers.enumerated() { active.item(at: index + 1)?.isEnabled = !layer.locked }
         active.isEnabled = session?.canEdit() == true
         counts = [:]
         if let document = session?.view?.document {
@@ -51,7 +52,10 @@ import PDFKit
         if row >= 0 && row < catalog.layers.count { table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
         updateButtons()
     }
-    private func updateButtons() { rename.isEnabled = table.selectedRow >= 0 && session?.canEdit() == true; remove.isEnabled = rename.isEnabled }
+    private func updateButtons() {
+        rename.isEnabled = table.selectedRow >= 0 && session?.canEdit() == true
+        remove.isEnabled = rename.isEnabled && session?.layerCatalog.layers[table.selectedRow].locked == false
+    }
     func numberOfRows(in tableView: NSTableView) -> Int { session?.layerCatalog.layers.count ?? 0 }
     func tableViewSelectionDidChange(_ notification: Notification) { updateButtons() }
     func tableView(_ tableView: NSTableView, viewFor column: NSTableColumn?, row: Int) -> NSView? {
@@ -61,6 +65,10 @@ import PDFKit
         case "visible":
             let check = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleVisibility(_:)))
             check.state = layer.visible ? .on : .off; check.tag = row; check.setAccessibilityLabel("Show layer " + layer.name); check.isEnabled = session.canEdit(); return check
+        case "locked":
+            let check = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleLock(_:)))
+            check.state = layer.locked ? .on : .off; check.tag = row
+            check.setAccessibilityLabel("Lock layer " + layer.name); check.isEnabled = session.canEdit(); return check
         case "count":
             return NSTextField(labelWithString: String(counts[layer.id, default: 0]))
         default: return NSTextField(labelWithString: layer.name)
@@ -69,6 +77,10 @@ import PDFKit
     @objc private func toggleVisibility(_ sender: NSButton) {
         guard let session, session.layerCatalog.layers.indices.contains(sender.tag) else { return }
         session.setLayerVisible(session.layerCatalog.layers[sender.tag].id, sender.state == .on)
+    }
+    @objc private func toggleLock(_ sender: NSButton) {
+        guard let session, session.layerCatalog.layers.indices.contains(sender.tag) else { return }
+        session.setLayerLocked(session.layerCatalog.layers[sender.tag].id, sender.state == .on)
     }
     @objc private func changeActive(_ sender: NSPopUpButton) {
         guard let session else { return }; let index = sender.indexOfSelectedItem - 1

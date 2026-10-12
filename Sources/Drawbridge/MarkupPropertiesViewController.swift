@@ -150,6 +150,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         let currentID = session.selected.flatMap(MarkupLayers.id) ?? (session.selected == nil ? session.layerCatalog.activeID : nil)
         membership.selectItem(at: currentID.flatMap { id in session.layerCatalog.layers.firstIndex { $0.id == id }.map { $0 + 1 } } ?? 0)
         membership.isEnabled = session.canEdit() && (session.selected.map(session.canAssignLayer) ?? true)
+        for (index, layer) in session.layerCatalog.layers.enumerated() { membership.item(at: index + 1)?.isEnabled = !layer.locked }
         membership.toolTip = session.selected == nil ? "Layer for new markups" : "Selected markup's layer"
         if lastDefaultTool != session.defaultTool { defaultStatus.stringValue = ""; lastDefaultTool = session.defaultTool }
         setAsDefault.isEnabled = session.canEdit() && session.defaultTool != nil
@@ -167,12 +168,12 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
             snapshotOverlay.state = style.overlay ? .on : .off
             snapshotFilter.selectItem(at: SnapshotStyle.Filter.allCases.firstIndex(of: style.filter) ?? 0)
             snapshotColor.color = style.nsColor; snapshotOpacity.doubleValue = style.opacity * 100
-            let editable = session.canEdit() && !selection.isReadOnly && RectangleMarkupRecord.owns(selection)
+            let editable = session.canEdit() && !selection.isReadOnly && !session.layerIsLocked(selection) && RectangleMarkupRecord.owns(selection)
             for control in [snapshotOverlay, snapshotFilter, snapshotOpacity] as [NSControl] { control.isEnabled = editable }
             snapshotColor.isEnabled = editable
         }
-        let enabled = session.canEdit() && selection?.isReadOnly != true && selection?.type != "Stamp" && (selection == nil || selection.map(RectangleMarkupRecord.owns) == true)
-        editingContext.stringValue = selection == nil ? "New markup defaults" : "Selected markup"
+        let enabled = session.canEdit() && selection?.isReadOnly != true && selection.map(session.layerIsLocked) != true && selection?.type != "Stamp" && (selection == nil || selection.map(RectangleMarkupRecord.owns) == true)
+        editingContext.stringValue = selection == nil ? "New markup defaults" : (selection.map(session.layerIsLocked) == true ? "Locked layer markup" : "Selected markup")
         stroke.color = selection.map(RectangleMarkupRecord.markupColor) ?? session.strokeColor
         weight.doubleValue = Double(selection?.border?.lineWidth ?? session.lineWidth)
         fontSize.doubleValue = Double(selection.map(RectangleMarkupRecord.textFontSize) ?? session.fontSize)
