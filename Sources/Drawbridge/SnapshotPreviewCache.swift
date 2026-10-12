@@ -12,7 +12,12 @@ final class SnapshotPreviewCache: @unchecked Sendable {
     private let lock = NSLock()
     private var pending = Set<String>()
     private var latestResolution = [String: Double]()
-    private let queue = DispatchQueue(label: "com.drawbridge.snapshot-preview", qos: .userInitiated)
+    // Detail work must yield to user gestures. These parsers belong exclusively
+    // to this serial queue, so tiles can reuse decoded fonts and image resources.
+    private let queue = DispatchQueue(label: "com.drawbridge.snapshot-preview", qos: .utility)
+    private var documents = [(key: String, document: CGPDFDocument)]()
+    private var completedCaptures = Set<String>()
+    private var notificationScheduled = false
 
     private init() {
         images.totalCostLimit = 48 * 1024 * 1024; images.countLimit = 64
@@ -24,44 +29,52 @@ final class SnapshotPreviewCache: @unchecked Sendable {
     }
 
     func prepare(_ data: Data, key: String, page: CGPDFPage) -> CGImage? {
-        guard data.count > 1_000_000 else { return nil }
+        // Compressed vector PDFs can be small but expensive to paint. Always
+        // prepare a bounded editing preview rather than guessing from file size.
         if let cached = previews.object(forKey: key as NSString) { return cached }
         let media = page.getBoxRect(.mediaBox)
-        let scale = min(2, 1024 / max(media.width, media.height))
+        let scale = min(1, 1024 / max(media.width, media.height))
         guard let image = render(page, region: media, scale: scale) else { return nil }
         previews.setObject(image, forKey: key as NSString, cost: image.bytesPerRow * image.height)
         return image
     }
 
-    func draw(data: Data, key: String, preview: CGImage, page: CGPDFPage, visibleRegion: CGRect? = nil, in context: CGContext) {
+    func draw(data: Data, key: String, preview: CGImage, page: CGPDFPage, visibleRegion: CGRect? = nil, deviceScale: Double? = nil, in context: CGContext) {
         let media = page.getBoxRect(.mediaBox)
         let ctm = context.ctm
-        let scale = max(hypot(ctm.a, ctm.b), hypot(ctm.c, ctm.d))
-        let previewScale = Double(preview.width) / media.width
+        let scale = max(max(hypot(ctm.a, ctm.b), hypot(ctm.c, ctm.d)), deviceScale ?? 0)
         context.interpolationQuality = .high
         context.draw(preview, in: media)
-        // A preview keeps zooming responsive. Visible tiles then replace it at
-        // the actual device resolution, without rasterizing the whole sheet.
-        guard scale.isFinite, scale > previewScale * 1.2, scale <= 64 else { return }
+        requestTiles(data: data, key: key, preview: preview, media: media,
+                     visible: context.boundingBoxOfClipPath.intersection(media).intersection(visibleRegion ?? media),
+                     scale: scale, context: context)
+    }
+
+    func prepareVisible(data: Data, key: String, preview: CGImage, page: CGPDFPage, region: CGRect, scale: Double) {
+        let media = page.getBoxRect(.mediaBox)
+        requestTiles(data: data, key: key, preview: preview, media: media,
+                     visible: region.intersection(media), scale: scale, context: nil)
+    }
+
+    private func requestTiles(data: Data, key: String, preview: CGImage, media: CGRect, visible: CGRect, scale: Double, context: CGContext?) {
+        let previewScale = Double(preview.width) / media.width
+        guard scale.isFinite, scale > previewScale * 1.2, scale <= 64,
+              !visible.isNull, !visible.isEmpty else { return }
         let resolution = ceil(scale * 4) / 4
         lock.lock()
         if latestResolution.count > 64 { latestResolution.removeAll(keepingCapacity: true) }
         latestResolution[key] = resolution
         lock.unlock()
-        let span = 512 / resolution
-        let visible = context.boundingBoxOfClipPath.intersection(media).intersection(visibleRegion ?? media)
-        guard !visible.isNull, !visible.isEmpty else { return }
+        let span = 1024 / resolution
         let minX = Int(floor(visible.minX / span)), maxX = Int(floor(visible.maxX / span))
         let minY = Int(floor(visible.minY / span)), maxY = Int(floor(visible.maxY / span))
-        // PDFKit can request full-page tiles. Bound each draw's queued work and
-        // let subsequent visible redraws request the remaining tiles.
         var requested = 0
         for y in minY...maxY { for x in minX...maxX {
             let region = CGRect(x: Double(x) * span, y: Double(y) * span, width: span, height: span).intersection(media)
             guard !region.isEmpty else { continue }
             let tileKey = "\(key):\(resolution):\(x):\(y)"
             if let image = images.object(forKey: tileKey as NSString) {
-                context.draw(image, in: region)
+                context?.draw(image, in: region)
             } else if requested < 8 {
                 request(data: data, key: tileKey, captureKey: key, region: region, scale: resolution)
                 requested += 1
@@ -79,14 +92,45 @@ final class SnapshotPreviewCache: @unchecked Sendable {
             if !relevant { pending.remove(key) }
             lock.unlock()
             guard relevant else { return }
-            // Each job owns its PDF parser. Never share PDFKit pages or their
-            // mutable document with the background rendering queue.
-            if let provider = CGDataProvider(data: data as CFData), let document = CGPDFDocument(provider),
+            // Queue-owned parsers never share PDFKit's mutable document.
+            var rendered = false
+            if let document = document(data: data, key: captureKey),
                let page = document.page(at: 1), let image = render(page, region: region, scale: scale) {
                 store(image, key: key)
+                rendered = true
             }
             lock.lock(); pending.remove(key); lock.unlock()
-            DispatchQueue.main.async { NotificationCenter.default.post(name: Self.ready, object: nil) }
+            if rendered { announce(captureKey) }
+        }
+    }
+
+    // Called only on the serial rendering queue. Retain at most four captures.
+    private func document(data: Data, key: String) -> CGPDFDocument? {
+        if let index = documents.firstIndex(where: { $0.key == key }) {
+            let entry = documents.remove(at: index)
+            documents.append(entry)
+            return entry.document
+        }
+        guard let provider = CGDataProvider(data: data as CFData), let document = CGPDFDocument(provider) else { return nil }
+        documents.append((key, document))
+        if documents.count > 4 { documents.removeFirst() }
+        return document
+    }
+
+    private func announce(_ key: String) {
+        lock.lock()
+        completedCaptures.insert(key)
+        guard !notificationScheduled else { lock.unlock(); return }
+        notificationScheduled = true
+        lock.unlock()
+        // Coalesce fast tiles instead of rebuilding PDFKit's page for each tile.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [self] in
+            lock.lock()
+            let keys = completedCaptures
+            completedCaptures.removeAll(keepingCapacity: true)
+            notificationScheduled = false
+            lock.unlock()
+            NotificationCenter.default.post(name: Self.ready, object: nil, userInfo: ["captureKeys": keys])
         }
     }
 

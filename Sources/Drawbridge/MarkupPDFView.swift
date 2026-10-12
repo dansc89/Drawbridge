@@ -536,13 +536,34 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         registerForDraggedTypes([.fileURL])
         installViewportObserversIfNeeded()
         rectangleMarkup.install(on: self)
-        NotificationCenter.default.addObserver(self, selector: #selector(snapshotPreviewReady), name: SnapshotPreviewCache.ready, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(snapshotPreviewReady(_:)), name: SnapshotPreviewCache.ready, object: nil)
     }
 
-    @objc private func snapshotPreviewReady() {
-        for page in visiblePages where page.annotations.contains(where: SnapshotPayload.isSnapshot) {
-            refreshAnnotationRendering(on: page)
+    @objc private func snapshotPreviewReady(_ notification: Notification) {
+        guard window?.isVisible == true, let keys = notification.userInfo?["captureKeys"] as? Set<String> else { return }
+        for page in visiblePages {
+            let region = Self.snapshotPreviewBounds(on: page, keys: keys)
+            guard let region else { continue }
+            // PDFKit caches custom Stamp drawings independently of page tiles.
+            // Reattach the affected suffix in its original order to retire those
+            // cached layers while retaining annotation identity and selection.
+            let annotations = page.annotations
+            if let first = annotations.firstIndex(where: {
+                guard let snapshot = $0 as? DrawbridgeSnapshotAnnotation else { return false }
+                return snapshot.previewKey.map(keys.contains) == true
+            }) {
+                let suffix = Array(annotations[first...])
+                suffix.forEach(page.removeAnnotation)
+                suffix.forEach(page.addAnnotation)
+            }
+            refreshAnnotationRendering(on: page, region: region)
         }
+    }
+
+    static func snapshotPreviewBounds(on page: PDFPage, keys: Set<String>) -> CGRect? {
+        let snapshots = page.annotations.compactMap { $0 as? DrawbridgeSnapshotAnnotation }
+            .filter { $0.shouldDisplay && !$0.isRetired && $0.previewKey.map(keys.contains) == true }
+        return snapshots.reduce(nil as CGRect?) { result, snapshot in result.map { $0.union(snapshot.bounds) } ?? snapshot.bounds }
     }
 
     required init?(coder: NSCoder) {
@@ -586,12 +607,12 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             let region = convert(bounds, to: page).intersection(page.bounds(for: displayBox))
             for snapshot in page.annotations.compactMap({ $0 as? DrawbridgeSnapshotAnnotation }) {
                 snapshotPreviewPages.add(page)
-                snapshot.updatePreviewViewport(region)
+                snapshot.updatePreviewViewport(region, deviceScale: scaleFactor * (window?.backingScaleFactor ?? 1))
             }
         }
     }
 
-    func refreshAnnotationRendering(on page: PDFPage, importedAppearanceChanged: Bool = false) {
+    func refreshAnnotationRendering(on page: PDFPage, importedAppearanceChanged: Bool = false, region: CGRect? = nil) {
         updateSnapshotPreviewViewports()
         if importedAppearanceChanged && window?.isVisible == true && !snapshotPreviewPages.contains(page) {
             // Detached or hidden views have no on-screen tiles to clear.
@@ -605,7 +626,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         annotationsChanged(on: page)
         guard currentPage === page || visiblePages.contains(where: { $0 === page }) else { return }
-        let pageRect = convert(page.bounds(for: displayBox), from: page).insetBy(dx: -4, dy: -4)
+        let pageRect = convert(region ?? page.bounds(for: displayBox), from: page).insetBy(dx: -4, dy: -4)
         guard !pageRect.isEmpty, !pageRect.isNull,
               pageRect.origin.x.isFinite, pageRect.origin.y.isFinite,
               pageRect.width.isFinite, pageRect.height.isFinite else {

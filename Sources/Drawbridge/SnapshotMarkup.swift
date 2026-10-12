@@ -137,7 +137,7 @@ enum SnapshotAppearance {
         defer { try? FileManager.default.removeItem(at: directory) }
         let input = directory.appendingPathComponent("fragment.pdf"), output = directory.appendingPathComponent("fragment.json")
         try data.write(to: input)
-        guard PDFTKBookmarkWriter.run(executable, arguments: ["--json=2", "--json-stream-data=inline", "--decode-level=generalized", input.path, output.path]),
+        guard PDFTKBookmarkWriter.run(executable, arguments: ["--json=2", "--json-stream-data=inline", "--decode-level=none", input.path, output.path]),
               ((try? output.resourceValues(forKeys:[.fileSizeKey]).fileSize) ?? Int.max) <= 128 * 1024 * 1024,
               let json = try JSONSerialization.jsonObject(with: Data(contentsOf: output)) as? [String:Any],
               let tables = json["qpdf"] as? [[String:Any]], tables.count == 2,
@@ -166,17 +166,39 @@ enum SnapshotAppearance {
             return value
         }
         let contentRefs = (page["/Contents"] as? [String]) ?? (page["/Contents"] as? String).map { [$0] } ?? []
+        // A captured page normally has one compressed content stream. Preserve it
+        // directly: expanding dense CAD commands can require hundreds of megabytes.
         var content = Data()
-        for ref in contentRefs {
-            guard let object = sourceObjects["obj:" + ref] as? [String:Any], let stream = object["stream"] as? [String:Any],
-                  let dict = stream["dict"] as? [String:Any], dict["/Filter"] == nil,
-                  let encoded = stream["data"] as? String, let bytes = Data(base64Encoded: encoded) else { throw CocoaError(.fileReadCorruptFile) }
-            content.append(bytes); content.append(10)
+        var encoding: [String:Any] = [:]
+        if contentRefs.count == 1, let ref = contentRefs.first,
+           let object = sourceObjects["obj:" + ref] as? [String:Any],
+           let stream = object["stream"] as? [String:Any],
+           let dict = stream["dict"] as? [String:Any],
+           let encoded = stream["data"] as? String, let bytes = Data(base64Encoded: encoded) {
+            content = bytes
+            for key in ["/Filter", "/DecodeParms"] {
+                if let value = dict[key] { encoding[key] = try remap(value) }
+            }
+        } else if !contentRefs.isEmpty {
+            let decoded = directory.appendingPathComponent("contents.json")
+            let selectors = contentRefs.map { "--json-object=" + $0.replacingOccurrences(of: " R", with: "").replacingOccurrences(of: " ", with: ",") }
+            guard PDFTKBookmarkWriter.run(executable, arguments: ["--json=2", "--json-key=qpdf", "--json-stream-data=inline", "--decode-level=generalized"] + selectors + [input.path, decoded.path]),
+                  ((try? decoded.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? Int.max) <= 128 * 1024 * 1024,
+                  let decodedJSON = try JSONSerialization.jsonObject(with: Data(contentsOf: decoded)) as? [String:Any],
+                  let decodedTables = decodedJSON["qpdf"] as? [[String:Any]], decodedTables.count == 2 else { throw CocoaError(.fileReadCorruptFile) }
+            for ref in contentRefs {
+                guard let object = decodedTables[1]["obj:" + ref] as? [String:Any], let stream = object["stream"] as? [String:Any],
+                      let dict = stream["dict"] as? [String:Any], dict["/Filter"] == nil,
+                      let encoded = stream["data"] as? String, let bytes = Data(base64Encoded: encoded) else { throw CocoaError(.fileReadCorruptFile) }
+                content.append(bytes); content.append(10)
+            }
         }
         let size = SnapshotPayload(data: data).size!
         let fragmentRef = "\(next) 0 R"; next += 1
         let resources = try remap(page["/Resources"] ?? [String:Any]())
-        objects["obj:" + fragmentRef] = ["stream": ["dict": ["/Type":"/XObject", "/Subtype":"/Form", "/BBox":[0,0,size.width,size.height], "/Group":["/S":"/Transparency", "/CS":"/DeviceRGB", "/I":true], "/Resources":resources, "/DrawbridgeRectangleAppearance":true], "data":content.base64EncodedString()]]
+        var fragmentDictionary: [String:Any] = ["/Type":"/XObject", "/Subtype":"/Form", "/BBox":[0,0,size.width,size.height], "/Group":["/S":"/Transparency", "/CS":"/DeviceRGB", "/I":true], "/Resources":resources, "/DrawbridgeRectangleAppearance":true]
+        fragmentDictionary.merge(encoding) { _, value in value }
+        objects["obj:" + fragmentRef] = ["stream": ["dict": fragmentDictionary, "data":content.base64EncodedString()]]
         forms[data] = fragmentRef
         return wrapper(fragmentRef: fragmentRef, size: size, bounds: bounds, rotation: rotation, style: style)
     }
@@ -194,14 +216,25 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
     private let captureRotation: Int
     private let style: SnapshotStyle
     private let previewData: Data?
-    private let previewKey: String?
+    let previewKey: String?
     private let screenPreview: CGImage?
     private let viewportLock = NSLock()
     private var previewViewport: CGRect?
+    private var previewDeviceScale: Double?
     var isRetired = false
 
-    func updatePreviewViewport(_ region: CGRect) {
-        viewportLock.lock(); previewViewport = region; viewportLock.unlock()
+    func updatePreviewViewport(_ region: CGRect, deviceScale: Double = 1) {
+        guard let source = fragment?.page(at: 1) else { return }
+        let media = source.getBoxRect(.mediaBox)
+        let transform = SnapshotPayload.transform(size: media.size, bounds: bounds, rotation: captureRotation)
+        let scale = deviceScale * max(hypot(transform.a, transform.b), hypot(transform.c, transform.d))
+        viewportLock.lock(); previewViewport = region; previewDeviceScale = scale; viewportLock.unlock()
+        // PDFKit can reuse its annotation layer during zoom without invoking draw.
+        // Request detail from the real viewport density instead of its unit CTM.
+        if shouldDisplay, !isRetired, let previewData, let previewKey, let screenPreview {
+            SnapshotPreviewCache.shared.prepareVisible(data: previewData, key: previewKey, preview: screenPreview,
+                page: source, region: region.applying(transform.inverted()), scale: scale)
+        }
     }
 
     init(bounds: CGRect, document: CGPDFDocument, rotation: Int, style: SnapshotStyle, previewData: Data? = nil) {
@@ -280,11 +313,11 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         let screenContext = NSGraphicsContext.current?.isDrawingToScreen != false
             && (context.width > 0 || NSGraphicsContext.current?.isDrawingToScreen == true || localAppearance || internalPreview)
         if !SnapshotPageRendering.isPreview, !SnapshotPageRendering.isVectorOutput, screenContext, let previewData, let previewKey, let screenPreview {
-            viewportLock.lock(); let viewport = previewViewport; viewportLock.unlock()
+            viewportLock.lock(); let viewport = previewViewport; let deviceScale = previewDeviceScale; viewportLock.unlock()
             let fragmentViewport = viewport.map {
                 $0.applying(SnapshotPayload.transform(size: media.size, bounds: bounds, rotation: captureRotation).inverted())
             }
-            SnapshotPreviewCache.shared.draw(data: previewData, key: previewKey, preview: screenPreview, page: source, visibleRegion: fragmentViewport, in: context)
+            SnapshotPreviewCache.shared.draw(data: previewData, key: previewKey, preview: screenPreview, page: source, visibleRegion: fragmentViewport, deviceScale: deviceScale, in: context)
         } else { context.drawPDFPage(source) }
         if grouped { context.endTransparencyLayer() }
         context.restoreGState()
