@@ -20,7 +20,7 @@ enum MarkupListPresentation {
         case "Circle": return "Ellipse"
         case "FreeText": return "Text Box"
         case "Line": return annotation.endLineStyle == .openArrow ? "Arrow" : "Line"
-        case "Stamp": return SnapshotPayload.read(annotation) != nil ? "Snapshot" : "Stamp"
+        case "Stamp": return SnapshotPayload.isSnapshot(annotation) ? "Snapshot" : "Stamp"
         case "Ink": return RectangleMarkupRecord.vertices(annotation).isEmpty ? "Pen" : "Polyline"
         default: return annotation.type ?? "Markup"
         }

@@ -53,7 +53,7 @@ extension RectangleMarkupController {
         if let annotation = selected {
             guard RectangleMarkupRecord.owns(annotation), !annotation.isReadOnly else { return nil }
             if let measurement = MeasurementMetadata.measurement(annotation) { return measurement.kind == .area ? .area : .perimeter }
-            if SnapshotPayload.read(annotation) != nil { return .snapshotBox }
+            if SnapshotPayload.isSnapshot(annotation) { return .snapshotBox }
             switch annotation.type {
             case "Square": return .rectangle
             case "Circle": return .ellipse
@@ -73,7 +73,7 @@ extension RectangleMarkupController {
         guard canEdit(), let target = defaultTool else { return false }
         var style = currentAppearance
         if let annotation = selected {
-            if SnapshotPayload.read(annotation) != nil { style.snapshot = SnapshotStyle.read(annotation) }
+            if SnapshotPayload.isSnapshot(annotation) { style.snapshot = SnapshotStyle.read(annotation) }
             else {
                 style.stroke = SavedMarkupAppearance.components(RectangleMarkupRecord.markupColor(annotation))
                 // Text annotations have no border. Keep the valid tool line weight.

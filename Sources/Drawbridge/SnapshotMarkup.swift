@@ -27,6 +27,12 @@ struct SnapshotPayload: Sendable {
         return page
     }
     var size: CGSize? { page?.getBoxRect(.mediaBox).size }
+    /// Identification for UI refreshes must not decode and parse the embedded PDF.
+    /// Actions that actually consume the capture still validate it with read().
+    static func isSnapshot(_ annotation: PDFAnnotation) -> Bool {
+        annotation is DrawbridgeSnapshotAnnotation ||
+        (annotation.type == "Stamp" && annotation.value(forAnnotationKey: key) is String)
+    }
     static func read(_ annotation: PDFAnnotation) -> SnapshotPayload? {
         guard let string = annotation.value(forAnnotationKey: key) as? String,
               string.utf8.count <= maximumBytes * 2, let data = Data(base64Encoded: string) else { return nil }
@@ -83,7 +89,7 @@ struct SnapshotPayload: Sendable {
             context.saveGState()
             if annotation is DrawbridgeSnapshotAnnotation || annotation is DrawbridgeShapeAnnotation || annotation is DrawbridgePolygonAnnotation || annotation is DrawbridgeMeasuredPathAnnotation {
                 context.concatenate(transform); context.translateBy(x: origin.x, y: origin.y)
-                annotation.draw(with: .mediaBox, in: context)
+                SnapshotPageRendering.vector { annotation.draw(with: .mediaBox, in: context) }
             } else { annotation.draw(with: .cropBox, in: context) }
             context.restoreGState()
         }
@@ -91,7 +97,10 @@ struct SnapshotPayload: Sendable {
         var payload = Self(data: output as Data)
         let xs = points.map(\.x), ys = points.map(\.y)
         payload.placement = Placement(x: xs.min()!, y: ys.min()!, width: xs.max()!-xs.min()!, height: ys.max()!-ys.min()!, rotation: rotation)
-        guard payload.page != nil else { throw CocoaError(.fileWriteUnknown) }
+        guard let capturedPage = payload.page else { throw CocoaError(.fileWriteUnknown) }
+        // Prepare the first editing preview while the capture indicator is still
+        // visible, so the first Paste does not block to render the entire source.
+        _ = SnapshotPreviewCache.shared.prepare(payload.data, key: SnapshotPreviewCache.key(payload.data), page: capturedPage)
         return payload
     }
     /// Counter-rotate the pasted fragment so it keeps the orientation the user captured.
@@ -112,7 +121,7 @@ struct SnapshotPayload: Sendable {
         let data = try SnapshotFilterRenderer.filtered(payload.data, style: style)
         guard let provider = CGDataProvider(data: data as CFData), let document = CGPDFDocument(provider),
               document.page(at: 1) != nil else { throw CocoaError(.fileReadCorruptFile) }
-        return DrawbridgeSnapshotAnnotation(bounds: bounds, document: document, rotation: rotation, style: style)
+        return DrawbridgeSnapshotAnnotation(bounds: bounds, document: document, rotation: rotation, style: style, previewData: data)
     }
 }
 
@@ -184,12 +193,26 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
     private let fragment: CGPDFDocument?
     private let captureRotation: Int
     private let style: SnapshotStyle
+    private let previewData: Data?
+    private let previewKey: String?
+    private let screenPreview: CGImage?
+    private let viewportLock = NSLock()
+    private var previewViewport: CGRect?
     var isRetired = false
 
-    init(bounds: CGRect, document: CGPDFDocument, rotation: Int, style: SnapshotStyle) {
+    func updatePreviewViewport(_ region: CGRect) {
+        viewportLock.lock(); previewViewport = region; viewportLock.unlock()
+    }
+
+    init(bounds: CGRect, document: CGPDFDocument, rotation: Int, style: SnapshotStyle, previewData: Data? = nil) {
         fragment = document
         captureRotation = rotation
         self.style = style
+        self.previewData = previewData
+        previewKey = previewData.map(SnapshotPreviewCache.key)
+        if let previewData, let previewKey, let page = document.page(at: 1) {
+            screenPreview = SnapshotPreviewCache.shared.prepare(previewData, key: previewKey, page: page)
+        } else { screenPreview = nil }
         super.init(bounds: bounds, forType: .stamp, withProperties: nil)
         color = .clear
         shouldDisplay = true
@@ -200,6 +223,9 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         fragment = nil
         captureRotation = 0
         style = SnapshotStyle()
+        previewData = nil
+        previewKey = nil
+        screenPreview = nil
         super.init(coder: coder)
     }
 
@@ -212,18 +238,55 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         context.saveGState()
         context.setAlpha(style.opacity)
         context.setBlendMode(style.overlay ? .multiply : .normal)
-        context.beginTransparencyLayer(auxiliaryInfo: nil)
         let pageBounds = page?.bounds(for: box) ?? .zero
         // PDFView supplies page-space contexts. Whole-page PDFKit previews instead
         // draw custom annotations in display space; that entry point scopes this flag.
-        if SnapshotPageRendering.isPreview {
+        // PDFKit also builds an unscoped, upright whole-page preview using
+        // an identity context. Exclude that cached background copy; explicit
+        // previews use the display-space transform below.
+        let clip = context.boundingBoxOfClipPath
+        let rotation = ((page?.rotation ?? 0) % 360 + 360) % 360
+        let displayedSize = rotation % 180 == 0 ? pageBounds.size : CGSize(width: pageBounds.height, height: pageBounds.width)
+        let internalPreview = rotation != 0 && context.ctm == .identity
+            && abs(clip.width - displayedSize.width) < 1 && abs(clip.height - displayedSize.height) < 1
+            && abs(clip.minX) < 1 && abs(clip.minY) < 1
+        // PDFKit composites live annotation layers over its page preview.
+        // Baking the Stamp into that cached background creates stale copies
+        // after moves, style changes and deletion. Explicit exports include it.
+        if internalPreview && !SnapshotPageRendering.isPreview && !SnapshotPageRendering.isVectorOutput {
+            context.restoreGState()
+            return
+        }
+        if SnapshotPageRendering.isPreview || internalPreview {
             context.concatenate(page?.transform(for: box) ?? .identity)
         } else {
             context.translateBy(x: -pageBounds.minX, y: -pageBounds.minY)
         }
         context.concatenate(SnapshotPayload.transform(size: source.getBoxRect(.mediaBox).size, bounds: bounds, rotation: captureRotation))
-        context.drawPDFPage(source)
-        context.endTransparencyLayer()
+        // Restrict the compositing surface before allocating a transparency
+        // group. A zoomed architectural page can otherwise allocate a surface
+        // covering the entire sheet for a small pasted capture.
+        let media = source.getBoxRect(.mediaBox)
+        context.clip(to: media)
+        guard !context.boundingBoxOfClipPath.isEmpty else { context.restoreGState(); return }
+        let grouped = style.overlay || style.opacity < 1
+        if grouped { context.beginTransparencyLayer(in: media, auxiliaryInfo: nil) }
+        // PDFKit's annotation CGLayers have neither bitmap dimensions nor an
+        // NSGraphicsContext. Their clip is the annotation's page-space bounds.
+        // Printing contexts and whole-page vector previews keep the PDF path.
+        let localAppearance = !internalPreview && NSGraphicsContext.current == nil
+            && abs(clip.minX - bounds.minX) < 1 && abs(clip.minY - bounds.minY) < 1
+            && abs(clip.width - bounds.width) < 3 && abs(clip.height - bounds.height) < 3
+        let screenContext = NSGraphicsContext.current?.isDrawingToScreen != false
+            && (context.width > 0 || NSGraphicsContext.current?.isDrawingToScreen == true || localAppearance || internalPreview)
+        if !SnapshotPageRendering.isPreview, !SnapshotPageRendering.isVectorOutput, screenContext, let previewData, let previewKey, let screenPreview {
+            viewportLock.lock(); let viewport = previewViewport; viewportLock.unlock()
+            let fragmentViewport = viewport.map {
+                $0.applying(SnapshotPayload.transform(size: media.size, bounds: bounds, rotation: captureRotation).inverted())
+            }
+            SnapshotPreviewCache.shared.draw(data: previewData, key: previewKey, preview: screenPreview, page: source, visibleRegion: fragmentViewport, in: context)
+        } else { context.drawPDFPage(source) }
+        if grouped { context.endTransparencyLayer() }
         context.restoreGState()
     }
 }
@@ -232,6 +295,13 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
 /// annotation contract. Thread-local scope also covers nested/background previews.
 enum SnapshotPageRendering {
     private static let key = "DrawbridgeSnapshotPagePreview"
+    static var isVectorOutput: Bool { (Thread.current.threadDictionary["DrawbridgeSnapshotVectorOutput"] as? Bool) == true }
+    static func vector<T>(_ body: () -> T) -> T {
+        let old = Thread.current.threadDictionary["DrawbridgeSnapshotVectorOutput"]
+        Thread.current.threadDictionary["DrawbridgeSnapshotVectorOutput"] = true
+        defer { Thread.current.threadDictionary["DrawbridgeSnapshotVectorOutput"] = old }
+        return body()
+    }
     static var isPreview: Bool { (Thread.current.threadDictionary[key] as? Int ?? 0) > 0 }
     static func preview<T>(_ body: () -> T) -> T {
         let depth = Thread.current.threadDictionary[key] as? Int ?? 0

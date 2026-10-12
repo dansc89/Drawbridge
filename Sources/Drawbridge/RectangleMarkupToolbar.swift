@@ -137,7 +137,7 @@ extension MainViewController {
         for (index,item) in rectangleToolbar.fillPopup.itemArray.enumerated() { item.tag = index; item.target = self; item.action = #selector(polygonFill(_:)) }
         refreshRectangleToolbar()
     }
-    func refreshRectangleToolbar() {
+    func refreshRectangleToolbar(refreshProperties: Bool = true) {
         revealMarkupPropertiesForInteraction()
         refreshMeasurementScaleDisplay()
         let s = pdfView.rectangleMarkup
@@ -147,7 +147,8 @@ extension MainViewController {
         rectangleToolbar.editTextButton.toolTip = importedSelected
             ? "Imported text editing is not yet supported"
             : "Edit Text"
-        rectangleToolbar.propertiesController.refresh()
+        if refreshProperties { rectangleToolbar.propertiesController.refresh() }
+        else { rectangleToolbar.propertiesController.refreshEditingAvailabilityIfNeeded() }
         for (button, tool) in [(rectangleToolbar.penButton, RectangleMarkupController.Tool.pen), (rectangleToolbar.selectButton, RectangleMarkupController.Tool.select), (rectangleToolbar.rectangleButton, .rectangle), (rectangleToolbar.ellipseButton, .ellipse), (rectangleToolbar.lineButton, .line), (rectangleToolbar.arrowButton, .arrow), (rectangleToolbar.polygonButton, .polygon), (rectangleToolbar.polylineButton, .polyline), (rectangleToolbar.textButton, .text), (rectangleToolbar.snapshotButton, .snapshotBox), (rectangleToolbar.areaButton, .area), (rectangleToolbar.perimeterButton, .perimeter)] {
             button.isEnabled = enabled
             button.state = s.tool == tool ? .on : .off

@@ -536,6 +536,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         registerForDraggedTypes([.fileURL])
         installViewportObserversIfNeeded()
         rectangleMarkup.install(on: self)
+        NotificationCenter.default.addObserver(self, selector: #selector(snapshotPreviewReady), name: SnapshotPreviewCache.ready, object: nil)
+    }
+
+    @objc private func snapshotPreviewReady() {
+        for page in visiblePages where page.annotations.contains(where: SnapshotPayload.isSnapshot) {
+            refreshAnnotationRendering(on: page)
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -572,10 +579,23 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     /// PDFKit draws pages in nested views/layers; invalidating only PDFView can
     /// leave a cached annotation image visible after the annotation is removed.
+    private let snapshotPreviewPages = NSHashTable<PDFPage>.weakObjects()
+
+    private func updateSnapshotPreviewViewports() {
+        for page in visiblePages {
+            let region = convert(bounds, to: page).intersection(page.bounds(for: displayBox))
+            for snapshot in page.annotations.compactMap({ $0 as? DrawbridgeSnapshotAnnotation }) {
+                snapshotPreviewPages.add(page)
+                snapshot.updatePreviewViewport(region)
+            }
+        }
+    }
+
     func refreshAnnotationRendering(on page: PDFPage, importedAppearanceChanged: Bool = false) {
-        if importedAppearanceChanged && window != nil {
-            // Detached views have no on-screen tiles to clear. Rotating their
-            // pages queues PDFKit layout work that can outlive the view.
+        updateSnapshotPreviewViewports()
+        if importedAppearanceChanged && window?.isVisible == true && !snapshotPreviewPages.contains(page) {
+            // Detached or hidden views have no on-screen tiles to clear.
+            // Rotating them queues PDFKit layout work that can outlive the view.
             // PDFKit bakes external AP streams into page tiles. A geometry
             // invalidation clears those tiles. Restore rotation synchronously;
             // the document and viewport retain their original orientation.
@@ -665,7 +685,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         installClipViewObserverIfNeeded()
         updateGridOverlayIfNeeded()
         updateHyperlinkOverlayIfNeeded()
-        rectangleMarkup.refresh()
+        rectangleMarkup.refresh(presentationChanged: false)
     }
 
     func setGridVisible(_ visible: Bool) {
@@ -679,8 +699,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     func refreshHyperlinkHighlights() {
+        updateSnapshotPreviewViewports()
         updateHyperlinkOverlayIfNeeded()
-        rectangleMarkup.refresh()
+        rectangleMarkup.refresh(presentationChanged: false)
     }
 
     func setOrthoSnapEnabled(_ enabled: Bool) {
@@ -738,13 +759,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     @objc private func handlePDFViewportChangedNotification(_ notification: Notification) {
         _ = notification
         updateHyperlinkOverlayIfNeeded()
-        rectangleMarkup.refresh()
+        rectangleMarkup.refresh(presentationChanged: false)
     }
 
     @objc private func handleClipViewBoundsDidChange(_ notification: Notification) {
         _ = notification
         updateHyperlinkOverlayIfNeeded()
-        rectangleMarkup.refresh()
+        rectangleMarkup.refresh(presentationChanged: false)
         onViewportChanged?()
     }
 
@@ -2229,7 +2250,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             scrollContentClipView(to: NSPoint(x: rect.midX - clip.bounds.width / 2,
                                              y: rect.midY - clip.bounds.height / 2))
         }
-        rectangleMarkup.refresh()
+        rectangleMarkup.refresh(presentationChanged: false)
         onViewportChanged?()
     }
 
@@ -2692,7 +2713,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             pendingInteractiveViewportFeedbackWorkItem = nil
             lastInteractiveViewportFeedbackAt = now
             updateGridOverlayIfNeeded()
-            rectangleMarkup.refresh()
+            rectangleMarkup.refresh(presentationChanged: false)
             onViewportChanged?()
             return
         }

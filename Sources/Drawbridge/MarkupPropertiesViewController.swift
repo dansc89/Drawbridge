@@ -16,6 +16,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
     let setAsDefault = NSButton(title: "Set as Default", target: nil, action: nil)
     let defaultStatus = NSTextField(labelWithString: "")
     private var lastDefaultTool: RectangleMarkupController.Tool?
+    private var lastEditingAvailability: Bool?
     let linePattern = NSPopUpButton()
     let strokeOpacity = NSTextField()
     let fillOpacity = NSTextField()
@@ -142,9 +143,14 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         let id = session.layerCatalog.layers.indices.contains(index) ? session.layerCatalog.layers[index].id : nil
         if let annotation = session.selected { session.assignLayer(id, to: [annotation]) } else { session.setActiveLayer(id) }
     }
+    func refreshEditingAvailabilityIfNeeded() {
+        guard let session, lastEditingAvailability != session.canEdit() else { return }
+        refresh()
+    }
     func refresh() {
         _ = view
         guard let session else { return }
+        lastEditingAvailability = session.canEdit()
         layersView.session = session; layersView.refresh()
         membership.removeAllItems(); membership.addItems(withTitles: ["Unassigned"] + session.layerCatalog.layers.map(\.name))
         let currentID = session.selected.flatMap(MarkupLayers.id) ?? (session.selected == nil ? session.layerCatalog.activeID : nil)
@@ -157,7 +163,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         let selection = session.selected
         let text = selection.map { $0.type == "FreeText" } ?? (session.tool == .text)
         let closedShape = selection.map { ["Square", "Circle", "Polygon"].contains($0.type ?? "") } ?? ([.rectangle, .ellipse, .polygon, .area].contains(session.tool))
-        let snapshot = selection.flatMap(SnapshotPayload.read) != nil
+        let snapshot = selection.map(SnapshotPayload.isSnapshot) == true
         let capturing = selection == nil && (session.tool == .snapshotBox || session.tool == .snapshotPolygon)
         captureHint.isHidden = !capturing
         note.isHidden = snapshot || capturing

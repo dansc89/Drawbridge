@@ -70,13 +70,28 @@ import XCTest
                 context.translateBy(x: displayBounds.minX, y: displayBounds.minY)
                 context.drawPDFPage(fragment)
             }
+            let automaticPreview = try bitmap { context in
+                context.clip(to: CGRect(origin: .zero, size: size))
+                stamp.draw(with: .mediaBox, in: context)
+            }
+            let explicitPreview = try bitmap { context in
+                SnapshotPageRendering.preview { stamp.draw(with: .mediaBox, in: context) }
+            }
+            var previewDifferences = 0
+            var backgroundInk = 0
             var differences = 0
             for y in 0..<actual.pixelsHigh { for x in 0..<actual.pixelsWide {
                 let a = try XCTUnwrap(actual.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
                 let b = try XCTUnwrap(expected.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+                let preview = try XCTUnwrap(explicitPreview.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+                let background = try XCTUnwrap(automaticPreview.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB))
+                if background.redComponent + background.greenComponent + background.blueComponent < 2.9 { backgroundInk += 1 }
+                if abs(preview.redComponent-b.redComponent)+abs(preview.greenComponent-b.greenComponent)+abs(preview.blueComponent-b.blueComponent) > 0.1 { previewDifferences += 1 }
                 if abs(a.redComponent-b.redComponent)+abs(a.greenComponent-b.greenComponent)+abs(a.blueComponent-b.blueComponent) > 0.1 { differences += 1 }
             } }
             XCTAssertLessThan(differences, 100, "Live annotation clipping must preserve the complete upright capture, rotation \(rotation)")
+            XCTAssertLessThan(previewDifferences, 100, "Explicit previews must retain the full capture, rotation \(rotation)")
+            if rotation != 0 { XCTAssertEqual(backgroundInk, 0, "PDFKit's cached background must not retain a second Snapshot that ghosts after deletion") }
         }
     }
 
@@ -369,9 +384,84 @@ import XCTest
         }
     }
 
+    func testSnapshotPreviewSharpensWithoutReplacingOriginalPDF() throws {
+        let url = try fixture()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let document = try XCTUnwrap(PDFDocument(url: url))
+        let captured = try capture(try XCTUnwrap(document.page(at: 0)))
+        // Valid trailing PDF whitespace models a large payload without a private fixture.
+        let payload = SnapshotPayload(data: captured.data + Data(repeating: 32, count: 1_100_000))
+        let fragment = try XCTUnwrap(payload.page), media = fragment.getBoxRect(.mediaBox)
+        let stamp = try SnapshotStampFactory.make(payload: payload, bounds: media, rotation: 0)
+        func tile(vector: Bool) throws -> Data {
+            let context = try XCTUnwrap(CGContext(data: nil, width: 512, height: 512, bitsPerComponent: 8, bytesPerRow: 2048, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.setFillColor(NSColor.white.cgColor); context.fill(CGRect(x: 0, y: 0, width: 512, height: 512))
+            context.translateBy(x: 256, y: 256); context.scaleBy(x: 12, y: 12)
+            context.translateBy(x: -media.midX, y: -media.midY)
+            if vector { SnapshotPageRendering.vector { stamp.draw(with: .mediaBox, in: context) } }
+            else { stamp.draw(with: .mediaBox, in: context) }
+            return Data(bytes: try XCTUnwrap(context.data), count: 512 * 512 * 4)
+        }
+        let original = try tile(vector: true)
+        func difference(_ actual: Data) -> Double {
+            zip(actual, original).reduce(0.0) { $0 + abs(Double($1.0) - Double($1.1)) } / Double(original.count)
+        }
+        let initial = difference(try tile(vector: false))
+        let deadline = Date().addingTimeInterval(8)
+        var final = initial
+        while final > 0.6 && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+            final = difference(try tile(vector: false))
+        }
+        XCTAssertGreaterThan(initial, 1, "First draw must exercise the inexpensive preview")
+        XCTAssertLessThan(final, 0.6, "Background tiles must restore fine linework at device resolution")
+        XCTAssertEqual(try tile(vector: true), original, "Progressive preview must never replace the original PDF")
+    }
+
+    func testLargePDFSnapshotZoomTilesRemainVisibleAndMatchOriginal() throws {
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_SNAPSHOT_FIXTURE"] else { throw XCTSkip("Provide a large local PDF for zoom testing") }
+        let document = try XCTUnwrap(PDFDocument(url: URL(fileURLWithPath: path)))
+        for index in [0, min(50, document.pageCount - 1)] {
+            let page = try XCTUnwrap(document.page(at: index))
+            let box = page.bounds(for: .cropBox)
+            let region = box.insetBy(dx: box.width * 0.2, dy: box.height * 0.2)
+            let start = Date()
+            let payload = try SnapshotPayload.capture(page: page, points: [region.origin, CGPoint(x: region.maxX, y: region.minY), CGPoint(x: region.maxX, y: region.maxY), CGPoint(x: region.minX, y: region.maxY)])
+            let fragment = try XCTUnwrap(payload.page)
+            let media = fragment.getBoxRect(.mediaBox)
+            let stamp = try SnapshotStampFactory.make(payload: payload, bounds: media, rotation: 0)
+            print("Zoom capture page", index + 1, "seconds", Date().timeIntervalSince(start), "bytes", payload.data.count)
+            for scale in [1.0, 4.0, 12.0] {
+                func tile(_ draw: (CGContext) -> Void) throws -> Data {
+                    let c = try XCTUnwrap(CGContext(data: nil, width: 768, height: 768, bitsPerComponent: 8, bytesPerRow: 768 * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                    c.setFillColor(NSColor.white.cgColor); c.fill(CGRect(x: 0, y: 0, width: 768, height: 768))
+                    c.translateBy(x: 384, y: 384); c.scaleBy(x: scale, y: scale)
+                    c.translateBy(x: -media.midX, y: -media.midY)
+                    draw(c)
+                    return Data(bytes: try XCTUnwrap(c.data), count: 768 * 768 * 4)
+                }
+                let expected = try tile { $0.drawPDFPage(fragment) }
+                let drawStart = Date()
+                var actual = Data()
+                for _ in 0..<3 { actual = try tile { stamp.draw(with: .mediaBox, in: $0) } }
+                let elapsed = Date().timeIntervalSince(drawStart) / 3
+                print("Snapshot zoom tile page", index + 1, "scale", scale, "seconds", elapsed)
+                let original = try tile { c in SnapshotPageRendering.vector { stamp.draw(with: .mediaBox, in: c) } }
+                XCTAssertEqual(original, expected, "Export must retain the complete original vector fragment at every zoom")
+                let expectedInk = stride(from: 0, to: expected.count, by: 4).filter { expected[$0] < 240 || expected[$0+1] < 240 || expected[$0+2] < 240 }.count
+                let actualInk = stride(from: 0, to: actual.count, by: 4).filter { actual[$0] < 240 || actual[$0+1] < 240 || actual[$0+2] < 240 }.count
+                print("Snapshot tile ink pixels", expectedInk, actualInk)
+                if expectedInk > 768 * 768 / 100 { XCTAssertGreaterThan(actualInk, 0, "A capture with visible content must not be blank") }
+                XCTAssertLessThan(elapsed, 1, "A visible Snapshot tile must not block zooming for seconds")
+            }
+        }
+    }
+
     func testLargePDFSnapshotsAndRepeatedSaves() throws {
         guard let path=ProcessInfo.processInfo.environment["DRAWBRIDGE_SNAPSHOT_FIXTURE"] else { throw XCTSkip("Provide a large local PDF for performance testing") }
         let source=URL(fileURLWithPath:path), document=try XCTUnwrap(PDFDocument(url:source)), page=document.page(at:0)!
+        let originalSnapshotCount = RectangleMarkupRecord.capture(document).filter { $0.kind == .snapshot }.count
+        var addedIDs = Set<String>()
         let box=page.bounds(for:.cropBox), w=box.width/5, h=box.height/5
         let points=[CGPoint(x:box.maxX-w,y:box.minY),CGPoint(x:box.maxX,y:box.minY),CGPoint(x:box.maxX,y:box.minY+h),CGPoint(x:box.maxX-w,y:box.minY+h)]
         let captureStart=Date(); let payload=try SnapshotPayload.capture(page:page,points:points)
@@ -380,7 +470,8 @@ import XCTest
         session.bind(to:document); session.canEdit={true}
         for index in 0..<20 {
             let p=document.page(at:index % document.pageCount)!
-            XCTAssertNotNil(session.pasteSnapshot(payload,on:p,center:CGPoint(x:p.bounds(for:.cropBox).midX,y:p.bounds(for:.cropBox).midY)))
+            let added = try XCTUnwrap(session.pasteSnapshot(payload,on:p,center:CGPoint(x:p.bounds(for:.cropBox).midX,y:p.bounds(for:.cropBox).midY)))
+            addedIDs.insert(try XCTUnwrap(RectangleMarkupRecord.identity(added)))
         }
         XCTAssertTrue(PDFRectangleWriter.prepareInspection(source:source))
         let output=URL(fileURLWithPath:"/tmp/Drawbridge-Snapshot-Large-QA.pdf")
@@ -391,7 +482,7 @@ import XCTest
         // Keep a five-second floor, with a 40 MiB/s budget for large permit sets.
         let sourceBytes = try source.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         XCTAssertLessThan(elapsed, max(5, Double(sourceBytes) / (40 * 1024 * 1024)))
-        let reopened=try XCTUnwrap(PDFDocument(url:output)); XCTAssertEqual(RectangleMarkupRecord.capture(reopened).filter { $0.kind == .snapshot }.count,20)
+        let reopened=try XCTUnwrap(PDFDocument(url:output)); XCTAssertEqual(RectangleMarkupRecord.capture(reopened).filter { $0.kind == .snapshot }.count, originalSnapshotCount + 20)
         let savedData=try Data(contentsOf:output,options:.mappedIfSafe), originalData=try Data(contentsOf:source,options:.mappedIfSafe)
         XCTAssertTrue(savedData.starts(with:originalData))
         let inspection = URL(fileURLWithPath:"/tmp/Drawbridge-Snapshot-Sharing-QA.json")
@@ -400,7 +491,7 @@ import XCTest
         defer { try? FileManager.default.removeItem(at:inspection) }
         let graph = try XCTUnwrap(try JSONSerialization.jsonObject(with:Data(contentsOf:inspection)) as? [String:Any])
         let objects = try XCTUnwrap((graph["qpdf"] as? [[String:Any]])?.last)
-        let snapshots = objects.values.compactMap { ($0 as? [String:Any])?["value"] as? [String:Any] }.filter { $0["/DrawbridgeSnapshotPDF"] != nil }
+        let snapshots = objects.values.compactMap { ($0 as? [String:Any])?["value"] as? [String:Any] }.filter { $0["/DrawbridgeSnapshotPDF"] != nil && addedIDs.contains(String(($0["/NM"] as? String ?? "").dropFirst(2))) }
         XCTAssertEqual(snapshots.count,20)
         let payloadReferences = snapshots.compactMap { $0["/DrawbridgeSnapshotPDF"] as? String }
         XCTAssertEqual(Set(payloadReferences).count,1,"Repeated captures share one embedded payload")

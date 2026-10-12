@@ -39,6 +39,33 @@ final class MarkupPropertiesTests: XCTestCase {
         }
     }
 
+    func testZoomStatusRefreshPreservesPendingPropertyInput() throws {
+        _ = NSApplication.shared
+        let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(document.page(at: 0))
+        let controller = MainViewController(); _ = controller.view
+        controller.openDocumentURL = source
+        controller.pdfView.setMarkupDocument(document); controller.pdfView.go(to: page)
+        let payload = try SnapshotPayload.capture(page: page, points: [CGPoint(x: 40,y: 40),CGPoint(x: 220,y: 40),CGPoint(x: 220,y: 180),CGPoint(x: 40,y: 180)])
+        let session = controller.pdfView.rectangleMarkup
+        _ = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: CGPoint(x: 200,y: 150)))
+        let inspector = controller.rectangleToolbar.propertiesController
+        inspector.refresh(); inspector.snapshotOpacity.stringValue = "37.25"
+        var presentationChanges = 0
+        let previous = session.onPresentationChanged
+        session.onPresentationChanged = { presentationChanges += 1; previous?() }
+        for _ in 0..<20 {
+            controller.pdfView.refreshHyperlinkHighlights()
+            controller.updateStatusBar()
+        }
+        XCTAssertEqual(presentationChanges, 0, "Viewport movement must not rebuild the inspector")
+        XCTAssertEqual(inspector.snapshotOpacity.stringValue, "37.25", "Zoom/status changes must not reset uncommitted input")
+        inspector.changeNumber(inspector.snapshotOpacity)
+        XCTAssertEqual(SnapshotStyle.read(try XCTUnwrap(session.selected)).opacity, 0.3725)
+        session.onPresentationChanged = previous
+        controller.pdfView.setMarkupDocument(nil)
+    }
+
     func testRectangleAndEllipseHavePolygonFillControlsAndRoundTrip() throws {
         _ = NSApplication.shared
         for kind in [RectangleMarkupRecord.Kind.rectangle, .ellipse] {

@@ -4926,7 +4926,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func refreshFlattenButtonState() {
-        refreshRectangleToolbar()
+        refreshRectangleToolbar(refreshProperties: false)
         goToSheetButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
         fitPageButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
         reduceFileSizeButton.isEnabled = pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy
