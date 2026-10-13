@@ -296,6 +296,9 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     var onToolShortcut: ((ToolMode) -> Void)?
     var onPageNavigationShortcut: ((Int) -> Void)?
     var onViewportChanged: (() -> Void)?
+    // Internal observation seam for verifying viewport work without replacing it.
+    enum ViewportRefreshOperation { case hyperlinkOverlay, snapshotPreviewViewports }
+    var onViewportRefreshOperation: ((ViewportRefreshOperation) -> Void)?
     var onRegionCaptured: ((PDFPage, NSRect) -> Void)?
     var shouldBeginMarkupInteraction: (() -> Bool)?
     var polygonVertexEditModeEnabled = false
@@ -589,18 +592,20 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             let region = Self.snapshotPreviewBounds(on: page, keys: keys)
             guard let region else { continue }
             // PDFKit caches custom Stamp drawings independently of page tiles.
-            // Reattach the affected suffix in its original order to retire those
-            // cached layers while retaining annotation identity and selection.
+            // Reattach only from the first affected drawing layer, in original
+            // order. A tiled owner's Stamp does not draw; its tiles do.
             let annotations = page.annotations
             if let first = annotations.firstIndex(where: {
-                guard let snapshot = $0 as? DrawbridgeSnapshotAnnotation else { return false }
+                let snapshot = ($0 as? SnapshotViewportTileAnnotation)?.snapshot
+                    ?? ($0 as? DrawbridgeSnapshotAnnotation).flatMap { $0.usesViewportTiles ? nil : $0 }
+                guard let snapshot, snapshot.shouldDisplay, !snapshot.isRetired else { return false }
                 return snapshot.previewKey.map(keys.contains) == true
             }) {
                 let suffix = Array(annotations[first...])
                 suffix.forEach(page.removeAnnotation)
                 suffix.forEach(page.addAnnotation)
             }
-            refreshAnnotationRendering(on: page, region: region)
+            refreshAnnotationRendering(on: page, region: region, reason: .snapshotDetailReady)
         }
     }
 
@@ -709,6 +714,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func updateSnapshotPreviewViewports() {
+        onViewportRefreshOperation?(.snapshotPreviewViewports)
         scheduleSnapshotViewportTiles()
         for page in visiblePages {
             let region = convert(bounds, to: page).intersection(page.bounds(for: displayBox))
@@ -719,12 +725,18 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
     }
 
-    func refreshAnnotationRendering(on page: PDFPage, importedAppearanceChanged: Bool = false, region: CGRect? = nil) {
+    enum AnnotationRefreshReason { case markupChanged, snapshotDetailReady }
+
+    func refreshAnnotationRendering(on page: PDFPage, importedAppearanceChanged: Bool = false, region: CGRect? = nil, reason: AnnotationRefreshReason = .markupChanged) {
         let hadViewportTiles = page.annotations.contains { $0 is SnapshotViewportTileAnnotation }
         // Retire stale display tiles before PDFKit invalidates the page. Doing
         // this later can leave a deleted Snapshot cached until the next zoom.
-        updateSnapshotViewportTiles()
-        updateSnapshotPreviewViewports()
+        // Detail publication changes pixels, not geometry or viewport demand.
+        // Re-entering the mutation path here restarts zoom settling and tiling.
+        if reason == .markupChanged {
+            updateSnapshotViewportTiles()
+            updateSnapshotPreviewViewports()
+        }
         if importedAppearanceChanged && window?.isVisible == true && !snapshotPreviewPages.contains(page) {
             // Detached or hidden views have no on-screen tiles to clear.
             // Rotating them queues PDFKit layout work that can outlive the view.
@@ -753,7 +765,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             for child in target.subviews { invalidate(child) }
         }
         invalidate(self)
-        if hadViewportTiles && window?.isVisible == true {
+        if reason == .markupChanged && hadViewportTiles && window?.isVisible == true {
             // PDFKit retains a composited high-zoom surface after Stamp removal.
             // Retile at an adjacent scale, then restore the exact scale and anchor.
             // Plain needsDisplay and page rotation do not retire that surface.
@@ -902,19 +914,19 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             pendingSnapshotDetailKeys.removeAll(keepingCapacity: true)
         }
         noteSnapshotViewportActivity()
-        updateHyperlinkOverlayIfNeeded()
-        rectangleMarkup.refresh(presentationChanged: false)
+        refreshHyperlinkHighlights()
     }
 
     @objc private func handleClipViewBoundsDidChange(_ notification: Notification) {
         _ = notification
         noteSnapshotViewportActivity()
-        updateHyperlinkOverlayIfNeeded()
-        rectangleMarkup.refresh(presentationChanged: false)
+        // The view owns viewport rendering even without a controller callback.
+        refreshHyperlinkHighlights()
         onViewportChanged?()
     }
 
     private func updateHyperlinkOverlayIfNeeded(forceHideWhenDisabled: Bool = false) {
+        onViewportRefreshOperation?(.hyperlinkOverlay)
         guard areHyperlinkHighlightsVisible else {
             if forceHideWhenDisabled {
                 hyperlinkOverlayLayer.path = nil
@@ -1169,6 +1181,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
 
     @objc private func bringSelectedMarkupToFront(_ sender: Any?) { rectangleMarkup.reorderSelected(toFront: true) }
     @objc private func sendSelectedMarkupToBack(_ sender: Any?) { rectangleMarkup.reorderSelected(toFront: false) }
+    @objc private func bringSelectedMarkupForward(_ sender: Any?) { rectangleMarkup.reorderSelected(.bringForward) }
+    @objc private func sendSelectedMarkupBackward(_ sender: Any?) { rectangleMarkup.reorderSelected(.sendBackward) }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let menu = NSMenu(title: "PDF")
@@ -1183,6 +1197,10 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 front.target = self; front.isEnabled = !rectangleMarkup.layerIsLocked(annotation) && !annotation.isReadOnly
                 let back = menu.addItem(withTitle: "Send to Back", action: #selector(sendSelectedMarkupToBack(_:)), keyEquivalent: "")
                 back.target = self; back.isEnabled = front.isEnabled
+                let forward = menu.addItem(withTitle: "Bring Forward", action: #selector(bringSelectedMarkupForward(_:)), keyEquivalent: "")
+                forward.target = self; forward.isEnabled = front.isEnabled
+                let backward = menu.addItem(withTitle: "Send Backward", action: #selector(sendSelectedMarkupBackward(_:)), keyEquivalent: "")
+                backward.target = self; backward.isEnabled = front.isEnabled
                 menu.addItem(.separator())
             }
         }
@@ -2908,7 +2926,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             pendingInteractiveViewportFeedbackWorkItem = nil
             lastInteractiveViewportFeedbackAt = now
             updateGridOverlayIfNeeded()
-            rectangleMarkup.refresh(presentationChanged: false)
+            refreshHyperlinkHighlights()
             onViewportChanged?()
             return
         }
@@ -2920,6 +2938,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             self.pendingInteractiveViewportFeedbackWorkItem = nil
             self.lastInteractiveViewportFeedbackAt = CFAbsoluteTimeGetCurrent()
             self.updateGridOverlayIfNeeded()
+            self.refreshHyperlinkHighlights()
             self.onViewportChanged?()
         }
         pendingInteractiveViewportFeedbackWorkItem = workItem

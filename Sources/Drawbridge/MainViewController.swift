@@ -653,7 +653,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             self?.lastUserInteractionAt = Date()
             self?.requestChromeRefresh()
             self?.updateSelectionOverlay()
-            self?.pdfView.refreshHyperlinkHighlights()
         }
         pdfView.onToolShortcut = { [weak self] mode in
             self?.setTool(mode)
@@ -1602,7 +1601,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         markupsToggleButton.setButtonType(.toggle)
         markupsToggleButton.target = self; markupsToggleButton.action = #selector(commandToggleMarkupsList(_:))
         markupsToggleButton.identifier = NSUserInterfaceItemIdentifier("drawbridgeMarkupsList")
-        let details = NSStackView(views: [history,pages] + labels + [invertColorsButton, markupsToggleButton])
+        let details = NSStackView(views: [history,pages] + labels + [invertColorsButton, markupsToggleButton, rectangleToolbar.scaleButton])
         details.orientation = .horizontal
         details.spacing = 14
         details.translatesAutoresizingMaskIntoConstraints = false
@@ -2929,6 +2928,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         saveGenerateElapsed = 0
     }
 
+    // Publication observation seam; reloads still use the real AppKit table.
+    var onMarkupListReload: (() -> Void)?
+    private func reloadPublishedMarkupList() {
+        markupsTable.reloadData()
+        onMarkupListReload?()
+    }
+
     @objc func refreshMarkups() {
         pendingMarkupsRefreshWorkItem?.cancel()
         performRefreshMarkups(selecting: currentSelectedAnnotation(), forceImmediate: true)
@@ -3016,7 +3022,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             }
             func finalizePublish(totalMatching: Int, collected: [MarkupItem]) {
                 self.markupItems = collected
-                self.markupsTable.reloadData()
+                self.reloadPublishedMarkupList()
                 self.lastKnownTotalMatchingMarkups = totalMatching
                 self.isMarkupListTruncated = (totalMatching > indexCap)
                 if self.isMarkupListTruncated {
@@ -3098,10 +3104,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 }
                 return true
             }
-            self.markupItems = collected
-            self.markupsTable.reloadData()
-
             if !final {
+                self.markupItems = collected
+                self.reloadPublishedMarkupList()
                 if filter.isEmpty {
                     self.markupsCountLabel.stringValue = "Loading… \(collected.count) shown"
                 } else {

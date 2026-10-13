@@ -74,7 +74,7 @@ final class RectangleMarkupToolbar: NSStackView {
         scaleButton.bezelStyle = .texturedRounded; scaleButton.controlSize = .small
         scaleButton.setAccessibilityLabel("Set drawing scale")
         scaleButton.widthAnchor.constraint(lessThanOrEqualToConstant: 125).isActive = true
-        addArrangedSubview(scaleButton)
+
         setHuggingPriority(.required, for: .horizontal)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

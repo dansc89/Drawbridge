@@ -676,17 +676,12 @@ final class RectangleMarkupController {
         guard !changedPages.isEmpty else { return }
         restoreDrawingScales(changedPages.map { ($0, scale) })
     }
-    private func restoreDrawingScales(_ updates: [(PDFPage, DrawingScale?)]) {
+    private func restoreDrawingScales(_ updates: [(PDFPage, DrawingScale?)], measurements: [(PDFAnnotation, DrawingMeasurement)]? = nil) {
         guard canEdit(), updates.allSatisfy({ $0.0.document === boundDocument }) else { return }
         let previous = updates.map { ($0.0, MeasurementMetadata.scale(on: $0.0)) }
         let previousMeasurements = updates.flatMap { page, _ in page.annotations.compactMap { a -> (PDFAnnotation, DrawingMeasurement)? in MeasurementMetadata.measurement(a).map { (a,$0) } } }
         undo.registerUndo(withTarget: self) { target in
-            target.restoreDrawingScales(previous)
-            for (annotation, measurement) in previousMeasurements {
-                annotation.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey)
-                MeasurementMetadata.updateLabel(annotation)
-                if let page = annotation.page { target.changed(page) }
-            }
+            target.restoreDrawingScales(previous, measurements: previousMeasurements)
         }
         undo.setActionName("Set Page Scales")
         for (page, scale) in updates {
@@ -708,8 +703,14 @@ final class RectangleMarkupController {
                     }
                 }
             }
-            changed(page)
         }
+        // Restore heterogeneous per-measurement scales before publishing any page.
+        // Capturing inverse state above keeps repeated undo/redo cycles exact.
+        for (annotation, measurement) in measurements ?? [] {
+            annotation.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey)
+            MeasurementMetadata.updateLabel(annotation)
+        }
+        for (page, _) in updates { changed(page) }
     }
     static func polylineBounds(_ points: [CGPoint], width: CGFloat) -> CGRect {
         let xs = points.map(\.x), ys = points.map(\.y)
@@ -996,6 +997,9 @@ final class RectangleMarkupController {
         if let measurement { annotation.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey); MeasurementMetadata.updateLabel(annotation) }
         annotation.shouldDisplay = true; annotation.shouldPrint = true
         assignNewMarkupLayer(annotation)
+        // Only a successfully validated placement finishes the drawing tool.
+        // Pen stays active for repeated strokes; drafts and undo/redo do not enter here.
+        if tool != .pen { tool = .select }
         setPresence(true, annotation: annotation, page: page, action: "Add " + kind.rawValue.capitalized)
         return annotation
     }
@@ -1068,23 +1072,67 @@ final class RectangleMarkupController {
     }
 
     func reorderSelected(toFront: Bool) {
-        guard canEdit(), let page = selected?.page else { return }
-        let items = selectedItems.filter { $0.page === page && !$0.isReadOnly && !layerIsLocked($0) }
-        let original = page.annotations
-        let moving = original.filter { a in items.contains { $0 === a } }
-        guard !moving.isEmpty else { return }
-        let remaining = original.filter { a in !items.contains { $0 === a } }
-        restoreAnnotationOrder(toFront ? remaining + moving : moving + remaining, on: page)
-        setSelectedItems(items)
-        undo.setActionName(toFront ? "Bring to Front" : "Send to Back")
+        reorderSelected(toFront ? .bringToFront : .sendToBack)
     }
 
-    private func restoreAnnotationOrder(_ order: [PDFAnnotation], on page: PDFPage) {
+    func reorderSelected(_ action: MainViewController.AnnotationReorderAction) {
+        guard canEdit() else { return }
+        let selection = selectedItems
+        let items = selection.filter { $0.page?.document === boundDocument && !$0.isReadOnly && !layerIsLocked($0) }
+        let movingIDs = Set(items.map(ObjectIdentifier.init))
+        var pages: [PDFPage] = []
+        for item in items {
+            if let page = item.page, !pages.contains(where: { $0 === page }) { pages.append(page) }
+        }
+        var changes: [(PDFPage, [PDFAnnotation])] = []
+        for page in pages {
+            let original = page.annotations
+            // Screen-only capture tiles are part of their owner's stacking unit.
+            var logical = original.filter { !($0 is SnapshotViewportTileAnnotation) }
+            let isMoving: (PDFAnnotation) -> Bool = { movingIDs.contains(ObjectIdentifier($0)) }
+            switch action {
+            case .bringToFront: logical = logical.filter { !isMoving($0) } + logical.filter(isMoving)
+            case .sendToBack: logical = logical.filter(isMoving) + logical.filter { !isMoving($0) }
+            case .bringForward:
+                if logical.count > 1 {
+                    for i in stride(from: logical.count - 2, through: 0, by: -1) where isMoving(logical[i]) && !isMoving(logical[i + 1]) {
+                        logical.swapAt(i, i + 1)
+                    }
+                }
+            case .sendBackward:
+                if logical.count > 1 {
+                    for i in 1..<logical.count where isMoving(logical[i]) && !isMoving(logical[i - 1]) {
+                        logical.swapAt(i, i - 1)
+                    }
+                }
+            }
+            let oldLogical = original.filter { !($0 is SnapshotViewportTileAnnotation) }
+            guard logical.map(ObjectIdentifier.init) != oldLogical.map(ObjectIdentifier.init) else { continue }
+            var tiles: [ObjectIdentifier: [PDFAnnotation]] = [:]
+            var orphans: [PDFAnnotation] = []
+            for case let tile as SnapshotViewportTileAnnotation in original {
+                if let owner = tile.snapshot, logical.contains(where: { $0 === owner }) {
+                    tiles[ObjectIdentifier(owner), default: []].append(tile)
+                } else { orphans.append(tile) }
+            }
+            let order = logical.flatMap { [$0] + (tiles[ObjectIdentifier($0)] ?? []) } + orphans
+            changes.append((page, order))
+        }
+        guard !changes.isEmpty else { return }
+        undo.beginUndoGrouping()
+        for (page, order) in changes { restoreAnnotationOrder(order, on: page, selection: selection) }
+        undo.setActionName(action.undoTitle)
+        undo.endUndoGrouping()
+    }
+
+    private func restoreAnnotationOrder(_ order: [PDFAnnotation], on page: PDFPage, selection: [PDFAnnotation]) {
         let previous = page.annotations
-        undo.registerUndo(withTarget: self) { target in target.restoreAnnotationOrder(previous, on: page) }
+        let previousSelection = selectedItems
+        undo.registerUndo(withTarget: self) { target in target.restoreAnnotationOrder(previous, on: page, selection: previousSelection) }
         previous.forEach(page.removeAnnotation)
         order.forEach(page.addAnnotation)
         importedState?.reordered(page)
+        setSelectedItems(selection)
         changed(page)
     }
 
@@ -1368,7 +1416,10 @@ final class RectangleMarkupController {
     }
     func cancelGesture() { groupMove = nil; selectionWindow = nil; penConstraintAnchor = nil; pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
     func escape() { cancelSnapshotCapture(); cancelGesture(); selected = nil; onClickAway?(); tool = .select; refresh() }
+    // Observes real overlay work, including presentation-silent viewport refreshes.
+    var onOverlayRefresh: (() -> Void)?
     func refresh(presentationChanged: Bool = true) {
+        onOverlayRefresh?()
         positionTextEditor()
         CATransaction.begin(); CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }

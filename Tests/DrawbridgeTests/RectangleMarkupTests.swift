@@ -1075,6 +1075,7 @@ final class RectangleMarkupTests: XCTestCase {
             XCTAssertEqual(ink.type, "Ink"); XCTAssertEqual(ink.border?.lineWidth, 4)
             XCTAssertEqual(RectangleMarkupRecord.vertices(ink).count, 3)
             XCTAssertEqual(session.tool, .pen)
+            XCTAssertNil(session.selected)
             let records = RectangleMarkupRecord.capture(doc)
             let output = source.deletingLastPathComponent().appendingPathComponent("Pen-\(UUID().uuidString).pdf")
             defer { try? FileManager.default.removeItem(at: output) }

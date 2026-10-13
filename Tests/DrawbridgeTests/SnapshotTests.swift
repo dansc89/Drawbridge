@@ -20,8 +20,10 @@ import XCTest
 
 private final class SnapshotRefreshTrackingPage: PDFPage {
     var removalCount = 0
+    var removedAnnotations = [PDFAnnotation]()
     override func removeAnnotation(_ annotation: PDFAnnotation) {
         removalCount += 1
+        removedAnnotations.append(annotation)
         super.removeAnnotation(annotation)
     }
 }
@@ -646,6 +648,60 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
         // A Retina viewport update alone must schedule sharp detail.
         stamp.updatePreviewViewport(stamp.bounds, deviceScale: 7)
         waitForExpectations(timeout: 5)
+    }
+
+    func testSettledDetailRefreshDoesNotRestartZoomOrViewportDemand() throws {
+        let sourceURL = try fixture()
+        defer { try? FileManager.default.removeItem(at: sourceURL) }
+        let source = try XCTUnwrap(PDFDocument(url: sourceURL))
+        let payload = try capture(try XCTUnwrap(source.page(at: 0)))
+        let document = PDFDocument()
+        let page = SnapshotRefreshTrackingPage()
+        page.setBounds(CGRect(x: 0, y: 0, width: 500, height: 400), for: .mediaBox)
+        document.insert(page, at: 0)
+        let stamp = try XCTUnwrap(SnapshotStampFactory.make(payload: payload,
+            bounds: CGRect(x: 150, y: 100, width: 200, height: 200), rotation: 0) as? DrawbridgeSnapshotAnnotation)
+        let above = PDFAnnotation(bounds: stamp.bounds, forType: .square, withProperties: nil)
+        let window = SnapshotPreviewWindow(contentRect: CGRect(x: 0, y: 0, width: 900, height: 700),
+                                           styleMask: [.titled], backing: .buffered, defer: false)
+        let view = MarkupPDFView(frame: window.contentView!.bounds)
+        window.contentView!.addSubview(view)
+        view.setMarkupDocument(document)
+        defer { view.setMarkupDocument(nil); withExtendedLifetime(window) {} }
+        page.addAnnotation(stamp); page.addAnnotation(above)
+        // Let document installation finish its deferred initial-scale restoration.
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        view.autoScales = false; view.maxScaleFactor = 64; view.scaleFactor = 24
+        window.layoutIfNeeded(); view.layoutSubtreeIfNeeded(); view.revealMarkup(stamp)
+        RunLoop.main.run(until: Date().addingTimeInterval(1))
+        view.updateSnapshotViewportTiles()
+        XCTAssertTrue(stamp.usesViewportTiles, "scale=\(view.scaleFactor) bounds=\(stamp.bounds) visible=\(view.visiblePages.count)")
+        XCTAssertTrue(page.annotations.contains { $0 is SnapshotViewportTileAnnotation })
+        let key = try XCTUnwrap(stamp.previewKey)
+        let scale = view.scaleFactor
+        let order = page.annotations
+        let anchor = view.convert(CGPoint(x: view.bounds.midX, y: view.bounds.midY), to: page)
+        var requests = 0
+        view.onViewportRefreshOperation = { if case .snapshotPreviewViewports = $0 { requests += 1 } }
+        let scaleChanges = SnapshotNotificationCounter()
+        let token = NotificationCenter.default.addObserver(forName: .PDFViewScaleChanged, object: view, queue: .main) { _ in
+            MainActor.assumeIsolated { scaleChanges.value += 1 }
+        }
+        defer { NotificationCenter.default.removeObserver(token) }
+        page.removedAnnotations = []
+        // Exercise the production ready observer, quiet timer, and settled refresh.
+        NotificationCenter.default.post(name: SnapshotPreviewCache.ready, object: nil, userInfo: ["captureKeys": Set([key])])
+        RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+        XCTAssertEqual(scaleChanges.value, 0, "Publishing detail is not a zoom gesture")
+        XCTAssertEqual(requests, 0, "Ready detail must not submit fresh viewport demand")
+        XCTAssertFalse(page.removedAnnotations.contains { $0 === stamp }, "The tiled owner's non-drawing layer need not be reattached")
+        XCTAssertTrue(page.removedAnnotations.contains { $0 is SnapshotViewportTileAnnotation }, "Retire cached drawing layers so ready detail can sharpen")
+        XCTAssertTrue(zip(order, page.annotations).allSatisfy { $0 === $1 })
+        XCTAssertEqual(order.count, page.annotations.count)
+        XCTAssertEqual(view.scaleFactor, scale, accuracy: 0.000001)
+        let restored = view.convert(CGPoint(x: view.bounds.midX, y: view.bounds.midY), to: page)
+        XCTAssertEqual(restored.x, anchor.x, accuracy: 0.1)
+        XCTAssertEqual(restored.y, anchor.y, accuracy: 0.1)
     }
 
     func testDetailRefreshTargetsMatchingVisibleSnapshotsOnly() throws {

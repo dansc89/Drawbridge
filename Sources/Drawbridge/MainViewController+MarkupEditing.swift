@@ -114,7 +114,7 @@ extension MainViewController {
     }
 
     func reorderSelectedMarkups(_ action: AnnotationReorderAction) {
-        // Compatibility entry point: annotation authoring is unavailable.
+        pdfView.rectangleMarkup.reorderSelected(action)
     }
 
     private func applyAnnotationOrder(_ ordered: [PDFAnnotation], on page: PDFPage) {
