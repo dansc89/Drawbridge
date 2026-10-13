@@ -42,10 +42,32 @@ struct DrawingMeasurement: Codable, Equatable, Sendable {
         return kind == .area ? MeasurementGeometry.area(points) * factor * factor
             : MeasurementGeometry.length(points, closed: closed) * factor
     }
+    /// Only a two-endpoint open length is a distance dimension; multi-leg lengths
+    /// and closed perimeter/area measurements retain their existing presentation.
+    func isDistance(points: [CGPoint]) -> Bool { kind == .perimeter && !closed && points.count == 2 }
     func label(points: [CGPoint]) -> String {
+        if isDistance(points: points), scale.unit == "ft", let dimension = ArchitecturalDistance.format(feet: value(points: points)) {
+            return dimension
+        }
         let name = kind == .area ? "Area" : (closed ? "Perimeter" : "Length")
         let units = kind == .area ? "sq \(scale.unit)" : scale.unit
         return String(format: "%@: %.2f %@", locale: Locale(identifier: "en_US_POSIX"), name, value(points: points), units)
+    }
+}
+
+enum ArchitecturalDistance {
+    /// Round once in sixteenths of an inch, then reduce and carry. Splitting off
+    /// whole feet first avoids integer overflow on unusually large drawing scales.
+    static func format(feet: Double) -> String? {
+        guard feet.isFinite, feet >= 0 else { return nil }
+        var wholeFeet = floor(feet)
+        var ticks = Int(((feet - wholeFeet) * 192).rounded())
+        if ticks == 192 { wholeFeet += 1; ticks = 0 }
+        let inches = ticks / 16
+        var numerator = ticks % 16, denominator = 16
+        while numerator > 0 && numerator % 2 == 0 { numerator /= 2; denominator /= 2 }
+        let fraction = numerator == 0 ? "" : " \(numerator)/\(denominator)"
+        return String(format: "%.0f", locale: Locale(identifier: "en_US_POSIX"), wholeFeet) + "'-\(inches)\(fraction)\""
     }
 }
 
@@ -182,6 +204,53 @@ enum MeasurementMetadata {
 }
 
 enum MeasurementAppearance {
+    /// Shared page-space geometry for both the live annotation and saved PDF.
+    /// Text stays upright on the displayed page, and the gap is real (no white mask).
+    struct DimensionLayout {
+        let segments: [(CGPoint, CGPoint)]
+        let arrows: [[CGPoint]]
+        let center: CGPoint
+        let cosine: CGFloat
+        let sine: CGFloat
+        let factor: CGFloat
+        let width: CGFloat
+        let baseline: CGFloat
+        let strokeWidth: CGFloat
+
+        init(points: [CGPoint], bounds: CGRect, rotation: Int, line: CTLine, lineWidth: CGFloat) {
+            let a = points[0], b = points[1]
+            let length = hypot(b.x-a.x, b.y-a.y)
+            var u = CGPoint(x: (b.x-a.x)/length, y: (b.y-a.y)/length)
+            let angle = CGFloat(rotation) * .pi / 180
+            cosine = abs(cos(angle)) < 1e-10 ? 0 : cos(angle)
+            sine = abs(sin(angle)) < 1e-10 ? 0 : sin(angle)
+            let alongX = u.x*cosine + u.y*sine
+            let alongY = -u.x*sine + u.y*cosine
+            // Stable extension sides even when the user reverses the endpoints.
+            if alongX < -1e-10 || (abs(alongX) <= 1e-10 && alongY < 0) { u.x = -u.x; u.y = -u.y }
+            let n = CGPoint(x: -u.y, y: u.x)
+            center = CGPoint(x: a.x/2+b.x/2, y: a.y/2+b.y/2)
+            width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
+            let glyphBounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
+            baseline = -glyphBounds.midY
+            let projected = (width+8)*abs(alongX) + (glyphBounds.height+6)*abs(alongY)
+            // Very short spans shrink text/arrowheads instead of moving endpoints
+            // or clipping the label out of the saved annotation's appearance box.
+            factor = min(fit(width: width, bounds: bounds, rotation: rotation), length*0.65/max(1, projected))
+            let gap = projected*factor/2
+            let arrowLength = min(8, length/8), arrowHalfWidth = arrowLength*0.375
+            strokeWidth = min(max(0.25, lineWidth), length/40)
+            func offset(_ p: CGPoint, _ along: CGFloat, _ normal: CGFloat = 0) -> CGPoint {
+                CGPoint(x: p.x + u.x*along + n.x*normal, y: p.y + u.y*along + n.y*normal)
+            }
+            let left = offset(center, -length/2), right = offset(center, length/2)
+            segments = [(left, offset(center, -gap)), (offset(center, gap), right)] +
+                [left, right].map { (offset($0, 0, -12), offset($0, 0, 4)) }
+            arrows = [[left, offset(left, arrowLength, arrowHalfWidth), offset(left, arrowLength, -arrowHalfWidth)],
+                      [right, offset(right, -arrowLength, arrowHalfWidth), offset(right, -arrowLength, -arrowHalfWidth)]]
+        }
+    }
+
     private static func fit(width: CGFloat, bounds: CGRect, rotation: Int) -> CGFloat {
         let rotated = rotation % 180 != 0
         let availableWidth = rotated ? bounds.height : bounds.width
@@ -196,11 +265,38 @@ enum MeasurementAppearance {
     static func draw(_ annotation: PDFAnnotation, box: PDFDisplayBox, context: CGContext) {
         guard let measurement = MeasurementMetadata.measurement(annotation) else { return }
         let text = measurement.label(points: RectangleMarkupRecord.vertices(annotation))
+        let points = RectangleMarkupRecord.vertices(annotation)
+        // MarkupStyle already stores opacity in annotation.color. Dimensions
+        // use a single graphics-state alpha for stroke, filled arrows and text.
+        let color = measurement.isDistance(points: points) ? annotation.color.withAlphaComponent(1) : annotation.color
         let font = CTFontCreateWithName("Helvetica" as CFString, 11, nil)
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: [
             NSAttributedString.Key(kCTFontAttributeName as String): font,
-            NSAttributedString.Key(kCTForegroundColorAttributeName as String): annotation.color.cgColor
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): color.cgColor
         ]))
+        if measurement.isDistance(points: points), MeasurementGeometry.length(points, closed: false) > 0 {
+            let layout = DimensionLayout(points: points, bounds: annotation.bounds, rotation: annotation.page?.rotation ?? 0,
+                                         line: line, lineWidth: annotation.border?.lineWidth ?? 1)
+            let origin = annotation.page?.bounds(for: box).origin ?? .zero
+            context.saveGState(); defer { context.restoreGState() }
+            context.translateBy(x: -origin.x, y: -origin.y)
+            context.setStrokeColor(color.cgColor); context.setFillColor(color.cgColor)
+            context.setAlpha(CGFloat(MarkupStyle.strokeOpacity(annotation)))
+            context.setLineWidth(layout.strokeWidth)
+            context.setLineDash(phase: 0, lengths: annotation.border?.dashPattern?.compactMap { ($0 as? NSNumber).map { CGFloat(truncating: $0) } } ?? [])
+            context.setLineCap(.butt)
+            for segment in layout.segments { context.move(to: segment.0); context.addLine(to: segment.1) }
+            context.strokePath()
+            for arrow in layout.arrows {
+                context.move(to: arrow[0]); context.addLine(to: arrow[1]); context.addLine(to: arrow[2]); context.closePath(); context.fillPath()
+            }
+            context.translateBy(x: layout.center.x, y: layout.center.y)
+            context.rotate(by: CGFloat(annotation.page?.rotation ?? 0) * .pi / 180)
+            context.scaleBy(x: layout.factor, y: layout.factor)
+            context.textMatrix = .identity; context.textPosition = CGPoint(x: -layout.width/2, y: layout.baseline)
+            CTLineDraw(line, context)
+            return
+        }
         let width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
         let origin = annotation.page?.bounds(for: box).origin ?? .zero
         let b = annotation.bounds
@@ -221,6 +317,28 @@ enum MeasurementAppearance {
         let label = measurement.label(points: record.vertices)
         let font = CTFontCreateWithName("Helvetica" as CFString, 11, nil)
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: label, attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font]))
+        if measurement.isDistance(points: record.vertices), MeasurementGeometry.length(record.vertices, closed: false) > 0 {
+            let layout = DimensionLayout(points: record.vertices, bounds: record.bounds, rotation: record.textRotation,
+                                         line: line, lineWidth: CGFloat(record.lineWidth))
+            // PDF appearance coordinates are annotation-local; retain page-space
+            // endpoints in metadata and translate only the generated appearance.
+            func number(_ value: CGFloat) -> String {
+                String(format: "%.10f", locale: Locale(identifier: "en_US_POSIX"), value == 0 ? 0 : value)
+            }
+            func point(_ p: CGPoint) -> String {
+                "\(number(p.x-record.bounds.minX)) \(number(p.y-record.bounds.minY))"
+            }
+            let dash = record.linePattern.dash(width: CGFloat(record.lineWidth)).map { String($0) }.joined(separator: " ")
+            var drawing = "q /MarkupGS gs [\(dash)] 0 d 0 J 1 j \(number(layout.strokeWidth)) w \(record.red) \(record.green) \(record.blue) RG \(record.red) \(record.green) \(record.blue) rg\n"
+            for segment in layout.segments { drawing += "\(point(segment.0)) m \(point(segment.1)) l\n" }
+            drawing += "S\n"
+            for arrow in layout.arrows {
+                drawing += "\(point(arrow[0])) m \(point(arrow[1])) l \(point(arrow[2])) l h f\n"
+            }
+            let c = layout.cosine*layout.factor, s = layout.sine*layout.factor
+            drawing += "\(number(c)) \(number(s)) \(number(-s)) \(number(c)) \(point(layout.center)) cm BT /MeasureFont 11 Tf 1 0 0 1 \(number(-layout.width/2)) \(number(layout.baseline)) Tm (\(label)) Tj ET Q\n"
+            return drawing
+        }
         let width = CTLineGetTypographicBounds(line, nil, nil, nil)
         let factor = fit(width: width, bounds: record.bounds, rotation: record.textRotation)
         let angle = Double(record.textRotation) * .pi / 180
@@ -236,7 +354,10 @@ enum MeasurementAppearance {
 final class DrawbridgeMeasuredPathAnnotation: PDFAnnotation {
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
         guard shouldDisplay else { return }
-        super.draw(with: box, in: context)
+        let points = RectangleMarkupRecord.vertices(self)
+        if MeasurementMetadata.measurement(self)?.isDistance(points: points) != true {
+            super.draw(with: box, in: context)
+        }
         MeasurementAppearance.draw(self, box: box, context: context)
     }
 }

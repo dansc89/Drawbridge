@@ -12,6 +12,7 @@ enum PDFTKBookmarkWriter {
         case saved
         case unavailable
         case rejectedSizeGrowth
+        case sourceChanged
     }
     struct NavigationSnapshot: Sendable {
         let pageCount: Int
@@ -39,36 +40,60 @@ enum PDFTKBookmarkWriter {
         sourceURL explicitSourceURL: URL? = nil,
         to destinationURL: URL,
         pageLabels: [Int: String],
-        navigationSnapshot: NavigationSnapshot? = nil
+        navigationSnapshot: NavigationSnapshot? = nil,
+        expectedSourceStamp: PDFMarkupSourceStamp? = nil,
+        onFailure: ((PDFRectangleWriter.SaveFailure) -> Void)? = nil
     ) -> WriteResult {
-        let navigation = navigationSnapshot ?? captureNavigation(in: document)
         let sourceURL = explicitSourceURL ?? document.documentURL ?? destinationURL
+        func sourceChanged(_ stage: String) -> WriteResult {
+            onFailure?(PDFRectangleWriter.SaveFailure(stage: stage, errorCode: nil))
+            return .sourceChanged
+        }
+        // Check before helper discovery, so an unavailable helper cannot turn
+        // a source conflict into a destructive PDFKit fallback.
+        if let expectedSourceStamp, !expectedSourceStamp.matchesSource(sourceURL) {
+            return sourceChanged("source changed since opening")
+        }
         guard sourceURL.isFileURL,
               FileManager.default.fileExists(atPath: sourceURL.path),
               let executable = executableURL() else {
             return .unavailable
         }
+        let navigation = navigationSnapshot ?? captureNavigation(in: document)
+        guard let sourceStamp = expectedSourceStamp ?? PDFMarkupSourceStamp.read(sourceURL) else {
+            return sourceChanged("source changed before navigation read")
+        }
 
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("DrawbridgeNavigationSave-\(UUID().uuidString)", isDirectory: true)
         let jsonURL = temporaryDirectory.appendingPathComponent("navigation.json")
-        let outputURL = temporaryDirectory.appendingPathComponent(destinationURL.lastPathComponent)
+        let inputURL = temporaryDirectory.appendingPathComponent("input.pdf")
+        let outputURL = temporaryDirectory.appendingPathComponent("candidate.pdf")
         defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
 
         do {
             try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
-            guard run(executable, arguments: ["--json=2", sourceURL.path, jsonURL.path]),
+            guard sourceStamp.matchesSource(sourceURL) else {
+                return sourceChanged("source changed before navigation read")
+            }
+            // Both helper reads use one frozen source, including recovery saves
+            // whose explicit source differs from PDFKit's original document URL.
+            try FileManager.default.copyItem(at: sourceURL, to: inputURL)
+            guard sourceStamp.matchesSource(sourceURL) else {
+                return sourceChanged("source changed during navigation snapshot")
+            }
+            guard run(executable, arguments: ["--json=2", inputURL.path, jsonURL.path]),
                   var json = try JSONSerialization.jsonObject(with: Data(contentsOf: jsonURL)) as? [String: Any],
                   updateNavigationJSON(&json, snapshot: navigation, pageLabels: pageLabels),
                   JSONSerialization.isValidJSONObject(json) else {
                 return .unavailable
             }
             try PDFJSONPatchEncoder.data(withJSONObject: json).write(to: jsonURL, options: .atomic)
-            guard run(executable, arguments: [sourceURL.path, "--stream-data=preserve", "--update-from-json=\(jsonURL.path)", outputURL.path]),
+            guard run(executable, arguments: [inputURL.path, "--stream-data=preserve", "--update-from-json=\(jsonURL.path)", outputURL.path]),
                   FileManager.default.fileExists(atPath: outputURL.path) else {
                 return .unavailable
             }
-            let sourceSize = try fileSize(at: sourceURL)
+            let sourceSize = try fileSize(at: inputURL)
             let outputSize = try fileSize(at: outputURL)
             let allowedSize = max(
                 sourceSize + maximumNavigationGrowthBytes,
@@ -79,9 +104,15 @@ enum PDFTKBookmarkWriter {
                 return .rejectedSizeGrowth
             }
             guard outlineMatches(navigation, writtenURL: outputURL) else { return .unavailable }
+            guard sourceStamp.matchesSource(sourceURL) else {
+                return sourceChanged("source changed before navigation commit")
+            }
             try MainViewController.commitStagedSave(from: outputURL, to: destinationURL)
             return .saved
         } catch {
+            if !sourceStamp.matchesSource(sourceURL) {
+                return sourceChanged("source changed during navigation save")
+            }
             return .unavailable
         }
     }

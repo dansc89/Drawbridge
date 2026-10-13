@@ -14,6 +14,201 @@ final class MarkupRefreshPerformanceTests: XCTestCase {
         return try XCTUnwrap(PDFDocument(data: data as Data))
     }
 
+    private func indexedFixture(at url: URL, pages: Int, prefix: String) throws -> [String] {
+        let doc = try document(pages: pages)
+        var contents: [String] = []
+        for index in 0..<pages {
+            let page = try XCTUnwrap(doc.page(at: index))
+            for text in ["\(prefix)-\(index)", "DrawbridgeMeasure|\(72 + index)"] {
+                let annotation = PDFAnnotation(bounds: CGRect(x: 20, y: 20, width: 50, height: 50), forType: .square, withProperties: nil)
+                annotation.contents = text
+                page.addAnnotation(annotation)
+                contents.append(text)
+            }
+        }
+        XCTAssertTrue(doc.write(to: url))
+        return contents
+    }
+
+    func testDocumentOpenYieldsBeforeIndexingAllPagesAndPreservesFinalResults() throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("chunked.pdf")
+        let pageCount = 65
+        let expectedContents = try indexedFixture(at: url, pages: pageCount, prefix: "opened")
+        let controller = MainViewController(); _ = controller.view
+        defer {
+            controller.onMarkupPageIndexed = nil
+            controller.onMarkupListReload = nil
+            controller.clearToStartState()
+        }
+        var indexedPages: [Int] = []
+        var publications: [Int] = []
+        let complete = expectation(description: "final publication")
+        controller.onMarkupPageIndexed = { _, index in indexedPages.append(index) }
+        controller.onMarkupListReload = {
+            publications.append(controller.markupItems.count)
+            if controller.markupItems.count == expectedContents.count { complete.fulfill() }
+        }
+        controller.openDocument(at: url)
+        print("Document-open work: \(indexedPages.count)/\(pageCount) pages indexed before return")
+        XCTAssertLessThan(indexedPages.count, pageCount, "Opening must return control before indexing every markup page")
+        XCTAssertLessThan(controller.totalCachedAnnotationCount(), expectedContents.count)
+        wait(for: [complete], timeout: 10)
+        controller.onMarkupListReload = nil
+        XCTAssertEqual(indexedPages, Array(0..<pageCount), "Each page must be indexed exactly once in document order")
+        XCTAssertTrue(publications.contains { $0 > 0 && $0 < expectedContents.count }, "Cold open retains provisional publication")
+        XCTAssertEqual(controller.markupItems.map(\.pageIndex), (0..<pageCount).flatMap { [$0, $0] })
+        XCTAssertEqual(controller.markupItems.map { $0.annotation.contents ?? "" }, expectedContents)
+        XCTAssertEqual(controller.totalCachedAnnotationCount(), expectedContents.count)
+        XCTAssertEqual(controller.markupsCountLabel.stringValue, "\(expectedContents.count) markups")
+        XCTAssertEqual(controller.markupsTable.numberOfRows, expectedContents.count)
+        XCTAssertEqual(controller.indexedMeasurementSummary.count, pageCount)
+        XCTAssertEqual(controller.indexedMeasurementSummary.totalPoints, CGFloat((0..<pageCount).reduce(0) { $0 + 72 + $1 }))
+        let finishedContents = controller.markupItems.map { $0.annotation.contents }
+        controller.refreshMarkups()
+        XCTAssertEqual(indexedPages.count, pageCount, "Warm synchronous refresh must not rebuild clean pages")
+        XCTAssertEqual(controller.markupItems.map { $0.annotation.contents }, finishedContents)
+        print("Document-open final: \(indexedPages.count) pages, \(controller.totalCachedAnnotationCount()) markups; publications \(publications); measurements \(controller.indexedMeasurementSummary)")
+        let doc = try XCTUnwrap(controller.pdfView.document)
+        for index in 0..<pageCount { controller.markPageMarkupCacheDirty(doc.page(at: index)) }
+        controller.refreshMarkups()
+        XCTAssertEqual(indexedPages, Array(0..<pageCount) + Array(0..<pageCount), "Explicit refresh must still rebuild every dirty page before returning")
+        XCTAssertEqual(controller.markupItems.map { $0.annotation.contents }, finishedContents)
+    }
+
+    func testDocumentReplacementClearsPublishedRowsAndSelectionBeforeDeferredIndexing() throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let oldURL = directory.appendingPathComponent("indexed-old.pdf")
+        let newURL = directory.appendingPathComponent("replacement.pdf")
+        let oldContents = try indexedFixture(at: oldURL, pages: 2, prefix: "old")
+        let expected = try indexedFixture(at: newURL, pages: 65, prefix: "replacement")
+        let controller = MainViewController(); _ = controller.view
+        defer {
+            controller.onDocumentOpened = nil
+            controller.onMarkupPageIndexed = nil
+            controller.onMarkupListReload = nil
+            controller.clearToStartState()
+        }
+        controller.openDocument(at: oldURL)
+        controller.refreshMarkups()
+        XCTAssertEqual(controller.markupItems.map { $0.annotation.contents ?? "" }, oldContents)
+        controller.markupsTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        XCTAssertNotNil(controller.currentSelectedAnnotation())
+        let labels = Dictionary(uniqueKeysWithValues: Mirror(reflecting: controller).children.compactMap { child -> (String, NSTextField)? in
+            guard let name = child.label, let field = child.value as? NSTextField else { return nil }
+            return (name, field)
+        })
+        let measurementCount = try XCTUnwrap(labels["measurementCountLabel"])
+        let measurementTotal = try XCTUnwrap(labels["measurementTotalLabel"])
+        XCTAssertEqual(measurementCount.stringValue, "Measurements: 2")
+        var indexedPages: [Int] = []
+        var opened = false
+        func assertCleared() {
+            XCTAssertTrue(controller.markupItems.isEmpty, "Previous document rows must disappear synchronously")
+            XCTAssertEqual(controller.markupsTable.numberOfRows, 0)
+            XCTAssertTrue(controller.markupsTable.selectedRowIndexes.isEmpty)
+            XCTAssertNil(controller.currentSelectedAnnotation())
+            XCTAssertTrue(controller.pdfView.rectangleMarkup.selectedItems.isEmpty)
+            XCTAssertEqual(controller.markupsCountLabel.stringValue, "0 items")
+            XCTAssertEqual(controller.totalCachedAnnotationCount(), 0)
+            XCTAssertEqual(controller.indexedMeasurementSummary.count, 0)
+            XCTAssertEqual(controller.indexedMeasurementSummary.totalPoints, 0)
+            XCTAssertEqual(measurementCount.stringValue, "Measurements: 0")
+            XCTAssertEqual(measurementTotal.stringValue, "Total Length: 0 \(controller.pdfView.measurementUnitLabel)")
+            XCTAssertTrue(indexedPages.isEmpty, "Clearing publication must not synchronously index the replacement")
+        }
+        controller.onDocumentOpened = { url in
+            XCTAssertEqual(url, newURL)
+            opened = true
+            assertCleared()
+        }
+        controller.onMarkupPageIndexed = { _, index in indexedPages.append(index) }
+        let complete = expectation(description: "replacement indexed")
+        controller.onMarkupListReload = {
+            if controller.markupItems.count == expected.count { complete.fulfill() }
+        }
+        controller.openDocument(at: newURL)
+        XCTAssertTrue(opened)
+        assertCleared()
+        wait(for: [complete], timeout: 10)
+        controller.onMarkupListReload = nil
+        XCTAssertEqual(indexedPages, Array(0..<65))
+        XCTAssertEqual(controller.markupItems.map(\.pageIndex), (0..<65).flatMap { [$0, $0] })
+        XCTAssertEqual(controller.markupItems.map { $0.annotation.contents ?? "" }, expected)
+        XCTAssertEqual(controller.markupsTable.numberOfRows, expected.count)
+        XCTAssertEqual(controller.markupsCountLabel.stringValue, "\(expected.count) markups")
+        XCTAssertEqual(controller.indexedMeasurementSummary.count, 65)
+        XCTAssertEqual(controller.indexedMeasurementSummary.totalPoints, CGFloat((0..<65).reduce(0) { $0 + 72 + $1 }))
+        XCTAssertTrue(controller.markupsTable.selectedRowIndexes.isEmpty)
+        XCTAssertNil(controller.currentSelectedAnnotation())
+    }
+
+    func testDocumentOpenCancelsStaleIndexChunksBeforeTheyCanPublish() throws {
+        _ = NSApplication.shared
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let oldURL = directory.appendingPathComponent("old.pdf")
+        let newURL = directory.appendingPathComponent("new.pdf")
+        _ = try indexedFixture(at: oldURL, pages: 65, prefix: "old")
+        let expected = try indexedFixture(at: newURL, pages: 2, prefix: "new")
+        let controller = MainViewController(); _ = controller.view
+        defer {
+            controller.onMarkupPageIndexed = nil
+            controller.onMarkupListReload = nil
+            controller.clearToStartState()
+        }
+        var oldDocument: PDFDocument?
+        var oldPages: [Int] = []
+        var newPages: [Int] = []
+        var switched = false
+        var queuedSwitch = false
+        var oldPageCountAtSwitch = 0
+        var publicationCountAfterSwitch = 0
+        let complete = expectation(description: "replacement published and stale continuation drained")
+        controller.onMarkupPageIndexed = { doc, index in
+            if oldDocument == nil { oldDocument = doc }
+            if doc === oldDocument {
+                oldPages.append(index)
+                if !queuedSwitch {
+                    queuedSwitch = true
+                    // FIFO sentinel runs after the first real chunk but before its continuation.
+                    DispatchQueue.main.async {
+                        XCTAssertLessThan(oldPages.count, 65, "A main-queue turn must occur before the old scan finishes")
+                        oldPageCountAtSwitch = oldPages.count
+                        switched = true
+                        controller.openDocument(at: newURL)
+                    }
+                }
+            } else { newPages.append(index) }
+        }
+        controller.onMarkupListReload = {
+            guard switched else { return }
+            publicationCountAfterSwitch += 1
+            XCTAssertEqual(controller.markupItems.map { $0.annotation.contents ?? "" }, expected, "Cancelled document work must never publish over its replacement")
+            DispatchQueue.main.async { complete.fulfill() }
+        }
+        controller.openDocument(at: oldURL)
+        XCTAssertLessThan(oldPages.count, 65)
+        wait(for: [complete], timeout: 10)
+        controller.onMarkupListReload = nil
+        XCTAssertEqual(publicationCountAfterSwitch, 1)
+        XCTAssertEqual(newPages, [0, 1])
+        XCTAssertLessThan(oldPages.count, 65, "Cancelled continuation must not do further old-document indexing")
+        XCTAssertEqual(oldPages.count, oldPageCountAtSwitch, "Stale chunks must do zero indexing after the switch")
+        print("Document-switch work: old \(oldPageCountAtSwitch)/65 pages at switch, \(oldPages.count) after drain; new \(newPages.count) pages; \(publicationCountAfterSwitch) replacement publication")
+        XCTAssertEqual(controller.openDocumentURL, newURL)
+        XCTAssertEqual(controller.markupsCountLabel.stringValue, "4 markups")
+        XCTAssertEqual(controller.indexedMeasurementSummary.count, 2)
+        XCTAssertEqual(controller.indexedMeasurementSummary.totalPoints, 145)
+    }
+
     private func scroll(_ view: MarkupPDFView) {
         // Invoke the actual Objective-C notification handler, independent of PDFKit layout noise.
         _ = view.perform(NSSelectorFromString("handleClipViewBoundsDidChange:"), with: Notification(name: NSView.boundsDidChangeNotification) as NSNotification)

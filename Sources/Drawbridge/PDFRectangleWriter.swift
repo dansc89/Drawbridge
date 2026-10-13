@@ -587,6 +587,9 @@ enum PDFRectangleWriter {
                 if let measurement = record.measurement {
                     annotation["/DrawbridgeMeasurement"] = "u:" + MeasurementMetadata.json(measurement)
                     annotation["/Contents"] = "u:" + measurement.label(points: record.vertices)
+                    // Semantic equality alone cannot validate a legacy unsplit AP.
+                    // Version only distance appearances so other markups retain reuse.
+                    if measurement.isDistance(points: record.vertices) { annotation["/DrawbridgeDimensionAppearanceVersion"] = 1 }
                 }
                 if let a = record.start, let z = record.end {
                     annotation["/L"] = [a.x,a.y,z.x,z.y]
@@ -627,7 +630,8 @@ enum PDFRectangleWriter {
                     objects["obj:\(annotationRef)"] = ["value": annotation]; entries.append(annotationRef); continue
                 }
                 let drawing = appearanceDrawing(record)
-                var resources: [String: Any] = ["/ExtGState": ["/MarkupGS": ["/Type": "/ExtGState", "/CA": record.strokeOpacity, "/ca": record.kind == .text ? record.strokeOpacity : record.fillOpacity]]]
+                let isDimension = record.measurement?.isDistance(points: record.vertices) == true
+                var resources: [String: Any] = ["/ExtGState": ["/MarkupGS": ["/Type": "/ExtGState", "/CA": record.strokeOpacity, "/ca": record.kind == .text || isDimension ? record.strokeOpacity : record.fillOpacity]]]
                 if record.measurement != nil { resources["/Font"] = ["/MeasureFont": ["/Type": "/Font", "/Subtype": "/Type1", "/BaseFont": "/Helvetica"]] }
                 objects["obj:\(appearanceRef)"] = ["stream": ["dict": ["/Type": "/XObject", "/Subtype": "/Form", "/BBox": [0,0,b.width,b.height], "/Resources": resources, "/DrawbridgeRectangleAppearance": true], "data": Data(drawing.utf8).base64EncodedString()]]
                 objects["obj:\(annotationRef)"] = ["value": annotation]
@@ -659,6 +663,9 @@ enum PDFRectangleWriter {
     /// Appearance coordinates are local to the annotation; page rotation is untouched.
     private static func appearanceDrawing(_ r: RectangleMarkupRecord) -> String {
         if r.pageScale != nil || r.pageScaleCleared { return "" }
+        // The dimension appearance owns its split stroke, ticks, and arrows.
+        // Do not paint the underlying InkList through the transparent label gap.
+        if r.measurement?.isDistance(points: r.vertices) == true { return MeasurementAppearance.pdf(r) }
         let style = "/MarkupGS gs [" + r.linePattern.dash(width: CGFloat(r.lineWidth)).map { String($0) }.joined(separator: " ") + "] 0 d"
         let half = r.lineWidth/2, w = max(0,Double(r.bounds.width)-r.lineWidth), h = max(0,Double(r.bounds.height)-r.lineWidth)
         var path: String

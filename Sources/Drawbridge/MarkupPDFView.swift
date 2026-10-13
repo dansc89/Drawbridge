@@ -676,7 +676,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             let originals = page.annotations.filter { !($0 is SnapshotViewportTileAnnotation) }
             let snapshots = originals.compactMap { $0 as? DrawbridgeSnapshotAnnotation }
             let viewport = convert(contentClipView.map { convert($0.bounds, from: $0) } ?? bounds, to: page)
-            var tilesByOwner = [ObjectIdentifier: [SnapshotViewportTileAnnotation]]()
+            var boundsByOwner = [ObjectIdentifier: [CGRect]]()
             for snapshot in snapshots {
                 let needsTiles = visible && snapshot.shouldDisplay && !snapshot.isRetired
                     && max(snapshot.bounds.width, snapshot.bounds.height) * density > 4096
@@ -685,21 +685,30 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 let region = viewport.intersection(snapshot.bounds).intersection(page.bounds(for: displayBox))
                 guard !region.isNull, !region.isEmpty else { continue }
                 let span = 1024 / max(density, 1)
-                var tiles = [SnapshotViewportTileAnnotation]()
+                var tileRegions = [CGRect]()
                 for y in Int(floor(region.minY / span))...Int(floor(region.maxY / span)) {
                     for x in Int(floor(region.minX / span))...Int(floor(region.maxX / span)) {
                         let tileBounds = CGRect(x: CGFloat(x) * span, y: CGFloat(y) * span, width: span, height: span).intersection(region)
-                        if !tileBounds.isEmpty { tiles.append(SnapshotViewportTileAnnotation(snapshot: snapshot, bounds: tileBounds)) }
+                        if !tileBounds.isEmpty { tileRegions.append(tileBounds) }
                     }
                 }
-                tilesByOwner[ObjectIdentifier(snapshot)] = tiles
+                boundsByOwner[ObjectIdentifier(snapshot)] = tileRegions
             }
             let oldTiles = page.annotations.compactMap { $0 as? SnapshotViewportTileAnnotation }
-            let newTiles = originals.flatMap { tilesByOwner[ObjectIdentifier($0)] ?? [] }
-            let unchanged = oldTiles.count == newTiles.count && zip(oldTiles, newTiles).allSatisfy {
-                $0.snapshot === $1.snapshot && $0.bounds == $1.bounds
+            // Compare lightweight demand before allocating PDFKit annotations.
+            let descriptors = snapshots.flatMap { snapshot in
+                (boundsByOwner[ObjectIdentifier(snapshot)] ?? []).map { (snapshot: snapshot, bounds: $0) }
             }
-            if !unchanged && (!oldTiles.isEmpty || !newTiles.isEmpty) {
+            let unchanged = oldTiles.count == descriptors.count && zip(oldTiles, descriptors).allSatisfy {
+                $0.shouldDisplay && $0.snapshot === $1.snapshot && $0.bounds == $1.bounds
+            }
+            if !unchanged && (!oldTiles.isEmpty || !descriptors.isEmpty) {
+                var tilesByOwner = [ObjectIdentifier: [SnapshotViewportTileAnnotation]]()
+                for snapshot in snapshots {
+                    tilesByOwner[ObjectIdentifier(snapshot)] = (boundsByOwner[ObjectIdentifier(snapshot)] ?? []).map {
+                        SnapshotViewportTileAnnotation(snapshot: snapshot, bounds: $0)
+                    }
+                }
                 oldTiles.forEach { $0.shouldDisplay = false }
                 // Retain the original stacking order. Tiles immediately follow
                 // their source, below every annotation originally above it.

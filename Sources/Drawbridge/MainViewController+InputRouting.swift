@@ -91,12 +91,14 @@ extension MainViewController {
             return nil
         }
         if event.keyCode == 48 {
-            if modifiers == [.control] {
+            // Caps Lock is keyboard state, not part of the tab-switch shortcut.
+            let tabModifiers = modifiers.subtracting(.capsLock)
+            if tabModifiers == [.control] {
                 lastUserInteractionAt = Date()
                 commandCycleNextDocument(nil)
                 return nil
             }
-            if modifiers == [.control, .shift] {
+            if tabModifiers == [.control, .shift] {
                 lastUserInteractionAt = Date()
                 commandCyclePreviousDocument(nil)
                 return nil

@@ -76,9 +76,9 @@ private final class PDFMarkupSourceBaseline: @unchecked Sendable {
     }
 }
 
-struct RectangleMarkupRecord: Sendable, Equatable {
+struct RectangleMarkupRecord: Codable, Sendable, Equatable {
     static let prefix = "DrawbridgeRectangleV1:"
-    enum Kind: String, Sendable { case rectangle, ellipse, line, arrow, text, polyline, polygon, snapshot }
+    enum Kind: String, Codable, Sendable { case rectangle, ellipse, line, arrow, text, polyline, polygon, snapshot }
     static let inkToolKey = PDFAnnotationKey(rawValue: "DrawbridgeInkTool")
     var inkTool: String? = nil
     var linePattern: MarkupLinePattern = .solid
@@ -190,7 +190,13 @@ struct RectangleMarkupRecord: Sendable, Equatable {
                     annotation.setValue(id, forAnnotationKey: PDFAnnotationKey(rawValue: "/NM"))
                     seen.insert(id)
                 }
-                guard let rgb = markupColor(annotation).usingColorSpace(.deviceRGB) else { return nil }
+                return capture(annotation: annotation, pageIndex: index)
+            } ?? []
+        }
+    }
+
+    static func capture(annotation: PDFAnnotation, pageIndex index: Int) -> Self? {
+                guard owns(annotation), let id = identity(annotation), let rgb = markupColor(annotation).usingColorSpace(.deviceRGB) else { return nil }
                 var record = Self(id: id, pageIndex: index, bounds: annotation.bounds,
                             red: Double(rgb.redComponent), green: Double(rgb.greenComponent), blue: Double(rgb.blueComponent),
                             lineWidth: Double(annotation.border?.lineWidth ?? 2))
@@ -202,7 +208,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
                 record.fillOpacity = MarkupStyle.fillOpacity(annotation)
                 if ["Square", "Circle", "Polygon"].contains(annotation.type ?? ""), let rgb = polygonFill(annotation)?.usingColorSpace(.deviceRGB) { record.fill = [Double(rgb.redComponent), Double(rgb.greenComponent), Double(rgb.blueComponent)] }
                 record.measurement = MeasurementMetadata.measurement(annotation)
-                record.pageScale = MeasurementMetadata.isPageScaleMetadata(annotation) ? (MeasurementMetadata.scale(on: document.page(at: index)!) ?? MeasurementMetadata.pageScale(annotation)) : nil
+                record.pageScale = MeasurementMetadata.isPageScaleMetadata(annotation) ? (annotation.page.flatMap { MeasurementMetadata.scale(on: $0) } ?? MeasurementMetadata.pageScale(annotation)) : nil
                 record.pageScaleCleared = record.pageScale == nil && annotation.value(forAnnotationKey: MeasurementMetadata.clearedScaleKey) as? Bool == true
                 if record.measurement != nil { record.textRotation = (((annotation.page?.rotation ?? 0) % 360) + 360) % 360 }
                 let author = annotation.userName ?? ""
@@ -215,7 +221,7 @@ struct RectangleMarkupRecord: Sendable, Equatable {
                 if annotation.type == "Ink" || annotation.type == "Polygon" {
                     record.kind = annotation.type == "Polygon" ? .polygon : .polyline; record.vertices = vertices(annotation)
                 }
-                if annotation.type == "Stamp" { record.kind = .snapshot; record.snapshotStyle = SnapshotStyle.read(annotation); record.snapshotData = SnapshotPayload.read(annotation)?.data; record.textRotation = (((annotation.page?.rotation ?? 0) % 360) + 360) % 360 }
+                if annotation.type == "Stamp" { record.lineWidth = 2; record.kind = .snapshot; record.snapshotStyle = SnapshotStyle.read(annotation); record.snapshotData = SnapshotPayload.read(annotation)?.data; record.textRotation = (((annotation.page?.rotation ?? 0) % 360) + 360) % 360 }
                 if annotation.type == "Circle" { record.kind = .ellipse }
                 if annotation.type == "Line" {
                     record.kind = annotation.endLineStyle == .openArrow ? .arrow : .line
@@ -223,8 +229,6 @@ struct RectangleMarkupRecord: Sendable, Equatable {
                     record.end = CGPoint(x: annotation.bounds.minX + annotation.endPoint.x, y: annotation.bounds.minY + annotation.endPoint.y)
                 }
                 return record
-            } ?? []
-        }
     }
 
     var isValid: Bool {
@@ -438,6 +442,7 @@ final class RectangleMarkupController {
                     if let id = MarkupLayers.id(original) { polygon.setValue(id, forAnnotationKey: MarkupLayers.membershipKey) }
                     polygon.shouldDisplay = original.shouldDisplay; polygon.shouldPrint = original.shouldPrint; polygon.isReadOnly = original.isReadOnly
                     RectangleMarkupRecord.setVertices(RectangleMarkupRecord.vertices(original),on:polygon)
+                    if measuredPath { MeasurementMetadata.updateLabel(polygon) }
                     RectangleMarkupRecord.setPolygonFill(RectangleMarkupRecord.polygonFill(original),on:polygon)
                     original.shouldDisplay = false
                     page.removeAnnotation(original); page.addAnnotation(polygon)

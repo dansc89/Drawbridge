@@ -222,7 +222,7 @@ final class DrawingMeasurementTests: XCTestCase {
                 XCTAssertTrue(controller.removeLastDraftPoint())
                 XCTAssertTrue(controller.pointerDown(at: view.convert(points[1],from: page), modifiers: .shift))
                 XCTAssertTrue(controller.finishPolyline())
-                XCTAssertEqual(controller.selected?.contents,"Length: 10.00 ft")
+                XCTAssertEqual(controller.selected?.contents,"10'-0\"")
                 let vertices = RectangleMarkupRecord.vertices(try XCTUnwrap(controller.selected))
                 XCTAssertEqual(vertices[0].y,vertices[1].y,accuracy: 1e-8)
                 controller.tool = .area

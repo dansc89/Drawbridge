@@ -171,6 +171,8 @@ extension MainViewController {
         let startedMarkupVersion = markupChangeVersion
         let savingDocumentID = ObjectIdentifier(document)
         let canonicalTargetURL = canonicalDocumentURL(resolvedTargetURL)
+        let resumeInterruptedMarkupIndex = pdfView.document === document
+            && hasIncompleteMarkupIndex(for: document)
         // Prevent expensive markup-list rebuild work from competing with save completion on main.
         pendingMarkupsRefreshWorkItem?.cancel()
         pendingMarkupsRefreshWorkItem = nil
@@ -266,7 +268,8 @@ extension MainViewController {
                     pageLabels: pageLabelsForEmbeddedSave,
                     navigationSourceURL: navigationSourceURL,
                     rectangleRecords: rectangleRecords,
-                    rectangleSourceStamp: rectangleSourceStamp
+                    rectangleSourceStamp: rectangleSourceStamp,
+                    navigationSnapshot: navigationSnapshot
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
 
@@ -301,7 +304,8 @@ extension MainViewController {
                     pageLabels: pageLabelsForEmbeddedSave,
                     navigationSourceURL: navigationSourceURL,
                     rectangleRecords: rectangleRecords,
-                    rectangleSourceStamp: rectangleSourceStamp
+                    rectangleSourceStamp: rectangleSourceStamp,
+                    navigationSnapshot: navigationSnapshot
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - directWriteStartedAt
 
@@ -320,7 +324,8 @@ extension MainViewController {
                         pageLabels: pageLabelsForEmbeddedSave,
                         navigationSourceURL: navigationSourceURL,
                         rectangleRecords: rectangleRecords,
-                        rectangleSourceStamp: rectangleSourceStamp
+                        rectangleSourceStamp: rectangleSourceStamp,
+                        navigationSnapshot: navigationSnapshot
                     )
                     writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
                     if success {
@@ -356,7 +361,8 @@ extension MainViewController {
                     pageLabels: pageLabelsForEmbeddedSave,
                     navigationSourceURL: navigationSourceURL,
                     rectangleRecords: rectangleRecords,
-                    rectangleSourceStamp: rectangleSourceStamp
+                    rectangleSourceStamp: rectangleSourceStamp,
+                    navigationSnapshot: navigationSnapshot
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - stagedWriteStartedAt
                 if success {
@@ -380,7 +386,8 @@ extension MainViewController {
                     pageLabels: pageLabelsForEmbeddedSave,
                     navigationSourceURL: navigationSourceURL,
                     rectangleRecords: rectangleRecords,
-                    rectangleSourceStamp: rectangleSourceStamp
+                    rectangleSourceStamp: rectangleSourceStamp,
+                    navigationSnapshot: navigationSnapshot
                 )
                 writeElapsed = CFAbsoluteTimeGetCurrent() - writeStartedAt
             }
@@ -415,6 +422,13 @@ extension MainViewController {
                         self.endBusyIndicator()
                     }
                     self.isSavingDocumentOperation = false
+                    // Cancellation invalidates queued chunks, not the pages already
+                    // indexed. Resume only unfinished publication for this document.
+                    if resumeInterruptedMarkupIndex,
+                       self.pdfView.document === documentBox.document,
+                       self.hasIncompleteMarkupIndex(for: documentBox.document) {
+                        self.scheduleMarkupsRefresh(selecting: self.currentSelectedAnnotation())
+                    }
                     self.updateStatusBar()
                     self.persistenceCoordinator.endManualSave {
                         self.scheduleAutosave()
@@ -445,7 +459,7 @@ extension MainViewController {
                     }
                     let canRecover = completedMarkupFailure?.isSourceConflict == true && self.pdfView.rectangleMarkup.sourceStamp?.recoverySourceURL != nil && saveContextStillActive
                     self.queuedFastEmbeddedSave = false
-                    let response = self.runAlert(
+                    let response = self.saveErrorPresenter?(informativeText) ?? self.runAlert(
                         title: "Failed to save PDF",
                         informativeText: informativeText,
                         style: .warning,
@@ -614,27 +628,60 @@ extension MainViewController {
             sourceURL: navigationSourceURL,
             to: url,
             pageLabels: pageLabels,
-            navigationSnapshot: navigationSnapshot
+            navigationSnapshot: navigationSnapshot,
+            expectedSourceStamp: rectangleSourceStamp,
+            onFailure: onMarkupSaveFailure
         ) {
         case .saved:
             return true
-        case .rejectedSizeGrowth:
+        case .sourceChanged, .rejectedSizeGrowth:
             // Do not let the PDFKit fallback silently replace a compact source with
             // a much larger full-document rewrite.
             return false
         case .unavailable:
             break
         }
+        let navigationSource = navigationSourceURL ?? document.documentURL ?? url
+        func sourceStillMatches(_ stage: String) -> Bool {
+            guard let rectangleSourceStamp else { return true }
+            guard rectangleSourceStamp.matchesSource(navigationSource) else {
+                onMarkupSaveFailure?(PDFRectangleWriter.SaveFailure(stage: stage, errorCode: nil))
+                return false
+            }
+            return true
+        }
+        guard sourceStillMatches("source changed before navigation fallback") else { return false }
+        if let rectangleSourceStamp, let backingURL = document.documentURL,
+           !rectangleSourceStamp.matchesSource(backingURL) {
+            // Recovery's frozen source may be valid while PDFKit still points
+            // at an externally replaced original. Without the helper, fail
+            // closed rather than silently recover the wrong page content.
+            onMarkupSaveFailure?(PDFRectangleWriter.SaveFailure(stage: "source snapshot", errorCode: nil))
+            return false
+        }
+        // A frozen asynchronous save cannot safely fall back to enumerating the
+        // live document: navigation and annotation arrays may have changed on main.
+        // Release bundles carry qpdf; fail closed if it cannot honor the snapshot.
+        if navigationSnapshot != nil {
+            onMarkupSaveFailure?(PDFRectangleWriter.SaveFailure(stage: "navigation snapshot unavailable", errorCode: nil))
+            return false
+        }
+        // A guarded fallback must stage its PDFKit output too: never overwrite
+        // the destination before the final source-conflict check.
+        let fallbackURL = rectangleSourceStamp == nil ? url : temporaryLocalSaveURL(for: url)
+        defer { if fallbackURL != url { try? FileManager.default.removeItem(at: fallbackURL) } }
         let preservedPageRotations = pageRotations(in: document)
         // `write(to:withOptions:)` is materially faster than `write(to:)` on large drawing sets.
-        guard SnapshotViewportTileAnnotation.withoutScreenTiles(in: document, { document.write(to: url, withOptions: options) }) else {
+        guard SnapshotViewportTileAnnotation.withoutScreenTiles(in: document, { document.write(to: fallbackURL, withOptions: options) }) else {
             return false
         }
         restorePageRotations(preservedPageRotations, to: document)
         do {
-            guard writtenPageRotationsMatch(preservedPageRotations, at: url) else {
+            guard writtenPageRotationsMatch(preservedPageRotations, at: fallbackURL) else {
                 return false
             }
+            guard sourceStillMatches("source changed before navigation fallback commit") else { return false }
+            if fallbackURL != url { try commitStagedSave(from: fallbackURL, to: url) }
             try synchronizePersistedFile(at: url)
             return true
         } catch {

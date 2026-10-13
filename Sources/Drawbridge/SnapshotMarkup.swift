@@ -330,6 +330,11 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
 /// Disposable screen tiles keep PDFKit from allocating a sheet-sized Stamp
 /// surface at high zoom. They have no persistent markup identity and never print.
 final class SnapshotViewportTileAnnotation: PDFAnnotation {
+    // Thread-scoped observation only; no shared mutable state or replacement factory.
+    static var onInitialization: (() -> Void)? {
+        get { Thread.current.threadDictionary["DrawbridgeSnapshotTileInitialization"] as? (() -> Void) }
+        set { Thread.current.threadDictionary["DrawbridgeSnapshotTileInitialization"] = newValue }
+    }
     weak var snapshot: DrawbridgeSnapshotAnnotation?
     init(snapshot: DrawbridgeSnapshotAnnotation, bounds: CGRect) {
         self.snapshot = snapshot
@@ -337,6 +342,7 @@ final class SnapshotViewportTileAnnotation: PDFAnnotation {
         color = .clear
         isReadOnly = true
         shouldPrint = false
+        Self.onInitialization?()
     }
     required init?(coder: NSCoder) { super.init(coder: coder) }
     /// PDFKit fallback serialization must not persist editing-only tiles.

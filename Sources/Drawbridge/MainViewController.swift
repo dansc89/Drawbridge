@@ -174,6 +174,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let emptyStateTitle = NSTextField(labelWithString: "Open a drawing set to get started")
     private let emptyStateOpenButton = NSButton(title: "Open PDF", target: nil, action: nil)
     private let emptyStateRecentButton = NSButton(title: "Open Recent", target: nil, action: nil)
+    private let emptyStateMergeButton = NSButton(title: "Merge PDFs…", target: nil, action: #selector(PDFMergeWorkflow.showMerge(_:)))
+
+    func configureWelcomeMerge(workflow: PDFMergeWorkflow) {
+        emptyStateMergeButton.target = workflow
+    }
     private let emptyStateSampleButton = NSButton(title: "Create New", target: nil, action: nil)
     private let emptyStateBatchMobileButton = NSButton(title: "Batch Export to iPhone / iPad", target: nil, action: nil)
     let markupsTable = NSTableView(frame: .zero)
@@ -327,6 +332,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var tabSearchQueries: [URL: String] = [:]
     var autosaveURL: URL?
     lazy var persistenceCoordinator = DocumentPersistenceCoordinator(autosaveInterval: autosaveIntervalSeconds)
+    // Internal presentation seam; normal saves still present their modal error alert.
+    var saveErrorPresenter: ((String) -> NSApplication.ModalResponse)?
     var pendingMarkupsRefreshWorkItem: DispatchWorkItem?
     var pendingSearchWorkItem: DispatchWorkItem?
     private var pendingChromeRefreshWorkItem: DispatchWorkItem?
@@ -336,6 +343,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var searchHitIndex: Int = -1
     var markupsScanGeneration = 0
     private var cachedMarkupDocumentID: ObjectIdentifier?
+    private var pendingMarkupIndexPublicationDocumentID: ObjectIdentifier?
     private var pageMarkupCache: [Int: [PDFAnnotation]] = [:]
     private var pageMarkupSearchIndex: [Int: [ObjectIdentifier: String]] = [:]
     private var pendingSearchIndexWarmupWorkItem: DispatchWorkItem?
@@ -1830,10 +1838,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         emptyStateTitle.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
         emptyStateOpenButton.bezelStyle = .texturedRounded
         emptyStateRecentButton.bezelStyle = .texturedRounded
+        emptyStateMergeButton.bezelStyle = .texturedRounded
         emptyStateSampleButton.bezelStyle = .texturedRounded
         emptyStateBatchMobileButton.bezelStyle = .texturedRounded
 
-        let actions = NSStackView(views: [emptyStateOpenButton, emptyStateRecentButton])
+        let actions = NSStackView(views: [emptyStateOpenButton, emptyStateRecentButton, emptyStateMergeButton])
         actions.orientation = .horizontal
         actions.spacing = 8
         actions.alignment = .centerY
@@ -2891,7 +2900,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func pasteCopiedMarkupsFromPasteboard() {
-        // Compatibility entry point: annotation authoring is unavailable.
+        commandPaste(nil)
     }
 
     func startSaveProgressTracking(phase: String) {
@@ -2930,6 +2939,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     // Publication observation seam; reloads still use the real AppKit table.
     var onMarkupListReload: (() -> Void)?
+    // Observation only: invoked after real page indexing, without replacing any work.
+    var onMarkupPageIndexed: ((PDFDocument, Int) -> Void)?
+    var indexedMeasurementSummary: (count: Int, totalPoints: CGFloat) {
+        (cachedMeasurementCount, cachedMeasurementTotalPoints)
+    }
     private func reloadPublishedMarkupList() {
         markupsTable.reloadData()
         onMarkupListReload?()
@@ -2978,6 +2992,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         let generation = markupsScanGeneration + 1
         markupsScanGeneration = generation
+        pendingMarkupIndexPublicationDocumentID = ObjectIdentifier(document)
         let filter = markupFilterText
         let pagesToRebuild = dirtyMarkupPageIndexes.sorted()
         if !pagesToRebuild.isEmpty {
@@ -3021,6 +3036,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 }
             }
             func finalizePublish(totalMatching: Int, collected: [MarkupItem]) {
+                self.pendingMarkupIndexPublicationDocumentID = nil
                 self.markupItems = collected
                 self.reloadPublishedMarkupList()
                 self.lastKnownTotalMatchingMarkups = totalMatching
@@ -3148,6 +3164,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                     let pageSummary = self.measurementSummary(for: annotations)
                     self.updateMeasurementSummaryCache(pageSummary, for: pageIndex)
                     self.dirtyMarkupPageIndexes.remove(pageIndex)
+                    self.onMarkupPageIndexed?(document, pageIndex)
                 }
             }
             if !didPublishProvisional,
@@ -3174,6 +3191,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guard cachedMarkupDocumentID != id else { return }
         cancelSearchIndexWarmup()
         cachedMarkupDocumentID = id
+        pendingMarkupIndexPublicationDocumentID = nil
         pageMarkupCache.removeAll(keepingCapacity: false)
         pageMarkupSearchIndex.removeAll(keepingCapacity: false)
         cachedMarkupAnnotationCount = 0
@@ -3190,6 +3208,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         contentsSummaryPageCount = 0
         cancelSearchIndexWarmup()
         cachedMarkupDocumentID = nil
+        pendingMarkupIndexPublicationDocumentID = nil
         pageMarkupCache.removeAll(keepingCapacity: false)
         pageMarkupSearchIndex.removeAll(keepingCapacity: false)
         cachedMarkupAnnotationCount = 0
@@ -3200,6 +3219,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         lastKnownTotalMatchingMarkups = 0
         isMarkupListTruncated = false
         markupsScanGeneration += 1
+    }
+
+    func hasIncompleteMarkupIndex(for document: PDFDocument) -> Bool {
+        let id = ObjectIdentifier(document)
+        return cachedMarkupDocumentID != id
+            || pendingMarkupIndexPublicationDocumentID == id
+            || !dirtyMarkupPageIndexes.isEmpty
+            || pageMarkupCache.count < document.pageCount
     }
 
     func markPageMarkupCacheDirty(_ page: PDFPage?) {
@@ -4552,6 +4579,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         dominantDocumentPageSizeInInches = dominantPageSizeInInches(for: document)
         pdfView.setMarkupDocument(document)
         clearMarkupCache()
+        // The replacement is active now, but its index is deliberately deferred.
+        // Do not leave the departing document's published rows or selection live.
+        markupItems.removeAll(keepingCapacity: false)
+        markupsTable.deselectAll(nil)
+        markupsTable.reloadData()
+        markupsCountLabel.stringValue = "0 items"
+        measurementCountLabel.stringValue = "Measurements: 0"
+        measurementTotalLabel.stringValue = "Total Length: 0 \(pdfView.measurementUnitLabel)"
         pageScaleLocks.removeAll(keepingCapacity: false)
         lastScaleLockAppliedPageIndex = -1
         lastExplicitScaleSetDocumentID = nil
@@ -4599,7 +4634,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         view.window?.title = "Drawbridge - \(url.lastPathComponent)"
         view.window?.makeFirstResponder(pdfView)
         markDocumentClean(updateStatusBarValue: false)
-        refreshMarkups()
+        scheduleMarkupsRefresh(selecting: currentSelectedAnnotation())
         updateEmptyStateVisibility()
         requestChromeRefresh()
         onDocumentOpened?(url)

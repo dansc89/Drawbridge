@@ -456,7 +456,7 @@ extension MainViewController {
             NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: sender)
             return
         }
-        if let selected = pdfView.rectangleMarkup.selected, let payload = SnapshotPayload.read(selected) { payload.copy(); return }
+        if MarkupClipboard.copy(pdfView.rectangleMarkup.selectedItems) { return }
         pdfView.copy(sender)
     }
     @objc func commandPaste(_ sender: Any?) {
@@ -465,7 +465,7 @@ extension MainViewController {
             NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: sender)
             return
         }
-        guard let payload = SnapshotPayload.clipboard(), let page = pdfView.currentPage else { return }
+        guard let page = pdfView.currentPage else { return }
         let session = pdfView.rectangleMarkup
         session.bind(to: pdfView.document)
         let visible = pdfView.convert(pdfView.bounds, to: page).intersection(page.bounds(for: pdfView.displayBox))
@@ -476,14 +476,16 @@ extension MainViewController {
                 center = pdfView.convert(location, to: page)
             } else { center = CGPoint(x: visible.midX, y: visible.midY) }
         } else { center = CGPoint(x: visible.midX, y: visible.midY) }
-        _ = session.pasteSnapshot(payload, on: page, center: center)
+        if let items = MarkupClipboard.read() { _ = session.pasteMarkups(items, on: page, center: center) }
+        else if let payload = SnapshotPayload.clipboard() { _ = session.pasteSnapshot(payload, on: page, center: center) }
         view.window?.makeFirstResponder(pdfView)
     }
     @objc func commandPasteInPlace(_ sender: Any?) {
         guard !(view.window?.firstResponder is NSTextView), !(view.window?.firstResponder is NSTextField),
-              let payload = SnapshotPayload.clipboard(), payload.placement != nil, let page = pdfView.currentPage else { return }
+              let page = pdfView.currentPage else { return }
         let session = pdfView.rectangleMarkup; session.bind(to: pdfView.document)
-        _ = session.pasteSnapshot(payload, on: page, center: .zero, inPlace: true)
+        if let items = MarkupClipboard.read() { _ = session.pasteMarkups(items, on: page, center: .zero, inPlace: true) }
+        else if let payload = SnapshotPayload.clipboard(), payload.placement != nil { _ = session.pasteSnapshot(payload, on: page, center: .zero, inPlace: true) }
         view.window?.makeFirstResponder(pdfView)
     }
     @objc func commandDeleteMarkup(_ sender: Any?) { deleteSelectedMarkup() }
@@ -701,11 +703,11 @@ extension MainViewController {
                 !$0.annotation.isReadOnly && !pdfView.rectangleMarkup.layerIsLocked($0.annotation) && (RectangleMarkupRecord.owns($0.annotation) || ImportedMarkupState.selectable($0.annotation) || pdfView.rectangleMarkup.canAssignLayer($0.annotation))
             }
         case #selector(commandPasteInPlace(_:)):
-            return !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField) && hasDocument && pdfView.rectangleMarkup.canEdit() && SnapshotPayload.clipboard()?.placement != nil
+            return !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField) && hasDocument && pdfView.rectangleMarkup.canEdit() && !pdfView.rectangleMarkup.activeLayerIsLocked && (MarkupClipboard.canPaste() || SnapshotPayload.clipboard()?.placement != nil)
         case #selector(commandCopy(_:)), #selector(commandPaste(_:)), #selector(commandSelectAll(_:)):
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField { return true }
-            if action == #selector(commandPaste(_:)) { return hasDocument && pdfView.rectangleMarkup.canEdit() && SnapshotPayload.clipboard() != nil }
-            if action == #selector(commandCopy(_:)) { return pdfView.currentSelection != nil || pdfView.rectangleMarkup.selected.flatMap(SnapshotPayload.read) != nil }
+            if action == #selector(commandPaste(_:)) { return hasDocument && pdfView.rectangleMarkup.canEdit() && !pdfView.rectangleMarkup.activeLayerIsLocked && (MarkupClipboard.canPaste() || SnapshotPayload.clipboard() != nil) }
+            if action == #selector(commandCopy(_:)) { return pdfView.currentSelection != nil || !pdfView.rectangleMarkup.selectedItems.isEmpty }
             return hasDocument
         case #selector(commandSave(_:)), #selector(commandSaveCopy(_:)),
              #selector(commandAutoGenerateSheetNames(_:)), #selector(commandBatchLinkSheetNumbers(_:)),

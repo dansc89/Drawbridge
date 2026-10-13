@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow?
     private var mainViewController: MainViewController?
+    private let mergePDFWorkflow = PDFMergeWorkflow()
     private var pendingOpenURLs: [URL] = []
     private var recentFiles: [URL] = []
     private let recentFilesDefaultsKey = "DrawbridgeRecentFiles"
@@ -157,7 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         UserDefaults.standard.set(recentFiles.map(\.path), forKey: recentFilesDefaultsKey)
     }
 
-    private func setupMainMenu(controller: MainViewController) {
+    func setupMainMenu(controller: MainViewController) {
         let mainMenu = NSMenu()
 
         let appItem = NSMenuItem()
@@ -198,6 +199,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainMenu.addItem(fileItem)
         let fileMenu = NSMenu(title: "File")
         fileMenu.addItem(withTitle: "Open PDF...", action: #selector(MainViewController.commandOpen(_:)), keyEquivalent: "o").target = controller
+        mergePDFWorkflow.controller = controller
+        controller.configureWelcomeMerge(workflow: mergePDFWorkflow)
+        fileMenu.addItem(withTitle: "Merge PDFs…", action: #selector(PDFMergeWorkflow.showMerge(_:)), keyEquivalent: "").target = mergePDFWorkflow
         fileMenu.addItem(withTitle: "Close", action: #selector(MainViewController.commandCloseDocument(_:)), keyEquivalent: "w").target = controller
         let openRecentRoot = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
         let openRecentMenu = NSMenu(title: "Open Recent")

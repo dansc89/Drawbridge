@@ -8,7 +8,7 @@ APP_NAME="Drawbridge"
 BUNDLE_ID="com.drawbridge.app"
 BUILD_DIR=".build/arm64-apple-macosx/release"
 BIN_PATH="$BUILD_DIR/$APP_NAME"
-DIST_DIR="dist"
+DIST_DIR="${DRAWBRIDGE_DIST_DIR:-dist}"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 INSTALL_APP_PATH="${DRAWBRIDGE_INSTALL_APP_PATH:-$HOME/Applications/$APP_NAME.app}"
 CONTENTS_DIR="$APP_DIR/Contents"
@@ -165,19 +165,15 @@ fi
 echo "Verifying app signature..."
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 
-echo "Installing app bundle to: $INSTALL_APP_PATH"
-mkdir -p "$(dirname "$INSTALL_APP_PATH")"
-rm -rf "$INSTALL_APP_PATH"
-cp -R "$APP_DIR" "$INSTALL_APP_PATH"
+if [[ "${DRAWBRIDGE_SKIP_INSTALL:-0}" != "1" ]]; then
+  echo "Installing app bundle to: $INSTALL_APP_PATH"
+  mkdir -p "$(dirname "$INSTALL_APP_PATH")"
+  rm -rf "$INSTALL_APP_PATH"
+  cp -R "$APP_DIR" "$INSTALL_APP_PATH"
+fi
 
-# Automatically create a checkpoint for quick rollback.
-CHECKPOINT_LABEL="${CHECKPOINT_LABEL:-}"
-if [[ -n "$CHECKPOINT_LABEL" ]]; then
-  ./Scripts/checkpoint.sh create "$CHECKPOINT_LABEL"
-else
-  ./Scripts/checkpoint.sh create "$VERSION_TAG"
+if [[ "${DRAWBRIDGE_SKIP_CHECKPOINT:-0}" != "1" ]]; then
+  ./Scripts/checkpoint.sh create "${CHECKPOINT_LABEL:-$VERSION_TAG}"
 fi
 
 echo "Done: $APP_DIR"
-echo "Installed: $INSTALL_APP_PATH"
-echo "Launch with: open \"$APP_DIR\""
