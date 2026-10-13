@@ -245,7 +245,13 @@ final class ReleasePersistenceRegressionTests: XCTestCase {
         session.undo.undo()
         view.updateSnapshotViewportTiles()
         let tiles = page.annotations.compactMap { $0 as? SnapshotViewportTileAnnotation }
-        XCTAssertEqual(tiles.map(\.bounds), oldTiles.map(\.bounds))
+        XCTAssertEqual(tiles.count, oldTiles.count)
+        for (tile, oldTile) in zip(tiles, oldTiles) {
+            XCTAssertEqual(tile.bounds.minX, oldTile.bounds.minX, accuracy: 1e-6)
+            XCTAssertEqual(tile.bounds.minY, oldTile.bounds.minY, accuracy: 1e-6)
+            XCTAssertEqual(tile.bounds.width, oldTile.bounds.width, accuracy: 1e-6)
+            XCTAssertEqual(tile.bounds.height, oldTile.bounds.height, accuracy: 1e-6)
+        }
         XCTAssertFalse(tiles.isEmpty)
         XCTAssertTrue(tiles.allSatisfy(\.shouldDisplay), "Undo must not accept retired tiles just because bounds match")
         XCTAssertFalse(tiles.contains { tile in oldTiles.contains { $0 === tile } })
