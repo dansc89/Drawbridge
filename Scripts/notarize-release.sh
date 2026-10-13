@@ -49,8 +49,23 @@ ditto -c -k --keepParent "$APP_PATH" "$APP_ZIP"
 echo "Submitting app for notarization..."
 xcrun notarytool submit "$APP_ZIP" "${NOTARY_ARGS[@]}" --wait
 
+staple_with_retry() {
+  local target="$1"
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if xcrun stapler staple "$target"; then
+      return 0
+    fi
+    if [[ "$attempt" -lt 5 ]]; then
+      echo "Ticket retrieval failed; retrying in 10 seconds ($attempt/5)..."
+      sleep 10
+    fi
+  done
+  return 1
+}
+
 echo "Stapling app ticket..."
-xcrun stapler staple "$APP_PATH"
+staple_with_retry "$APP_PATH"
 
 echo "Validating app ticket..."
 xcrun stapler validate "$APP_PATH"
@@ -64,7 +79,7 @@ if [[ -n "$DMG_PATH" ]]; then
   xcrun notarytool submit "$DMG_PATH" "${NOTARY_ARGS[@]}" --wait
 
   echo "Stapling DMG ticket..."
-  xcrun stapler staple "$DMG_PATH"
+  staple_with_retry "$DMG_PATH"
 
   echo "Validating DMG ticket..."
   xcrun stapler validate "$DMG_PATH"
