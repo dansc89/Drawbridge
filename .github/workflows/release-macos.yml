@@ -88,7 +88,7 @@ jobs:
 
       - name: Build app bundle
         env:
-          DRAWBRIDGE_BUILD_NUMBER: "185"
+          DRAWBRIDGE_BUILD_NUMBER: "186"
         run: ./Scripts/package-app.sh
 
       - name: Notarize app before packaging
