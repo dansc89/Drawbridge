@@ -739,6 +739,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        NotificationCenter.default.addObserver(self, selector: #selector(interfaceThemeChanged(_:)), name: InterfaceTheme.didChange, object: nil)
         registerDefaultPerformanceSettingsIfNeeded()
         migrateHyperlinkHighlightsDefaultIfNeeded()
         isHyperlinkHighlightsVisible = UserDefaults.standard.bool(forKey: Self.defaultsHyperlinkHighlightsVisibleKey)
@@ -976,7 +977,28 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         refreshDocumentTabs()
     }
 
+    lazy var settingsWindowController = SettingsWindowController(editor: self)
+
+    @objc func commandSettings(_ sender: Any?) {
+        settingsWindowController.prepare()
+        settingsWindowController.showWindow(sender)
+    }
+
+    @objc private func interfaceThemeChanged(_ notification: Notification) {
+        applyAppearanceColors()
+    }
+
     private func applyAppearanceColors() {
+        let chromeAppearance = InterfaceTheme.current == .system ? nil : NSAppearance(named: .darkAqua)
+        // Never set the editor window/root appearance: PDF content must retain its
+        // inherited appearance and inversion state independently of chrome colors.
+        for chrome in [bookmarksContainer, statusBar, busyOverlayView, captureToastView,
+                       emptyStateView, collapsedSidebarRevealButton, documentTabsBar,
+                       markupsPanel, toolbarControlsStack, toolbarModeGroupsStack] {
+            chrome.appearance = chromeAppearance
+        }
+        sidebarContainerView?.appearance = chromeAppearance
+        rectangleToolbar.appearance = chromeAppearance
         view.effectiveAppearance.performAsCurrentDrawingAppearance {
             if let rootDropView = view as? StartupDropView {
                 rootDropView.wantsLayer = true
@@ -7291,6 +7313,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         emptyStateView.isHidden = hasDocument
         emptyStateSampleButton.isEnabled = true
         pdfView.isHidden = !hasDocument
+        pdfPaneSplitView.isHidden = !hasDocument
         bookmarksContainer.isHidden = !showNavigationPane
         navigationResizeHandle.isHidden = !showNavigationPane
         bookmarksWidthConstraint?.constant = showNavigationPane ? navigationWidth : 0

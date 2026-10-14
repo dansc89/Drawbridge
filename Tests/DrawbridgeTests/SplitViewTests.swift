@@ -11,17 +11,28 @@ import XCTest
     private func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
     private func panes(_ c: MainViewController) -> [MarkupPDFView] { descendants(c.view).compactMap { $0 as? MarkupPDFView } }
     private func toggle(_ c: MainViewController) { _ = c.tryToPerform(NSSelectorFromString("commandToggleSplitView:"), with: nil) }
-    private func fixture(_ body: (MainViewController, NSWindow, PDFDocument) throws -> Void) throws {
+    private func fixture(presentDocument: Bool = false, _ body: (MainViewController, NSWindow, PDFDocument) throws -> Void) throws {
         _ = NSApplication.shared
         let data = NSMutableData()
         var box = CGRect(x: 0, y: 0, width: 600, height: 800)
         let ctx = try XCTUnwrap(CGContext(consumer: XCTUnwrap(CGDataConsumer(data: data)), mediaBox: &box, nil))
         for _ in 0..<6 { ctx.beginPDFPage(nil); ctx.endPDFPage() }; ctx.closePDF()
-        let doc = try XCTUnwrap(PDFDocument(data: data as Data))
+        var doc = try XCTUnwrap(PDFDocument(data: data as Data))
         let c = MainViewController()
         let w = SplitTestWindow(contentRect: NSRect(x: 0, y: 0, width: 1500, height: 900), styleMask: [.titled], backing: .buffered, defer: false)
         w.contentViewController = c
-        c.pdfView.setMarkupDocument(doc); c.pdfView.go(to: doc.page(at: 1)!)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("split-gesture-\(UUID().uuidString).pdf")
+        defer { if presentDocument { try? FileManager.default.removeItem(at: url) } }
+        if presentDocument {
+            // Pointer routing needs the controller's presentation lifecycle, not
+            // just a PDFKit document assignment beneath the hidden empty state.
+            try (data as Data).write(to: url)
+            c.openDocument(at: url)
+            doc = try XCTUnwrap(c.pdfView.document)
+        } else {
+            c.pdfView.setMarkupDocument(doc)
+        }
+        c.pdfView.go(to: doc.page(at: 1)!)
         w.layoutIfNeeded()
         defer { w.makeFirstResponder(nil); w.contentViewController = nil }
         try body(c, w, doc)
@@ -446,7 +457,7 @@ import XCTest
     }
 
     func testFirstPenGestureInInactivePaneCreatesCanonicalMarkup() throws {
-        try fixture { c, w, doc in
+        try fixture(presentDocument: true) { c, w, doc in
             toggle(c); w.layoutIfNeeded()
             let peer = try XCTUnwrap(c.secondaryPDFView)
             let session = c.pdfView.rectangleMarkup
@@ -454,6 +465,8 @@ import XCTest
             let page = try XCTUnwrap(peer.currentPage)
             let start = peer.convert(CGPoint(x: 250, y: 300), from: page)
             let end = peer.convert(CGPoint(x: 320, y: 370), from: page)
+            XCTAssertFalse(c.pdfPaneSplitView.isHidden, "A pointer gesture requires a presented split container")
+            XCTAssertFalse(peer.isHiddenOrHasHiddenAncestor, "The inactive canvas must be eligible for AppKit hit testing")
             XCTAssertTrue(peer.hitTest(peer.convert(start, to: peer.superview)) === peer,
                           "The first drag must target the stable canvas, not a PDFKit descendant retired during activation")
             for (type, point) in [(NSEvent.EventType.leftMouseDown, start), (.leftMouseDragged, end), (.leftMouseUp, end)] {

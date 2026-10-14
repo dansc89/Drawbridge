@@ -99,7 +99,7 @@ extension MainViewController {
     }
 
     func updateShortcutHintLabel() {
-        statusToolsHintLabel.stringValue = "Esc cancels current action. Shortcuts customizable in Drawbridge > Keyboard Shortcuts…"
+        statusToolsHintLabel.stringValue = "Esc cancels current action. Shortcuts customizable in Drawbridge > Settings… > Keyboard Shortcuts"
         refreshToolbarShortcutTooltips()
     }
 

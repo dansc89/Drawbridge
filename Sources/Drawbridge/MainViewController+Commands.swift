@@ -679,7 +679,7 @@ extension MainViewController {
         case #selector(commandToggleSplitView(_:)):
             menuItem.state = secondaryPDFView == nil ? .off : .on
             return hasDocument && !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField)
-        case #selector(commandOpen(_:)), #selector(commandKeyboardShortcuts(_:)),
+        case #selector(commandSettings(_:)), #selector(commandOpen(_:)), #selector(commandKeyboardShortcuts(_:)),
              #selector(commandPerformanceSettings(_:)), #selector(commandMarkupAuthor(_:)), #selector(commandToggleMarkupsList(_:)), #selector(commandQuickStart(_:)):
             return true
         case #selector(commandCycleNextDocument(_:)), #selector(commandCyclePreviousDocument(_:)):
