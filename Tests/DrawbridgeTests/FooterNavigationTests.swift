@@ -5,6 +5,8 @@ import XCTest
 
 @MainActor private final class FooterTestWindow: NSWindow {
     override var isKeyWindow: Bool { true }
+    var testBackingScale: CGFloat?
+    override var backingScaleFactor: CGFloat { testBackingScale ?? super.backingScaleFactor }
 }
 
 @MainActor final class FooterNavigationTests: XCTestCase {
@@ -14,7 +16,7 @@ import XCTest
     private func field(_ id: String, _ controller: MainViewController) throws -> NSTextField {
         try XCTUnwrap(descendants(controller.statusBar).first { $0.identifier?.rawValue == id } as? NSTextField)
     }
-    private func withFooter(_ body: (MainViewController, NSWindow, PDFDocument) throws -> Void) throws {
+    private func withFooter(backingScale: CGFloat? = nil, _ body: (MainViewController, NSWindow, PDFDocument) throws -> Void) throws {
         _ = NSApplication.shared
         let bytes = NSMutableData()
         var box = CGRect(x: 0, y: 0, width: 600, height: 800)
@@ -24,6 +26,7 @@ import XCTest
         let document = try XCTUnwrap(PDFDocument(data: bytes as Data))
         let controller = MainViewController()
         let window = FooterTestWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900), styleMask: [.titled], backing: .buffered, defer: false)
+        window.testBackingScale = backingScale
         window.contentViewController = controller
         controller.pdfView.setMarkupDocument(document)
         controller.pdfView.go(to: document.page(at: 0)!)
@@ -33,7 +36,12 @@ import XCTest
         try body(controller, window, document)
     }
     func testFixedControlGroupIsCenteredAndSheetLabelIsIndependentlyTrailing() throws {
-        try withFooter { controller, window, document in
+        for backingScale: CGFloat in [1, 2] {
+            try assertFixedControlGroupIsCenteredAndSheetLabelIsIndependentlyTrailing(backingScale: backingScale)
+        }
+    }
+    private func assertFixedControlGroupIsCenteredAndSheetLabelIsIndependentlyTrailing(backingScale: CGFloat) throws {
+        try withFooter(backingScale: backingScale) { controller, window, document in
             let buttons = descendants(controller.statusBar).compactMap { $0 as? NSButton }
             XCTAssertGreaterThanOrEqual(buttons.count, 7)
             let entry = try XCTUnwrap(try field("drawbridgeFooterPageNumber", controller).superview)
@@ -43,7 +51,7 @@ import XCTest
             }
             @MainActor func assertCentered(file: StaticString = #filePath, line: UInt = #line) throws {
                 let frame = controlFrame()
-                XCTAssertEqual(frame.midX, controller.statusBar.bounds.midX, accuracy: 0.1, file: file, line: line)
+                XCTAssertTrue(centerOffsetIsWithinBackingAlignment(frame.midX - controller.statusBar.bounds.midX, in: controller.statusBar), "Control center \(frame.midX) differs from footer center \(controller.statusBar.bounds.midX) by more than half a backing pixel", file: file, line: line)
                 let label = try field("drawbridgeFooterPageLabel", controller)
                 let labelFrame = label.convert(label.bounds, to: controller.statusBar)
                 XCTAssertEqual(labelFrame.maxX, controller.statusBar.bounds.maxX - 10, accuracy: 0.1, file: file, line: line)
@@ -99,6 +107,30 @@ import XCTest
             controller.updateStatusBar(); window.layoutIfNeeded()
             for (button, x) in zip(buttons, documentPositions) {
                 XCTAssertEqual(button.convert(button.bounds, to: overflow.documentView).minX, x, accuracy: 0.1)
+            }
+        }
+    }
+    private func maximumCenterOffset(in view: NSView) -> CGFloat {
+        // Auto Layout snaps the odd-width control block's origin to a backing pixel.
+        // Nearest-pixel rounding can move its center by at most half a backing pixel.
+        abs(view.convertFromBacking(NSSize(width: 1, height: 0)).width) / 2
+    }
+    private func centerOffsetIsWithinBackingAlignment(_ offset: CGFloat, in view: NSView) -> Bool {
+        abs(offset) <= maximumCenterOffset(in: view)
+    }
+    func testCenterAllowanceAcceptsOnlyHalfABackingPixel() throws {
+        for backingScale: CGFloat in [1, 2] {
+            try withFooter(backingScale: backingScale) { controller, _, _ in
+                let view = controller.statusBar
+                XCTAssertEqual(view.convertToBacking(NSSize(width: 1, height: 1)).width, backingScale, accuracy: 0.0001)
+                let halfPixel = 0.5 / backingScale
+                XCTAssertEqual(maximumCenterOffset(in: view), halfPixel, accuracy: 0.0001)
+                for sign: CGFloat in [-1, 1] {
+                    XCTAssertTrue(centerOffsetIsWithinBackingAlignment(sign * halfPixel, in: view))
+                    XCTAssertFalse(centerOffsetIsWithinBackingAlignment(sign * (halfPixel + 0.001), in: view))
+                    XCTAssertFalse(centerOffsetIsWithinBackingAlignment(sign / backingScale, in: view))
+                }
+                XCTAssertTrue(centerOffsetIsWithinBackingAlignment(0, in: view))
             }
         }
     }

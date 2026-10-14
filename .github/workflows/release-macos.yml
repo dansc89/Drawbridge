@@ -10,6 +10,11 @@ on:
         description: Existing version tag to build (for example v1.1 or v1.0.1)
         required: true
         type: string
+      source_ref:
+        description: Candidate branch or commit to build; defaults to release tag
+        required: false
+        default: ""
+        type: string
       replace_release:
         description: Replace existing release assets after notarization
         required: false
@@ -32,7 +37,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && (inputs.source_ref || inputs.release_tag) || github.ref }}
 
       - name: Validate new release version
         env:
