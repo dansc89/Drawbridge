@@ -74,4 +74,26 @@ final class PDFCanvasAccessibilityTests: XCTestCase {
         XCTAssertTrue(peer.document === doc)
         XCTAssertTrue(peer.rectangleMarkup.selected === original, "Accessibility must select the editing object, not its inactive display copy")
     }
+
+    func testAccessibleImportedOverlapRetainsTheChosenAnnotation() throws {
+        _ = NSApplication.shared
+        let doc = try document(pages: 3)
+        let page = try XCTUnwrap(doc.page(at: 0))
+        let first = PDFAnnotation(bounds: CGRect(x: 200, y: 300, width: 100, height: 100), forType: .square, withProperties: nil)
+        let second = PDFAnnotation(bounds: first.bounds, forType: .square, withProperties: nil)
+        first.color = .red; second.color = .blue
+        page.addAnnotation(first); page.addAnnotation(second)
+        let controller = MainViewController()
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1500, height: 900), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = controller
+        defer { window.contentViewController = nil }
+        controller.pdfView.setMarkupDocument(doc)
+        controller.pdfView.rectangleMarkup.canEdit = { true }
+        controller.commandToggleSplitView(nil); window.layoutIfNeeded()
+        let peer = try XCTUnwrap(controller.secondaryPDFView)
+        let displayed = try XCTUnwrap(peer.currentPage?.annotations.last)
+        XCTAssertNil(RectangleMarkupRecord.identity(displayed))
+        XCTAssertTrue(peer.activateAccessibleAnnotation(displayed))
+        XCTAssertTrue(peer.rectangleMarkup.selected === second, "Identical bounds and text must not select a different imported annotation")
+    }
 }

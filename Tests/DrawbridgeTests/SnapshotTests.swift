@@ -735,7 +735,7 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
             let media = fragment.getBoxRect(.mediaBox)
             let stamp = try SnapshotStampFactory.make(payload: payload, bounds: media, rotation: 0)
             print("Zoom capture page", index + 1, "seconds", Date().timeIntervalSince(start), "bytes", payload.data.count)
-            for scale in [1.0, 4.0, 12.0] {
+            for scale in [1.0, 4.0, 12.0, 24.0, 40.0] {
                 func tile(_ draw: (CGContext) -> Void) throws -> Data {
                     let c = try XCTUnwrap(CGContext(data: nil, width: 768, height: 768, bitsPerComponent: 8, bytesPerRow: 768 * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
                     c.setFillColor(NSColor.white.cgColor); c.fill(CGRect(x: 0, y: 0, width: 768, height: 768))

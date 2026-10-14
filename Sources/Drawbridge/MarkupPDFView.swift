@@ -1315,11 +1315,23 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let bounds = displayed.bounds
         let type = displayed.type
         let contents = displayed.contents
+        let slot = displayed.page?.annotations.filter { !($0 is SnapshotViewportTileAnnotation) }.firstIndex { $0 === displayed }
         onActivatePane?()
         guard let page = currentPage else { return false }
-        let annotation = page.annotations.first {
-            if let identity { return RectangleMarkupRecord.identity($0) == identity }
-            return $0.bounds == bounds && $0.type == type && $0.contents == contents
+        let originals = page.annotations.filter { !($0 is SnapshotViewportTileAnnotation) }
+        let annotation: PDFAnnotation?
+        if let exact = originals.first(where: { $0 === displayed }) {
+            annotation = exact
+        } else if let identity {
+            annotation = originals.first { RectangleMarkupRecord.identity($0) == identity }
+        } else if let slot, originals.indices.contains(slot),
+                  originals[slot].bounds == bounds, originals[slot].type == type, originals[slot].contents == contents {
+            // Presentation generations retain source order. Imported annotations
+            // need that position because coincident bounds/text are not an ID.
+            annotation = originals[slot]
+        } else {
+            let matches = originals.filter { $0.bounds == bounds && $0.type == type && $0.contents == contents }
+            annotation = matches.count == 1 ? matches[0] : nil
         }
         guard let annotation, annotation.shouldDisplay, rectangleMarkup.layerIsVisible(annotation) else { return false }
         if annotation.type == "Link" {
