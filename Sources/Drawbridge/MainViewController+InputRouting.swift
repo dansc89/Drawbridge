@@ -150,6 +150,21 @@ extension MainViewController {
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField {
                 return event
             }
+            if view.window?.firstResponder === bookmarksOutlineView,
+               [123, 124, 125, 126].contains(event.keyCode) {
+                // Keep outline expansion and range selection native. Only plain
+                // Up/Down activate the newly selected bookmark, just like a click.
+                guard [125, 126].contains(event.keyCode), !modifiers.contains(.shift) else {
+                    return event
+                }
+                let previousSelection = bookmarksOutlineView.selectedRowIndexes
+                bookmarksOutlineView.keyDown(with: event)
+                if bookmarksOutlineView.selectedRowIndexes != previousSelection {
+                    lastUserInteractionAt = Date()
+                    _ = bookmarksOutlineView.sendAction(bookmarksOutlineView.action, to: bookmarksOutlineView.target)
+                }
+                return nil
+            }
             if pdfView.rectangleMarkup.handleToolShortcut(event) {
                 view.window?.makeFirstResponder(pdfView)
                 return nil
