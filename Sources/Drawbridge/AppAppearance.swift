@@ -29,10 +29,10 @@ enum InterfaceTheme: String, CaseIterable {
         }
         let index: Int
         switch role {
-        case "chrome": index = 0
+        case "chrome", "canvas": index = 0
         case "panel": index = 1
         case "sidebar": index = 2
-        default: return nil // The PDF canvas and annotation colors never use palettes.
+        default: return nil // PDF page and annotation colors never use palettes.
         }
         let rgb = colors[index]
         return NSColor(srgbRed: CGFloat((rgb >> 16) & 255) / 255,

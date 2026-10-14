@@ -989,6 +989,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func applyAppearanceColors() {
+        // Transparent native titlebar uses NSWindow's background without replacing
+        // the traffic lights, drag region, toolbar, or content layout.
+        view.window?.titlebarAppearsTransparent = InterfaceTheme.current != .system
         let chromeAppearance = InterfaceTheme.current == .system ? nil : NSAppearance(named: .darkAqua)
         // Never set the editor window/root appearance: PDF content must retain its
         // inherited appearance and inversion state independently of chrome colors.
@@ -1016,6 +1019,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             collapsedSidebarRevealButton.layer?.backgroundColor = panelBackgroundColor.cgColor
             documentTabsBar.layer?.backgroundColor = panelBackgroundColor.cgColor
             pdfView.refreshAppearanceColors()
+            secondaryPDFView?.refreshAppearanceColors()
             view.window?.backgroundColor = chromeBackgroundColor
             bookmarksContainer.layer?.borderColor = NSColor.separatorColor.cgColor
             documentTabsBar.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor

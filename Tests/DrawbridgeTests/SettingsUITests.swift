@@ -56,7 +56,6 @@ import PDFKit
         let document = PDFDocument()
         document.insert(page, at: 0)
         editor.pdfView.document = document
-        let canvasColor = editor.pdfView.backgroundColor
         let rootAppearance = editor.view.appearance
         let markupColor = annotation.color
         for theme in InterfaceTheme.presets {
@@ -66,7 +65,7 @@ import PDFKit
             XCTAssertEqual(editor.statusBar.layer?.backgroundColor, AppAppearance.panel.cgColor)
             XCTAssertTrue(editor.pdfView.document === document)
             XCTAssertEqual(annotation.color, markupColor)
-            XCTAssertEqual(editor.pdfView.backgroundColor, canvasColor)
+            XCTAssertEqual(editor.pdfView.backgroundColor, AppAppearance.canvas)
             XCTAssertEqual(editor.view.appearance, rootAppearance)
             XCTAssertNil(editor.pdfView.appearance)
         }
@@ -75,7 +74,7 @@ import PDFKit
         XCTAssertNil(editor.statusBar.appearance)
         XCTAssertEqual(editor.view.appearance, rootAppearance)
         XCTAssertEqual(annotation.color, markupColor)
-        XCTAssertEqual(editor.pdfView.backgroundColor, canvasColor)
+        XCTAssertEqual(editor.pdfView.backgroundColor, AppAppearance.canvas)
     }
 
     func testSettingsControlsPersistAuthorPerformanceAndShortcutEdits() throws {
@@ -117,7 +116,37 @@ import PDFKit
         XCTAssertEqual(defaults.double(forKey: MainViewController.defaultsWatchdogThresholdSecondsKey), 30)
     }
 
-    func testCustomPaletteChangesChromeWithoutChangingCanvas() {
+    func testNativeTitlebarAndCanvasFollowPaletteAndRestoreSystem() throws {
+        _ = NSApplication.shared
+        let defaults = UserDefaults.standard
+        let old = defaults.object(forKey: InterfaceTheme.defaultsKey)
+        defer { if let old { defaults.set(old, forKey: InterfaceTheme.defaultsKey) } else { defaults.removeObject(forKey: InterfaceTheme.defaultsKey) } }
+        let editor = MainViewController()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1420, height: 820), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentViewController = editor
+        editor.viewDidAppear()
+        let style = window.styleMask
+        let controls = [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].map { window.standardWindowButton($0) }
+        for theme in InterfaceTheme.presets {
+            InterfaceTheme.select(theme)
+            XCTAssertTrue(window.titlebarAppearsTransparent, "Native trim must show the custom background")
+            XCTAssertEqual(window.backgroundColor, AppAppearance.chrome)
+            XCTAssertEqual(window.styleMask, style)
+            XCTAssertNil(window.appearance, "PDF appearance must remain inherited")
+            for (index, type) in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].enumerated() {
+                XCTAssertTrue(window.standardWindowButton(type) === controls[index])
+            }
+            XCTAssertEqual(editor.pdfView.backgroundColor, AppAppearance.canvas)
+        }
+        InterfaceTheme.select(.system)
+        XCTAssertFalse(window.titlebarAppearsTransparent)
+        XCTAssertNil(window.appearance)
+        XCTAssertEqual(window.styleMask, style)
+    }
+
+    func testCustomPaletteChangesChromeAndCanvas() {
         let defaults = UserDefaults.standard
         let key = "DrawbridgeInterfaceTheme"
         let old = defaults.object(forKey: key)
@@ -133,6 +162,9 @@ import PDFKit
         let canvas = resolved(AppAppearance.canvas)
         defaults.set("dracula", forKey: key)
         XCTAssertNotEqual(resolved(AppAppearance.chrome), native)
-        XCTAssertEqual(resolved(AppAppearance.canvas), canvas, "Interface palettes must not recolor PDF canvas")
+        XCTAssertNotEqual(resolved(AppAppearance.canvas), canvas, "Palette colors only the surround, not PDF pages")
+        defaults.set("system", forKey: key)
+        XCTAssertEqual(resolved(AppAppearance.canvas), canvas)
+        XCTAssertEqual(resolved(AppAppearance.chrome), native)
     }
 }
