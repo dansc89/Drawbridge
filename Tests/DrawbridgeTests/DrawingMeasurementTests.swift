@@ -62,7 +62,7 @@ final class DrawingMeasurementTests: XCTestCase {
                 XCTAssertEqual(vertices.count,4)
                 for (a,b) in zip(vertices,vertices.dropFirst()) { XCTAssertTrue(abs(a.x-b.x)<1e-8 || abs(a.y-b.y)<1e-8) }
                 if tool == .area { XCTAssertEqual(session.selected?.contents,"Area: 200.00 sq ft") }
-                if tool == .perimeter { XCTAssertEqual(session.selected?.contents,"Perimeter: 60.00 ft") }
+                if tool == .perimeter { XCTAssertEqual(session.selected?.contents,"60'-0\"") }
             }
             session.tool = .pen
             XCTAssertTrue(session.pointerDown(at: location(start), modifiers: .shift))
@@ -331,7 +331,7 @@ final class DrawingMeasurementTests: XCTestCase {
             XCTAssertEqual(page.rotation,index*90); XCTAssertEqual(page.bounds(for: .mediaBox),pages[index].bounds(for: .mediaBox))
             XCTAssertEqual(MeasurementMetadata.scale(on: page),eighth)
             XCTAssertEqual(page.annotations.filter(MarkupListPresentation.includes).count,2)
-            XCTAssertEqual(Set(page.annotations.filter(MarkupListPresentation.includes).compactMap(\.contents)),["Area: 200.00 sq ft","Length: 30.00 ft"])
+            XCTAssertEqual(Set(page.annotations.filter(MarkupListPresentation.includes).compactMap(\.contents)),["Area: 200.00 sq ft","30'-0\""])
 
         }
         let editing = RectangleMarkupController(); editing.bind(to: reopened)
@@ -380,7 +380,7 @@ final class DrawingMeasurementTests: XCTestCase {
                 controller.tool = .perimeter
                 for point in points { XCTAssertTrue(controller.pointerDown(at: view.convert(point,from: page))) }
                 XCTAssertTrue(controller.pointerDown(at: view.convert(points[0],from: page)))
-                XCTAssertEqual(controller.selected?.contents,"Perimeter: 60.00 ft")
+                XCTAssertEqual(controller.selected?.contents,"60'-0\"")
                 let count = page.annotations.count
                 XCTAssertTrue(controller.pointerDown(at: view.convert(points[0],from: page)))
                 controller.escape(); XCTAssertEqual(page.annotations.count,count)

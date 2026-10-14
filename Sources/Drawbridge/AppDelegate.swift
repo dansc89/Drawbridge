@@ -282,6 +282,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         viewItem.title = "View"
         mainMenu.addItem(viewItem)
         let viewMenu = NSMenu(title: "View")
+        let splitItem = viewMenu.addItem(withTitle: "Toggle Split View", action: #selector(MainViewController.commandToggleSplitView(_:)), keyEquivalent: "2")
+        splitItem.keyEquivalentModifierMask = [.control]
+        splitItem.target = controller
         viewMenu.addItem(withTitle: "Markups List", action: #selector(MainViewController.commandToggleMarkupsList(_:)), keyEquivalent: "").target = controller
         viewMenu.addItem(withTitle: "Invert", action: #selector(MainViewController.commandToggleInvert(_:)), keyEquivalent: "").target = controller
         viewMenu.addItem(withTitle: "Zoom In", action: #selector(MainViewController.commandZoomIn(_:)), keyEquivalent: "+").target = controller

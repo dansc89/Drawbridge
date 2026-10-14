@@ -42,7 +42,7 @@ private final class NavigationResizeHandleView: NSView {
 }
 
 @MainActor
-final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemValidation, NSSplitViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate {
+final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemValidation, NSSplitViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTextFieldDelegate {
     struct PDFDocumentBox: @unchecked Sendable {
         let document: PDFDocument
     }
@@ -125,7 +125,130 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }()
 
     private let showNavigationPane = true
-    let pdfView = MarkupPDFView(frame: .zero)
+    // All existing commands resolve through the active canvas, not a second controller.
+    var pdfView = MarkupPDFView(frame: .zero)
+    let pdfPaneSplitView = NSSplitView(frame: .zero)
+    var secondaryPDFView: MarkupPDFView?
+
+    func configurePaneActivation(_ pane: MarkupPDFView) {
+        pane.onActivatePane = { [weak self, weak pane] in
+            guard let self, let pane else { return }
+            self.activatePDFPane(pane)
+        }
+        pane.onWillReplaceDocument = { [weak self] in self?.collapsePDFSplit() }
+    }
+
+    private func synchronizePDFPaneSettings(_ pane: MarkupPDFView) {
+        pane.setGridVisible(isGridVisible)
+        pane.setOrthoSnapEnabled(isOrthoSnapEnabled)
+        pane.setEndpointSnapEnabled(isEndpointSnapEnabled)
+        pane.setMidpointSnapEnabled(isMidpointSnapEnabled)
+        pane.setIntersectionSnapEnabled(isIntersectionSnapEnabled)
+        pane.setColorInverted(pdfView.isColorInverted)
+        pane.setHyperlinkHighlightsVisible(isHyperlinkHighlightsVisible)
+    }
+
+    func activatePDFPane(_ pane: MarkupPDFView) {
+        guard pane !== pdfView, pdfPaneSplitView.arrangedSubviews.contains(where: { $0 === pane }), !isPDFProcessingBusy else { return }
+        let previous = pdfView
+        previous.rectangleMarkup.finishTextEditing()
+        previous.rectangleMarkup.cancelGesture()
+        cancelPendingMarkupInteractions()
+        pane.toolMode = previous.toolMode
+        pane.polygonVertexEditModeEnabled = previous.polygonVertexEditModeEnabled
+        synchronizePDFPaneSettings(pane)
+        pdfView = pane
+        secondaryPDFView = previous
+        // One session owns dirty state, source stamps, layers, and undo across both views.
+        pane.rectangleMarkup.install(on: pane)
+        pane.rectangleMarkup.refresh(presentationChanged: false)
+        updatePDFPaneFocus()
+        for overlay in [selectedMarkupOverlayLayer, selectedTextOverlayLayer, selectedLineEndpointHaloLayer, selectedLineEndpointOverlayLayer] {
+            overlay.removeFromSuperlayer()
+            pane.layer?.addSublayer(overlay)
+        }
+        updateSelectionOverlay()
+        refreshRectangleToolbar()
+        requestChromeRefresh(immediate: true)
+    }
+
+    @objc func commandToggleSplitView(_ sender: Any?) {
+        guard !isPDFProcessingBusy, let document = pdfView.document else { return }
+        if secondaryPDFView != nil { collapsePDFSplit(); return }
+        let state = pdfView.captureTabViewState()
+        let pane = MarkupPDFView(frame: pdfView.frame)
+        let inheritedScale = pdfView.scaleFactor
+        // Assign inherited PDFKit document directly: do not bind/scan/reopen a second session.
+        pane.rectangleMarkup = pdfView.rectangleMarkup
+        pane.document = document
+        pane.displayMode = pdfView.displayMode
+        pane.displayDirection = pdfView.displayDirection
+        pane.displayBox = pdfView.displayBox
+        pane.autoScales = false
+        pane.scaleFactor = pdfView.scaleFactor
+        pane.onOpenDroppedPDF = pdfView.onOpenDroppedPDF
+        pane.onToolShortcut = pdfView.onToolShortcut
+        pane.onPageNavigationShortcut = pdfView.onPageNavigationShortcut
+        pane.onRegionCaptured = pdfView.onRegionCaptured
+        pane.shouldBeginMarkupInteraction = pdfView.shouldBeginMarkupInteraction
+        pane.onAnnotationAdded = pdfView.onAnnotationAdded
+        pane.onAnnotationTextEdited = pdfView.onAnnotationTextEdited
+        pane.onAnnotationClicked = pdfView.onAnnotationClicked
+        pane.onAnnotationsBoxSelected = pdfView.onAnnotationsBoxSelected
+        pane.toolMode = pdfView.toolMode
+        synchronizePDFPaneSettings(pane)
+        pane.setHyperlinkHighlightsVisible(isHyperlinkHighlightsVisible)
+        pane.onViewportChanged = { [weak self, weak pane] in
+            guard let self, let pane, self.pdfView === pane else { return }
+            self.requestChromeRefresh()
+            self.updateSelectionOverlay()
+        }
+        configurePaneActivation(pane)
+        // Viewport tile annotations live on PDFPage. Two independent viewports must
+        // not race to replace that shared tile list; use ordinary snapshot previews.
+        pdfView.snapshotViewportTilesEnabled = false
+        pane.snapshotViewportTilesEnabled = false
+        pdfView.updateSnapshotViewportTiles()
+        secondaryPDFView = pane
+        pdfPaneSplitView.addArrangedSubview(pane)
+        pdfPaneSplitView.adjustSubviews()
+        pdfPaneSplitView.setPosition(pdfPaneSplitView.bounds.width / 2, ofDividerAt: 0)
+        if let state { _ = pane.restoreTabViewState(state) }
+        pane.autoScales = false
+        // PDFKit destination navigation can reset a newly attached pane to 1x.
+        pane.scaleFactor = inheritedScale
+        pdfView.autoScales = false
+        if let state { _ = pdfView.restoreTabViewState(state) }
+        pdfView.autoScales = false
+        updatePDFPaneFocus()
+    }
+
+    private func updatePDFPaneFocus() {
+        pdfView.wantsLayer = true
+        pdfView.layer?.borderColor = NSColor.controlAccentColor.cgColor
+        pdfView.layer?.borderWidth = secondaryPDFView == nil ? 0 : 2
+        secondaryPDFView?.layer?.borderWidth = 0
+    }
+
+    func collapsePDFSplit() {
+        guard let inactive = secondaryPDFView else { return }
+        pdfView.rectangleMarkup.finishTextEditing()
+        pdfView.rectangleMarkup.cancelGesture()
+        let state = pdfView.captureTabViewState()
+        secondaryPDFView = nil
+        inactive.onActivatePane = nil
+        inactive.onWillReplaceDocument = nil
+        inactive.retireSplitPane()
+        inactive.document = nil
+        pdfPaneSplitView.removeArrangedSubview(inactive)
+        inactive.removeFromSuperview()
+        pdfView.snapshotViewportTilesEnabled = true
+        updatePDFPaneFocus()
+        pdfPaneSplitView.adjustSubviews()
+        if let state { _ = pdfView.restoreTabViewState(state) }
+        view.window?.makeFirstResponder(pdfView)
+        requestChromeRefresh(immediate: true)
+    }
     private let pdfCanvasContainer = StartupDropView(frame: .zero)
     private let bookmarksContainer = NSView(frame: .zero)
     private let navigationResizeHandle = NavigationResizeHandleView(frame: .zero)
@@ -249,7 +372,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let statusToolLabel = NSTextField(labelWithString: "Tool: Pen")
     let statusToolsHintLabel = NSTextField(labelWithString: "Shortcuts customizable in Drawbridge > Keyboard Shortcuts…")
     private let statusPageSizeLabel = NSTextField(labelWithString: "Size: -")
-    private let statusPageLabel = NSTextField(labelWithString: "Page: -")
+    private let statusPageLabel = NSTextField(labelWithString: "-")
+    private let statusPageNumberField = NSTextField(frame: .zero)
+    private let statusPageTotalLabel = NSTextField(labelWithString: "of 0")
+    private var isEditingFooterPageNumber = false
+    private weak var footerEditingDocument: PDFDocument?
     private let statusZoomLabel = NSTextField(labelWithString: "Zoom: 100%")
     private let statusScaleLabel = NSTextField(labelWithString: "Scale: 1.0 ft")
     private let measurementCountLabel = NSTextField(labelWithString: "Measurements: 0")
@@ -522,7 +649,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             self,
             selector: #selector(handlePDFPageChangedNotification(_:)),
             name: Notification.Name.PDFViewPageChanged,
-            object: pdfView
+            object: nil
         )
         updateShortcutHintLabel()
         configureWatchdogFromDefaults()
@@ -530,6 +657,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc private func handlePDFPageChangedNotification(_ notification: Notification) {
+        guard let pane = notification.object as? MarkupPDFView, pane === pdfView else { return }
         updateSelectionOverlay()
         requestChromeRefresh(immediate: true)
     }
@@ -657,10 +785,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             self.openDocument(at: url)
         }
         configureRectangleMarkup()
-        pdfView.onViewportChanged = { [weak self] in
-            self?.lastUserInteractionAt = Date()
-            self?.requestChromeRefresh()
-            self?.updateSelectionOverlay()
+        pdfView.onViewportChanged = { [weak self, weak pane = pdfView] in
+            guard let self, let pane, self.pdfView === pane else { return }
+            self.lastUserInteractionAt = Date()
+            self.requestChromeRefresh()
+            self.updateSelectionOverlay()
         }
         pdfView.onToolShortcut = { [weak self] mode in
             self?.setTool(mode)
@@ -819,7 +948,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         navigationResizeHandle.translatesAutoresizingMaskIntoConstraints = false
 
         pdfCanvasContainer.addSubview(bookmarksContainer)
-        pdfCanvasContainer.addSubview(pdfView)
+        pdfPaneSplitView.translatesAutoresizingMaskIntoConstraints = false
+        pdfPaneSplitView.isVertical = true
+        pdfPaneSplitView.dividerStyle = .thin
+        pdfView.translatesAutoresizingMaskIntoConstraints = true
+        pdfView.autoresizingMask = [.width, .height]
+        pdfPaneSplitView.addArrangedSubview(pdfView)
+        configurePaneActivation(pdfView)
+        pdfCanvasContainer.addSubview(pdfPaneSplitView)
         // Keep the navigation grabber above the PDF view so drag events are never blocked.
         pdfCanvasContainer.addSubview(navigationResizeHandle)
 
@@ -835,10 +971,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             navigationResizeHandle.centerXAnchor.constraint(equalTo: bookmarksContainer.trailingAnchor),
             navigationResizeHandle.widthAnchor.constraint(equalToConstant: 26),
 
-            pdfView.topAnchor.constraint(equalTo: pdfCanvasContainer.topAnchor),
-            pdfView.leadingAnchor.constraint(equalTo: bookmarksContainer.trailingAnchor),
-            pdfView.trailingAnchor.constraint(equalTo: pdfCanvasContainer.trailingAnchor),
-            pdfView.bottomAnchor.constraint(equalTo: pdfCanvasContainer.bottomAnchor)
+            pdfPaneSplitView.topAnchor.constraint(equalTo: pdfCanvasContainer.topAnchor),
+            pdfPaneSplitView.leadingAnchor.constraint(equalTo: bookmarksContainer.trailingAnchor),
+            pdfPaneSplitView.trailingAnchor.constraint(equalTo: pdfCanvasContainer.trailingAnchor),
+            pdfPaneSplitView.bottomAnchor.constraint(equalTo: pdfCanvasContainer.bottomAnchor)
         ])
         bookmarksWidthConstraint = bookmarksWidth
 
@@ -1564,11 +1700,31 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         statusBar.wantsLayer = true
         statusBar.layer?.backgroundColor = panelBackgroundColor.cgColor
 
-        let labels = [statusPageSizeLabel, statusPageLabel, statusZoomLabel]
+        let labels = [statusPageSizeLabel, statusPageLabel, statusZoomLabel, statusPageTotalLabel]
         labels.forEach {
             $0.font = NSFont.systemFont(ofSize: 11, weight: .regular)
             $0.textColor = .secondaryLabelColor
+            $0.isSelectable = true
+            $0.lineBreakMode = .byTruncatingMiddle
         }
+        statusPageSizeLabel.identifier = NSUserInterfaceItemIdentifier("drawbridgeFooterSize")
+        statusPageLabel.identifier = NSUserInterfaceItemIdentifier("drawbridgeFooterPageLabel")
+        statusZoomLabel.identifier = NSUserInterfaceItemIdentifier("drawbridgeFooterZoom")
+        statusPageTotalLabel.identifier = NSUserInterfaceItemIdentifier("drawbridgeFooterPageTotal")
+        statusPageNumberField.identifier = NSUserInterfaceItemIdentifier("drawbridgeFooterPageNumber")
+        statusPageNumberField.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        statusPageNumberField.alignment = .right
+        statusPageNumberField.controlSize = .small
+        statusPageNumberField.delegate = self
+        statusPageNumberField.setAccessibilityLabel("Page number")
+        statusPageNumberField.toolTip = "Type a page number (1-based) and press Enter to jump. Escape cancels."
+        let pageTitle = NSTextField(labelWithString: "Page")
+        pageTitle.font = .systemFont(ofSize: 11)
+        pageTitle.textColor = .secondaryLabelColor
+        let pageEntry = NSStackView(views: [pageTitle, statusPageNumberField, statusPageTotalLabel])
+        pageEntry.orientation = .horizontal; pageEntry.spacing = 5; pageEntry.alignment = .centerY
+        statusPageNumberField.widthAnchor.constraint(equalToConstant: 52).isActive = true
+        statusPageTotalLabel.widthAnchor.constraint(equalToConstant: 64).isActive = true
 
         for (button, symbol, name, action, identifier) in [
             (navigationBackButton, "arrow.uturn.backward", "Back to previous view (⌥←)", #selector(commandNavigateBack(_:)), "drawbridgeNavigateBack"),
@@ -1609,18 +1765,121 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         markupsToggleButton.setButtonType(.toggle)
         markupsToggleButton.target = self; markupsToggleButton.action = #selector(commandToggleMarkupsList(_:))
         markupsToggleButton.identifier = NSUserInterfaceItemIdentifier("drawbridgeMarkupsList")
-        let details = NSStackView(views: [history,pages] + labels + [invertColorsButton, markupsToggleButton, rectangleToolbar.scaleButton])
-        details.orientation = .horizontal
-        details.spacing = 14
+        // The fixed control block is centered independently of the trailing sheet label.
+        let slots: [(NSView, CGFloat)] = [
+            (history, 100), (pages, 90), (statusPageSizeLabel, 145), (pageEntry, 158),
+            (statusZoomLabel, 92), (invertColorsButton, 68), (markupsToggleButton, 82),
+            (rectangleToolbar.scaleButton, 150)
+        ]
+        slots.forEach { $0.0.widthAnchor.constraint(equalToConstant: $0.1).isActive = true }
+        let details = NSStackView(views: slots.map(\.0))
+        let controlWidth = slots.reduce(CGFloat(0)) { $0 + $1.1 } + CGFloat(slots.count - 1) * 10
+        details.widthAnchor.constraint(equalToConstant: controlWidth).isActive = true
+        details.orientation = .horizontal; details.alignment = .centerY; details.spacing = 10
+        details.detachesHiddenViews = false
         details.translatesAutoresizingMaskIntoConstraints = false
-        statusBar.addSubview(details)
+        statusPageLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        statusPageLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        statusPageLabel.alignment = .right
+        statusPageLabel.translatesAutoresizingMaskIntoConstraints = false
+        let sheetContainer = NSView(frame: .zero)
+        sheetContainer.translatesAutoresizingMaskIntoConstraints = false
+        sheetContainer.wantsLayer = true
+        sheetContainer.layer?.masksToBounds = true
+        sheetContainer.addSubview(statusPageLabel)
+        // At narrow widths this independent area collapses instead of overlapping controls.
+        let sheetWidth = sheetContainer.widthAnchor.constraint(equalTo: statusBar.widthAnchor, multiplier: 0.5, constant: -controlWidth / 2 - 20)
+        sheetWidth.priority = .defaultHigh
 
+        // Narrow windows scroll the fixed-width footer, rather than squeezing or moving buttons.
+        let scroll = NSScrollView(frame: .zero)
+        scroll.identifier = NSUserInterfaceItemIdentifier("drawbridgeFooterOverflow")
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.drawsBackground = false; scroll.borderType = .noBorder
+        scroll.hasHorizontalScroller = true; scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        let content = NSView(frame: .zero)
+        content.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(details)
+        scroll.documentView = content
+        statusBar.addSubview(scroll)
+        statusBar.addSubview(sheetContainer)
+        let preferredWidth = content.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor)
+        preferredWidth.priority = .defaultLow
         NSLayoutConstraint.activate([
-            details.centerXAnchor.constraint(equalTo: statusBar.centerXAnchor),
-            details.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
-            details.leadingAnchor.constraint(greaterThanOrEqualTo: statusBar.leadingAnchor, constant: 10),
-            details.trailingAnchor.constraint(lessThanOrEqualTo: statusBar.trailingAnchor, constant: -10)
+            scroll.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: statusBar.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: statusBar.bottomAnchor),
+            content.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            content.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            content.heightAnchor.constraint(equalTo: scroll.contentView.heightAnchor),
+            content.widthAnchor.constraint(greaterThanOrEqualTo: scroll.contentView.widthAnchor),
+            preferredWidth,
+            content.widthAnchor.constraint(greaterThanOrEqualToConstant: controlWidth + 20),
+            details.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            details.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            sheetContainer.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor, constant: -10),
+            sheetContainer.topAnchor.constraint(equalTo: statusBar.topAnchor),
+            sheetContainer.bottomAnchor.constraint(equalTo: statusBar.bottomAnchor),
+            sheetContainer.widthAnchor.constraint(greaterThanOrEqualToConstant: 0),
+            sheetWidth,
+            // NSTextField alignment rect excludes two horizontal points of frame padding.
+            statusPageLabel.leadingAnchor.constraint(equalTo: sheetContainer.leadingAnchor, constant: 2),
+            statusPageLabel.trailingAnchor.constraint(equalTo: sheetContainer.trailingAnchor, constant: -2),
+            statusPageLabel.centerYAnchor.constraint(equalTo: sheetContainer.centerYAnchor)
         ])
+    }
+
+    func control(_ control: NSControl, textShouldBeginEditing fieldEditor: NSText) -> Bool {
+        guard control === statusPageNumberField else { return true }
+        isEditingFooterPageNumber = true
+        footerEditingDocument = pdfView.document
+        return true
+    }
+
+    func controlTextDidBeginEditing(_ notification: Notification) {
+        guard notification.object as? NSTextField === statusPageNumberField else { return }
+        isEditingFooterPageNumber = true
+        footerEditingDocument = pdfView.document
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard notification.object as? NSTextField === statusPageNumberField else { return }
+        // Leaving the field without Enter cancels the draft; never navigate on focus changes.
+        isEditingFooterPageNumber = false
+        footerEditingDocument = nil
+        // AppKit posts this notification before detaching the field editor.
+        // Restore explicitly here instead of relying on the refresh's editing guard.
+        if let document = pdfView.document, let page = pdfView.currentPage {
+            statusPageNumberField.stringValue = "\(document.index(for: page) + 1)"
+        } else {
+            statusPageNumberField.stringValue = ""
+        }
+        updateStatusBar()
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === statusPageNumberField else { return false }
+        guard commandSelector == #selector(NSResponder.insertNewline(_:)) ||
+              commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        let input = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
+        let document = pdfView.document
+        let validDocument = footerEditingDocument === document
+        let number = input.allSatisfy { $0 >= "0" && $0 <= "9" } ? Int(input) : nil
+        let destination: PDFPage?
+        if commandSelector == #selector(NSResponder.insertNewline(_:)), validDocument,
+           !isPDFProcessingBusy, let document, let number, number > 0, number <= document.pageCount {
+            destination = document.page(at: number - 1)
+        } else {
+            destination = nil
+        }
+        view.window?.makeFirstResponder(pdfView)
+        isEditingFooterPageNumber = false
+        footerEditingDocument = nil
+        if let destination { pdfView.navigateToPageWithHistory(destination) }
+        updateStatusBar()
+        return true
     }
 
     private func configureBusyOverlay() {
@@ -3250,20 +3509,23 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func invalidateVisibleMarkupRendering(on page: PDFPage) {
-        guard pdfView.currentPage === page else { return }
-        let pageBounds = page.bounds(for: pdfView.displayBox)
-        let rectInView = pdfView.convert(pageBounds, from: page)
-        let hasFiniteComponents =
-            rectInView.origin.x.isFinite &&
-            rectInView.origin.y.isFinite &&
-            rectInView.size.width.isFinite &&
-            rectInView.size.height.isFinite
-        if rectInView.isNull || !hasFiniteComponents || rectInView.isEmpty {
-            pdfView.needsDisplay = true
-            return
+        for pane in [pdfView, secondaryPDFView].compactMap({ $0 }) {
+            guard pane.visiblePages.contains(where: { $0 === page }) || pane.currentPage === page else { continue }
+            let pageBounds = page.bounds(for: pane.displayBox)
+            let rectInView = pane.convert(pageBounds, from: page)
+            let hasFiniteComponents =
+                rectInView.origin.x.isFinite &&
+                rectInView.origin.y.isFinite &&
+                rectInView.size.width.isFinite &&
+                rectInView.size.height.isFinite
+            if rectInView.isNull || !hasFiniteComponents || rectInView.isEmpty {
+                pane.needsDisplay = true
+            } else {
+                pane.setNeedsDisplay(rectInView.insetBy(dx: -4, dy: -4))
+            }
+            // PDFKit draws page content in descendants, not just PDFView itself.
+            pane.documentView?.needsDisplay = true
         }
-        let expanded = rectInView.insetBy(dx: -4, dy: -4)
-        pdfView.setNeedsDisplay(expanded)
     }
 
     func totalCachedAnnotationCount() -> Int {
@@ -4995,8 +5257,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             let index = document.index(for: page)
             let label = displayPageLabel(forPageIndex: index)
             statusPageSizeLabel.stringValue = "Size: \(formattedPageSize(for: page))"
-            statusPageLabel.stringValue = "Page \(index + 1) of \(document.pageCount): \(label)"
+            statusPageLabel.stringValue = label
             statusPageLabel.toolTip = label
+            statusPageTotalLabel.stringValue = "of \(document.pageCount)"
+            statusPageTotalLabel.toolTip = statusPageTotalLabel.stringValue
+            if !isEditingFooterPageNumber && statusPageNumberField.currentEditor() == nil {
+                statusPageNumberField.stringValue = "\(index + 1)"
+            }
             pageJumpField.stringValue = label
             if sidebarCurrentPageIndex != index {
                 sidebarCurrentPageIndex = index
@@ -5015,7 +5282,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             batchLinkSheetsButton.isEnabled = !isPDFProcessingBusy
         } else {
             statusPageSizeLabel.stringValue = "Size: -"
-            statusPageLabel.stringValue = "Page: -"
+            statusPageLabel.stringValue = "-"
+            statusPageLabel.toolTip = nil
+            statusPageTotalLabel.stringValue = "of 0"
+            if !isEditingFooterPageNumber && statusPageNumberField.currentEditor() == nil {
+                statusPageNumberField.stringValue = ""
+            }
             pageJumpField.stringValue = ""
             if sidebarCurrentPageIndex != -1 {
                 sidebarCurrentPageIndex = -1
@@ -5030,6 +5302,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         let zoomPercent = Int(round(pdfView.scaleFactor * 100))
         statusZoomLabel.stringValue = "Zoom: \(zoomPercent)%"
+        statusPageNumberField.isEnabled = pdfView.document != nil && pdfView.currentPage != nil && !isPDFProcessingBusy
+        statusPageSizeLabel.toolTip = statusPageSizeLabel.stringValue
+        statusZoomLabel.toolTip = statusZoomLabel.stringValue
         let scaleText = measurementScaleField.stringValue.isEmpty ? "1.0" : measurementScaleField.stringValue
         let unit = measurementUnitPopup.titleOfSelectedItem ?? pdfView.measurementUnitLabel
         let lockedSuffix: String

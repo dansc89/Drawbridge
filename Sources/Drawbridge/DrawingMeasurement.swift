@@ -46,7 +46,7 @@ struct DrawingMeasurement: Codable, Equatable, Sendable {
     /// and closed perimeter/area measurements retain their existing presentation.
     func isDistance(points: [CGPoint]) -> Bool { kind == .perimeter && !closed && points.count == 2 }
     func label(points: [CGPoint]) -> String {
-        if isDistance(points: points), scale.unit == "ft", let dimension = ArchitecturalDistance.format(feet: value(points: points)) {
+        if kind == .perimeter, scale.unit == "ft", let dimension = ArchitecturalDistance.format(feet: value(points: points)) {
             return dimension
         }
         let name = kind == .area ? "Area" : (closed ? "Perimeter" : "Length")
@@ -222,21 +222,25 @@ enum MeasurementAppearance {
             let length = hypot(b.x-a.x, b.y-a.y)
             var u = CGPoint(x: (b.x-a.x)/length, y: (b.y-a.y)/length)
             let angle = CGFloat(rotation) * .pi / 180
-            cosine = abs(cos(angle)) < 1e-10 ? 0 : cos(angle)
-            sine = abs(sin(angle)) < 1e-10 ? 0 : sin(angle)
-            let alongX = u.x*cosine + u.y*sine
-            let alongY = -u.x*sine + u.y*cosine
-            // Stable extension sides even when the user reverses the endpoints.
-            if alongX < -1e-10 || (abs(alongX) <= 1e-10 && alongY < 0) { u.x = -u.x; u.y = -u.y }
+            let screenX = u.x*cos(angle) + u.y*sin(angle)
+            let screenY = -u.x*sin(angle) + u.y*cos(angle)
+            // Stable readable direction after /Rotate, including bottom-to-top
+            // screen-vertical text, independent of endpoint order.
+            if screenX < -1e-10 || (abs(screenX) <= 1e-10 && screenY < 0) { u.x = -u.x; u.y = -u.y }
+            cosine = u.x == 0 ? 0 : u.x
+            sine = u.y == 0 ? 0 : u.y
             let n = CGPoint(x: -u.y, y: u.x)
             center = CGPoint(x: a.x/2+b.x/2, y: a.y/2+b.y/2)
             width = CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))
             let glyphBounds = CTLineGetBoundsWithOptions(line, .useGlyphPathBounds)
             baseline = -glyphBounds.midY
-            let projected = (width+8)*abs(alongX) + (glyphBounds.height+6)*abs(alongY)
-            // Very short spans shrink text/arrowheads instead of moving endpoints
-            // or clipping the label out of the saved annotation's appearance box.
-            factor = min(fit(width: width, bounds: bounds, rotation: rotation), length*0.65/max(1, projected))
+            let projected = width + 8
+            // Fit the actual endpoint-aligned text into the AP box, not a
+            // page-horizontal approximation (which shrank vertical labels).
+            let boxWidth = abs(cosine)*(width+8) + abs(sine)*(glyphBounds.height+6)
+            let boxHeight = abs(sine)*(width+8) + abs(cosine)*(glyphBounds.height+6)
+            factor = max(0.001, min(1, bounds.width/max(1, boxWidth), bounds.height/max(1, boxHeight),
+                                    length*0.65/max(1, projected)))
             let gap = projected*factor/2
             let arrowLength = min(8, length/8), arrowHalfWidth = arrowLength*0.375
             strokeWidth = min(max(0.25, lineWidth), length/40)
@@ -291,7 +295,7 @@ enum MeasurementAppearance {
                 context.move(to: arrow[0]); context.addLine(to: arrow[1]); context.addLine(to: arrow[2]); context.closePath(); context.fillPath()
             }
             context.translateBy(x: layout.center.x, y: layout.center.y)
-            context.rotate(by: CGFloat(annotation.page?.rotation ?? 0) * .pi / 180)
+            context.rotate(by: atan2(layout.sine, layout.cosine))
             context.scaleBy(x: layout.factor, y: layout.factor)
             context.textMatrix = .identity; context.textPosition = CGPoint(x: -layout.width/2, y: layout.baseline)
             CTLineDraw(line, context)

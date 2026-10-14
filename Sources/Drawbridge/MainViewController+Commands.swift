@@ -676,6 +676,9 @@ extension MainViewController {
         guard !isPDFProcessingBusy else { return false }
         let hasDocument = pdfView.document != nil
         switch action {
+        case #selector(commandToggleSplitView(_:)):
+            menuItem.state = secondaryPDFView == nil ? .off : .on
+            return hasDocument && !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField)
         case #selector(commandOpen(_:)), #selector(commandKeyboardShortcuts(_:)),
              #selector(commandPerformanceSettings(_:)), #selector(commandMarkupAuthor(_:)), #selector(commandToggleMarkupsList(_:)), #selector(commandQuickStart(_:)):
             return true

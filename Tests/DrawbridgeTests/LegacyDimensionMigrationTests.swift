@@ -8,6 +8,14 @@ final class LegacyDimensionMigrationTests: XCTestCase {
     private let staleDrawing = "q 1 0 0 RG 0 0 m 200 0 l S Q\n% legacy unsplit appearance\n"
 
     func testUnchangedLegacyMetricDistanceRegeneratesAppearance() throws {
+        try assertLegacyDistanceRegeneratesAppearance(version: nil)
+    }
+
+    func testVersionOneVerticalDistanceRegeneratesAppearance() throws {
+        try assertLegacyDistanceRegeneratesAppearance(version: 1)
+    }
+
+    private func assertLegacyDistanceRegeneratesAppearance(version: Int?) throws {
         let fixture = try savedFixture(distance: true)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let executable = try XCTUnwrap(PDFTKBookmarkWriter.executableURL())
@@ -25,7 +33,8 @@ final class LegacyDimensionMigrationTests: XCTestCase {
         let oldAP = try XCTUnwrap((annotation["/AP"] as? [String: Any])?["/N"] as? String)
         // All semantic/style fields are exactly those emitted by the writer.
         // Only the appearance version and stream differ from a current dimension.
-        annotation.removeValue(forKey: "/DrawbridgeDimensionAppearanceVersion")
+        if let version { annotation["/DrawbridgeDimensionAppearanceVersion"] = version }
+        else { annotation.removeValue(forKey: "/DrawbridgeDimensionAppearanceVersion") }
         annotationObject["value"] = annotation; objects[annotationKey] = annotationObject
         var streamObject = try XCTUnwrap(objects["obj:" + oldAP] as? [String: Any])
         var stream = try XCTUnwrap(streamObject["stream"] as? [String: Any])
@@ -136,7 +145,7 @@ final class LegacyDimensionMigrationTests: XCTestCase {
         context.beginPDFPage(nil); context.endPDFPage(); context.closePDF()
         let document = try XCTUnwrap(PDFDocument(url: source)); let page = try XCTUnwrap(document.page(at: 0))
         let controller = RectangleMarkupController(); controller.bind(to: document)
-        var points = [CGPoint(x: 80, y: 120), CGPoint(x: 280, y: 120)]
+        var points = distance ? [CGPoint(x: 120, y: 80), CGPoint(x: 120, y: 280)] : [CGPoint(x: 80, y: 120), CGPoint(x: 280, y: 120)]
         if !distance { points.append(CGPoint(x: 280, y: 220)) }
         _ = try XCTUnwrap(controller.createMeasurement(on: page, points: points, kind: .perimeter, closed: false,
             scale: DrawingScale(unitsPerPoint: 0.07, unit: "m", name: "metric")))

@@ -589,7 +589,7 @@ enum PDFRectangleWriter {
                     annotation["/Contents"] = "u:" + measurement.label(points: record.vertices)
                     // Semantic equality alone cannot validate a legacy unsplit AP.
                     // Version only distance appearances so other markups retain reuse.
-                    if measurement.isDistance(points: record.vertices) { annotation["/DrawbridgeDimensionAppearanceVersion"] = 1 }
+                    if measurement.isDistance(points: record.vertices) { annotation["/DrawbridgeDimensionAppearanceVersion"] = 2 }
                 }
                 if let a = record.start, let z = record.end {
                     annotation["/L"] = [a.x,a.y,z.x,z.y]

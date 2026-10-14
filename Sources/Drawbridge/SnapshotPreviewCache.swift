@@ -28,7 +28,12 @@ final class SnapshotPreviewCache: @unchecked Sendable {
     private var completedCaptures = Set<String>()
     private var notificationScheduled = false
 
-    private init() {
+    // Immutable observation-only seam; callbacks run on the rendering caller's
+    // thread and must be thread-safe. Production retains the default nil observer.
+    private let onRenderCompleted: (@Sendable (CGRect, Double) -> Void)?
+
+    init(onRenderCompleted: (@Sendable (CGRect, Double) -> Void)? = nil) {
+        self.onRenderCompleted = onRenderCompleted
         images.totalCostLimit = 48 * 1024 * 1024; images.countLimit = 64
         previews.totalCostLimit = 32 * 1024 * 1024; previews.countLimit = 16
     }
@@ -104,7 +109,10 @@ final class SnapshotPreviewCache: @unchecked Sendable {
         var requested = 0
         for y in minY...maxY { for x in minX...maxX {
             let region = CGRect(x: Double(x) * span, y: Double(y) * span, width: span, height: span).intersection(media)
-            guard !region.isEmpty else { continue }
+            // The inclusive grid endpoint may lie exactly on the viewport's
+            // far edge. Such a tile contributes no pixels, but traversing its
+            // vector page still consumes render work and a request-budget slot.
+            guard !region.isEmpty, !region.intersection(visible).isEmpty else { continue }
             let tileKey = "\(key):\(resolution):\(x):\(y)"
             if let image = images.object(forKey: tileKey as NSString) {
                 context?.draw(image, in: region)
@@ -191,6 +199,8 @@ final class SnapshotPreviewCache: @unchecked Sendable {
         context.scaleBy(x: Double(width) / region.width, y: Double(height) / region.height)
         context.translateBy(x: -region.minX, y: -region.minY)
         context.drawPDFPage(page)
-        return context.makeImage()
+        let image = context.makeImage()
+        if image != nil { onRenderCompleted?(region, scale) }
+        return image
     }
 }

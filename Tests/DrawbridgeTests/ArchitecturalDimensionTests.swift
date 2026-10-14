@@ -20,10 +20,41 @@ final class ArchitecturalDimensionTests: XCTestCase {
         }
     }
 
-    func testNonDistanceLabelsAreUnchanged() {
+    func testVerticalLabelsFollowEndpointsAtEveryPageRotation() throws {
+        let font = CTFontCreateWithName("Helvetica" as CFString, 11, nil)
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: "8'-0\"", attributes: [NSAttributedString.Key(kCTFontAttributeName as String): font]))
+        for rotation in [0, 90, 180, 270] {
+            for points in [[CGPoint(x: 120,y: 80), CGPoint(x: 120,y: 280)], [CGPoint(x: 80,y: 120), CGPoint(x: 280,y: 120)]] {
+                let bounds = CGRect(x: min(points[0].x,points[1].x)-24, y: min(points[0].y,points[1].y)-24, width: abs(points[1].x-points[0].x)+48, height: abs(points[1].y-points[0].y)+48)
+                let layout = MeasurementAppearance.DimensionLayout(points: points, bounds: bounds, rotation: rotation, line: line, lineWidth: 1)
+                let reverse = MeasurementAppearance.DimensionLayout(points: points.reversed(), bounds: bounds, rotation: rotation, line: line, lineWidth: 1)
+                let dx = points[1].x-points[0].x, dy = points[1].y-points[0].y
+                XCTAssertEqual(layout.cosine*dy-layout.sine*dx, 0, accuracy: 0.000001, "Text must follow dimension, not page horizontal")
+                XCTAssertEqual(layout.cosine, reverse.cosine, accuracy: 0.000001)
+                XCTAssertEqual(layout.sine, reverse.sine, accuracy: 0.000001)
+                let angle = CGFloat(rotation)*CGFloat.pi/180
+                let screenX = layout.cosine*cos(angle)+layout.sine*sin(angle)
+                let screenY = -layout.cosine*sin(angle)+layout.sine*cos(angle)
+                XCTAssertTrue(screenX > 0.000001 || (abs(screenX) < 0.000001 && screenY > 0), "Vertical text reads bottom-to-top")
+            }
+        }
+        let document = PDFDocument(); let page = PDFPage(); document.insert(page, at: 0)
+        let controller = RectangleMarkupController(); controller.bind(to: document)
+        let annotation = try XCTUnwrap(controller.createMeasurement(on: page, points: [CGPoint(x: 120,y: 80), CGPoint(x: 120,y: 280)], kind: .perimeter, closed: false, scale: DrawingScale(unitsPerPoint: 0.04, unit: "ft", name: "test")))
+        let pixels = try render(annotation)
+        XCTAssertFalse((90...104).contains { x in (165...195).contains { pixels.ink(x,$0) } }, "No horizontal glyphs extending left of vertical text")
+        let record = try XCTUnwrap(RectangleMarkupRecord.capture(document).first)
+        XCTAssertTrue(MeasurementAppearance.pdf(record).contains("0.0000000000 1.0000000000 -1.0000000000 0.0000000000"), "Saved text has the same bottom-to-top transform")
+    }
+
+    func testAllImperialLinearLabelsUseArchitecturalFormatting() {
         let scale = DrawingScale(unitsPerPoint: 1, unit: "ft", name: "test")
-        XCTAssertEqual(DrawingMeasurement(kind: .perimeter, scale: scale, closed: false).label(points: [.zero, CGPoint(x: 3,y: 0), CGPoint(x: 3,y: 4)]), "Length: 7.00 ft")
-        XCTAssertEqual(DrawingMeasurement(kind: .perimeter, scale: scale, closed: true).label(points: [.zero, CGPoint(x: 3,y: 0), CGPoint(x: 3,y: 4)]), "Perimeter: 12.00 ft")
+        XCTAssertEqual(DrawingMeasurement(kind: .perimeter, scale: scale, closed: false).label(points: [.zero, CGPoint(x: 3,y: 0), CGPoint(x: 3,y: 4)]), "7'-0\"")
+        XCTAssertEqual(DrawingMeasurement(kind: .perimeter, scale: scale, closed: true).label(points: [.zero, CGPoint(x: 3,y: 0), CGPoint(x: 3,y: 4)]), "12'-0\"")
+    }
+
+    func testAreaAndMetricLabelsAreUnchanged() {
+        let scale = DrawingScale(unitsPerPoint: 1, unit: "ft", name: "test")
         XCTAssertEqual(DrawingMeasurement(kind: .area, scale: scale, closed: true).label(points: [.zero, CGPoint(x: 3,y: 0), CGPoint(x: 3,y: 4)]), "Area: 6.00 sq ft")
         XCTAssertEqual(DrawingMeasurement(kind: .perimeter, scale: DrawingScale(unitsPerPoint: 0.07, unit: "m", name: "metric"), closed: false).label(points: [.zero, CGPoint(x: 200,y: 0)]), "Length: 14.00 m")
     }

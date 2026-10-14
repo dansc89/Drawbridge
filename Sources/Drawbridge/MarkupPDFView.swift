@@ -105,11 +105,39 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         ])
     }
 
-    let rectangleMarkup = RectangleMarkupController()
+    var rectangleMarkup = RectangleMarkupController()
+    var onActivatePane: (() -> Void)?
+    var onWillReplaceDocument: (() -> Void)?
+    var snapshotViewportTilesEnabled = true
+    private var isRetiredSplitPane = false
+
+    /// Pages and their display tiles are shared with the surviving pane. Retiring
+    /// this viewport must discard local demand, never remove page annotations.
+    func retireSplitPane() {
+        isRetiredSplitPane = true
+        snapshotTilesWorkItem?.cancel()
+        snapshotTilesWorkItem = nil
+        snapshotDetailRefreshWorkItem?.cancel()
+        snapshotDetailRefreshWorkItem = nil
+        snapshotDetailRefreshGeneration &+= 1
+        pendingInteractiveViewportFeedbackWorkItem?.cancel()
+        pendingInteractiveViewportFeedbackWorkItem = nil
+        pendingSnapshotDetailKeys.removeAll()
+        tiledSnapshotPages.removeAllObjects()
+        snapshotPreviewPages.removeAllObjects()
+        onViewportChanged = nil
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        onActivatePane?()
+        return super.becomeFirstResponder()
+    }
     // Keep PDFView.document inherited: PDFKit reads it from its formFillingQueue.
     // Overriding it here gives the ObjC getter a main-actor assertion and crashes
     // those legitimate framework callbacks on macOS 26.
     func setMarkupDocument(_ document: PDFDocument?) {
+        onWillReplaceDocument?()
         rectangleMarkup.finishTextEditing()
         for page in tiledSnapshotPages.allObjects {
             page.annotations.filter { $0 is SnapshotViewportTileAnnotation }.forEach(page.removeAnnotation)
@@ -555,18 +583,21 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private let snapshotViewportQuietInterval: CFAbsoluteTime = 0.25
 
     @objc private func snapshotPreviewReady(_ notification: Notification) {
+        guard !isRetiredSplitPane else { return }
         guard window?.isVisible == true, let keys = notification.userInfo?["captureKeys"] as? Set<String> else { return }
         pendingSnapshotDetailKeys.formUnion(keys)
         scheduleSnapshotDetailRefresh()
     }
 
     private func noteSnapshotViewportActivity() {
+        guard !isRetiredSplitPane else { return }
         lastSnapshotViewportActivity = CFAbsoluteTimeGetCurrent()
         scheduleSnapshotViewportTiles()
         if !pendingSnapshotDetailKeys.isEmpty { scheduleSnapshotDetailRefresh() }
     }
 
     private func scheduleSnapshotDetailRefresh() {
+        guard !isRetiredSplitPane else { return }
         snapshotDetailRefreshWorkItem?.cancel()
         snapshotDetailRefreshGeneration &+= 1
         let generation = snapshotDetailRefreshGeneration
@@ -656,7 +687,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private let tiledSnapshotPages = NSHashTable<PDFPage>.weakObjects()
 
     private func scheduleSnapshotViewportTiles() {
-        guard !updatingSnapshotTiles else { return }
+        guard !isRetiredSplitPane, !updatingSnapshotTiles else { return }
         snapshotTilesWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.updateSnapshotViewportTiles() }
         snapshotTilesWorkItem = work
@@ -664,7 +695,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     func updateSnapshotViewportTiles() {
-        guard !updatingSnapshotTiles else { return }
+        guard !isRetiredSplitPane, !updatingSnapshotTiles else { return }
         updatingSnapshotTiles = true
         defer { updatingSnapshotTiles = false }
         let pages = tiledSnapshotPages.allObjects + visiblePages.filter { candidate in
@@ -678,7 +709,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             let viewport = convert(contentClipView.map { convert($0.bounds, from: $0) } ?? bounds, to: page)
             var boundsByOwner = [ObjectIdentifier: [CGRect]]()
             for snapshot in snapshots {
-                let needsTiles = visible && snapshot.shouldDisplay && !snapshot.isRetired
+                let needsTiles = snapshotViewportTilesEnabled && visible && snapshot.shouldDisplay && !snapshot.isRetired
                     && max(snapshot.bounds.width, snapshot.bounds.height) * density > 4096
                 snapshot.usesViewportTiles = needsTiles
                 guard needsTiles else { continue }
@@ -1181,8 +1212,12 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         window?.acceptsMouseMovedEvents = true
     }
 
+    var ownsMarkupInteraction: Bool { rectangleMarkup.view === self }
+
     override func mouseMoved(with event: NSEvent) {
-        rectangleMarkup.pointerMoved(at:convert(event.locationInWindow,from:nil), modifiers: event.modifierFlags)
+        if ownsMarkupInteraction {
+            rectangleMarkup.pointerMoved(at:convert(event.locationInWindow,from:nil), modifiers: event.modifierFlags)
+        }
         lastPointerInView = convert(event.locationInWindow, from: nil)
         super.mouseMoved(with: event)
         if usesPenCursor { Self.penCursor.set() }
@@ -1221,6 +1256,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseDown(with event: NSEvent) {
+        onActivatePane?()
         window?.makeFirstResponder(self)
         let location = convert(event.locationInWindow, from: nil)
         lastPointerInView = location
@@ -1265,6 +1301,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        guard ownsMarkupInteraction else { return }
         let location = convert(event.locationInWindow, from: nil)
         lastPointerInView = location
         if isRegionCaptureModeEnabled {
@@ -1279,6 +1316,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     override func mouseUp(with event: NSEvent) {
+        guard ownsMarkupInteraction else { return }
         navigationSelectionStart = nil
         if !isRegionCaptureModeEnabled, rectangleMarkup.pointerUp(at: convert(event.locationInWindow, from: nil), modifiers: event.modifierFlags) { return }
         guard isRegionCaptureModeEnabled else { return }
@@ -2926,6 +2964,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func emitInteractiveViewportFeedback(force: Bool = false) {
+        guard !isRetiredSplitPane else { return }
         let minInterval: CFAbsoluteTime = 1.0 / 45.0
         let now = CFAbsoluteTimeGetCurrent()
 

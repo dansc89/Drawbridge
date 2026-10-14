@@ -27,11 +27,20 @@ extension MainViewController {
         guard scrollEventMonitor == nil else { return }
         scrollEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
             guard let self else { return event }
+            return self.routeScrollWheelEvent(event)
+        }
+    }
+
+    func routeScrollWheelEvent(_ event: NSEvent) -> NSEvent? {
             guard self.view.window?.isKeyWindow == true else { return event }
             guard self.pdfView.document != nil else { return event }
 
-            let point = self.pdfView.convert(event.locationInWindow, from: nil)
-            guard self.pdfView.bounds.contains(point) else { return event }
+            let panes = [self.pdfView, self.secondaryPDFView].compactMap { $0 }
+            guard let hovered = panes.first(where: {
+                $0.bounds.contains($0.convert(event.locationInWindow, from: nil))
+            }), !self.isPDFProcessingBusy else { return event }
+            self.activatePDFPane(hovered)
+            self.view.window?.makeFirstResponder(hovered)
 
             let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             if modifiers.contains(.control) {
@@ -48,7 +57,6 @@ extension MainViewController {
             self.pdfView.handleWheelZoom(event)
             self.lastUserInteractionAt = Date()
             return nil
-        }
     }
 
     func installKeyMonitorIfNeeded() {
@@ -62,6 +70,15 @@ extension MainViewController {
     func routeKeyDownEvent(_ event: NSEvent) -> NSEvent? {
         guard view.window?.isKeyWindow == true else { return event }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        if modifiers.subtracting(.capsLock) == [.control],
+           event.charactersIgnoringModifiers == "2" {
+            guard !(view.window?.firstResponder is NSTextView),
+                  !(view.window?.firstResponder is NSTextField),
+                  pdfView.document != nil, !isPDFProcessingBusy else { return event }
+            if !event.isARepeat { commandToggleSplitView(nil) }
+            return nil
+        }
 
         let optionNavigationModifiersAllowed =
             modifiers.contains(.option) &&
