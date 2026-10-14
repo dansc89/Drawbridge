@@ -34,15 +34,16 @@ import XCTest
             XCTAssertEqual(views.count, 2, "Toggle must create a second real PDF pane")
             guard views.count == 2 else { return }
             let right = try XCTUnwrap(views.first { $0 !== left })
-            XCTAssertTrue(right.document === doc); XCTAssertTrue(left.document === doc)
-            XCTAssertTrue(right.currentPage === left.currentPage)
+            XCTAssertFalse(right.document === doc); XCTAssertTrue(left.document === doc)
+            XCTAssertEqual(right.document?.index(for: right.currentPage!), doc.index(for: left.currentPage!))
+            XCTAssertFalse(right.currentPage === left.currentPage)
             left.autoScales = false; right.autoScales = false
             left.scaleFactor = 0.7; right.scaleFactor = 1.3
             XCTAssertTrue(w.makeFirstResponder(right))
             c.commandNextPage(nil)
             XCTAssertTrue(c.pdfView === right)
             XCTAssertTrue(right.currentPage === doc.page(at: 2))
-            XCTAssertTrue(left.currentPage === doc.page(at: 1))
+            XCTAssertEqual(left.document?.index(for: left.currentPage!), 1)
             XCTAssertEqual(left.scaleFactor, 0.7, accuracy: 0.001)
             XCTAssertEqual(right.scaleFactor, 1.3, accuracy: 0.001)
             XCTAssertTrue(left.rectangleMarkup === right.rectangleMarkup, "One editing/save/undo owner")
@@ -138,7 +139,8 @@ import XCTest
             XCTAssertTrue(c.pdfView.currentPage === aDocument.page(at: 4))
             XCTAssertEqual(c.pdfView.scaleFactor, 1.7, accuracy: 0.001)
             toggle(c)
-            XCTAssertTrue(c.secondaryPDFView?.document === aDocument)
+            XCTAssertFalse(c.secondaryPDFView?.document === aDocument)
+            XCTAssertEqual(c.secondaryPDFView?.document?.pageCount, aDocument.pageCount)
             c.commandCloseDocument(nil)
             XCTAssertEqual(panes(c).count, 1)
             XCTAssertEqual(c.openDocumentURL, b)
@@ -180,7 +182,7 @@ import XCTest
         XCTAssertFalse(window.isDocumentEdited)
         XCTAssertFalse(session.hasUnsavedChanges)
         XCTAssertEqual(RectangleMarkupRecord.capture(try XCTUnwrap(PDFDocument(url: url))), expected)
-        XCTAssertTrue(left.document === doc); XCTAssertTrue(right.document === doc)
+        XCTAssertFalse(left.document === doc); XCTAssertTrue(right.document === doc)
     }
 
     func testActivationRefreshesSelectionForDistinctPageAndZoom() throws {
@@ -188,7 +190,7 @@ import XCTest
             let left = c.pdfView
             toggle(c); w.layoutIfNeeded()
             let right = try XCTUnwrap(c.secondaryPDFView)
-            left.go(to: doc.page(at: 1)!); right.go(to: doc.page(at: 4)!)
+            left.go(to: doc.page(at: 1)!); right.go(to: right.document!.page(at: 4)!)
             left.autoScales = false; right.autoScales = false
             left.scaleFactor = 0.7; right.scaleFactor = 1.6
             let session = left.rectangleMarkup
@@ -261,10 +263,10 @@ import XCTest
             XCTAssertNil(c.routeScrollWheelEvent(wheel))
             XCTAssertTrue(c.pdfView === right)
             XCTAssertTrue(w.firstResponder === right, "Wheel activation must transfer keyboard focus")
-            let before = left.currentPage
+            let before = left.document?.index(for: left.currentPage!)
             c.commandNextPage(nil)
             XCTAssertTrue(c.pdfView === right, "Command focus resolution must not reactivate the old pane")
-            XCTAssertTrue(left.currentPage === before)
+            XCTAssertEqual(left.document?.index(for: left.currentPage!), before)
             XCTAssertTrue(right.currentPage === doc.page(at: 2))
         }
     }
@@ -279,6 +281,7 @@ import XCTest
             let fragment = try XCTUnwrap(CGPDFDocument(XCTUnwrap(CGDataProvider(data: bytes as CFData))))
             let snapshot = DrawbridgeSnapshotAnnotation(bounds: CGRect(x: 0, y: 0, width: 600, height: 800), document: fragment, rotation: 0, style: SnapshotStyle())
             page.addAnnotation(snapshot)
+            c.activatePDFPane(retired)
             retired.autoScales = false; retired.scaleFactor = 10
             retired.snapshotViewportTilesEnabled = true
             retired.updateSnapshotViewportTiles()
@@ -286,6 +289,7 @@ import XCTest
             NotificationCenter.default.post(name: .PDFViewScaleChanged, object: retired)
             let pending = try XCTUnwrap(Mirror(reflecting: retired).children.first { $0.label == "snapshotTilesWorkItem" }?.value as? DispatchWorkItem)
             XCTAssertFalse(pending.isCancelled, "Fixture must capture genuinely queued work")
+            c.activatePDFPane(left)
             toggle(c); w.layoutIfNeeded()
             XCTAssertNil(retired.document)
             let pendingAfterRetirement = Mirror(reflecting: retired).children.first { $0.label == "snapshotTilesWorkItem" }?.value as? DispatchWorkItem
@@ -314,4 +318,135 @@ import XCTest
             XCTAssertEqual(panes(c).count, 1); XCTAssertNil(c.pdfView.document)
         }
     }
+
+    func testSplitHeadersIdentifyDocumentActiveSideAndReserveCanvasSpace() throws {
+        try fixture { c, w, _ in
+            let containers = { c.pdfPaneSplitView.arrangedSubviews.compactMap { $0 as? PDFPaneContainerView } }
+            XCTAssertTrue(try XCTUnwrap(containers().first).header.isHidden)
+            toggle(c); w.layoutIfNeeded()
+            let split = containers()
+            XCTAssertEqual(split.count, 2)
+            guard split.count == 2 else { return }
+            XCTAssertEqual(c.pdfPaneSplitView.dividerThickness, 10)
+            XCTAssertEqual(split[0].modeLabel.stringValue, "Split view · Left · Active")
+            XCTAssertEqual(split[1].modeLabel.stringValue, "Split view · Right")
+            for container in split {
+                XCTAssertFalse(container.header.isHidden)
+                XCTAssertEqual(container.header.frame.height, 30, accuracy: 0.1)
+                XCTAssertEqual(container.pdfView.frame.height + 30, container.bounds.height, accuracy: 0.1)
+                XCTAssertFalse(container.header.frame.intersects(container.pdfView.frame))
+                XCTAssertEqual(container.titleLabel.stringValue, "PDF")
+                XCTAssertTrue(container.header.toolTip?.contains("same PDF") == true)
+            }
+            c.activatePDFPane(split[1].pdfView)
+            XCTAssertEqual(split[0].modeLabel.stringValue, "Split view · Left")
+            XCTAssertEqual(split[1].modeLabel.stringValue, "Split view · Right · Active")
+            c.pdfPaneSplitView.setPosition(420, ofDividerAt: 0); w.layoutIfNeeded()
+            XCTAssertEqual(split[1].modeLabel.stringValue, "Split view · Right · Active")
+            toggle(c); w.layoutIfNeeded()
+            let remaining = try XCTUnwrap(containers().first)
+            XCTAssertTrue(remaining.pdfView === split[1].pdfView)
+            XCTAssertTrue(remaining.header.isHidden)
+            XCTAssertEqual(remaining.pdfView.frame.height, remaining.bounds.height, accuracy: 0.1)
+        }
+    }
+    func testSplitPresentationUpdatesWithoutSharingLiveAnnotationInstances() throws {
+        try fixture { c, w, doc in
+            toggle(c); w.layoutIfNeeded()
+            let session = c.pdfView.rectangleMarkup
+            session.canEdit = { true }
+            let page = try XCTUnwrap(c.pdfView.currentPage)
+            let peer = try XCTUnwrap(c.secondaryPDFView)
+            let annotation = try XCTUnwrap(session.create(on: page,
+                bounds: CGRect(x: 100, y: 100, width: 100, height: 80), kind: .rectangle))
+            let generation = try XCTUnwrap(peer.document)
+            let displayed = try XCTUnwrap(peer.currentPage?.annotations.first)
+            XCTAssertFalse(displayed === annotation)
+            XCTAssertTrue(displayed is DrawbridgeShapeAnnotation)
+            XCTAssertEqual(displayed.bounds, annotation.bounds)
+            XCTAssertEqual(RectangleMarkupRecord.capture(annotation: displayed, pageIndex: 1),
+                           RectangleMarkupRecord.capture(annotation: annotation, pageIndex: 1))
+            session.selectFromList(annotation)
+            session.fillSelected(.blue)
+            session.setLineAppearance(pattern: .dashDot, opacity: 0.5)
+            session.setBounds(CGRect(x: 250, y: 200, width: 120, height: 90), of: annotation, on: page, action: "Move")
+            let moved = try XCTUnwrap(peer.currentPage?.annotations.first)
+            XCTAssertEqual(moved.bounds, annotation.bounds)
+            XCTAssertEqual(RectangleMarkupRecord.capture(annotation: moved, pageIndex: 1),
+                           RectangleMarkupRecord.capture(annotation: annotation, pageIndex: 1))
+            XCTAssertEqual(displayed.bounds, CGRect(x: 100, y: 100, width: 100, height: 80))
+            session.undo.removeAllActions()
+            session.deleteSelected()
+            XCTAssertTrue(peer.currentPage?.annotations.isEmpty == true)
+            XCTAssertEqual(generation.page(at: 1)?.annotations.count, 1,
+                           "An already submitted rendering generation must stay immutable")
+            c.rectangleUndo(nil)
+            XCTAssertEqual(peer.currentPage?.annotations.count, 1)
+            XCTAssertEqual(doc.page(at: 1)?.annotations.count, 1)
+            c.activatePDFPane(peer)
+            XCTAssertTrue(peer.document === doc)
+            XCTAssertTrue(peer.currentPage?.annotations.first === annotation)
+        }
+    }
+
+    func testFirstPenGestureInInactivePaneCreatesCanonicalMarkup() throws {
+        try fixture { c, w, doc in
+            toggle(c); w.layoutIfNeeded()
+            let peer = try XCTUnwrap(c.secondaryPDFView)
+            let session = c.pdfView.rectangleMarkup
+            session.canEdit = { true }; session.tool = .pen
+            let page = try XCTUnwrap(peer.currentPage)
+            let start = peer.convert(CGPoint(x: 250, y: 300), from: page)
+            let end = peer.convert(CGPoint(x: 320, y: 370), from: page)
+            XCTAssertTrue(peer.hitTest(peer.convert(start, to: peer.superview)) === peer,
+                          "The first drag must target the stable canvas, not a PDFKit descendant retired during activation")
+            for (type, point) in [(NSEvent.EventType.leftMouseDown, start), (.leftMouseDragged, end), (.leftMouseUp, end)] {
+                let event = try XCTUnwrap(NSEvent.mouseEvent(with: type,
+                    location: peer.convert(point, to: nil), modifierFlags: [], timestamp: 0,
+                    windowNumber: w.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+                if type == .leftMouseDown { peer.mouseDown(with: event) }
+                else if type == .leftMouseDragged { peer.mouseDragged(with: event) }
+                else { peer.mouseUp(with: event) }
+            }
+            XCTAssertTrue(c.pdfView === peer)
+            XCTAssertEqual(doc.page(at: 1)?.annotations.count, 1)
+            XCTAssertEqual(c.secondaryPDFView?.currentPage?.annotations.count, 1)
+        }
+    }
+
+    func testSnapshotPresentationRetainsRenderedCaptureAndEffects() throws {
+        try fixture { c, w, _ in
+            let bytes = NSMutableData()
+            var media = CGRect(x: 0, y: 0, width: 100, height: 100)
+            let writer = try XCTUnwrap(CGContext(consumer: XCTUnwrap(CGDataConsumer(data: bytes)), mediaBox: &media, nil))
+            writer.beginPDFPage(nil)
+            writer.setFillColor(NSColor.black.cgColor)
+            writer.fill(CGRect(x: 10, y: 10, width: 80, height: 80))
+            writer.endPDFPage(); writer.closePDF()
+            let source = try XCTUnwrap(PDFDocument(data: bytes as Data))
+            var payload = try SnapshotPayload.capture(page: XCTUnwrap(source.page(at: 0)),
+                points: [CGPoint(x: 0,y: 0), CGPoint(x: 100,y: 0), CGPoint(x: 100,y: 100), CGPoint(x: 0,y: 100)])
+            payload.style = SnapshotStyle(overlay: true, opacity: 0.5, filter: .colorize, color: [1, 0, 0])
+            let session = c.pdfView.rectangleMarkup
+            session.canEdit = { true }
+            let original = try XCTUnwrap(session.pasteSnapshot(payload, on: XCTUnwrap(c.pdfView.currentPage), center: CGPoint(x: 200,y: 200)))
+            toggle(c); w.layoutIfNeeded()
+            let copy = try XCTUnwrap(c.secondaryPDFView?.currentPage?.annotations.first as? DrawbridgeSnapshotAnnotation)
+            XCTAssertFalse(copy === original)
+            func raster(_ stamp: PDFAnnotation) throws -> Data {
+                let context = try XCTUnwrap(CGContext(data: nil, width: 600, height: 800, bitsPerComponent: 8,
+                    bytesPerRow: 2400, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+                context.setFillColor(NSColor.white.cgColor); context.fill(CGRect(x: 0,y: 0,width: 600,height: 800))
+                stamp.draw(with: .cropBox, in: context)
+                return Data(bytes: try XCTUnwrap(context.data), count: 2400 * 800)
+            }
+            let expected = try raster(original)
+            XCTAssertTrue(expected.contains { $0 < 240 }, "Fixture must contain actual captured linework")
+            XCTAssertEqual(try raster(copy), expected, "A copied Stamp must retain its capture renderer, not an empty decoded subclass")
+            session.selectFromList(original); session.deleteSelected()
+            XCTAssertTrue(c.secondaryPDFView?.currentPage?.annotations.isEmpty == true)
+            XCTAssertEqual(try raster(copy), expected, "A retired display generation must not lose its immutable capture")
+        }
+    }
+
 }

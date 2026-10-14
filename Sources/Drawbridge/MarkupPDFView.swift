@@ -1229,6 +1229,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     @objc private func sendSelectedMarkupBackward(_ sender: Any?) { rectangleMarkup.reorderSelected(.sendBackward) }
 
     override func menu(for event: NSEvent) -> NSMenu? {
+        onActivatePane?()
         let menu = NSMenu(title: "PDF")
         let location = convert(event.locationInWindow, from: nil)
         if let page = page(for: location, nearest: false) {
@@ -1253,6 +1254,17 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let selectItem = menu.addItem(withTitle: "Select All Text", action: #selector(selectAll(_:)), keyEquivalent: "")
         selectItem.target = self
         return menu
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        // Keep canvas events on this stable owner. Activating a split pane swaps
+        // PDFKit's page descendants; an event addressed to the old descendant
+        // would otherwise disappear before its first mouseDown is delivered.
+        if let documentView, hit === documentView || hit.isDescendant(of: documentView) {
+            return self
+        }
+        return hit // Scrollbars and other PDFView chrome keep native routing.
     }
 
     override func mouseDown(with event: NSEvent) {

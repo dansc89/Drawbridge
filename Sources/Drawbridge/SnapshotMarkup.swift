@@ -253,6 +253,26 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         shouldPrint = true
     }
 
+    /// A separate presentation instance shares only immutable capture data.
+    /// PDFKit must not share mutable annotation ownership between split canvases.
+    func splitPresentationCopy() -> DrawbridgeSnapshotAnnotation? {
+        guard fragment != nil else { return nil }
+        return DrawbridgeSnapshotAnnotation(presentationOf: self)
+    }
+
+    private init(presentationOf source: DrawbridgeSnapshotAnnotation) {
+        fragment = source.fragment
+        captureRotation = source.captureRotation
+        style = source.style
+        previewData = source.previewData
+        previewKey = source.previewKey
+        screenPreview = source.screenPreview
+        super.init(bounds: source.bounds, forType: .stamp, withProperties: nil)
+        color = .clear
+        shouldDisplay = source.shouldDisplay
+        shouldPrint = source.shouldPrint
+    }
+
     required init?(coder: NSCoder) {
         fragment = nil
         captureRotation = 0

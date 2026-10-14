@@ -127,7 +127,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let showNavigationPane = true
     // All existing commands resolve through the active canvas, not a second controller.
     var pdfView = MarkupPDFView(frame: .zero)
-    let pdfPaneSplitView = NSSplitView(frame: .zero)
+    let pdfPaneSplitView = PDFPaneSplitView(frame: .zero)
     var secondaryPDFView: MarkupPDFView?
 
     func configurePaneActivation(_ pane: MarkupPDFView) {
@@ -149,7 +149,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func activatePDFPane(_ pane: MarkupPDFView) {
-        guard pane !== pdfView, pdfPaneSplitView.arrangedSubviews.contains(where: { $0 === pane }), !isPDFProcessingBusy else { return }
+        guard pane !== pdfView,
+              pdfPaneSplitView.arrangedSubviews.contains(where: { ($0 as? PDFPaneContainerView)?.pdfView === pane }),
+              !isPDFProcessingBusy else { return }
         let previous = pdfView
         previous.rectangleMarkup.finishTextEditing()
         previous.rectangleMarkup.cancelGesture()
@@ -157,8 +159,21 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pane.toolMode = previous.toolMode
         pane.polygonVertexEditModeEnabled = previous.polygonVertexEditModeEnabled
         synchronizePDFPaneSettings(pane)
+        let canonical = previous.document
+        let incomingState = pane.captureTabViewState()
+        let outgoingState = previous.captureTabViewState()
+        // Only the active canvas attaches to the editing document. The inactive
+        // canvas owns detached page/annotation instances, never live edit objects.
+        previous.document = nil
+        pane.document = canonical
+        if let incomingState { _ = pane.restoreTabViewState(incomingState) }
+        pane.layoutDocumentView()
+        pane.layoutSubtreeIfNeeded()
         pdfView = pane
         secondaryPDFView = previous
+        if let canonical, let outgoingState {
+            installSplitPresentation(on: previous, from: canonical, state: outgoingState)
+        }
         // One session owns dirty state, source stamps, layers, and undo across both views.
         pane.rectangleMarkup.install(on: pane)
         pane.rectangleMarkup.refresh(presentationChanged: false)
@@ -180,7 +195,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let inheritedScale = pdfView.scaleFactor
         // Assign inherited PDFKit document directly: do not bind/scan/reopen a second session.
         pane.rectangleMarkup = pdfView.rectangleMarkup
-        pane.document = document
         pane.displayMode = pdfView.displayMode
         pane.displayDirection = pdfView.displayDirection
         pane.displayBox = pdfView.displayBox
@@ -209,8 +223,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfView.snapshotViewportTilesEnabled = false
         pane.snapshotViewportTilesEnabled = false
         pdfView.updateSnapshotViewportTiles()
+        if let state { installSplitPresentation(on: pane, from: document, state: state) }
         secondaryPDFView = pane
-        pdfPaneSplitView.addArrangedSubview(pane)
+        pdfPaneSplitView.addArrangedSubview(PDFPaneContainerView(pdfView: pane))
         pdfPaneSplitView.adjustSubviews()
         pdfPaneSplitView.setPosition(pdfPaneSplitView.bounds.width / 2, ofDividerAt: 0)
         if let state { _ = pane.restoreTabViewState(state) }
@@ -223,15 +238,63 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         updatePDFPaneFocus()
     }
 
+    private func installSplitPresentation(on pane: MarkupPDFView, from document: PDFDocument,
+                                          state: MarkupPDFView.TabViewState) {
+        guard let source = document.page(at: state.current.pageIndex),
+              let copiedPage = source.copy() as? PDFPage else { return }
+        // Build the generation off-view. Native annotations are copied by PDFKit;
+        // custom drawing classes need their typed renderer and immutable payload.
+        for annotation in copiedPage.annotations { copiedPage.removeAnnotation(annotation) }
+        for original in source.annotations where !(original is SnapshotViewportTileAnnotation) {
+            let copy: PDFAnnotation?
+            if let snapshot = original as? DrawbridgeSnapshotAnnotation {
+                copy = snapshot.splitPresentationCopy()
+            } else if original is DrawbridgeShapeAnnotation || original is DrawbridgePolygonAnnotation || original is DrawbridgeMeasuredPathAnnotation,
+                      let record = RectangleMarkupRecord.capture(annotation: original, pageIndex: state.current.pageIndex) {
+                copy = try? record.clipboardAnnotation(contents: original.contents)
+            } else {
+                copy = original.copy() as? PDFAnnotation
+            }
+            guard let copy else { continue }
+            for (rawKey, value) in original.annotationKeyValues {
+                guard let key = rawKey as? String, key != "P", key != "/P" else { continue }
+                copy.setValue(value, forAnnotationKey: PDFAnnotationKey(rawValue: key))
+            }
+            copy.shouldDisplay = original.shouldDisplay
+            copy.shouldPrint = original.shouldPrint
+            copiedPage.addAnnotation(copy)
+        }
+        let presentation = PDFDocument()
+        // Single-page mode renders only the selected page. Placeholders keep page
+        // indices stable without copying every sheet of a large drawing set.
+        for index in 0..<document.pageCount {
+            presentation.insert(index == state.current.pageIndex ? copiedPage : PDFPage(), at: index)
+        }
+        pane.document = presentation
+        _ = pane.restoreTabViewState(state)
+    }
+
     private func updatePDFPaneFocus() {
+        updatePDFPaneHeaders()
         pdfView.wantsLayer = true
         pdfView.layer?.borderColor = NSColor.controlAccentColor.cgColor
         pdfView.layer?.borderWidth = secondaryPDFView == nil ? 0 : 2
         secondaryPDFView?.layer?.borderWidth = 0
     }
 
+    private func updatePDFPaneHeaders() {
+        for (index, container) in pdfPaneSplitView.arrangedSubviews.enumerated() {
+            guard let container = container as? PDFPaneContainerView else { continue }
+            container.updateHeader(documentName: openDocumentURL?.lastPathComponent ?? "PDF",
+                                   side: index == 0 ? "Left" : "Right",
+                                   active: container.pdfView === pdfView,
+                                   split: secondaryPDFView != nil)
+        }
+    }
+
     func collapsePDFSplit() {
         guard let inactive = secondaryPDFView else { return }
+        let inactiveContainer = inactive.superview
         pdfView.rectangleMarkup.finishTextEditing()
         pdfView.rectangleMarkup.cancelGesture()
         let state = pdfView.captureTabViewState()
@@ -240,8 +303,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         inactive.onWillReplaceDocument = nil
         inactive.retireSplitPane()
         inactive.document = nil
-        pdfPaneSplitView.removeArrangedSubview(inactive)
-        inactive.removeFromSuperview()
+        if let inactiveContainer {
+            pdfPaneSplitView.removeArrangedSubview(inactiveContainer)
+            inactiveContainer.removeFromSuperview()
+        }
         pdfView.snapshotViewportTilesEnabled = true
         updatePDFPaneFocus()
         pdfPaneSplitView.adjustSubviews()
@@ -951,9 +1016,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfPaneSplitView.translatesAutoresizingMaskIntoConstraints = false
         pdfPaneSplitView.isVertical = true
         pdfPaneSplitView.dividerStyle = .thin
-        pdfView.translatesAutoresizingMaskIntoConstraints = true
-        pdfView.autoresizingMask = [.width, .height]
-        pdfPaneSplitView.addArrangedSubview(pdfView)
+        pdfPaneSplitView.addArrangedSubview(PDFPaneContainerView(pdfView: pdfView))
         configurePaneActivation(pdfView)
         pdfCanvasContainer.addSubview(pdfPaneSplitView)
         // Keep the navigation grabber above the PDF view so drag events are never blocked.
@@ -3509,6 +3572,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func invalidateVisibleMarkupRendering(on page: PDFPage) {
+        if let peer = secondaryPDFView, let canonical = pdfView.document,
+           let state = peer.captureTabViewState(), canonical.index(for: page) == state.current.pageIndex {
+            installSplitPresentation(on: peer, from: canonical, state: state)
+        }
         for pane in [pdfView, secondaryPDFView].compactMap({ $0 }) {
             guard pane.visiblePages.contains(where: { $0 === page }) || pane.currentPage === page else { continue }
             let pageBounds = page.bounds(for: pane.displayBox)
@@ -5240,6 +5307,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func updateStatusBar() {
+        updatePDFPaneHeaders()
         refreshFlattenButtonState()
         invertColorsButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
         invertColorsButton.state = pdfView.isColorInverted ? .on : .off
