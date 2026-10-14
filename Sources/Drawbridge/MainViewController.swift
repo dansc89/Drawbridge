@@ -228,10 +228,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfPaneSplitView.addArrangedSubview(PDFPaneContainerView(pdfView: pane))
         pdfPaneSplitView.adjustSubviews()
         pdfPaneSplitView.setPosition(pdfPaneSplitView.bounds.width / 2, ofDividerAt: 0)
+        updatePDFPaneFocus()
+        pdfPaneSplitView.layoutSubtreeIfNeeded()
         if let state { _ = pane.restoreTabViewState(state) }
         pane.autoScales = false
         // PDFKit destination navigation can reset a newly attached pane to 1x.
         pane.scaleFactor = inheritedScale
+        if let state { pane.centerViewport(on: state.viewportCenter) }
         pdfView.autoScales = false
         if let state { _ = pdfView.restoreTabViewState(state) }
         pdfView.autoScales = false

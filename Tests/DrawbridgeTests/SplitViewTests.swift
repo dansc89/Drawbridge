@@ -449,4 +449,30 @@ import XCTest
         }
     }
 
+    func testSplitCreationActivationAndMarkupRefreshPreserveVisiblePageCenter() throws {
+        try fixture { c, w, doc in
+            let left = c.pdfView
+            left.autoScales = false; left.scaleFactor = 2
+            left.centerViewport(on: CGPoint(x: 300, y: 400))
+            let before = try XCTUnwrap(left.captureTabViewState())
+            toggle(c); w.layoutIfNeeded()
+            let right = try XCTUnwrap(c.secondaryPDFView)
+            @MainActor func center(_ pane: MarkupPDFView) throws -> CGPoint { try XCTUnwrap(pane.captureTabViewState()).viewportCenter }
+            for pane in [left, right] {
+                XCTAssertEqual(try center(pane).x, before.viewportCenter.x, accuracy: 1)
+                XCTAssertEqual(try center(pane).y, before.viewportCenter.y, accuracy: 1)
+            }
+            let rightBefore = try center(right)
+            c.activatePDFPane(right)
+            XCTAssertEqual(try center(right).x, rightBefore.x, accuracy: 1)
+            XCTAssertEqual(try center(right).y, rightBefore.y, accuracy: 1)
+            let leftBefore = try center(left)
+            let session = right.rectangleMarkup; session.canEdit = { true }
+            _ = try XCTUnwrap(session.create(on: XCTUnwrap(doc.page(at:1)),bounds:CGRect(x:250,y:350,width:100,height:80),kind:.rectangle))
+            XCTAssertEqual(try center(left).x, leftBefore.x, accuracy: 1)
+            XCTAssertEqual(try center(left).y, leftBefore.y, accuracy: 1)
+            XCTAssertEqual(left.scaleFactor, 2, accuracy: 0.001)
+        }
+    }
+
 }

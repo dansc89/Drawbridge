@@ -353,11 +353,14 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let back: [ViewportHistoryEntry]
         let forward: [ViewportHistoryEntry]
         let autoScales: Bool
+        let viewportCenter: NSPoint
     }
     func captureTabViewState() -> TabViewState? {
         resetNavigationHistoryIfNeeded()
-        guard let current = currentViewportHistoryEntry() else { return nil }
-        return TabViewState(current: current, back: navigationBackStack, forward: navigationForwardStack, autoScales: autoScales)
+        guard let current = currentViewportHistoryEntry(), let page = currentPage else { return nil }
+        let center = convert(NSPoint(x: bounds.midX, y: bounds.midY), to: page)
+        return TabViewState(current: current, back: navigationBackStack, forward: navigationForwardStack,
+                            autoScales: autoScales, viewportCenter: center)
     }
     @discardableResult func restoreTabViewState(_ state: TabViewState) -> Bool {
         resetNavigationHistoryIfNeeded()
@@ -365,7 +368,19 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         navigationBackStack = state.back.filter { $0.pageIndex < (document?.pageCount ?? 0) }
         navigationForwardStack = state.forward.filter { $0.pageIndex < (document?.pageCount ?? 0) }
         autoScales = state.autoScales
+        centerViewport(on: state.viewportCenter)
         return true
+    }
+
+    func centerViewport(on point: NSPoint) {
+        layoutSubtreeIfNeeded()
+        layoutDocumentView()
+        guard let page = currentPage, let clip = contentClipView else { return }
+        let target = clip.convert(convert(point, from: page), from: self)
+        guard target.x.isFinite, target.y.isFinite else { return }
+        let anchor = clip.convert(NSPoint(x: bounds.midX, y: bounds.midY), from: self)
+        scrollContentClipView(to: NSPoint(x: clip.bounds.minX + target.x - anchor.x,
+                                         y: clip.bounds.minY + target.y - anchor.y))
     }
     private var navigationHistoryDocumentID: ObjectIdentifier?
     private var pendingCalloutPage: PDFPage?
@@ -948,6 +963,12 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     @objc private func handlePDFViewportChangedNotification(_ notification: Notification) {
+        if hasRequestedCanvasAccessibility, displayMode == .singlePage,
+           notification.name == .PDFViewDocumentChanged || notification.name == .PDFViewPageChanged {
+            if document == nil { canvasAccessibility.reset() }
+            _ = canvasAccessibility.elements()
+            NSAccessibility.post(element: self, notification: .layoutChanged)
+        }
         if notification.name == .PDFViewDocumentChanged {
             snapshotDetailRefreshWorkItem?.cancel()
             snapshotDetailRefreshGeneration &+= 1
@@ -1254,6 +1275,64 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let selectItem = menu.addItem(withTitle: "Select All Text", action: #selector(selectAll(_:)), keyEquivalent: "")
         selectItem.target = self
         return menu
+    }
+
+    private var hasRequestedCanvasAccessibility = false
+    private lazy var canvasAccessibility = PDFCanvasAccessibility(view: self)
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .scrollArea }
+    override func accessibilityLabel() -> String? { "PDF canvas" }
+    override func accessibilityChildren() -> [Any]? {
+        guard displayMode == .singlePage else { return super.accessibilityChildren() }
+        hasRequestedCanvasAccessibility = true
+        return canvasAccessibility.elements()
+    }
+
+    @objc nonisolated func accessibilityPerformScrollUp() -> Bool { scheduleAccessibleScroll(horizontal: 0, vertical: -1) }
+    @objc nonisolated func accessibilityPerformScrollDown() -> Bool { scheduleAccessibleScroll(horizontal: 0, vertical: 1) }
+    @objc nonisolated func accessibilityPerformScrollLeft() -> Bool { scheduleAccessibleScroll(horizontal: -1, vertical: 0) }
+    @objc nonisolated func accessibilityPerformScrollRight() -> Bool { scheduleAccessibleScroll(horizontal: 1, vertical: 0) }
+
+    private nonisolated func scheduleAccessibleScroll(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+        Task { @MainActor [weak self] in _ = self?.scrollAccessible(horizontal: horizontal, vertical: vertical) }
+        return true
+    }
+
+    private func scrollAccessible(horizontal: CGFloat, vertical: CGFloat) -> Bool {
+        onActivatePane?()
+        guard let clip = contentClipView, document != nil else { return false }
+        var origin = clip.bounds.origin
+        origin.x += horizontal * clip.bounds.width * 0.8
+        origin.y += vertical * clip.bounds.height * 0.8 * (clip.documentView?.isFlipped == true ? 1 : -1)
+        scrollContentClipView(to: origin)
+        onViewportChanged?()
+        return true
+    }
+
+    func activateAccessibleAnnotation(_ displayed: PDFAnnotation) -> Bool {
+        let identity = RectangleMarkupRecord.identity(displayed)
+        let bounds = displayed.bounds
+        let type = displayed.type
+        let contents = displayed.contents
+        onActivatePane?()
+        guard let page = currentPage else { return false }
+        let annotation = page.annotations.first {
+            if let identity { return RectangleMarkupRecord.identity($0) == identity }
+            return $0.bounds == bounds && $0.type == type && $0.contents == contents
+        }
+        guard let annotation, annotation.shouldDisplay, rectangleMarkup.layerIsVisible(annotation) else { return false }
+        if annotation.type == "Link" {
+            if followLinkIfPossible(annotation) { return true }
+            if let action = annotation.action as? PDFActionURL, let url = action.url {
+                requestExternalLink(url)
+                return true
+            }
+            return false
+        }
+        guard rectangleMarkup.canAssignLayer(annotation) else { return false }
+        rectangleMarkup.selectFromList(annotation)
+        return true
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
