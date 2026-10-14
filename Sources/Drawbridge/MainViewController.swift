@@ -241,6 +241,35 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         updatePDFPaneFocus()
     }
 
+    // Source identities for every index in the current detached generation.
+    // Keeping removed sheets alive also makes undo remapping unambiguous.
+    private var splitPresentationSourcePages: [PDFPage] = []
+
+    private func refreshSplitPresentationAfterStructureChange(document: PDFDocument) {
+        guard let peer = secondaryPDFView, let state = peer.captureTabViewState(),
+              document.pageCount > 0 else { return }
+        func remap(_ entry: MarkupPDFView.ViewportHistoryEntry, fallback: Bool) -> MarkupPDFView.ViewportHistoryEntry? {
+            let source = splitPresentationSourcePages.indices.contains(entry.pageIndex) ? splitPresentationSourcePages[entry.pageIndex] : nil
+            let survivingIndex = source.map { document.index(for: $0) }
+            let index: Int
+            if let survivingIndex, survivingIndex >= 0, survivingIndex < document.pageCount {
+                index = survivingIndex
+            } else {
+                guard fallback else { return nil }
+                // Removed sheet: use its old slot (next sheet), or the final
+                // preceding sheet when that slot is beyond the new end.
+                index = min(max(entry.pageIndex, 0), document.pageCount - 1)
+            }
+            return .init(pageIndex: index, point: entry.point, scale: entry.scale)
+        }
+        guard let current = remap(state.current, fallback: true) else { return }
+        let mapped = MarkupPDFView.TabViewState(current: current,
+            back: state.back.compactMap { remap($0, fallback: false) },
+            forward: state.forward.compactMap { remap($0, fallback: false) },
+            autoScales: state.autoScales, viewportCenter: state.viewportCenter)
+        installSplitPresentation(on: peer, from: document, state: mapped)
+    }
+
     private func installSplitPresentation(on pane: MarkupPDFView, from document: PDFDocument,
                                           state: MarkupPDFView.TabViewState) {
         guard let source = document.page(at: state.current.pageIndex),
@@ -273,6 +302,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         for index in 0..<document.pageCount {
             presentation.insert(index == state.current.pageIndex ? copiedPage : PDFPage(), at: index)
         }
+        splitPresentationSourcePages = (0..<document.pageCount).compactMap { document.page(at: $0) }
         pane.document = presentation
         _ = pane.restoreTabViewState(state)
     }
@@ -302,6 +332,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfView.rectangleMarkup.cancelGesture()
         let state = pdfView.captureTabViewState()
         secondaryPDFView = nil
+        splitPresentationSourcePages = []
         inactive.onActivatePane = nil
         inactive.onWillReplaceDocument = nil
         inactive.retireSplitPane()
@@ -1678,6 +1709,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func refreshAfterPageStructureChange(document: PDFDocument, preferredIndex: Int) {
+        refreshSplitPresentationAfterStructureChange(document: document)
         pdfView.rectangleMarkup.cancelGesture()
         pdfView.rectangleMarkup.ensureLayerCatalogMarker()
         pdfView.rectangleMarkup.applyLayerVisibility()

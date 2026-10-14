@@ -26,6 +26,62 @@ import XCTest
         defer { w.makeFirstResponder(nil); w.contentViewController = nil }
         try body(c, w, doc)
     }
+    func testDeletionRemapsDetachedPeerBySheetIdentityAcrossUndoRedo() throws {
+        for displayedIndex in [3, 5] {
+            for deleteDisplayed in [false, true] {
+                for activateBeforeUndo in [false, true] {
+                    try fixture { c, w, doc in
+                        let source = FileManager.default.temporaryDirectory.appendingPathComponent("split-delete-\(UUID().uuidString).pdf")
+                        XCTAssertTrue(doc.write(to: source))
+                        defer { try? FileManager.default.removeItem(at: source) }
+                        c.pdfView.rectangleMarkup.rememberSource(source)
+                        let originals = try (0..<6).map { try XCTUnwrap(doc.page(at: $0)) }
+                        // Distinct sheet metadata proves detached content, not only its index.
+                        for (index, page) in originals.enumerated() {
+                            let marker = PDFAnnotation(bounds: CGRect(x: 200, y: 300, width: 100, height: 100), forType: .square, withProperties: nil)
+                            marker.contents = "sheet-\(index)"; page.addAnnotation(marker)
+                        }
+                        c.pdfView.go(to: originals[displayedIndex]); toggle(c); w.layoutIfNeeded()
+                        let peer = try XCTUnwrap(c.secondaryPDFView)
+                        c.pdfView.go(to: originals[0])
+                        let undo = try XCTUnwrap(w.undoManager)
+                        undo.removeAllActions(); undo.beginUndoGrouping()
+                        let deletedIndex = deleteDisplayed ? displayedIndex : 1
+                        try c.deletePages(at: IndexSet(integer: deletedIndex))
+                        undo.endUndoGrouping()
+                        let expected = deleteDisplayed ? originals[min(displayedIndex + 1, 5) == displayedIndex ? displayedIndex - 1 : displayedIndex + 1] : originals[displayedIndex]
+                        XCTAssertEqual(peer.document?.pageCount, 5)
+                        XCTAssertEqual(peer.currentPage?.annotations.first { $0.contents?.hasPrefix("sheet-") == true }?.contents,
+                                       expected.annotations.first?.contents)
+                        XCTAssertEqual(peer.document?.index(for: try XCTUnwrap(peer.currentPage)), doc.index(for: expected))
+                        if activateBeforeUndo {
+                            c.activatePDFPane(peer)
+                            XCTAssertTrue(peer.currentPage === expected)
+                        }
+                        undo.undo()
+                        XCTAssertEqual(doc.pageCount, 6)
+                        if !activateBeforeUndo {
+                            XCTAssertEqual(peer.document?.pageCount, 6)
+                            c.activatePDFPane(peer)
+                            XCTAssertTrue(peer.currentPage === expected)
+                        }
+                        undo.redo()
+                        XCTAssertEqual(doc.pageCount, 5)
+                        let inactive = try XCTUnwrap(c.secondaryPDFView)
+                        XCTAssertEqual(inactive.document?.pageCount, 5)
+                        c.activatePDFPane(inactive)
+                        XCTAssertTrue(inactive.document === doc)
+                        XCTAssertNotNil(originals.first { $0 === inactive.currentPage })
+                        undo.undo()
+                        XCTAssertEqual(doc.pageCount, 6)
+                        XCTAssertEqual(c.secondaryPDFView?.document?.pageCount, 6)
+                        XCTAssertFalse(w.isVisible)
+                    }
+                }
+            }
+        }
+    }
+
     func testSameDocumentIndependentNavigationZoomAndCollapseRetainsActiveView() throws {
         try fixture { c, w, doc in
             let left = c.pdfView

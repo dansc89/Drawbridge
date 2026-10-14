@@ -96,7 +96,13 @@ final class PDFCanvasAccessibility {
 private final class PDFCanvasMarkupElement: NSAccessibilityElement {
     private nonisolated let press: @MainActor @Sendable () -> Void
     init(view: MarkupPDFView, annotation: PDFAnnotation) {
-        press = { [weak view] in _ = view?.activateAccessibleAnnotation(annotation) }
+        let document = view.document
+        let page = view.currentPage
+        press = { [weak view, weak document, weak page] in
+            guard let view, let document, let page,
+                  view.document === document, view.currentPage === page else { return }
+            _ = view.activateAccessibleAnnotation(annotation)
+        }
         super.init()
     }
     override func accessibilityPerformPress() -> Bool {

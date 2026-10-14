@@ -1311,6 +1311,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     func activateAccessibleAnnotation(_ displayed: PDFAnnotation) -> Bool {
+        // Resolve only within the presentation that supplied this annotation.
+        // Activation may deliberately replace that presentation with the canonical
+        // page, but a retained element from another sheet must not activate it.
+        guard let displayedPage = displayed.page, displayedPage === currentPage,
+              displayedPage.document === document else { return false }
         let identity = RectangleMarkupRecord.identity(displayed)
         let bounds = displayed.bounds
         let type = displayed.type

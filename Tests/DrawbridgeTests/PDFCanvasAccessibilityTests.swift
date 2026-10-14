@@ -75,6 +75,39 @@ final class PDFCanvasAccessibilityTests: XCTestCase {
         XCTAssertTrue(peer.rectangleMarkup.selected === original, "Accessibility must select the editing object, not its inactive display copy")
     }
 
+    func testRetainedMarkupPressRejectsNavigationAndDocumentReplacement() async throws {
+        _ = NSApplication.shared
+        for replaceDocument in [false, true] {
+            let doc = try document(pages: 2)
+            let replacement = replaceDocument ? try document(pages: 2) : doc
+            let origin = try XCTUnwrap(doc.page(at: 0))
+            let destination = try XCTUnwrap(replacement.page(at: replaceDocument ? 0 : 1))
+            let first = PDFAnnotation(bounds: CGRect(x: 200, y: 300, width: 100, height: 100), forType: .square, withProperties: nil)
+            let second = PDFAnnotation(bounds: first.bounds, forType: .square, withProperties: nil)
+            first.contents = "same"; second.contents = "same"
+            origin.addAnnotation(first); destination.addAnnotation(second)
+            let view = MarkupPDFView(frame: CGRect(x: 0, y: 0, width: 900, height: 700))
+            let window = NSWindow(contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: false)
+            window.contentView = view
+            defer { window.contentView = nil }
+            view.setMarkupDocument(doc); view.go(to: origin); window.layoutIfNeeded()
+            let retained = try XCTUnwrap(view.accessibilityChildren()?.compactMap { $0 as? NSAccessibilityElement }.first { $0.accessibilityRole() == .layoutItem })
+            if replaceDocument { view.setMarkupDocument(replacement) }
+            view.go(to: destination)
+            XCTAssertTrue(retained.accessibilityPerformPress())
+            // The press schedules main-actor work; assert only after that task runs.
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertNil(view.rectangleMarkup.selected, "A retained element must not select a matching annotation on another page/document")
+            XCTAssertFalse(view.rectangleMarkup.selected === first)
+            XCTAssertFalse(view.rectangleMarkup.selected === second)
+            let fresh = try XCTUnwrap(view.accessibilityChildren()?.compactMap { $0 as? NSAccessibilityElement }.first { $0.accessibilityRole() == .layoutItem })
+            XCTAssertTrue(fresh.accessibilityPerformPress())
+            try await Task.sleep(nanoseconds: 50_000_000)
+            XCTAssertTrue(view.rectangleMarkup.selected === second)
+            XCTAssertFalse(window.isVisible)
+        }
+    }
+
     func testAccessibleImportedOverlapRetainsTheChosenAnnotation() throws {
         _ = NSApplication.shared
         let doc = try document(pages: 3)
