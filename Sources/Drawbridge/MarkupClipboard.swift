@@ -115,6 +115,7 @@ extension RectangleMarkupRecord {
                 let color = fill.map { NSColor(deviceRed: $0[0], green: $0[1], blue: $0[2], alpha: fillOpacity) }
                 RectangleMarkupRecord.setPolygonFill(color, on: annotation)
                 annotation.setValue(fillOpacity, forAnnotationKey: MarkupStyle.fillOpacityKey)
+                DraftingHatch.apply(hatch, to: annotation)
             }
             if let start, let end {
                 annotation.startPoint = CGPoint(x: start.x - bounds.minX, y: start.y - bounds.minY)

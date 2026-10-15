@@ -84,6 +84,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
     var linePattern: MarkupLinePattern = .solid
     var strokeOpacity: Double = 1
     var fillOpacity: Double = 1
+    var hatch: DraftingHatch? = nil
     var layerID: String? = nil
     var layerCatalog: String? = nil
     var snapshotStyle = SnapshotStyle()
@@ -206,6 +207,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
                 record.linePattern = MarkupStyle.pattern(annotation)
                 record.strokeOpacity = MarkupStyle.strokeOpacity(annotation)
                 record.fillOpacity = MarkupStyle.fillOpacity(annotation)
+                record.hatch = DraftingHatch.read(annotation)
                 if ["Square", "Circle", "Polygon"].contains(annotation.type ?? ""), let rgb = polygonFill(annotation)?.usingColorSpace(.deviceRGB) { record.fill = [Double(rgb.redComponent), Double(rgb.greenComponent), Double(rgb.blueComponent)] }
                 record.measurement = MeasurementMetadata.measurement(annotation)
                 record.pageScale = MeasurementMetadata.isPageScaleMetadata(annotation) ? (annotation.page.flatMap { MeasurementMetadata.scale(on: $0) } ?? MeasurementMetadata.pageScale(annotation)) : nil
@@ -233,6 +235,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
 
     var isValid: Bool {
         id.hasPrefix(Self.prefix) && pageIndex >= 0 &&
+        (hatch == nil || (hatch!.isValid && [.rectangle, .ellipse, .polygon].contains(kind))) &&
         (inkTool == nil || (kind == .polyline && ["pen", "polyline"].contains(inkTool!))) &&
         (kind != .snapshot || (snapshotStyle.isValid && snapshotData != nil && SnapshotPayload(data: snapshotData!).page != nil)) &&
         (pageScale == nil || (kind == .rectangle && pageScale!.isValid && measurement == nil)) &&
@@ -360,6 +363,7 @@ final class RectangleMarkupController {
     var isEditingText: Bool { inlineText != nil }
     var fontSize: CGFloat = 18
     var fillColor: NSColor? = .orange
+    var hatchStyle: DraftingHatch? = nil
     var linePattern: MarkupLinePattern = .solid
     var strokeOpacity: Double = 1
     var strokeColor: NSColor = .red
@@ -999,6 +1003,7 @@ final class RectangleMarkupController {
         MarkupStyle.apply(pattern: linePattern, opacity: strokeOpacity, to: annotation)
         if kind == .polyline || kind == .polygon { RectangleMarkupRecord.setVertices(vertices,on:annotation) }
         if kind == .polygon || kind == .rectangle || kind == .ellipse { RectangleMarkupRecord.setPolygonFill(fillColor,on:annotation) }
+        if kind == .polygon || kind == .rectangle || kind == .ellipse { DraftingHatch.apply(hatchStyle, to: annotation) }
         if let measurement { annotation.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey); MeasurementMetadata.updateLabel(annotation) }
         annotation.shouldDisplay = true; annotation.shouldPrint = true
         assignNewMarkupLayer(annotation)
@@ -1152,6 +1157,22 @@ final class RectangleMarkupController {
         }
         undo.endUndoGrouping()
         selected = nil; refresh()
+    }
+
+    func hatchSelected(_ style: DraftingHatch?) {
+        guard canEdit(), style?.isValid ?? true else { return }
+        guard let annotation = selected else { hatchStyle = style; refresh(); return }
+        guard RectangleMarkupRecord.owns(annotation), ["Square", "Circle", "Polygon"].contains(annotation.type ?? ""),
+              !annotation.isReadOnly, !layerIsLocked(annotation), let page = annotation.page else { return }
+        setHatch(style, on: annotation, page: page)
+    }
+    private func setHatch(_ style: DraftingHatch?, on annotation: PDFAnnotation, page: PDFPage) {
+        guard page.document === boundDocument else { return }
+        let old = DraftingHatch.read(annotation)
+        guard old != style else { return }
+        undo.registerUndo(withTarget: self) { target in target.setHatch(old, on: annotation, page: page) }
+        undo.setActionName("Hatch Appearance")
+        DraftingHatch.apply(style, to: annotation); selected = annotation; changed(page)
     }
 
     func fillSelected(_ color: NSColor?) {
@@ -1521,7 +1542,12 @@ final class DrawbridgeShapeAnnotation: PDFAnnotation {
         context.setStrokeColor(color.cgColor)
         context.setLineWidth(width); context.setLineJoin(.round)
         context.setLineDash(phase: 0, lengths: MarkupStyle.pattern(self).dash(width: width).map { CGFloat($0) })
-        if let fill = RectangleMarkupRecord.polygonFill(self) { context.setFillColor(fill.cgColor); context.drawPath(using: .fillStroke) }
+        if let hatch = DraftingHatch.read(self), hatch.preset != .solid, let path = context.path {
+            context.beginPath()
+            hatch.draw(path: path, bounds: bounds.offsetBy(dx: -origin.x, dy: -origin.y), opacity: MarkupStyle.fillOpacity(self), in: context)
+            context.addPath(path); context.strokePath()
+        }
+        else if let fill = RectangleMarkupRecord.polygonFill(self) { context.setFillColor(fill.cgColor); context.drawPath(using: .fillStroke) }
         else { context.strokePath() }
     }
 }
@@ -1539,7 +1565,12 @@ final class DrawbridgePolygonAnnotation: PDFAnnotation {
         context.closePath(); context.setStrokeColor(color.cgColor)
         context.setLineWidth(border?.lineWidth ?? 2); context.setLineJoin(.round)
         context.setLineDash(phase: 0, lengths: MarkupStyle.pattern(self).dash(width: border?.lineWidth ?? 2).map { CGFloat($0) })
-        if let fill = RectangleMarkupRecord.polygonFill(self) { context.setFillColor(fill.cgColor); context.drawPath(using:.fillStroke) }
+        if let hatch = DraftingHatch.read(self), hatch.preset != .solid, let path = context.path {
+            context.beginPath()
+            hatch.draw(path: path, bounds: bounds.offsetBy(dx: -origin.x, dy: -origin.y), opacity: MarkupStyle.fillOpacity(self), in: context)
+            context.addPath(path); context.strokePath()
+        }
+        else if let fill = RectangleMarkupRecord.polygonFill(self) { context.setFillColor(fill.cgColor); context.drawPath(using:.fillStroke) }
         else { context.strokePath() }
         MeasurementAppearance.draw(self, box: box, context: context)
     }

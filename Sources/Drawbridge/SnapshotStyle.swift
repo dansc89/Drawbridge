@@ -5,7 +5,20 @@ import CryptoKit
 struct SnapshotStyle: Codable, Equatable, Sendable {
     enum Filter: String, Codable, CaseIterable, Sendable {
         case original, grayscale, colorize, invert
-        var title: String { switch self { case .original: return "Original"; case .grayscale: return "Grayscale"; case .colorize: return "Change Color"; case .invert: return "Invert" } }
+        case blackAndWhite, sepia, brighten, darken, increaseContrast
+        var title: String {
+            switch self {
+            case .original: "Original"
+            case .grayscale: "Grayscale"
+            case .colorize: "Change Color"
+            case .invert: "Invert"
+            case .blackAndWhite: "Black & White"
+            case .sepia: "Sepia"
+            case .brighten: "Brighten"
+            case .darken: "Darken"
+            case .increaseContrast: "Increase Contrast"
+            }
+        }
     }
     static let key = PDFAnnotationKey(rawValue: "DrawbridgeSnapshotStyle")
     var overlay = false
@@ -49,12 +62,20 @@ enum SnapshotFilterRenderer {
                 let alpha = Double(p[i+3]) / 255
                 if alpha == 0 { continue }
                 let luminance = min(1, (0.2126 * Double(p[i]) + 0.7152 * Double(p[i+1]) + 0.0722 * Double(p[i+2])) / (255 * alpha))
+                let rgb = (0..<3).map { Double(p[i+$0]) / (255 * alpha) }
                 for c in 0..<3 {
                     let value: Double
                     switch style.filter {
-                    case .original: value = Double(p[i+c]) / (255 * alpha)
+                    case .original: value = rgb[c]
                     case .grayscale: value = luminance
-                    case .invert: value = 1 - Double(p[i+c]) / (255 * alpha)
+                    case .blackAndWhite: value = luminance >= 0.5 ? 1 : 0
+                    case .sepia:
+                        let weights = [[0.393, 0.769, 0.189], [0.349, 0.686, 0.168], [0.272, 0.534, 0.131]]
+                        value = zip(rgb, weights[c]).reduce(0) { $0 + $1.0 * $1.1 }
+                    case .brighten: value = rgb[c] + 0.2
+                    case .darken: value = rgb[c] - 0.2
+                    case .increaseContrast: value = (rgb[c] - 0.5) * 1.5 + 0.5
+                    case .invert: value = 1 - rgb[c]
                     case .colorize: value = luminance + (1-luminance) * style.color[c]
                     }
                     p[i+c] = UInt8(min(255, max(0, (value * alpha * 255).rounded())))

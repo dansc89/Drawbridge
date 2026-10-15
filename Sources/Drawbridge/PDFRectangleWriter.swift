@@ -567,6 +567,7 @@ enum PDFRectangleWriter {
                 annotation["/DrawbridgeLinePattern"] = "u:" + record.linePattern.rawValue
                 annotation["/DrawbridgeStrokeOpacity"] = record.strokeOpacity
                 annotation["/DrawbridgeFillOpacity"] = record.fillOpacity
+                if let hatch = record.hatch { annotation["/DrawbridgeHatchStyle"] = "u:" + hatch.json }
                 annotation["/BS"] = ["/W": record.lineWidth, "/S": record.linePattern == .solid ? "/S" : "/D", "/D": record.linePattern.dash(width: CGFloat(record.lineWidth))]
                 if record.kind == .snapshot, let data = record.snapshotData {
                     let payloadRef: String
@@ -633,6 +634,11 @@ enum PDFRectangleWriter {
                 let isDimension = record.measurement?.isDistance(points: record.vertices) == true
                 var resources: [String: Any] = ["/ExtGState": ["/MarkupGS": ["/Type": "/ExtGState", "/CA": record.strokeOpacity, "/ca": record.kind == .text || isDimension ? record.strokeOpacity : record.fillOpacity]]]
                 if record.measurement != nil { resources["/Font"] = ["/MeasureFont": ["/Type": "/Font", "/Subtype": "/Type1", "/BaseFont": "/Helvetica"]] }
+                if record.hatch != nil {
+                    var states = resources["/ExtGState"] as! [String: Any]
+                    states["/HatchGS"] = ["/Type": "/ExtGState", "/CA": record.fillOpacity, "/ca": record.fillOpacity]
+                    resources["/ExtGState"] = states
+                }
                 objects["obj:\(appearanceRef)"] = ["stream": ["dict": ["/Type": "/XObject", "/Subtype": "/Form", "/BBox": [0,0,b.width,b.height], "/Resources": resources, "/DrawbridgeRectangleAppearance": true], "data": Data(drawing.utf8).base64EncodedString()]]
                 objects["obj:\(annotationRef)"] = ["value": annotation]
                 entries.append(annotationRef)
@@ -691,6 +697,9 @@ enum PDFRectangleWriter {
         }
         if r.kind == .polygon { path += " h" }
         if [.rectangle, .ellipse, .polygon].contains(r.kind) {
+            if let hatch = r.hatch, hatch.preset != .solid {
+                return hatch.pdf(path: path, size: r.bounds.size) + "q \(style) \(r.red) \(r.green) \(r.blue) RG \(r.lineWidth) w 1 j \(path) S Q\n" + MeasurementAppearance.pdf(r)
+            }
             if let fill = r.fill { return "q \(style) \(r.red) \(r.green) \(r.blue) RG \(fill[0]) \(fill[1]) \(fill[2]) rg \(r.lineWidth) w 1 j \(path) B Q\n" + MeasurementAppearance.pdf(r) }
         }
         return "q \(style) \(r.red) \(r.green) \(r.blue) RG \(r.lineWidth) w 1 J 1 j \(path) S Q\n" + MeasurementAppearance.pdf(r)
@@ -717,6 +726,7 @@ enum PDFRectangleWriter {
                       value["/DrawbridgeStrokeOpacity"] as? Double == expected.strokeOpacity,
                       value["/DrawbridgeFillOpacity"] as? Double == expected.fillOpacity else { return false }
                 if value["/DrawbridgeLayerID"] as? String != expected.layerID.map({ "u:" + $0 }) || value["/DrawbridgeLayerCatalog"] as? String != expected.layerCatalog.map({ "u:" + $0 }) { return false }
+                if value["/DrawbridgeHatchStyle"] as? String != expected.hatch.map({ "u:" + $0.json }) { return false }
                 if let id = expected.layerID, value["/OC"] as? String != PDFMarkupLayersPatch.references(objects)[id] { return false }
                 if expected.layerCatalog != nil && value["/F"] as? Int != 98 { return false }
                 if let tool = expected.inkTool, value["/DrawbridgeInkTool"] as? String != "u:" + tool { return false }

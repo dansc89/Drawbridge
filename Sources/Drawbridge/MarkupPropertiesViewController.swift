@@ -28,6 +28,15 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
     let editingContext = NSTextField(labelWithString: "New markup defaults")
     let stroke = NSColorWell()
     let fill = NSColorWell()
+    let hatchPattern = NSPopUpButton()
+    let hatchForeground = NSColorWell()
+    let hatchBackground = NSColorWell()
+    let hatchTransparent = NSButton(checkboxWithTitle: "Transparent background", target: nil, action: nil)
+    let hatchScale = NSTextField()
+    let hatchAngle = NSTextField()
+    let hatchWeight = NSTextField()
+    private var hatchRows = NSStackView()
+    private var hatchDetailRows = NSStackView()
     let filled = NSButton(checkboxWithTitle: "Fill", target: nil, action: nil)
     let weight = NSTextField()
     let fontSize = NSTextField()
@@ -73,6 +82,26 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         weightRow = row("Line weight (pt)", weight)
         fontRow = row("Font size (pt)", fontSize)
         fillRow = NSStackView(views: [filled, fill]); fillRow.spacing = 12
+        hatchPattern.addItems(withTitles: DraftingHatch.Preset.allCases.map(\.title))
+        hatchPattern.setAccessibilityLabel("Hatch pattern")
+        hatchForeground.setAccessibilityLabel("Hatch foreground color")
+        hatchBackground.setAccessibilityLabel("Hatch background color")
+        hatchTransparent.setAccessibilityLabel("Transparent hatch background")
+        for well in [hatchForeground, hatchBackground] { well.widthAnchor.constraint(equalToConstant: 85).isActive = true }
+        for (field, minimum, maximum, label) in [(hatchScale, 0.25, 20.0, "Hatch scale"), (hatchAngle, -360.0, 360.0, "Hatch angle degrees"), (hatchWeight, 0.1, 12.0, "Hatch line weight points")] {
+            let formatter = NumberFormatter(); formatter.minimum = NSNumber(value: minimum); formatter.maximum = NSNumber(value: maximum)
+            formatter.maximumFractionDigits = 2; formatter.allowsFloats = true
+            field.formatter = formatter; field.setAccessibilityLabel(label)
+            field.widthAnchor.constraint(equalToConstant: 85).isActive = true
+            field.cell?.sendsActionOnEndEditing = true; field.delegate = self
+        }
+        for control in [hatchPattern, hatchForeground, hatchBackground, hatchTransparent, hatchScale, hatchAngle, hatchWeight] as [NSControl] {
+            control.target = self; control.action = #selector(changeHatch(_:))
+        }
+        hatchDetailRows = NSStackView(views: [row("Foreground", hatchForeground), hatchTransparent, row("Background", hatchBackground), row("Scale", hatchScale), row("Angle (°)", hatchAngle), row("Weight (pt)", hatchWeight)])
+        hatchDetailRows.orientation = .vertical; hatchDetailRows.alignment = .leading; hatchDetailRows.spacing = 10
+        hatchRows = NSStackView(views: [row("Fill pattern", hatchPattern), hatchDetailRows])
+        hatchRows.orientation = .vertical; hatchRows.alignment = .leading; hatchRows.spacing = 10
         linePattern.widthAnchor.constraint(equalToConstant: 108).isActive = true
         linePattern.addItems(withTitles: MarkupLinePattern.allCases.map(\.title))
         linePattern.target = self; linePattern.action = #selector(changeAppearance(_:))
@@ -112,7 +141,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         setAsDefault.target = self; setAsDefault.action = #selector(saveDefault(_:))
         setAsDefault.toolTip = "Remember this appearance for future markups made with this tool."
         defaultStatus.font = .systemFont(ofSize: 11); defaultStatus.textColor = .secondaryLabelColor
-        propertiesContent = NSStackView(views: [membership, editingContext, captureHint, snapshotRows, strokeRow, weightRow, patternRow, strokeOpacityRow, fontRow, fillRow, fillOpacityRow, note, setAsDefault, defaultStatus])
+        propertiesContent = NSStackView(views: [membership, editingContext, captureHint, snapshotRows, strokeRow, weightRow, patternRow, strokeOpacityRow, fontRow, hatchRows, fillRow, fillOpacityRow, note, setAsDefault, defaultStatus])
         propertiesContent.orientation = .vertical; propertiesContent.alignment = .leading; propertiesContent.spacing = 10
         membership.target = self; membership.action = #selector(changeMembership(_:)); membership.setAccessibilityLabel("Assigned markup layer")
         let separator = NSBox(); separator.boxType = .separator
@@ -192,6 +221,19 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         patternRow.isHidden = text || snapshot || capturing; fillOpacityRow.isHidden = !closedShape
         weightRow.isHidden = text || snapshot || capturing; fontRow.isHidden = !text; fillRow.isHidden = !closedShape
         for control in [stroke, weight, fontSize, filled, linePattern, strokeOpacity] as [NSControl] { control.isEnabled = enabled }
+        let hatch = selection.flatMap(DraftingHatch.read) ?? (selection == nil ? session.hatchStyle : nil)
+        let patterned = hatch != nil && hatch?.preset != .solid
+        hatchRows.isHidden = !closedShape || snapshot || capturing
+        hatchDetailRows.isHidden = !patterned
+        hatchPattern.selectItem(at: DraftingHatch.Preset.allCases.firstIndex(of: hatch?.preset ?? .solid) ?? 0)
+        let appearance = hatch ?? DraftingHatch()
+        hatchForeground.color = NSColor(deviceRed: appearance.foreground[0], green: appearance.foreground[1], blue: appearance.foreground[2], alpha: 1)
+        if let background = appearance.background { hatchBackground.color = NSColor(deviceRed: background[0], green: background[1], blue: background[2], alpha: 1) }
+        hatchTransparent.state = appearance.background == nil ? .on : .off
+        hatchScale.doubleValue = appearance.scale; hatchAngle.doubleValue = appearance.angle; hatchWeight.doubleValue = appearance.lineWidth
+        for control in [hatchPattern, hatchForeground, hatchBackground, hatchTransparent, hatchScale, hatchAngle, hatchWeight] as [NSControl] { control.isEnabled = enabled && closedShape }
+        hatchBackground.isEnabled = enabled && appearance.background != nil
+        fillRow.isHidden = !closedShape || patterned; fillOpacityRow.isHidden = !closedShape || patterned
         fill.isEnabled = enabled && color != nil
         fillOpacity.isEnabled = enabled && color != nil
     }
@@ -224,6 +266,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         if let field = notification.object as? NSTextField { changeNumber(field) }
     }
     @objc func changeNumber(_ sender: NSTextField) {
+        if sender === hatchScale || sender === hatchAngle || sender === hatchWeight { changeHatch(sender); return }
         guard let session, let value = sender.objectValue as? NSNumber else { refresh(); return }
         if sender === strokeOpacity || sender === fillOpacity || sender === snapshotOpacity {
             guard value.doubleValue.isFinite, (0...100).contains(value.doubleValue) else { refresh(); return }
@@ -233,6 +276,19 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         if sender === fontSize { session.setFontSize(CGFloat(value.doubleValue)) }
         else { session.styleSelected(color: session.selected.map(RectangleMarkupRecord.markupColor) ?? session.strokeColor, width: CGFloat(value.doubleValue)) }
         refresh()
+    }
+    @objc func changeHatch(_ sender: NSControl) {
+        guard let session, session.canEdit(), hatchPattern.isEnabled else { refresh(); return }
+        let preset = DraftingHatch.Preset.allCases[max(0, hatchPattern.indexOfSelectedItem)]
+        if preset == .solid { session.hatchSelected(nil); refresh(); return }
+        guard let foreground = hatchForeground.color.usingColorSpace(.deviceRGB),
+              let background = hatchBackground.color.usingColorSpace(.deviceRGB) else { refresh(); return }
+        let style = DraftingHatch(preset: preset,
+            foreground: [Double(foreground.redComponent), Double(foreground.greenComponent), Double(foreground.blueComponent)],
+            background: hatchTransparent.state == .on ? nil : [Double(background.redComponent), Double(background.greenComponent), Double(background.blueComponent)],
+            scale: hatchScale.doubleValue, angle: hatchAngle.doubleValue, lineWidth: hatchWeight.doubleValue)
+        guard style.isValid else { refresh(); return }
+        session.hatchSelected(style); refresh()
     }
     @objc func changeFill(_ sender: Any?) {
         guard let session else { return }

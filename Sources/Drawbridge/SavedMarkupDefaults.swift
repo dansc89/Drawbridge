@@ -10,6 +10,7 @@ struct SavedMarkupAppearance: Codable {
     var fill: [Double]?
     var fontSize: Double
     var snapshot: SnapshotStyle = SnapshotStyle()
+    var hatch: DraftingHatch? = nil
 
     private static func validColor(_ color: [Double]) -> Bool {
         color.count == 4 && color.allSatisfy { $0.isFinite && (0...1).contains($0) }
@@ -18,7 +19,7 @@ struct SavedMarkupAppearance: Codable {
         Self.validColor(stroke) && (fill.map(Self.validColor) ?? true) &&
         width.isFinite && (0.25...72).contains(width) &&
         MarkupLinePattern(rawValue: pattern) != nil && opacity.isFinite && (0...1).contains(opacity) &&
-        fontSize.isFinite && (6...144).contains(fontSize) && snapshot.isValid
+        fontSize.isFinite && (6...144).contains(fontSize) && snapshot.isValid && (hatch?.isValid ?? true)
     }
     static func components(_ color: NSColor) -> [Double] {
         let rgb = color.usingColorSpace(.deviceRGB) ?? .red
@@ -42,12 +43,13 @@ extension RectangleMarkupController {
     var currentAppearance: SavedMarkupAppearance {
         SavedMarkupAppearance(stroke: SavedMarkupAppearance.components(strokeColor), width: Double(lineWidth),
                               pattern: linePattern.rawValue, opacity: strokeOpacity,
-                              fill: fillColor.map(SavedMarkupAppearance.components), fontSize: Double(fontSize))
+                              fill: fillColor.map(SavedMarkupAppearance.components), fontSize: Double(fontSize), hatch: hatchStyle)
     }
     func applyDefaults(_ style: SavedMarkupAppearance) {
         strokeColor = SavedMarkupAppearance.color(style.stroke); lineWidth = CGFloat(style.width)
         linePattern = MarkupLinePattern(rawValue: style.pattern) ?? .solid; strokeOpacity = style.opacity
         fillColor = style.fill.map(SavedMarkupAppearance.color); fontSize = CGFloat(style.fontSize)
+        hatchStyle = style.hatch
     }
     var defaultTool: Tool? {
         if let annotation = selected {
@@ -81,6 +83,7 @@ extension RectangleMarkupController {
                 style.pattern = MarkupStyle.pattern(annotation).rawValue
                 style.opacity = MarkupStyle.strokeOpacity(annotation)
                 style.fill = RectangleMarkupRecord.polygonFill(annotation).map(SavedMarkupAppearance.components)
+                style.hatch = DraftingHatch.read(annotation)
                 if annotation.type == "FreeText" { style.fontSize = Double(RectangleMarkupRecord.textFontSize(annotation)) }
             }
         } else if target == .snapshotBox || target == .snapshotPolygon {
