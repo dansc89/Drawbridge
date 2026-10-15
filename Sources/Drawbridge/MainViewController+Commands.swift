@@ -198,7 +198,7 @@ extension MainViewController {
             label.font = NSFont.systemFont(ofSize: 12, weight: .medium)
 
             let modifierPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-            modifierPopup.addItems(withTitles: ["None", "Shift", "Cmd+Shift"])
+            modifierPopup.addItems(withTitles: ["None", "Shift", "Cmd+Shift", "Ctrl"])
             switch binding.modifier {
             case .plain:
                 modifierPopup.selectItem(at: 0)
@@ -206,6 +206,8 @@ extension MainViewController {
                 modifierPopup.selectItem(at: 1)
             case .commandShift:
                 modifierPopup.selectItem(at: 2)
+            case .control:
+                modifierPopup.selectItem(at: 3)
             }
             modifierPopup.translatesAutoresizingMaskIntoConstraints = false
             modifierPopup.widthAnchor.constraint(equalToConstant: 108).isActive = true
@@ -250,7 +252,7 @@ extension MainViewController {
 
         let alert = NSAlert()
         alert.messageText = "Keyboard Shortcuts"
-        alert.informativeText = "Customize the text selection shortcut."
+        alert.informativeText = "Customize the text selection and Invert shortcuts."
         alert.alertStyle = .informational
         alert.accessoryView = scroll
         alert.addButton(withTitle: "Save")
@@ -285,6 +287,8 @@ extension MainViewController {
                 modifier = .shift
             case 2:
                 modifier = .commandShift
+            case 3:
+                modifier = .control
             default:
                 modifier = .plain
             }
@@ -733,7 +737,7 @@ extension MainViewController {
             return hasDocument
         case #selector(commandToggleInvert(_:)):
             menuItem.state = pdfView.isColorInverted ? .on : .off
-            return hasDocument
+            return hasDocument && !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField)
         default:
             // Legacy annotation selectors cannot be re-enabled by old menu state.
             return false

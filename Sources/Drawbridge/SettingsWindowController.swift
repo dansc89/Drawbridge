@@ -121,11 +121,11 @@ import AppKit
     }
     private func buildShortcuts() {
         guard let editor else { return }
-        var views: [NSView] = [help("Customize the Select Text binding. All other tool shortcuts remain unchanged. Use one letter, number, or supported punctuation character.")]
+        var views: [NSView] = [help("Customize Select Text and Invert bindings. All other tool shortcuts remain unchanged. Use one letter, number, or supported punctuation character.")]
         for action in ShortcutAction.allCases {
             let binding = editor.currentShortcutBinding(for: action)
             let key = field(NSTextField(), id: "shortcut.\(action.rawValue)", value: binding.key.uppercased())
-            let modifier = NSPopUpButton(); modifier.addItems(withTitles: ["None", "Shift", "Cmd+Shift"])
+            let modifier = NSPopUpButton(); modifier.addItems(withTitles: ["None", "Shift", "Cmd+Shift", "Ctrl"])
             modifier.selectItem(at: ShortcutModifier.allCases.firstIndex(of: binding.modifier) ?? 0)
             keys[action] = key; modifiers[action] = modifier
             views.append(row(action.displayName, NSStackView(views: [modifier, key])))

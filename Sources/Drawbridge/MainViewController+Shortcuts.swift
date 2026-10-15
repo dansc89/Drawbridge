@@ -4,10 +4,11 @@ enum ShortcutModifier: String, CaseIterable {
     case plain
     case shift
     case commandShift
+    case control
 
     var requiresShift: Bool {
         switch self {
-        case .plain:
+        case .plain, .control:
             return false
         case .shift, .commandShift:
             return true
@@ -17,20 +18,28 @@ enum ShortcutModifier: String, CaseIterable {
 
 enum ShortcutAction: String, CaseIterable {
     case selectTool
+    case invert
 
     var toolMode: ToolMode? {
         switch self {
         case .selectTool: return .select
+        case .invert: return nil
         }
     }
 
     var defaultBinding: ShortcutBinding {
         switch self {
         case .selectTool: return ShortcutBinding(key: "v", modifier: .plain)
+        case .invert: return ShortcutBinding(key: "3", modifier: .control)
         }
     }
 
-    var displayName: String { "Select Text" }
+    var displayName: String {
+        switch self {
+        case .selectTool: return "Select Text"
+        case .invert: return "Invert"
+        }
+    }
 
 }
 
@@ -44,6 +53,15 @@ struct ShortcutBinding: Equatable {
 
     var requiresShift: Bool {
         modifier.requiresShift
+    }
+
+    var menuModifiers: NSEvent.ModifierFlags {
+        switch modifier {
+        case .plain: return []
+        case .shift: return [.shift]
+        case .commandShift: return [.command, .shift]
+        case .control: return [.control]
+        }
     }
 
     static func decode(_ encoded: String) -> ShortcutBinding? {
@@ -101,6 +119,21 @@ extension MainViewController {
     func updateShortcutHintLabel() {
         statusToolsHintLabel.stringValue = "Esc cancels current action. Shortcuts customizable in Drawbridge > Settings… > Keyboard Shortcuts"
         refreshToolbarShortcutTooltips()
+        updateInvertMenuShortcut()
+    }
+
+    func updateInvertMenuShortcut() {
+        func update(_ menu: NSMenu) {
+            for item in menu.items {
+                if item.action == #selector(commandToggleInvert(_:)), item.target === self {
+                    let binding = currentShortcutBinding(for: .invert)
+                    item.keyEquivalent = binding.key
+                    item.keyEquivalentModifierMask = binding.menuModifiers
+                }
+                if let submenu = item.submenu { update(submenu) }
+            }
+        }
+        if let menu = NSApp.mainMenu { update(menu) }
     }
 
     func currentShortcutBinding(for action: ShortcutAction) -> ShortcutBinding {
@@ -117,6 +150,8 @@ extension MainViewController {
             return "Shift+\(key)"
         case .commandShift:
             return "Cmd+Shift+\(key)"
+        case .control:
+            return "Ctrl+\(key)"
         }
     }
 
@@ -126,7 +161,9 @@ extension MainViewController {
         let isShiftOnly = modifiers == [.shift]
         let isPlain = modifiers.isDisjoint(with: [.command, .option, .control, .shift])
         let modifier: ShortcutModifier
-        if isCommandShift {
+        if modifiers.subtracting(.capsLock) == [.control] {
+            modifier = .control
+        } else if isCommandShift {
             modifier = .commandShift
         } else if isShiftOnly {
             modifier = .shift
@@ -152,6 +189,11 @@ extension MainViewController {
 
     @discardableResult
     func performShortcutAction(_ action: ShortcutAction) -> Bool {
+        if action == .invert {
+            guard pdfView.document != nil, !isPDFProcessingBusy else { return false }
+            commandToggleInvert(nil)
+            return true
+        }
         if let mode = action.toolMode {
             setTool(mode)
             return true

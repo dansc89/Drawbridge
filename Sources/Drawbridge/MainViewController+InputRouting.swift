@@ -80,6 +80,15 @@ extension MainViewController {
             return nil
         }
 
+        if shortcutAction(for: event) == .invert {
+            guard !(view.window?.firstResponder is NSTextView),
+                  !(view.window?.firstResponder is NSTextField),
+                  pdfView.document != nil, !isPDFProcessingBusy else { return event }
+            if !event.isARepeat { performShortcutAction(.invert) }
+            lastUserInteractionAt = Date()
+            return nil
+        }
+
         let optionNavigationModifiersAllowed =
             modifiers.contains(.option) &&
             modifiers.isDisjoint(with: [.command, .control, .shift])
@@ -154,7 +163,7 @@ extension MainViewController {
             return nil
         }
 
-        if modifiers == [.command, .shift],
+        if (modifiers == [.command, .shift] || modifiers.subtracting(.capsLock) == [.control]),
            (view.window?.firstResponder is NSTextView) == false,
            (view.window?.firstResponder is NSTextField) == false,
            let action = shortcutAction(for: event),

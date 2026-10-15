@@ -283,7 +283,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         splitItem.keyEquivalentModifierMask = [.control]
         splitItem.target = controller
         viewMenu.addItem(withTitle: "Markups List", action: #selector(MainViewController.commandToggleMarkupsList(_:)), keyEquivalent: "").target = controller
-        viewMenu.addItem(withTitle: "Invert", action: #selector(MainViewController.commandToggleInvert(_:)), keyEquivalent: "").target = controller
+        let invertBinding = controller.currentShortcutBinding(for: .invert)
+        let invertItem = viewMenu.addItem(withTitle: "Invert", action: #selector(MainViewController.commandToggleInvert(_:)), keyEquivalent: invertBinding.key)
+        invertItem.keyEquivalentModifierMask = invertBinding.menuModifiers
+        invertItem.target = controller
         viewMenu.addItem(withTitle: "Zoom In", action: #selector(MainViewController.commandZoomIn(_:)), keyEquivalent: "+").target = controller
         viewMenu.addItem(withTitle: "Zoom Out", action: #selector(MainViewController.commandZoomOut(_:)), keyEquivalent: "-").target = controller
         viewMenu.addItem(withTitle: "Actual Size", action: #selector(MainViewController.commandActualSize(_:)), keyEquivalent: "0").target = controller
