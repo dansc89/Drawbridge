@@ -81,6 +81,51 @@ enum InterfaceTheme: String, CaseIterable {
     }
 }
 
+/// Opaque chrome surfaces keep native selection drawing from overriding palette text.
+/// Resolve within the chrome's appearance, never on the PDF subtree.
+struct ChromeSelectionColors {
+    let background: NSColor
+    let foreground: NSColor
+    let accent: NSColor
+
+    init(active: Bool, appearance: NSAppearance) {
+        var panel = NSColor.black, text = NSColor.white, marker = NSColor.white
+        appearance.performAsCurrentDrawingAppearance {
+            let theme = InterfaceTheme.current
+            let base = (theme.color(for: "panel") ?? AppAppearance.panel).usingColorSpace(.sRGB)!
+            marker = (theme.color(for: "accent") ?? .controlAccentColor).usingColorSpace(.sRGB)!
+            func mix(_ a: NSColor, _ b: NSColor, _ amount: CGFloat) -> NSColor {
+                NSColor(srgbRed: a.redComponent * (1 - amount) + b.redComponent * amount,
+                        green: a.greenComponent * (1 - amount) + b.greenComponent * amount,
+                        blue: a.blueComponent * (1 - amount) + b.blueComponent * amount, alpha: 1)
+            }
+            panel = active ? mix(base, marker, 0.12) : base
+            let preferred = (theme.color(for: "foreground") ?? .labelColor).usingColorSpace(.sRGB)!
+            // Native label colors can be translucent. Composite first, then correct
+            // only as far as necessary (e.g. Solarized's deliberately muted text).
+            text = mix(panel, preferred, preferred.alphaComponent)
+            func luminance(_ c: NSColor) -> CGFloat {
+                let v = [c.redComponent, c.greenComponent, c.blueComponent].map {
+                    $0 <= 0.04045 ? $0 / 12.92 : pow(($0 + 0.055) / 1.055, 2.4)
+                }
+                return v[0] * 0.2126 + v[1] * 0.7152 + v[2] * 0.0722
+            }
+            func contrast(_ c: NSColor) -> CGFloat {
+                let a = luminance(c), b = luminance(panel)
+                return (max(a,b) + 0.05) / (min(a,b) + 0.05)
+            }
+            let black = NSColor.black.usingColorSpace(.sRGB)!
+            let white = NSColor.white.usingColorSpace(.sRGB)!
+            let endpoint = contrast(black) > contrast(white) ? black : white
+            let original = text
+            for step in 0...100 where contrast(text) < 4.5 {
+                text = mix(original, endpoint, CGFloat(step) / 100)
+            }
+        }
+        background = panel; foreground = text; accent = marker
+    }
+}
+
 /// Semantic native controls, focus and selection remain AppKit-owned.
 enum AppAppearance {
     static let chrome = adaptive("chrome", light: 0.91, dark: 0.08)

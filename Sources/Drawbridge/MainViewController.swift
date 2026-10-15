@@ -1039,6 +1039,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             documentTabsBar.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
             refreshRectangleToolbar()
         }
+        updatePDFPaneHeaders()
+        refreshDocumentTabs()
     }
 
     private func applySplitLayoutIfPossible(force: Bool) {
@@ -2255,8 +2257,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         emptyStateView.addSubview(stack)
 
         NSLayoutConstraint.activate([
-            emptyStateView.centerXAnchor.constraint(equalTo: pdfView.centerXAnchor),
-            emptyStateView.centerYAnchor.constraint(equalTo: pdfView.centerYAnchor),
+            // This stable canvas survives pane activation and split teardown.
+            emptyStateView.centerXAnchor.constraint(equalTo: pdfPaneSplitView.centerXAnchor),
+            emptyStateView.centerYAnchor.constraint(equalTo: pdfPaneSplitView.centerYAnchor),
             emptyStateView.widthAnchor.constraint(equalToConstant: 620),
 
             stack.topAnchor.constraint(equalTo: emptyStateView.topAnchor),
@@ -2648,7 +2651,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
 
         for url in ordered {
-            let tab = NSButton(title: url.lastPathComponent, target: self, action: #selector(selectDocumentTab(_:)))
+            let tab = DocumentChromeTabButton(title: url.lastPathComponent, target: self, action: #selector(selectDocumentTab(_:)))
             tab.setButtonType(.toggle)
             tab.state = (url == current) ? .on : .off
             tab.bezelStyle = .texturedRounded
@@ -2656,6 +2659,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             tab.toolTip = url.path
             tab.identifier = NSUserInterfaceItemIdentifier(url.path)
             documentTabsStack.addArrangedSubview(tab)
+            tab.refreshChromeColors()
         }
     }
 

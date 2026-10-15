@@ -7,6 +7,19 @@ final class PDFPaneContainerView: NSView {
     let titleLabel = NSTextField(labelWithString: "")
     let modeLabel = NSTextField(labelWithString: "")
     private var headerHeight: NSLayoutConstraint!
+    private var isActive = false
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshHeaderColors()
+    }
+
+    private func refreshHeaderColors() {
+        let colors = ChromeSelectionColors(active: isActive, appearance: header.effectiveAppearance)
+        titleLabel.textColor = colors.foreground
+        modeLabel.textColor = colors.foreground
+        header.layer?.backgroundColor = colors.background.cgColor
+    }
 
     init(pdfView: MarkupPDFView) {
         self.pdfView = pdfView
@@ -52,8 +65,10 @@ final class PDFPaneContainerView: NSView {
         titleLabel.stringValue = documentName
         titleLabel.toolTip = documentName
         modeLabel.stringValue = "Split view · \(side)\(active ? " · Active" : "")"
-        modeLabel.textColor = active ? .controlAccentColor : .secondaryLabelColor
-        header.layer?.backgroundColor = (active ? NSColor.controlAccentColor.withAlphaComponent(0.12) : NSColor.controlBackgroundColor).cgColor
+        isActive = active
+        // Scope the override to the header: never propagate it into PDFKit.
+        header.appearance = InterfaceTheme.current.nativeAppearance
+        refreshHeaderColors()
         header.toolTip = "Split view: two independent views of the same PDF. Click a pane to work in it. Drag the divider to resize."
         header.setAccessibilityLabel("\(side) split view, \(documentName)\(active ? ", active" : "")")
     }
@@ -61,6 +76,32 @@ final class PDFPaneContainerView: NSView {
     override func mouseDown(with event: NSEvent) {
         pdfView.onActivatePane?()
         window?.makeFirstResponder(pdfView)
+    }
+}
+
+/// Retains normal button routing/accessibility without the native toggle bezel's
+/// selected white text, which is unrelated to custom palette contrast.
+@MainActor
+final class DocumentChromeTabButton: NSButton {
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshChromeColors()
+    }
+
+    func refreshChromeColors() {
+        wantsLayer = true
+        isBordered = false
+        (cell as? NSButtonCell)?.highlightsBy = []
+        (cell as? NSButtonCell)?.showsStateBy = []
+        let colors = ChromeSelectionColors(active: state == .on, appearance: effectiveAppearance)
+        layer?.backgroundColor = colors.background.cgColor
+        layer?.cornerRadius = 5
+        layer?.borderWidth = state == .on ? 2 : 0
+        layer?.borderColor = colors.accent.cgColor
+        let text = NSAttributedString(string: title, attributes: [.foregroundColor: colors.foreground, .font: font ?? NSFont.systemFont(ofSize: 11)])
+        attributedTitle = text
+        attributedAlternateTitle = text
+        contentTintColor = colors.foreground
     }
 }
 
