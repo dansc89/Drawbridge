@@ -60,8 +60,8 @@ import PDFKit
         let markupColor = annotation.color
         for theme in InterfaceTheme.presets {
             InterfaceTheme.select(theme)
-            XCTAssertEqual(editor.markupsPanel.appearance?.name, .darkAqua, "Markup list is chrome, not PDF content")
-            XCTAssertEqual(editor.statusBar.appearance?.name, .darkAqua)
+            XCTAssertEqual(editor.markupsPanel.appearance?.name, theme.nativeAppearance?.name, "Markup list is chrome, not PDF content")
+            XCTAssertEqual(editor.statusBar.appearance?.name, theme.nativeAppearance?.name)
             XCTAssertEqual(editor.statusBar.layer?.backgroundColor, AppAppearance.panel.cgColor)
             XCTAssertTrue(editor.pdfView.document === document)
             XCTAssertEqual(annotation.color, markupColor)

@@ -93,7 +93,7 @@ jobs:
 
       - name: Build app bundle
         env:
-          DRAWBRIDGE_BUILD_NUMBER: "238"
+          DRAWBRIDGE_BUILD_NUMBER: "239"
           DRAWBRIDGE_SKIP_INSTALL: "1"
           DRAWBRIDGE_SKIP_CHECKPOINT: "1"
         run: ./Scripts/package-app.sh

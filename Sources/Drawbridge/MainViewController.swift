@@ -992,7 +992,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         // Transparent native titlebar uses NSWindow's background without replacing
         // the traffic lights, drag region, toolbar, or content layout.
         view.window?.titlebarAppearsTransparent = InterfaceTheme.current != .system
-        let chromeAppearance = InterfaceTheme.current == .system ? nil : NSAppearance(named: .darkAqua)
+        let theme = InterfaceTheme.current
+        let chromeAppearance = theme.nativeAppearance
+        // Explicit static labels only: never retint table cells, selection, disabled
+        // buttons, editable fields, annotation color wells or PDF descendants.
+        markupsCountLabel.textColor = theme.color(for: "foreground") ?? .labelColor
+        busyStatusLabel.textColor = theme.color(for: "foreground") ?? .labelColor
+        captureToastLabel.textColor = theme.color(for: "foreground") ?? .labelColor
+        bookmarksSelectionLabel.textColor = theme.color(for: "accent") ?? .systemBlue
         // Never set the editor window/root appearance: PDF content must retain its
         // inherited appearance and inversion state independently of chrome colors.
         for chrome in [bookmarksContainer, statusBar, busyOverlayView, captureToastView,
