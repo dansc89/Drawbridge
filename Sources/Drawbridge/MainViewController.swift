@@ -129,6 +129,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var pdfView = MarkupPDFView(frame: .zero)
     let pdfPaneSplitView = PDFPaneSplitView(frame: .zero)
     var secondaryPDFView: MarkupPDFView?
+    // Moving the canonical document between panes is not a new PDF/tab session.
+    private var isTransferringPDFPaneDocument = false
 
     func configurePaneActivation(_ pane: MarkupPDFView) {
         pane.onActivatePane = { [weak self, weak pane] in
@@ -164,8 +166,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let outgoingState = previous.captureTabViewState()
         // Only the active canvas attaches to the editing document. The inactive
         // canvas owns detached page/annotation instances, never live edit objects.
+        isTransferringPDFPaneDocument = true
         previous.document = nil
         pane.document = canonical
+        isTransferringPDFPaneDocument = false
+        // Each PDFView resets its local overlay on document assignment.
+        pane.setHyperlinkHighlightsVisible(isHyperlinkHighlightsVisible)
         if let incomingState { _ = pane.restoreTabViewState(incomingState) }
         pane.layoutDocumentView()
         pane.layoutSubtreeIfNeeded()
@@ -211,7 +217,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pane.onAnnotationsBoxSelected = pdfView.onAnnotationsBoxSelected
         pane.toolMode = pdfView.toolMode
         synchronizePDFPaneSettings(pane)
-        pane.setHyperlinkHighlightsVisible(isHyperlinkHighlightsVisible)
         pane.onViewportChanged = { [weak self, weak pane] in
             guard let self, let pane, self.pdfView === pane else { return }
             self.requestChromeRefresh()
@@ -305,6 +310,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         splitPresentationSourcePages = (0..<document.pageCount).compactMap { document.page(at: $0) }
         pane.document = presentation
         _ = pane.restoreTabViewState(state)
+        pane.setHyperlinkHighlightsVisible(isHyperlinkHighlightsVisible)
     }
 
     private func updatePDFPaneFocus() {
@@ -741,10 +747,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         super.viewDidLoad()
         NotificationCenter.default.addObserver(self, selector: #selector(interfaceThemeChanged(_:)), name: InterfaceTheme.didChange, object: nil)
         registerDefaultPerformanceSettingsIfNeeded()
-        migrateHyperlinkHighlightsDefaultIfNeeded()
-        isHyperlinkHighlightsVisible = UserDefaults.standard.bool(forKey: Self.defaultsHyperlinkHighlightsVisibleKey)
+        // Visibility is local to this viewing session, never a persisted preference.
+        isHyperlinkHighlightsVisible = false
         loadShortcutBindings()
         setupUI()
+        NotificationCenter.default.addObserver(self, selector: #selector(hyperlinkDocumentChanged(_:)), name: .PDFViewDocumentChanged, object: nil)
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handlePDFPageChangedNotification(_:)),
@@ -2430,11 +2437,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     func setHyperlinkHighlightsVisible(_ visible: Bool) {
         isHyperlinkHighlightsVisible = visible
-        UserDefaults.standard.set(visible, forKey: Self.defaultsHyperlinkHighlightsVisibleKey)
         pdfView.setHyperlinkHighlightsVisible(visible)
-        if let item = NSApp.mainMenu?.item(withTitle: "View")?.submenu?.items.first(where: { $0.action == #selector(commandToggleHyperlinkHighlights(_:)) }) {
+        secondaryPDFView?.setHyperlinkHighlightsVisible(visible)
+        if let item = NSApp.mainMenu?.item(withTitle: "Hyperlinks")?.submenu?.items.first(where: { $0.action == #selector(commandToggleHyperlinkHighlights(_:)) }) {
             item.state = visible ? .on : .off
+            item.title = visible ? "Hide Hyperlinks" : "Show Hyperlinks"
         }
+    }
+
+    @objc private func hyperlinkDocumentChanged(_ notification: Notification) {
+        guard !isTransferringPDFPaneDocument,
+              let pane = notification.object as? MarkupPDFView, pane === pdfView else { return }
+        setHyperlinkHighlightsVisible(false)
     }
 
     @objc private func toggleGridOverlay() {
@@ -3817,14 +3831,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
     }
 
-    private func migrateHyperlinkHighlightsDefaultIfNeeded() {
-        let defaults = UserDefaults.standard
-        if defaults.bool(forKey: Self.defaultsHyperlinkHighlightsDefaultMigrationKey) {
-            return
-        }
-        defaults.set(true, forKey: Self.defaultsHyperlinkHighlightsVisibleKey)
-        defaults.set(true, forKey: Self.defaultsHyperlinkHighlightsDefaultMigrationKey)
-    }
 
     func configuredIndexCap() -> Int {
         let raw = UserDefaults.standard.integer(forKey: Self.defaultsIndexCapKey)

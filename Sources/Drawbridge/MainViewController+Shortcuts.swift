@@ -5,12 +5,13 @@ enum ShortcutModifier: String, CaseIterable {
     case shift
     case commandShift
     case control
+    case commandOptionShift
 
     var requiresShift: Bool {
         switch self {
         case .plain, .control:
             return false
-        case .shift, .commandShift:
+        case .shift, .commandShift, .commandOptionShift:
             return true
         }
     }
@@ -19,11 +20,12 @@ enum ShortcutModifier: String, CaseIterable {
 enum ShortcutAction: String, CaseIterable {
     case selectTool
     case invert
+    case hyperlinks
 
     var toolMode: ToolMode? {
         switch self {
         case .selectTool: return .select
-        case .invert: return nil
+        case .invert, .hyperlinks: return nil
         }
     }
 
@@ -31,6 +33,7 @@ enum ShortcutAction: String, CaseIterable {
         switch self {
         case .selectTool: return ShortcutBinding(key: "v", modifier: .plain)
         case .invert: return ShortcutBinding(key: "3", modifier: .control)
+        case .hyperlinks: return ShortcutBinding(key: "h", modifier: .commandOptionShift)
         }
     }
 
@@ -38,6 +41,7 @@ enum ShortcutAction: String, CaseIterable {
         switch self {
         case .selectTool: return "Select Text"
         case .invert: return "Invert"
+        case .hyperlinks: return "Show/Hide Hyperlinks"
         }
     }
 
@@ -61,6 +65,7 @@ struct ShortcutBinding: Equatable {
         case .shift: return [.shift]
         case .commandShift: return [.command, .shift]
         case .control: return [.control]
+        case .commandOptionShift: return [.command, .option, .shift]
         }
     }
 
@@ -130,6 +135,11 @@ extension MainViewController {
                     item.keyEquivalent = binding.key
                     item.keyEquivalentModifierMask = binding.menuModifiers
                 }
+                if item.action == #selector(commandToggleHyperlinkHighlights(_:)), item.target === self {
+                    let binding = currentShortcutBinding(for: .hyperlinks)
+                    item.keyEquivalent = binding.key
+                    item.keyEquivalentModifierMask = binding.menuModifiers
+                }
                 if let submenu = item.submenu { update(submenu) }
             }
         }
@@ -152,16 +162,20 @@ extension MainViewController {
             return "Cmd+Shift+\(key)"
         case .control:
             return "Ctrl+\(key)"
+        case .commandOptionShift:
+            return "Cmd+Option+Shift+\(key)"
         }
     }
 
     func shortcutAction(for event: NSEvent) -> ShortcutAction? {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock)
         let isCommandShift = modifiers == [.command, .shift]
         let isShiftOnly = modifiers == [.shift]
         let isPlain = modifiers.isDisjoint(with: [.command, .option, .control, .shift])
         let modifier: ShortcutModifier
-        if modifiers.subtracting(.capsLock) == [.control] {
+        if modifiers == [.command, .option, .shift] {
+            modifier = .commandOptionShift
+        } else if modifiers == [.control] {
             modifier = .control
         } else if isCommandShift {
             modifier = .commandShift
@@ -189,6 +203,11 @@ extension MainViewController {
 
     @discardableResult
     func performShortcutAction(_ action: ShortcutAction) -> Bool {
+        if action == .hyperlinks {
+            guard pdfView.document != nil, !isPDFProcessingBusy else { return false }
+            commandToggleHyperlinkHighlights(nil)
+            return true
+        }
         if action == .invert {
             guard pdfView.document != nil, !isPDFProcessingBusy else { return false }
             commandToggleInvert(nil)

@@ -178,6 +178,7 @@ extension MainViewController {
         (sender as? NSMenuItem)?.state = enabled ? .on : .off
     }
     @objc func commandToggleHyperlinkHighlights(_ sender: Any?) {
+        guard pdfView.document != nil, !isPDFProcessingBusy else { return }
         let enabled = !isHyperlinkHighlightsVisible
         setHyperlinkHighlightsVisible(enabled)
         (sender as? NSMenuItem)?.state = enabled ? .on : .off
@@ -198,7 +199,7 @@ extension MainViewController {
             label.font = NSFont.systemFont(ofSize: 12, weight: .medium)
 
             let modifierPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-            modifierPopup.addItems(withTitles: ["None", "Shift", "Cmd+Shift", "Ctrl"])
+            modifierPopup.addItems(withTitles: ["None", "Shift", "Cmd+Shift", "Ctrl", "Cmd+Option+Shift"])
             switch binding.modifier {
             case .plain:
                 modifierPopup.selectItem(at: 0)
@@ -208,6 +209,8 @@ extension MainViewController {
                 modifierPopup.selectItem(at: 2)
             case .control:
                 modifierPopup.selectItem(at: 3)
+            case .commandOptionShift:
+                modifierPopup.selectItem(at: 4)
             }
             modifierPopup.translatesAutoresizingMaskIntoConstraints = false
             modifierPopup.widthAnchor.constraint(equalToConstant: 108).isActive = true
@@ -252,7 +255,7 @@ extension MainViewController {
 
         let alert = NSAlert()
         alert.messageText = "Keyboard Shortcuts"
-        alert.informativeText = "Customize the text selection and Invert shortcuts."
+        alert.informativeText = "Customize the text selection, Invert, and Show/Hide Hyperlinks shortcuts."
         alert.alertStyle = .informational
         alert.accessoryView = scroll
         alert.addButton(withTitle: "Save")
@@ -289,6 +292,8 @@ extension MainViewController {
                 modifier = .commandShift
             case 3:
                 modifier = .control
+            case 4:
+                modifier = .commandOptionShift
             default:
                 modifier = .plain
             }
@@ -734,7 +739,8 @@ extension MainViewController {
             return hasDocument && !searchHits.isEmpty
         case #selector(commandToggleHyperlinkHighlights(_:)):
             menuItem.state = isHyperlinkHighlightsVisible ? .on : .off
-            return hasDocument
+            menuItem.title = isHyperlinkHighlightsVisible ? "Hide Hyperlinks" : "Show Hyperlinks"
+            return hasDocument && !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField)
         case #selector(commandToggleInvert(_:)):
             menuItem.state = pdfView.isColorInverted ? .on : .off
             return hasDocument && !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField)

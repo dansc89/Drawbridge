@@ -463,7 +463,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private let hyperlinkOverlayLayer: CAShapeLayer = {
         let layer = CAShapeLayer()
         layer.strokeColor = NSColor.clear.cgColor
-        layer.fillColor = NSColor.clear.cgColor
+        // Screen-only tint; never change the link annotations or page drawing.
+        layer.fillColor = NSColor(srgbRed: 0.35, green: 0.72, blue: 1, alpha: 0.22).cgColor
         layer.lineWidth = 0
         layer.lineJoin = .round
         layer.zPosition = 6
@@ -970,6 +971,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             NSAccessibility.post(element: self, notification: .layoutChanged)
         }
         if notification.name == .PDFViewDocumentChanged {
+            setHyperlinkHighlightsVisible(false)
             snapshotDetailRefreshWorkItem?.cancel()
             snapshotDetailRefreshGeneration &+= 1
             pendingSnapshotDetailKeys.removeAll(keepingCapacity: true)
@@ -1018,7 +1020,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         let path = CGMutablePath()
         var hasAny = false
         for page in pagesToRender {
-            for annotation in page.annotations where annotation.shouldDisplay && isLinkAnnotation(annotation) {
+            for annotation in page.annotations where annotation.shouldDisplay && annotation.type?.lowercased() == "link" {
                 let rectInView = convert(annotation.bounds, from: page).standardized
                 guard !rectInView.isEmpty, rectInView.intersects(expandedVisibleBounds) else { continue }
                 path.addRect(rectInView)

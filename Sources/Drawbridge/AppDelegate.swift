@@ -272,6 +272,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let batchLinkItem = hyperlinksMenu.addItem(withTitle: "Batch Link Sheet Numbers…", action: #selector(MainViewController.commandBatchLinkSheetNumbers(_:)), keyEquivalent: "h")
         batchLinkItem.keyEquivalentModifierMask = [.command, .shift]
         batchLinkItem.target = controller
+        hyperlinksMenu.addItem(NSMenuItem.separator())
+        let linkHighlightsItem = hyperlinksMenu.addItem(withTitle: controller.isHyperlinkHighlightsVisible ? "Hide Hyperlinks" : "Show Hyperlinks", action: #selector(MainViewController.commandToggleHyperlinkHighlights(_:)), keyEquivalent: controller.currentShortcutBinding(for: .hyperlinks).key)
+        linkHighlightsItem.keyEquivalentModifierMask = controller.currentShortcutBinding(for: .hyperlinks).menuModifiers
+        linkHighlightsItem.target = controller
+        linkHighlightsItem.state = controller.isHyperlinkHighlightsVisible ? .on : .off
         hyperlinksItem.submenu = hyperlinksMenu
 
         mainMenu.addItem(measurementsItem)
@@ -308,11 +313,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let forwardItem = viewMenu.addItem(withTitle: "Forward", action: #selector(MainViewController.commandNavigateForward(_:)), keyEquivalent: String(UnicodeScalar(NSRightArrowFunctionKey)!))
         forwardItem.keyEquivalentModifierMask = [.option]
         forwardItem.target = controller
-        viewMenu.addItem(NSMenuItem.separator())
-        let linkHighlightsItem = viewMenu.addItem(withTitle: "Show Hyperlink Highlights", action: #selector(MainViewController.commandToggleHyperlinkHighlights(_:)), keyEquivalent: "h")
-        linkHighlightsItem.keyEquivalentModifierMask = [.command, .option, .shift]
-        linkHighlightsItem.target = controller
-        linkHighlightsItem.state = controller.isHyperlinkHighlightsVisible ? .on : .off
         viewItem.submenu = viewMenu
 
         let helpItem = NSMenuItem()

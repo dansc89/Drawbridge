@@ -80,11 +80,11 @@ extension MainViewController {
             return nil
         }
 
-        if shortcutAction(for: event) == .invert {
+        if let action = shortcutAction(for: event), action == .invert || action == .hyperlinks {
             guard !(view.window?.firstResponder is NSTextView),
                   !(view.window?.firstResponder is NSTextField),
                   pdfView.document != nil, !isPDFProcessingBusy else { return event }
-            if !event.isARepeat { performShortcutAction(.invert) }
+            if !event.isARepeat { performShortcutAction(action) }
             lastUserInteractionAt = Date()
             return nil
         }
@@ -163,7 +163,7 @@ extension MainViewController {
             return nil
         }
 
-        if (modifiers == [.command, .shift] || modifiers.subtracting(.capsLock) == [.control]),
+        if (modifiers.subtracting(.capsLock) == [.command, .shift] || modifiers.subtracting(.capsLock) == [.control] || modifiers.subtracting(.capsLock) == [.command, .option, .shift]),
            (view.window?.firstResponder is NSTextView) == false,
            (view.window?.firstResponder is NSTextField) == false,
            let action = shortcutAction(for: event),
