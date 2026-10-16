@@ -954,7 +954,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             documentTabsBar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
             documentTabsBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             documentTabsBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            documentTabsBar.heightAnchor.constraint(equalToConstant: 34),
+            documentTabsBar.heightAnchor.constraint(equalToConstant: 40),
 
             splitView.topAnchor.constraint(equalTo: documentTabsBar.bottomAnchor),
             splitView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -2592,17 +2592,21 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         documentTabsScrollView.drawsBackground = false
         documentTabsScrollView.borderType = .noBorder
-        documentTabsScrollView.hasHorizontalScroller = true
+        // A legacy scrollbar takes 17 points out of this compact strip on Macs
+        // configured to always show scrollbars. Scroll gestures and reveal-on-select
+        // still work without a scrollbar consuming the tab height.
+        documentTabsScrollView.hasHorizontalScroller = false
         documentTabsScrollView.hasVerticalScroller = false
         documentTabsScrollView.autohidesScrollers = true
+        documentTabsScrollView.scrollerStyle = .overlay
         documentTabsScrollView.horizontalScrollElasticity = .automatic
         documentTabsScrollView.verticalScrollElasticity = .none
         documentTabsScrollView.translatesAutoresizingMaskIntoConstraints = false
 
         documentTabsStack.orientation = .horizontal
         documentTabsStack.alignment = .centerY
-        documentTabsStack.spacing = 6
-        documentTabsStack.edgeInsets = NSEdgeInsets(top: 2, left: 10, bottom: 2, right: 10)
+        documentTabsStack.spacing = 2
+        documentTabsStack.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 2, right: 8)
         documentTabsStack.translatesAutoresizingMaskIntoConstraints = false
         documentTabsScrollView.documentView = documentTabsStack
         documentTabsBar.addSubview(documentTabsScrollView)
@@ -2615,7 +2619,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
             documentTabsStack.topAnchor.constraint(equalTo: documentTabsScrollView.contentView.topAnchor),
             documentTabsStack.leadingAnchor.constraint(equalTo: documentTabsScrollView.contentView.leadingAnchor),
-            documentTabsStack.trailingAnchor.constraint(equalTo: documentTabsScrollView.contentView.trailingAnchor),
             documentTabsStack.bottomAnchor.constraint(equalTo: documentTabsScrollView.contentView.bottomAnchor),
             documentTabsStack.heightAnchor.constraint(equalTo: documentTabsScrollView.contentView.heightAnchor)
         ])
@@ -2652,14 +2655,30 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
         for url in ordered {
             let tab = DocumentChromeTabButton(title: url.lastPathComponent, target: self, action: #selector(selectDocumentTab(_:)))
-            tab.setButtonType(.toggle)
+            tab.bezelStyle = .regularSquare
             tab.state = (url == current) ? .on : .off
-            tab.bezelStyle = .texturedRounded
-            tab.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+            tab.font = NSFont.systemFont(ofSize: 12, weight: .medium)
             tab.toolTip = url.path
             tab.identifier = NSUserInterfaceItemIdentifier(url.path)
+            tab.onClose = { [weak self] in self?.closeDocumentTab(at: url) }
             documentTabsStack.addArrangedSubview(tab)
             tab.refreshChromeColors()
+        }
+        documentTabsBar.layoutSubtreeIfNeeded()
+        if let selected = documentTabsStack.arrangedSubviews.compactMap({ $0 as? DocumentChromeTabButton }).first(where: { $0.state == .on }) {
+            documentTabsStack.scrollToVisible(selected.frame.insetBy(dx: -8, dy: 0))
+        }
+    }
+
+    func closeDocumentTab(at url: URL) {
+        let normalized = canonicalDocumentURL(url)
+        guard sessionDocumentURLs.contains(normalized) else { return }
+        if openDocumentURL.map({ canonicalDocumentURL($0) }) == normalized {
+            commandCloseDocument(nil)
+        } else {
+            // Inactive sessions are cached only after the existing save/discard guard.
+            // Closing one must not switch or discard edits in the active document.
+            unregisterSessionDocument(normalized)
         }
     }
 

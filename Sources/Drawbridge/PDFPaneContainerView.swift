@@ -79,10 +79,42 @@ final class PDFPaneContainerView: NSView {
     }
 }
 
-/// Retains normal button routing/accessibility without the native toggle bezel's
-/// selected white text, which is unrelated to custom palette contrast.
+/// A bounded document tab with native button routing and an independent close target.
 @MainActor
 final class DocumentChromeTabButton: NSButton {
+    // Native button alignment expands/clamps the cell's drawing rectangle.
+    // This tab draws its own chrome and uses the complete constrained frame.
+    override func alignmentRect(forFrame frame: NSRect) -> NSRect { frame }
+    override func frame(forAlignmentRect alignmentRect: NSRect) -> NSRect { alignmentRect }
+    let closeButton = NSButton()
+    var onClose: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        isBordered = false
+        setButtonType(.momentaryPushIn)
+        font = .systemFont(ofSize: 12, weight: .medium)
+        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close document")
+        closeButton.isBordered = false
+        closeButton.imagePosition = .imageOnly
+        closeButton.target = self
+        closeButton.action = #selector(closeTab)
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(closeButton)
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: 240),
+            heightAnchor.constraint(equalToConstant: 32),
+            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 24),
+            closeButton.heightAnchor.constraint(equalToConstant: 24)
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    @objc private func closeTab() { onClose?() }
+
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         refreshChromeColors()
@@ -90,18 +122,49 @@ final class DocumentChromeTabButton: NSButton {
 
     func refreshChromeColors() {
         wantsLayer = true
-        isBordered = false
         (cell as? NSButtonCell)?.highlightsBy = []
         (cell as? NSButtonCell)?.showsStateBy = []
         let colors = ChromeSelectionColors(active: state == .on, appearance: effectiveAppearance)
         layer?.backgroundColor = colors.background.cgColor
-        layer?.cornerRadius = 5
-        layer?.borderWidth = state == .on ? 2 : 0
-        layer?.borderColor = colors.accent.cgColor
-        let text = NSAttributedString(string: title, attributes: [.foregroundColor: colors.foreground, .font: font ?? NSFont.systemFont(ofSize: 11)])
+        layer?.cornerRadius = 9
+        layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        layer?.borderWidth = 0
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        let text = NSAttributedString(string: title, attributes: [
+            .foregroundColor: colors.foreground,
+            .font: font ?? NSFont.systemFont(ofSize: 12),
+            .paragraphStyle: paragraph
+        ])
         attributedTitle = text
         attributedAlternateTitle = text
-        contentTintColor = colors.foreground
+        closeButton.contentTintColor = colors.foreground
+        closeButton.toolTip = "Close \(title)"
+        closeButton.setAccessibilityLabel("Close \(title)")
+        setAccessibilityLabel(title)
+        setAccessibilityValue(state == .on ? "Selected" : "")
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let colors = ChromeSelectionColors(active: state == .on, appearance: effectiveAppearance)
+        if state == .on {
+            colors.accent.setFill()
+            NSBezierPath(roundedRect: NSRect(x: 12, y: 1, width: bounds.width - 24, height: 2), xRadius: 1, yRadius: 1).fill()
+        } else {
+            colors.foreground.withAlphaComponent(0.2).setFill()
+            NSRect(x: bounds.width - 1, y: 8, width: 1, height: bounds.height - 16).fill()
+        }
+        let icon = NSImage(systemSymbolName: "doc.richtext", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(paletteColors: [colors.foreground]))
+        icon?.draw(in: NSRect(x: 11, y: 9, width: 14, height: 14), from: .zero, operation: .sourceOver, fraction: 1)
+        attributedTitle.draw(in: NSRect(x: 33, y: 8, width: bounds.width - 69, height: 17))
+        if window?.firstResponder === self {
+            NSColor.keyboardFocusIndicatorColor.setStroke()
+            let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: 7, yRadius: 7)
+            ring.lineWidth = 2
+            ring.stroke()
+        }
     }
 }
 
