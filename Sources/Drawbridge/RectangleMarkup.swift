@@ -554,7 +554,7 @@ final class RectangleMarkupController {
             view.setCurrentSelection(nil, animate:false)
             if tool == .area || tool == .perimeter || tool == .snapshotPolygon || tool == .snapshotBox {
                 if tool != .snapshotPolygon && tool != .snapshotBox { guard MeasurementMetadata.scale(on: page) != nil, MeasurementMetadata.supportedPage(page) else { onMeasurementNeedsScale?(); return true } }
-                if polylinePoints.count >= 3, let first = polylinePoints.first, hypot(first.x-point.x, first.y-point.y) <= 8 / max(view.scaleFactor, 0.01) {
+                if (tool != .perimeter || modifiers.contains(.control)), polylinePoints.count >= 3, let first = polylinePoints.first, hypot(first.x-point.x, first.y-point.y) <= 8 / max(view.scaleFactor, 0.01) {
                     _ = finishPolyline(closed: true); return true
                 }
                 guard polylinePoints.count < 512 else { onInvalidMeasurement?(); return true }
@@ -562,9 +562,16 @@ final class RectangleMarkupController {
             polylinePage = page
             let candidate = modifiers.contains(.shift) && !polylinePoints.isEmpty ? MeasurementGeometry.constrained(point, from: polylinePoints.last!) : point
             let p = Self.clamped(candidate,to:page.bounds(for:view.displayBox))
-            if let last = polylinePoints.last, hypot(last.x-p.x,last.y-p.y) < 0.5 { } else { polylinePoints.append(p) }
+            if let last = polylinePoints.last, hypot(last.x-p.x,last.y-p.y) < 0.5 {
+                // A duplicate endpoint is not a new segment or a completion click.
+                if tool == .perimeter { return true }
+            } else { polylinePoints.append(p) }
             polylineHover = p
-            if clickCount >= 2 { finishPolyline() } else { refresh() }
+            if tool == .perimeter, polylinePoints.count >= 2, !modifiers.contains(.control) {
+                // Shift only constrains geometry. Control explicitly keeps the
+                // dimension string open; release it for the final endpoint click.
+                _ = finishPolyline(closed: false)
+            } else if clickCount >= 2 { finishPolyline() } else { refresh() }
             return true
         }
         if clickCount >= 2, let hit = page.annotations.reversed().first(where:{ RectangleMarkupRecord.owns($0) && $0.type == "FreeText" && !$0.isReadOnly && !layerIsLocked($0) && $0.bounds.contains(point) }) {

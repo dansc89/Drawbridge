@@ -9,6 +9,79 @@ final class DrawingMeasurementTests: XCTestCase {
     var eighth: DrawingScale { DrawingScale.architectural(inches: 0.125, name: "1/8\" = 1'")! }
     var quarter: DrawingScale { DrawingScale.architectural(inches: 0.25, name: "1/4\" = 1'")! }
 
+    func testLengthSecondClickFinishesWithOrWithoutShiftAtEveryRotation() throws {
+        let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 1000), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = MarkupPDFView(frame: window.contentView!.bounds)
+        window.contentView?.addSubview(view); view.setMarkupDocument(document)
+        let session = view.rectangleMarkup
+        for index in 0..<4 {
+            let page = try XCTUnwrap(document.page(at: index)); view.go(to: page)
+            window.layoutIfNeeded(); view.layoutSubtreeIfNeeded()
+            session.applyDrawingScale(eighth, to: [page])
+            func location(_ point: CGPoint) -> CGPoint { view.convert(point, from: page) }
+            let start = CGPoint(x: 100, y: 100)
+            for end in [CGPoint(x: 190, y: 170), CGPoint(x: 170, y: 190)] {
+                for modifiers in [NSEvent.ModifierFlags(), .shift] {
+                    session.tool = .perimeter
+                    let count = page.annotations.count
+                    XCTAssertTrue(session.pointerDown(at: location(start)))
+                    XCTAssertTrue(session.pointerUp(at: location(start)))
+                    session.pointerMoved(at: location(end), modifiers: modifiers)
+                    XCTAssertEqual(page.annotations.count, count, "Hover must not commit")
+                    XCTAssertTrue(session.pointerDown(at: location(end), modifiers: modifiers))
+                    XCTAssertEqual(session.tool, .select, "Second click must finish even while Shift is held")
+                    XCTAssertEqual(page.annotations.count, count + 1)
+                    let annotation = try XCTUnwrap(session.selected)
+                    let vertices = RectangleMarkupRecord.vertices(annotation)
+                    XCTAssertEqual(vertices.count, 2)
+                    let expected = modifiers.contains(.shift) ? MeasurementGeometry.constrained(end, from: start) : end
+                    XCTAssertEqual(vertices[1].x, expected.x, accuracy: 1e-8)
+                    XCTAssertEqual(vertices[1].y, expected.y, accuracy: 1e-8)
+                    XCTAssertFalse(try XCTUnwrap(MeasurementMetadata.measurement(annotation)).closed)
+                    _ = session.pointerUp(at: location(end), modifiers: modifiers)
+                    XCTAssertEqual(page.annotations.count, count + 1, "Mouse up must not duplicate the dimension")
+                }
+            }
+        }
+    }
+
+    func testLengthControlContinuesUntilFinalClickAndRejectsDuplicateEndpoint() throws {
+        let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
+        let document = try XCTUnwrap(PDFDocument(url: source))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 1000), styleMask: [.titled], backing: .buffered, defer: false)
+        let view = MarkupPDFView(frame: window.contentView!.bounds)
+        window.contentView?.addSubview(view); view.setMarkupDocument(document)
+        let session = view.rectangleMarkup
+        for index in 0..<4 {
+            let page = try XCTUnwrap(document.page(at: index)); view.go(to: page)
+            window.layoutIfNeeded(); view.layoutSubtreeIfNeeded()
+            session.applyDrawingScale(eighth, to: [page])
+            func location(_ point: CGPoint) -> CGPoint { view.convert(point, from: page) }
+            let start = CGPoint(x: 100, y: 100), second = CGPoint(x: 190, y: 170), third = CGPoint(x: 230, y: 280)
+            session.tool = .perimeter
+            let count = page.annotations.count
+            XCTAssertTrue(session.pointerDown(at: location(start)))
+            XCTAssertTrue(session.pointerDown(at: location(start), modifiers: .shift))
+            XCTAssertEqual(session.tool, .perimeter, "Duplicate anchor cannot finish a zero-length dimension")
+            XCTAssertTrue(session.pointerDown(at: location(second), modifiers: [.control, .shift]))
+            XCTAssertEqual(session.tool, .perimeter)
+            XCTAssertEqual(page.annotations.count, count)
+            XCTAssertTrue(session.pointerDown(at: location(CGPoint(x: 190, y: 100)), modifiers: .shift))
+            XCTAssertEqual(page.annotations.count, count, "Duplicate last point cannot unexpectedly finish a chain")
+            XCTAssertTrue(session.pointerDown(at: location(third), modifiers: .shift))
+            XCTAssertEqual(session.tool, .select)
+            let vertices = RectangleMarkupRecord.vertices(try XCTUnwrap(session.selected))
+            XCTAssertEqual(vertices.count, 3)
+            XCTAssertEqual(vertices[1].x, 190, accuracy: 1e-8)
+            XCTAssertEqual(vertices[1].y, 100, accuracy: 1e-8)
+            XCTAssertEqual(vertices[2].x, 190, accuracy: 1e-8)
+            XCTAssertEqual(vertices[2].y, 280, accuracy: 1e-8)
+            XCTAssertEqual(page.annotations.count, count + 1)
+        }
+    }
+
     func testRotatedMeasurementAppearanceUsesValidPDFMatrixNumbers() {
         for rotation in [0, 90, 180, 270] {
             var record = RectangleMarkupRecord(id: "rotation-test", pageIndex: 0,
@@ -56,7 +129,7 @@ final class DrawingMeasurementTests: XCTestCase {
             for tool in [RectangleMarkupController.Tool.polyline, .polygon, .area, .perimeter] {
                 session.tool = tool
                 let inputs = [start,diagonal,CGPoint(x: 230,y: 280),CGPoint(x: 100,y: 230)]
-                for point in inputs { XCTAssertTrue(session.pointerDown(at: location(point), modifiers: .shift)) }
+                for point in inputs { XCTAssertTrue(session.pointerDown(at: location(point), modifiers: tool == .perimeter ? [.shift, .control] : .shift)) }
                 XCTAssertTrue(session.finishPolyline(closed: tool != .polyline))
                 let vertices = RectangleMarkupRecord.vertices(try XCTUnwrap(session.selected))
                 XCTAssertEqual(vertices.count,4)
@@ -218,10 +291,10 @@ final class DrawingMeasurementTests: XCTestCase {
                 controller.applyDrawingScale(eighth, to: [page])
                 controller.tool = .perimeter
                 XCTAssertTrue(controller.pointerDown(at: view.convert(points[0], from: page)))
-                XCTAssertTrue(controller.pointerDown(at: view.convert(CGPoint(x: 190,y: 105),from: page), modifiers: .shift))
+                XCTAssertTrue(controller.pointerDown(at: view.convert(CGPoint(x: 190,y: 105),from: page), modifiers: [.shift, .control]))
                 XCTAssertTrue(controller.removeLastDraftPoint())
                 XCTAssertTrue(controller.pointerDown(at: view.convert(points[1],from: page), modifiers: .shift))
-                XCTAssertTrue(controller.finishPolyline())
+                XCTAssertEqual(controller.tool, .select)
                 XCTAssertEqual(controller.selected?.contents,"10'-0\"")
                 let vertices = RectangleMarkupRecord.vertices(try XCTUnwrap(controller.selected))
                 XCTAssertEqual(vertices[0].y,vertices[1].y,accuracy: 1e-8)
@@ -378,8 +451,8 @@ final class DrawingMeasurementTests: XCTestCase {
                 let area = try XCTUnwrap(controller.selected)
                 XCTAssertEqual(area.contents,"Area: 200.00 sq ft")
                 controller.tool = .perimeter
-                for point in points { XCTAssertTrue(controller.pointerDown(at: view.convert(point,from: page))) }
-                XCTAssertTrue(controller.pointerDown(at: view.convert(points[0],from: page)))
+                for point in points { XCTAssertTrue(controller.pointerDown(at: view.convert(point,from: page), modifiers: .control)) }
+                XCTAssertTrue(controller.pointerDown(at: view.convert(points[0],from: page), modifiers: .control))
                 XCTAssertEqual(controller.selected?.contents,"60'-0\"")
                 let count = page.annotations.count
                 XCTAssertTrue(controller.pointerDown(at: view.convert(points[0],from: page)))

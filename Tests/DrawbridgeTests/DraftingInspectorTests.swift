@@ -47,7 +47,7 @@ import XCTest
         session.undo.beginUndoGrouping()
         preset.selectItem(withTitle: "Grid"); fire(preset)
         fg.color = .blue; fire(fg); bg.color = .yellow; transparent.state = .off; fire(transparent)
-        scale.doubleValue = 2; fire(scale); angle.doubleValue = 37; fire(angle); weight.doubleValue = 1.2; fire(weight)
+        scale.doubleValue = 200; fire(scale); angle.doubleValue = 37; fire(angle); weight.doubleValue = 1.2; fire(weight)
         session.undo.endUndoGrouping()
         let expected = DraftingHatch(preset: .grid, foreground: [0,0,1], background: [1,1,0], scale: 2, angle: 37, lineWidth: 1.2)
         XCTAssertEqual(DraftingHatch.read(annotation), expected)

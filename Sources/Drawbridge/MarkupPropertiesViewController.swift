@@ -88,7 +88,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         hatchBackground.setAccessibilityLabel("Hatch background color")
         hatchTransparent.setAccessibilityLabel("Transparent hatch background")
         for well in [hatchForeground, hatchBackground] { well.widthAnchor.constraint(equalToConstant: 85).isActive = true }
-        for (field, minimum, maximum, label) in [(hatchScale, 0.25, 20.0, "Hatch scale"), (hatchAngle, -360.0, 360.0, "Hatch angle degrees"), (hatchWeight, 0.1, 12.0, "Hatch line weight points")] {
+        for (field, minimum, maximum, label) in [(hatchScale, 5.0, 2000.0, "Hatch scale"), (hatchAngle, -360.0, 360.0, "Hatch angle degrees"), (hatchWeight, 0.1, 12.0, "Hatch line weight points")] {
             let formatter = NumberFormatter(); formatter.minimum = NSNumber(value: minimum); formatter.maximum = NSNumber(value: maximum)
             formatter.maximumFractionDigits = 2; formatter.allowsFloats = true
             field.formatter = formatter; field.setAccessibilityLabel(label)
@@ -98,7 +98,8 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         for control in [hatchPattern, hatchForeground, hatchBackground, hatchTransparent, hatchScale, hatchAngle, hatchWeight] as [NSControl] {
             control.target = self; control.action = #selector(changeHatch(_:))
         }
-        hatchDetailRows = NSStackView(views: [row("Foreground", hatchForeground), hatchTransparent, row("Background", hatchBackground), row("Scale", hatchScale), row("Angle (°)", hatchAngle), row("Weight (pt)", hatchWeight)])
+        hatchScale.toolTip = "Hatch scale percentage: 100% = original size. Enter 5–2000. Invalid values are rejected."
+        hatchDetailRows = NSStackView(views: [row("Foreground", hatchForeground), hatchTransparent, row("Background", hatchBackground), row("Scale (%)", hatchScale), row("Angle (°)", hatchAngle), row("Weight (pt)", hatchWeight)])
         hatchDetailRows.orientation = .vertical; hatchDetailRows.alignment = .leading; hatchDetailRows.spacing = 10
         hatchRows = NSStackView(views: [row("Fill pattern", hatchPattern), hatchDetailRows])
         hatchRows.orientation = .vertical; hatchRows.alignment = .leading; hatchRows.spacing = 10
@@ -230,7 +231,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         hatchForeground.color = NSColor(deviceRed: appearance.foreground[0], green: appearance.foreground[1], blue: appearance.foreground[2], alpha: 1)
         if let background = appearance.background { hatchBackground.color = NSColor(deviceRed: background[0], green: background[1], blue: background[2], alpha: 1) }
         hatchTransparent.state = appearance.background == nil ? .on : .off
-        hatchScale.doubleValue = appearance.scale; hatchAngle.doubleValue = appearance.angle; hatchWeight.doubleValue = appearance.lineWidth
+        hatchScale.doubleValue = appearance.scale * 100; hatchAngle.doubleValue = appearance.angle; hatchWeight.doubleValue = appearance.lineWidth
         for control in [hatchPattern, hatchForeground, hatchBackground, hatchTransparent, hatchScale, hatchAngle, hatchWeight] as [NSControl] { control.isEnabled = enabled && closedShape }
         hatchBackground.isEnabled = enabled && appearance.background != nil
         fillRow.isHidden = !closedShape || patterned; fillOpacityRow.isHidden = !closedShape || patterned
@@ -281,12 +282,15 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         guard let session, session.canEdit(), hatchPattern.isEnabled else { refresh(); return }
         let preset = DraftingHatch.Preset.allCases[max(0, hatchPattern.indexOfSelectedItem)]
         if preset == .solid { session.hatchSelected(nil); refresh(); return }
+        // UI percentages are converted only here; documents/defaults retain 1x factors.
+        guard let percentage = hatchScale.objectValue as? NSNumber,
+              percentage.doubleValue.isFinite, (5...2000).contains(percentage.doubleValue) else { refresh(); return }
         guard let foreground = hatchForeground.color.usingColorSpace(.deviceRGB),
               let background = hatchBackground.color.usingColorSpace(.deviceRGB) else { refresh(); return }
         let style = DraftingHatch(preset: preset,
             foreground: [Double(foreground.redComponent), Double(foreground.greenComponent), Double(foreground.blueComponent)],
             background: hatchTransparent.state == .on ? nil : [Double(background.redComponent), Double(background.greenComponent), Double(background.blueComponent)],
-            scale: hatchScale.doubleValue, angle: hatchAngle.doubleValue, lineWidth: hatchWeight.doubleValue)
+            scale: percentage.doubleValue / 100, angle: hatchAngle.doubleValue, lineWidth: hatchWeight.doubleValue)
         guard style.isValid else { refresh(); return }
         session.hatchSelected(style); refresh()
     }
