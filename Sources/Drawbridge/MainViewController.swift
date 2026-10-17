@@ -440,7 +440,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let editMarkupButton = NSButton(title: "Edit Markup Text", target: nil, action: nil)
     let pageJumpField = ClickOnlyTextField(frame: .zero)
     let scalePresetPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-    private let toolbarControlsStack = NSStackView(frame: .zero)
+    private let toolbarThemeBackground = ToolbarThemeBackgroundView(frame: .zero)
+    private let toolbarControlsStack = ThemedToolbarStackView(frame: .zero)
     private let toolbarModeGroupsStack = NSStackView(frame: .zero)
     let toolbarSearchField = NSSearchField(frame: .zero)
     let toolbarSearchPrevButton = NSButton(title: "", target: nil, action: nil)
@@ -749,6 +750,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     override func viewDidLoad() {
         super.viewDidLoad()
         NotificationCenter.default.addObserver(self, selector: #selector(interfaceThemeChanged(_:)), name: InterfaceTheme.didChange, object: nil)
+        for name in [NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(fullscreenChromeChanged(_:)), name: name, object: nil)
+        }
         registerDefaultPerformanceSettingsIfNeeded()
         // Visibility is local to this viewing session, never a persisted preference.
         isHyperlinkHighlightsVisible = false
@@ -784,6 +788,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     override func viewDidLayout() {
         super.viewDidLayout()
+        refreshToolbarThemeBackground()
         applySplitLayoutIfPossible(force: false)
         let thumbnailWidth = thumbnailScrollView.contentSize.width
         if thumbnailWidth > 0 {
@@ -998,11 +1003,47 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         applyAppearanceColors()
     }
 
+    @objc private func fullscreenChromeChanged(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === view.window else { return }
+        applyAppearanceColors()
+    }
+
+    private func refreshToolbarThemeBackground() {
+        guard InterfaceTheme.current != .system else {
+            toolbarThemeBackground.removeFromSuperview()
+            return
+        }
+        // Find the shared toolbar container by view relationships, not private
+        // AppKit class names. Never paint an ancestor containing the PDF root.
+        var parent = toolbarControlsStack.superview
+        while let candidate = parent {
+            if rectangleToolbar.isDescendant(of: candidate) {
+                guard candidate !== view, !view.isDescendant(of: candidate) else { return }
+                toolbarThemeBackground.wantsLayer = true
+                toolbarThemeBackground.layer?.backgroundColor = InterfaceTheme.current.color(for: "chrome")?.cgColor
+                toolbarThemeBackground.frame = candidate.bounds
+                toolbarThemeBackground.autoresizingMask = [.width, .height]
+                if toolbarThemeBackground.superview !== candidate {
+                    toolbarThemeBackground.removeFromSuperview()
+                    candidate.addSubview(toolbarThemeBackground, positioned: .below, relativeTo: nil)
+                }
+                return
+            }
+            parent = candidate.superview
+        }
+    }
+
     private func applyAppearanceColors() {
         // Transparent native titlebar uses NSWindow's background without replacing
         // the traffic lights, drag region, toolbar, or content layout.
         view.window?.titlebarAppearsTransparent = InterfaceTheme.current != .system
         let theme = InterfaceTheme.current
+        for toolbar in [toolbarControlsStack, rectangleToolbar] {
+            toolbar.onHostChanged = { [weak self] in self?.refreshToolbarThemeBackground() }
+            toolbar.editorWindow = view.window
+            toolbar.refreshHostTheme()
+        }
+        refreshToolbarThemeBackground()
         let chromeAppearance = theme.nativeAppearance
         // Explicit static labels only: never retint table cells, selection, disabled
         // buttons, editable fields, annotation color wells or PDF descendants.

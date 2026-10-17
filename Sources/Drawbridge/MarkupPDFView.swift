@@ -676,17 +676,25 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     func refreshAppearanceColors() {
-        // Core Image inverts in linear light. Near-white becomes a dark surround.
-        backgroundColor = isColorInverted ? NSColor(calibratedWhite: 0.997, alpha: 1.0) : AppAppearance.canvas
+        // CIColorInvert works in linear light: this neutral source becomes a
+        // flat charcoal surround on screen, with contrast against a black page.
+        backgroundColor = isColorInverted
+            ? NSColor(srgbRed: 0.98, green: 0.98, blue: 0.98, alpha: 1)
+            : AppAppearance.canvas
     }
 
     /// A screen-only filter. Never mutate a PDF page, annotation, or save payload.
     private(set) var isColorInverted = false
+    private var normalPageShadowsEnabled = true
 
     func setColorInverted(_ inverted: Bool) {
         guard inverted != isColorInverted else { return }
         let filter = CIFilter(name: "CIColorInvert")
         guard !inverted || filter != nil else { return }
+        if inverted { normalPageShadowsEnabled = pageShadowsEnabled }
+        // The native black page shadow otherwise becomes a bright halo under
+        // the screen-only filter. Keep PDF spacing/layout and saved data intact.
+        pageShadowsEnabled = inverted ? false : normalPageShadowsEnabled
         isColorInverted = inverted
         layerUsesCoreImageFilters = true
         contentFilters = inverted ? [filter!] : []

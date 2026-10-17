@@ -19,7 +19,7 @@ final class MarkupToolButton: NSButton {
 
 /// The first completed tools live in their own toolbar group, away from indexing.
 @MainActor
-final class RectangleMarkupToolbar: NSStackView {
+final class RectangleMarkupToolbar: ThemedToolbarStackView {
     let snapshotButton = MarkupToolButton(title: "Snapshot", target: nil, action: nil)
     let penButton = MarkupToolButton(title: "", target: nil, action: nil)
     let selectButton = MarkupToolButton(title: "Select", target: nil, action: nil)

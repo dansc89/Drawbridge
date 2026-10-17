@@ -148,3 +148,31 @@ enum AppAppearance {
         }
     }
 }
+
+/// Fullscreen toolbars can be hosted by a different AppKit window. Theme that
+/// chrome-only host without changing the editor window's inherited PDF appearance.
+@MainActor
+class ThemedToolbarStackView: NSStackView {
+    weak var editorWindow: NSWindow?
+    var onHostChanged: (() -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        refreshHostTheme()
+        onHostChanged?()
+    }
+
+    func refreshHostTheme() {
+        guard let editorWindow, let host = window, host !== editorWindow else { return }
+        let theme = InterfaceTheme.current
+        host.appearance = theme.nativeAppearance
+        host.backgroundColor = AppAppearance.chrome
+        host.titlebarAppearsTransparent = theme != .system
+    }
+}
+
+/// Opaque, noninteractive backing for the native toolbar's shared container.
+@MainActor
+final class ToolbarThemeBackgroundView: NSView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
