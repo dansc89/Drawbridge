@@ -35,8 +35,9 @@ struct SnapshotStyle: Codable, Equatable, Sendable {
     var nsColor: NSColor { NSColor(deviceRed: color[0], green: color[1], blue: color[2], alpha: 1) }
 }
 
-/// Optional filters are rendered once at a bounded high resolution. The original
-/// vector capture remains embedded so returning to Original never loses detail.
+/// Change Color uses PDF luminosity/alpha masks, retaining source vector detail.
+/// Other optional filters retain their bounded raster implementation; the original
+/// capture always remains embedded so returning to Original never loses detail.
 enum SnapshotFilterRenderer {
     // NSCache synchronizes concurrent reads and writes internally.
     nonisolated(unsafe) private static let cache = NSCache<NSString, NSData>()
@@ -48,6 +49,11 @@ enum SnapshotFilterRenderer {
         cache.totalCostLimit = 64 * 1024 * 1024
         if let cached = cache.object(forKey: key) { return cached as Data }
         guard let page = SnapshotPayload(data: data).page else { throw CocoaError(.fileReadCorruptFile) }
+        if style.filter == .colorize {
+            let filtered = try vectorColorize(data, style: style)
+            cache.setObject(filtered as NSData, forKey: key, cost: filtered.count)
+            return filtered
+        }
         let size = page.getBoxRect(.mediaBox).size
         let scale = min(300.0 / 72.0, sqrt(8_000_000 / (size.width * size.height)))
         let width = max(1, Int(ceil(size.width * scale))), height = max(1, Int(ceil(size.height * scale)))
@@ -89,5 +95,69 @@ enum SnapshotFilterRenderer {
         }
         cache.setObject(filtered as NSData, forKey: key, cost: filtered.count)
         return filtered
+    }
+
+    /// Paint white through the source alpha, then tint through its inverse
+    /// luminosity. PDF transparency evaluates the original paths/fonts/images at
+    /// the reader's output resolution, not at a preselected bitmap density.
+    private static func vectorColorize(_ data: Data, style: SnapshotStyle) throws -> Data {
+        guard let executable = PDFTKBookmarkWriter.executableURL(),
+              let source = SnapshotPayload(data: data).page else { throw CocoaError(.fileReadCorruptFile) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeSnapshotColor-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let input = directory.appendingPathComponent("input.pdf")
+        let jsonURL = directory.appendingPathComponent("input.json")
+        let update = directory.appendingPathComponent("update.json")
+        let output = directory.appendingPathComponent("output.pdf")
+        try data.write(to: input)
+        guard PDFTKBookmarkWriter.run(executable, arguments: ["--json=2", "--json-stream-data=inline", "--decode-level=generalized", input.path, jsonURL.path]),
+              ((try? jsonURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? Int.max) <= 128 * 1024 * 1024,
+              var json = try JSONSerialization.jsonObject(with: Data(contentsOf: jsonURL)) as? [String: Any],
+              var tables = json["qpdf"] as? [[String: Any]], tables.count == 2,
+              let pages = json["pages"] as? [[String: Any]], pages.count == 1,
+              let pageRef = pages[0]["object"] as? String,
+              var pageObject = tables[1]["obj:" + pageRef] as? [String: Any],
+              var page = pageObject["value"] as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
+        var objects = tables[1]
+        let refs = (page["/Contents"] as? [String]) ?? (page["/Contents"] as? String).map { [$0] } ?? []
+        var commands = Data()
+        for ref in refs {
+            guard let object = objects["obj:" + ref] as? [String: Any],
+                  let stream = object["stream"] as? [String: Any],
+                  let dict = stream["dict"] as? [String: Any], dict["/Filter"] == nil,
+                  let encoded = stream["data"] as? String, let bytes = Data(base64Encoded: encoded) else { throw CocoaError(.fileReadCorruptFile) }
+            commands.append(bytes); commands.append(10)
+        }
+        var next = (objects.keys.compactMap { Int($0.dropFirst(4).split(separator: " ").first ?? "") }.max() ?? 0) + 1
+        func addStream(_ dictionary: [String: Any], _ bytes: Data) -> String {
+            let ref = "\(next) 0 R"; next += 1
+            objects["obj:" + ref] = ["stream": ["dict": dictionary, "data": bytes.base64EncodedString()]]
+            return ref
+        }
+        let media = source.getBoxRect(.mediaBox)
+        let group: [String: Any] = ["/S": "/Transparency", "/CS": "/DeviceRGB", "/I": true]
+        let form = addStream(["/Type": "/XObject", "/Subtype": "/Form", "/BBox": [media.minX, media.minY, media.maxX, media.maxY],
+                              "/Resources": page["/Resources"] ?? [String: Any](), "/Group": group], commands)
+        let inverse: [String: Any] = ["/FunctionType": 2, "/Domain": [0, 1], "/C0": [1], "/C1": [0], "/N": 1]
+        let resources: [String: Any] = ["/ExtGState": [
+            "/SourceAlpha": ["/Type": "/ExtGState", "/SMask": ["/S": "/Alpha", "/G": form]],
+            "/SourceInk": ["/Type": "/ExtGState", "/SMask": ["/S": "/Luminosity", "/G": form, "/BC": [1, 1, 1], "/TR": inverse]]]]
+        // Decimal formatting avoids PDF's unsupported exponent notation.
+        func number(_ value: Double) -> String { String(format: "%.9f", locale: Locale(identifier: "en_US_POSIX"), value) }
+        let rect = "\(number(media.minX)) \(number(media.minY)) \(number(media.width)) \(number(media.height)) re f"
+        let tint = style.color.map(number).joined(separator: " ")
+        let drawing = "q /SourceAlpha gs 1 1 1 rg \(rect) Q\nq /SourceInk gs \(tint) rg \(rect) Q\n"
+        page["/Contents"] = addStream([:], Data(drawing.utf8))
+        page["/Resources"] = resources
+        page["/Group"] = group
+        pageObject["value"] = page; objects["obj:" + pageRef] = pageObject
+        tables[1] = objects; json["qpdf"] = tables
+        // qpdf consumes inline base64 literally; JSON-escaped slashes corrupt it.
+        try PDFJSONPatchEncoder.data(withJSONObject: json, options: [.withoutEscapingSlashes]).write(to: update)
+        guard PDFTKBookmarkWriter.run(executable, arguments: [input.path, "--update-from-json=" + update.path, output.path]) else { throw CocoaError(.fileWriteUnknown) }
+        let result = try Data(contentsOf: output)
+        guard SnapshotPayload(data: result).page != nil else { throw CocoaError(.fileWriteUnknown) }
+        return result
     }
 }

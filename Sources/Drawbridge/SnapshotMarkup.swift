@@ -128,10 +128,10 @@ struct SnapshotPayload: Sendable {
 /// Copy only the fragment's reachable resource objects into the incremental save.
 /// No source page, catalog, filesystem path, or external reference is retained.
 enum SnapshotAppearance {
-    static func install(data originalData: Data, bounds: CGRect, rotation: Int, style: SnapshotStyle = SnapshotStyle(), objects: inout [String:Any], next: inout Int, forms: inout [Data:String]) throws -> [String:Any] {
+    static func install(data originalData: Data, bounds: CGRect, rotation: Int, pageTransform: CGAffineTransform, style: SnapshotStyle = SnapshotStyle(), objects: inout [String:Any], next: inout Int, forms: inout [Data:String]) throws -> [String:Any] {
         let data = try SnapshotFilterRenderer.filtered(originalData, style: style)
         guard SnapshotPayload(data: data).page != nil, let executable = PDFTKBookmarkWriter.executableURL() else { throw CocoaError(.fileReadCorruptFile) }
-        if let fragmentRef = forms[data], let size = SnapshotPayload(data: data).size { return wrapper(fragmentRef: fragmentRef, size: size, bounds: bounds, rotation: rotation, style: style) }
+        if let fragmentRef = forms[data], let size = SnapshotPayload(data: data).size { return wrapper(fragmentRef: fragmentRef, size: size, bounds: bounds, rotation: rotation, pageTransform: pageTransform, style: style) }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeSnapshot-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -200,12 +200,20 @@ enum SnapshotAppearance {
         fragmentDictionary.merge(encoding) { _, value in value }
         objects["obj:" + fragmentRef] = ["stream": ["dict": fragmentDictionary, "data":content.base64EncodedString()]]
         forms[data] = fragmentRef
-        return wrapper(fragmentRef: fragmentRef, size: size, bounds: bounds, rotation: rotation, style: style)
+        return wrapper(fragmentRef: fragmentRef, size: size, bounds: bounds, rotation: rotation, pageTransform: pageTransform, style: style)
     }
-    private static func wrapper(fragmentRef: String, size: CGSize, bounds: CGRect, rotation: Int, style: SnapshotStyle) -> [String:Any] {
-        let t = SnapshotPayload.transform(size: size, bounds: CGRect(origin: .zero, size: bounds.size), rotation: rotation)
-        let drawing = "q /SnapshotGS gs \(t.a) \(t.b) \(t.c) \(t.d) \(t.tx) \(t.ty) cm /Snapshot Do Q"
-        return ["stream":["dict":["/Type":"/XObject", "/Subtype":"/Form", "/BBox":[0,0,bounds.width,bounds.height], "/Resources":["/XObject":["/Snapshot":fragmentRef], "/ExtGState":["/SnapshotGS":["/Type":"/ExtGState", "/ca":style.opacity, "/CA":style.opacity, "/BM":style.overlay ? "/Multiply" : "/Normal"]]], "/DrawbridgeRectangleAppearance":true], "data":Data(drawing.utf8).base64EncodedString()]]
+    private static func wrapper(fragmentRef: String, size: CGSize, bounds: CGRect, rotation: Int, pageTransform: CGAffineTransform, style: SnapshotStyle) -> [String:Any] {
+        // PDFKit resolves soft masks in destination display space. Keep the BBox
+        // and drawing in that space, then undo the page transform in the Form's
+        // Matrix so its effective bounds still match the annotation's page Rect.
+        // Capture rotation belongs only to the fragment placement below; it must
+        // not substitute for the destination page's rotation/media-box transform.
+        // Shared fragments and their vector resources/masks remain untouched.
+        let p = pageTransform, inverse = p.inverted()
+        let box = bounds.applying(p)
+        let t = SnapshotPayload.transform(size: size, bounds: bounds, rotation: rotation)
+        let drawing = "q /SnapshotGS gs \(p.a) \(p.b) \(p.c) \(p.d) \(p.tx) \(p.ty) cm \(t.a) \(t.b) \(t.c) \(t.d) \(t.tx) \(t.ty) cm /Snapshot Do Q"
+        return ["stream":["dict":["/Type":"/XObject", "/Subtype":"/Form", "/BBox":[box.minX,box.minY,box.maxX,box.maxY], "/Matrix":[inverse.a,inverse.b,inverse.c,inverse.d,inverse.tx,inverse.ty], "/Resources":["/XObject":["/Snapshot":fragmentRef], "/ExtGState":["/SnapshotGS":["/Type":"/ExtGState", "/ca":style.opacity, "/CA":style.opacity, "/BM":style.overlay ? "/Multiply" : "/Normal"]]], "/DrawbridgeRectangleAppearance":true], "data":Data(drawing.utf8).base64EncodedString()]]
     }
 }
 

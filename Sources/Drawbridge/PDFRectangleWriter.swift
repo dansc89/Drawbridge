@@ -627,7 +627,8 @@ enum PDFRectangleWriter {
                     }
                 }
                 if record.kind == .snapshot {
-                    objects["obj:\(appearanceRef)"] = try SnapshotAppearance.install(data: record.snapshotData!, bounds: b, rotation: record.textRotation, style: record.snapshotStyle, objects: &objects, next: &next, forms: &snapshotForms)
+                    guard let destinationPage = document.page(at: index) else { throw CocoaError(.fileReadCorruptFile) }
+                    objects["obj:\(appearanceRef)"] = try SnapshotAppearance.install(data: record.snapshotData!, bounds: b, rotation: record.textRotation, pageTransform: destinationPage.transform(for: .mediaBox), style: record.snapshotStyle, objects: &objects, next: &next, forms: &snapshotForms)
                     objects["obj:\(annotationRef)"] = ["value": annotation]; entries.append(annotationRef); continue
                 }
                 let drawing = appearanceDrawing(record)

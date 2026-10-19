@@ -184,7 +184,7 @@ import XCTest
         }
     }
 
-    func testRealTabCycleCachesActivePositionAndRetiresSecondary() throws {
+    func testRealTabCycleCachesActivePositionAndPreservesSecondary() throws {
         try fixture { c, w, fixtureDocument in
             let a = FileManager.default.temporaryDirectory.appendingPathComponent("Split-A-\(UUID().uuidString).pdf")
             let b = FileManager.default.temporaryDirectory.appendingPathComponent("Split-B-\(UUID().uuidString).pdf")
@@ -192,20 +192,31 @@ import XCTest
             XCTAssertTrue(fixtureDocument.write(to: a)); XCTAssertTrue(fixtureDocument.write(to: b))
             c.openDocument(at: a)
             let aDocument = try XCTUnwrap(c.pdfView.document)
+            // A now remains visible in the original pane when B replaces the
+            // focused pane. Seed its viewport before splitting so cycling back
+            // must preserve the same strict page/zoom expectations.
+            c.pdfView.go(to: try XCTUnwrap(aDocument.page(at: 4)))
+            c.pdfView.autoScales = false; c.pdfView.scaleFactor = 1.7
             toggle(c)
             let right = try XCTUnwrap(c.secondaryPDFView), left = c.pdfView
             w.makeFirstResponder(right)
             right.go(to: try XCTUnwrap(aDocument.page(at: 4)))
             right.autoScales = false; right.scaleFactor = 1.7
             c.openDocument(at: b)
-            XCTAssertEqual(panes(c).count, 1); XCTAssertNil(left.document)
+            XCTAssertEqual(panes(c).count, 2)
+            XCTAssertTrue(left.document === aDocument)
+            XCTAssertFalse(left.rectangleMarkup === right.rectangleMarkup)
+            let bDocument = try XCTUnwrap(right.document)
             XCTAssertEqual(c.sessionDocumentURLs, [a,b])
             c.commandCycleNextDocument(nil)
             XCTAssertEqual(c.openDocumentURL, a)
             XCTAssertTrue(c.pdfView.document === aDocument)
             XCTAssertTrue(c.pdfView.currentPage === aDocument.page(at: 4))
             XCTAssertEqual(c.pdfView.scaleFactor, 1.7, accuracy: 0.001)
-            toggle(c)
+            XCTAssertEqual(panes(c).count, 2)
+            XCTAssertTrue(c.pdfView === left)
+            XCTAssertTrue(c.secondaryPDFView === right)
+            XCTAssertTrue(c.secondaryPDFView?.document === bDocument)
             XCTAssertFalse(c.secondaryPDFView?.document === aDocument)
             XCTAssertEqual(c.secondaryPDFView?.document?.pageCount, aDocument.pageCount)
             c.commandCloseDocument(nil)

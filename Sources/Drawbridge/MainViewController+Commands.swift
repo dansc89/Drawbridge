@@ -417,6 +417,7 @@ extension MainViewController {
         cycleDocument(step: -1)
     }
     @objc func commandCloseDocument(_ sender: Any?) {
+        if let url = openDocumentURL, closeRetainedSplitDocument(at: url) { return }
         guard confirmDiscardUnsavedChangesIfNeeded() else {
             return
         }
@@ -425,12 +426,19 @@ extension MainViewController {
             unregisterSessionDocument(current)
         }
 
+        // A same-document split has two presentations of the closing tab.
+        // Retire both before loading its replacement, otherwise clicking the
+        // stale peer resurrects a document that is no longer in the tab bar.
+        let restoreSplit = secondaryPDFView != nil
+        if restoreSplit { collapsePDFSplit() }
+
         while let fallback = sessionDocumentURLs.last {
             guard FileManager.default.fileExists(atPath: fallback.path) else {
                 unregisterSessionDocument(fallback)
                 continue
             }
             openDocument(at: fallback)
+            if restoreSplit { commandToggleSplitView(nil) }
             return
         }
 
@@ -440,7 +448,7 @@ extension MainViewController {
     private func cycleDocument(step: Int) {
         guard guardOrBeep(sessionDocumentURLs.count > 1) else { return }
 
-        guard confirmDiscardUnsavedChangesIfNeeded() else {
+        guard secondaryPDFView != nil || retainsSplitDocumentSessions || confirmDiscardUnsavedChangesIfNeeded() else {
             return
         }
 
@@ -685,6 +693,9 @@ extension MainViewController {
         guard !isPDFProcessingBusy else { return false }
         let hasDocument = pdfView.document != nil
         switch action {
+        case #selector(commandToggleSyncDocuments(_:)):
+            menuItem.state = isSyncDocumentsEnabled ? .on : .off
+            return hasDocument && (secondaryPDFView?.document?.pageCount ?? 0) > 0
         case #selector(commandToggleSplitView(_:)):
             menuItem.state = secondaryPDFView == nil ? .off : .on
             return hasDocument && !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField)

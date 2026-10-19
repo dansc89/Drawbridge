@@ -269,7 +269,10 @@ final class RectangleMarkupController {
     private weak var boundDocument: PDFDocument?
     let layerStates = NSMapTable<PDFDocument, MarkupLayerState>(keyOptions: .weakMemory, valueOptions: .strongMemory)
     private let fallbackUndo = UndoManager()
-    var undo: UndoManager { inlineText?.editor.undoManager ?? view?.window?.undoManager ?? fallbackUndo }
+    // Set when a split first hosts independent documents. Same-document panes
+    // continue sharing their existing session and undo history.
+    var documentUndoManager: UndoManager?
+    var undo: UndoManager { inlineText?.editor.undoManager ?? documentUndoManager ?? view?.window?.undoManager ?? fallbackUndo }
     var selected: PDFAnnotation? { didSet { additionalSelection = [] } }
     private var additionalSelection: [PDFAnnotation] = []
     var selectedItems: [PDFAnnotation] { (selected.map { [$0] } ?? []) + additionalSelection }

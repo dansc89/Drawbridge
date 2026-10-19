@@ -54,6 +54,55 @@ import XCTest
             }
         }
     }
+    /// Path containment depends only on fixture geometry, not the material,
+    /// angle, background, or renderer. Preserve exact pixel-center CGPath tests
+    /// but compute them once per shape/scale instead of billions of times.
+    struct InteriorMask {
+        let width: Int
+        let height: Int
+        let pixels: [Bool]
+        init(path: CGPath, crop: CGRect, density: Int) {
+            let width = Int(crop.width) * density
+            let height = Int(crop.height) * density
+            self.width = width
+            self.height = height
+            pixels = (0..<height).flatMap { y in
+                (0..<width).map { x in
+                    path.contains(CGPoint(x: crop.minX + (Double(x)+0.5)/Double(density),
+                                          y: crop.minY + (Double(y)+0.5)/Double(density)))
+                }
+            }
+        }
+    }
+
+    func testInteriorMaskMatchesTranslatedPixelCenters() {
+        // The gallery reuses masks across translated cells. Check rectangles,
+        // curves, and concave corners against the original containment predicate.
+        for shape in ["Square", "Circle", "Polygon"] {
+            let path = CGMutablePath()
+            let bounds = CGRect(x: 12.5, y: 12.5, width: 35, height: 35)
+            if shape == "Square" { path.addRect(bounds) }
+            else if shape == "Circle" { path.addEllipse(in: bounds) }
+            else {
+                path.addLines(between: [CGPoint(x: 12.5, y: 12.5), CGPoint(x: 47.5, y: 12.5),
+                    CGPoint(x: 47.5, y: 28.25), CGPoint(x: 30, y: 28.25),
+                    CGPoint(x: 30, y: 47.5), CGPoint(x: 12.5, y: 47.5)])
+                path.closeSubpath()
+            }
+            let crop = CGRect(x: 8, y: 8, width: 44, height: 44)
+            let mask = InteriorMask(path: path, crop: crop, density: 3)
+            for translation in [CGPoint.zero, CGPoint(x: 624, y: 3120), CGPoint(x: 6864, y: 624)] {
+                var transform = CGAffineTransform(translationX: translation.x, y: translation.y)
+                let translated = path.copy(using: &transform)!
+                for y in 0..<mask.height { for x in 0..<mask.width {
+                    let p = CGPoint(x: crop.minX + translation.x + (Double(x)+0.5)/3,
+                                    y: crop.minY + translation.y + (Double(y)+0.5)/3)
+                    XCTAssertEqual(mask.pixels[y*mask.width+x], translated.contains(p), "\(shape) \(x),\(y)")
+                } }
+            }
+        }
+    }
+
     func testEveryHatchShapeScaleAngleBackgroundLiveAndPortablePDF() throws {
         let requested = ProcessInfo.processInfo.environment["DRAWBRIDGE_HATCH_GALLERY_DIR"]
         let root = requested.map { URL(fileURLWithPath: $0) } ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -67,6 +116,7 @@ import XCTest
         let blank = PDFDocument(); let blankPage = PDFPage(); blankPage.setBounds(box, for: .mediaBox); blank.insert(blankPage, at: 0)
         let source = root.appendingPathComponent("source.pdf"); XCTAssertTrue(blank.write(to: source))
         var manifest = [[String: Any]]()
+        var interiorMasks = [String: InteriorMask]()
         for preset in DraftingHatch.Preset.allCases {
             try autoreleasepool {
                 let document = PDFDocument(); let page = PDFPage(); page.setBounds(box, for: .mediaBox); document.insert(page, at: 0)
@@ -135,13 +185,20 @@ import XCTest
                         let image = try XCTUnwrap(native.makeImage())
                         let bytes = try XCTUnwrap(native.data).assumingMemoryBound(to: UInt8.self)
                         let nearPath = item.path.copy(strokingWithWidth: 4, lineCap: .round, lineJoin: .round, miterLimit: 10)
+                        let maskKey = "\(item.shape)-\(item.scale)"
+                        if interiorMasks[maskKey] == nil {
+                            interiorMasks[maskKey] = InteriorMask(path: item.path, crop: crop, density: density)
+                        }
+                        let mask = try XCTUnwrap(interiorMasks[maskKey])
+                        XCTAssertEqual(mask.width, native.width)
+                        XCTAssertEqual(mask.height, native.height)
                         var blue = 0, white = 0, green = 0, outside = 0, yellow = 0
                         for y in 0..<native.height { for x in 0..<native.width {
                             // CGContext's bottom-up page coordinates versus image top-down rows.
                             let offset = (native.height-1-y)*native.bytesPerRow + x*4
                             let red = Double(bytes[offset])/255, g = Double(bytes[offset+1])/255, blueValue = Double(bytes[offset+2])/255
                             let p = CGPoint(x: crop.minX + (Double(x)+0.5)/Double(density), y: crop.minY + (Double(y)+0.5)/Double(density))
-                            let inside = item.path.contains(p)
+                            let inside = mask.pixels[y*mask.width+x]
                             // Thin antialiased strokes blend with the selected underpaint.
                             // Over yellow, a visible blue stroke need not be blue-dominant.
                             let isBlue = item.colored
@@ -200,9 +257,11 @@ import XCTest
                     XCTAssertTrue((0.35...2.85).contains(ratio), "Live/PDF stroke mismatch \(preset) case \(i): \(ratio)")
                 }
                 if requested == nil { try? FileManager.default.removeItem(at: output) }
+                print("GALLERY_COMPLETED \(preset.rawValue) cases=\(cases.count) renderers=2")
             }
         }
         XCTAssertEqual(manifest.count, DraftingHatch.Preset.allCases.count * 72)
+        XCTAssertEqual(interiorMasks.count, 9)
         try JSONSerialization.data(withJSONObject: ["cases": manifest, "caseCount": manifest.count, "renderCount": manifest.count*2,
             "visualReviewPerformed": false, "coordinateSystem": "bottom-left page points; PNG rows top-down"], options: [.prettyPrinted, .sortedKeys])
             .write(to: root.appendingPathComponent("manifest.json"))

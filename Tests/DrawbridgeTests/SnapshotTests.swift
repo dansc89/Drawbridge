@@ -189,12 +189,12 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
             XCTAssertLessThan(difference, 5, "Snapshot must match a direct rendering of the source image, rather than paste blank")
         }
     }
-    func raster(_ page:CGPDFPage, size:CGSize, draw: ((CGContext)->Void)? = nil) throws -> [UInt8] {
-        let w=Int(size.width*2), h=Int(size.height*2)
+    func raster(_ page: CGPDFPage, size: CGSize, scale: CGFloat = 2, draw: ((CGContext) -> Void)? = nil) throws -> [UInt8] {
+        let w=Int(size.width*scale), h=Int(size.height*scale)
         var bytes = [UInt8](repeating:0,count:w*h*4)
         try bytes.withUnsafeMutableBytes { storage in
             let c = try XCTUnwrap(CGContext(data:storage.baseAddress,width:w,height:h,bitsPerComponent:8,bytesPerRow:w*4,space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue))
-            c.scaleBy(x:2,y:2)
+            c.scaleBy(x:scale,y:scale)
             if let draw { draw(c) } else { c.drawPDFPage(page) }
         }
         return bytes
@@ -935,6 +935,66 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
         XCTAssertTrue(PDFRectangleWriter.write(document: reopened, source: output, destination: output, pageLabels: [:], records: RectangleMarkupRecord.capture(reopened)))
     }
 
+    func testColorizedAppearanceSurvivesMoveResizeAndRepeatedSave() throws {
+        _ = NSApplication.shared
+        for rotation in [0, 90, 180, 270] {
+        let source = try fixture(rotation: rotation)
+        defer { try? FileManager.default.removeItem(at: source) }
+        let original = try Data(contentsOf: source)
+        let document = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(document.page(at: 0))
+        let payload = try capture(page, polygon: true)
+        let view = MarkupPDFView(); view.document = document
+        let session = view.rectangleMarkup; session.bind(to: document); session.canEdit = { true }
+        let stamp = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: CGPoint(x: 250, y: 240)))
+        let style = SnapshotStyle(overlay: true, opacity: 0.55, filter: .colorize, color: [0, 0.65, 0.15])
+        session.styleSelectedSnapshot(style)
+        func pixels(_ page: PDFPage) throws -> NSBitmapImageRep {
+            try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(page.drawbridgeThumbnail(of: CGSize(width: 500, height: 500), for: .mediaBox).tiffRepresentation)))
+        }
+        for bounds in [CGRect(x: 190, y: 200, width: 120, height: 80),
+                       CGRect(x: 265, y: 55, width: 180, height: 120),
+                       CGRect(x: -15, y: 25, width: 90, height: 60)] {
+            // Interactive stamps intentionally reject resizing; exercise the writer
+            // with externally resized bounds as well as offset/partly clipped bounds.
+            try XCTUnwrap(session.selected).bounds = bounds
+            let output = source.appendingPathExtension(UUID().uuidString + ".pdf")
+            defer { try? FileManager.default.removeItem(at: output) }
+            XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: output, pageLabels: [:], records: RectangleMarkupRecord.capture(document)))
+            let expected = try pixels(page)
+            // The second save reuses the imported fragment rather than installing
+            // fresh resources. Both must render correctly in unmodified PDFKit.
+            for revision in 0..<2 {
+                let reopened = try XCTUnwrap(PDFDocument(url: output)), savedPage = try XCTUnwrap(reopened.page(at: 0))
+                let savedStamp = try XCTUnwrap(savedPage.annotations.first)
+                XCTAssertEqual(SnapshotPayload.read(savedStamp)?.data, payload.data)
+                XCTAssertEqual(SnapshotStyle.read(savedStamp), style)
+                XCTAssertEqual(savedStamp.bounds, bounds)
+                XCTAssertTrue(try Data(contentsOf: output).starts(with: original))
+                let actual = try pixels(savedPage)
+                var differences = 0
+                for y in 0..<expected.pixelsHigh { for x in 0..<expected.pixelsWide {
+                    let a = expected.colorAt(x: x, y: y)!.usingColorSpace(.deviceRGB)!
+                    let b = actual.colorAt(x: x, y: y)!.usingColorSpace(.deviceRGB)!
+                    if abs(a.redComponent - b.redComponent) + abs(a.greenComponent - b.greenComponent) + abs(a.blueComponent - b.blueComponent) > 0.1 { differences += 1 }
+                } }
+                if differences >= 1200, let diagnosticRoot = ProcessInfo.processInfo.environment["DRAWBRIDGE_SNAPSHOT_DIAGNOSTICS"] {
+                    let root = URL(fileURLWithPath: diagnosticRoot)
+                    let name = "r\(rotation)-x\(Int(bounds.minX))-v\(revision)"
+                    try expected.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent(name + "-expected.png"))
+                    try actual.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent(name + "-actual.png"))
+                    try Data(contentsOf: output).write(to: root.appendingPathComponent(name + ".pdf"))
+                    print("SNAPSHOT_DIAGNOSTIC", name, differences, "context", String(describing: NSGraphicsContext.current), "appearance", NSApp.effectiveAppearance.name.rawValue)
+                }
+                XCTAssertLessThan(differences, 1200, "Colorized vector appearance at \(bounds), revision \(revision)")
+                if revision == 0 {
+                    XCTAssertTrue(PDFRectangleWriter.write(document: reopened, source: output, destination: output, pageLabels: [:], records: RectangleMarkupRecord.capture(reopened)))
+                }
+            }
+        }
+        XCTAssertNotNil(RectangleMarkupRecord.identity(stamp))
+        }
+    }
+
     func testSnapshotFiltersOverlayOpacitySaveReopenAndUndo() throws {
         _ = NSApplication.shared
         for rotation in [0,90,180,270] {
@@ -953,6 +1013,7 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
                 let out=source.deletingLastPathComponent().appendingPathComponent("Styled-\(UUID().uuidString).pdf")
                 defer { try? FileManager.default.removeItem(at:out) }
                 XCTAssertTrue(PDFRectangleWriter.write(document:doc,source:source,destination:out,pageLabels:[:],records:RectangleMarkupRecord.capture(doc)))
+
                 let saved=try XCTUnwrap(PDFDocument(url:out)), savedStamp=try XCTUnwrap(saved.page(at:0)!.annotations.first)
                 XCTAssertEqual(SnapshotStyle.read(savedStamp),style); XCTAssertEqual(SnapshotPayload.read(savedStamp)?.data,payload.data)
                 let a=try XCTUnwrap(NSBitmapImageRep(data:page.drawbridgeThumbnail(of:CGSize(width:500,height:500),for:.mediaBox).tiffRepresentation!))
@@ -979,7 +1040,7 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
             let filtered = try SnapshotFilterRenderer.filtered(payload.data, style: SnapshotStyle(filter:.colorize, color:color))
             let page = try XCTUnwrap(SnapshotPayload(data:filtered).page)
             XCTAssertEqual(page.getBoxRect(.mediaBox).size, payload.size)
-            let pixels = try raster(page, size:payload.size!)
+            let pixels = try raster(page, size:payload.size!, scale:16)
             var chosenColorPixels = 0, whitePixels = 0
             for i in stride(from:0,to:pixels.count,by:4) where pixels[i+3] > 250 {
                 if (0..<3).allSatisfy({ abs(Double(pixels[i+$0])/255-color[$0]) < 0.04 }) { chosenColorPixels += 1 }

@@ -40,6 +40,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.isOpaque = true
         window.alphaValue = 1.0
         window.backgroundColor = AppAppearance.chrome
+        // Install before attaching content: AppKit caches a default undo manager
+        // on first access without a delegate and then bypasses session routing.
+        window.delegate = self
         window.isMovableByWindowBackground = false
         let mainViewController = MainViewController()
         loadRecentFiles()
@@ -55,7 +58,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.toolbar?.showsBaselineSeparator = true
         window.contentView?.wantsLayer = true
         window.contentView?.superview?.wantsLayer = true
-        window.delegate = self
         window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
         window.minSize = NSSize(width: 1360, height: 700)
         window.maxSize = NSSize(width: 20000, height: 20000)
@@ -76,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let controller = mainViewController else { return .terminateNow }
-        guard controller.confirmDiscardUnsavedChangesIfNeeded() else { return .terminateCancel }
+        guard controller.confirmAllDocumentsForClose() else { return .terminateCancel }
         guard controller.hasPendingPDFWriteForTermination() else { return .terminateNow }
         beginWaitingForPDFWriteBeforeTermination(controller: controller)
         return .terminateLater
@@ -106,9 +108,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    // Same-document panes retain one window history until independent sessions exist.
+    private let sharedWindowUndoManager = UndoManager()
+
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? {
+        let controller = (window.contentViewController as? MainViewController) ?? mainViewController
+        return controller?.pdfView.rectangleMarkup.documentUndoManager ?? sharedWindowUndoManager
+    }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard let controller = mainViewController else { return true }
-        return controller.confirmDiscardUnsavedChangesIfNeeded()
+        guard let controller = (sender.contentViewController as? MainViewController) ?? mainViewController else { return true }
+        return controller.confirmAllDocumentsForClose()
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -287,6 +297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let splitItem = viewMenu.addItem(withTitle: "Toggle Split View", action: #selector(MainViewController.commandToggleSplitView(_:)), keyEquivalent: "2")
         splitItem.keyEquivalentModifierMask = [.control]
         splitItem.target = controller
+        viewMenu.addItem(withTitle: "Sync Documents", action: #selector(MainViewController.commandToggleSyncDocuments(_:)), keyEquivalent: "").target = controller
         viewMenu.addItem(withTitle: "Markups List", action: #selector(MainViewController.commandToggleMarkupsList(_:)), keyEquivalent: "").target = controller
         let invertBinding = controller.currentShortcutBinding(for: .invert)
         let invertItem = viewMenu.addItem(withTitle: "Invert", action: #selector(MainViewController.commandToggleInvert(_:)), keyEquivalent: invertBinding.key)

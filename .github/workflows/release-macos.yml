@@ -10,6 +10,11 @@ on:
         description: Existing version tag to build (for example v1.1 or v1.0.1)
         required: true
         type: string
+      publish:
+        description: Publication is disabled; qualification only
+        required: false
+        default: false
+        type: boolean
       source_ref:
         description: Candidate branch or commit to build; defaults to release tag
         required: false
@@ -108,7 +113,7 @@ jobs:
 
       - name: Build app bundle
         env:
-          DRAWBRIDGE_BUILD_NUMBER: "246"
+          DRAWBRIDGE_BUILD_NUMBER: "247"
           DRAWBRIDGE_SKIP_INSTALL: "1"
           DRAWBRIDGE_SKIP_CHECKPOINT: "1"
         run: ./Scripts/package-app.sh

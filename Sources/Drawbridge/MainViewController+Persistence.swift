@@ -123,6 +123,17 @@ extension MainViewController {
             completion?(false)
             return
         }
+        // Reject retained-session collisions before source recovery, model mutation,
+        // save admission or any background write. Filesystem replacement consent
+        // does not authorize discarding another document's edits and undo history.
+        if adoptAsPrimaryDocument,
+           savedDocumentDestinationIsOwnedByAnotherDocument(url, document: document) {
+            let message = "Could not save \(url.lastPathComponent). Another open document owns this destination. Choose a different filename or close that document before saving. Your documents remain unchanged."
+            _ = saveErrorPresenter?(message) ?? runAlert(title: "Failed to save PDF",
+                informativeText: message, style: .warning, buttons: ["OK"])
+            completion?(false)
+            return
+        }
         if persistenceCoordinator.isManualSaveInFlight {
             // Coalesce before resolving paths or showing recovery dialogs: an
             // active save owns its source snapshot and may relocate the file.
@@ -484,6 +495,11 @@ extension MainViewController {
 
                 if adoptAsPrimaryDocument {
                     let newDocumentURL = self.canonicalDocumentURL(targetURL)
+                    guard self.retireSessionAliases(for: documentBox.document, adopting: newDocumentURL,
+                                                   origin: originDocumentURLForAdoption) else {
+                        completion?(false)
+                        return
+                    }
                     if let origin = originDocumentURLForAdoption,
                        origin != newDocumentURL {
                         self.cleanupLegacyJSONArtifacts(for: newDocumentURL)
@@ -737,19 +753,39 @@ extension MainViewController {
             ]
         )
         let snapshotVersion = markupChangeVersion
+        let revision = autosaveRevision
+        let owner = persistenceCoordinator
+        let runID = owner.autosaveRunID
         let sidecar = sidecarURL(for: targetURL)
         let snapshot = buildSidecarSnapshot(document: document, sourcePDFURL: targetURL)
         let snapshotStore = self.snapshotStore
 
-        DispatchQueue.global(qos: .utility).async { [weak self] in
+        let documentID = ObjectIdentifier(document)
+        let work: @Sendable () -> Void = { [weak self] in
             let success = snapshotStore.writeSnapshot(snapshot, to: sidecar)
 
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard owner.autosaveRunID == runID else { return }
+                // Always retire the captured run, never whichever session is active.
+                defer {
+                    owner.finishAutosaveRun(stillHasChanges: false) {
+                        if self.persistenceCoordinator === owner { self.scheduleAutosave() }
+                    }
+                    if self.persistenceCoordinator === owner && self.markupChangeVersion > 0 {
+                        self.scheduleAutosave()
+                    }
+                }
+                guard self.pdfView.document.map(ObjectIdentifier.init) == documentID,
+                      self.persistenceCoordinator === owner,
+                      self.openDocumentURL == targetURL else {
+                    PerformanceMetrics.end(autosaveSpan, extra: ["result": "inactive_owner"])
+                    return
+                }
 
                 if success {
                     self.lastAutosaveAt = Date()
-                    if self.markupChangeVersion <= snapshotVersion {
+                    if self.autosaveRevision == revision {
                         self.markDocumentClean()
                     } else {
                         self.lastAutosavedChangeVersion = snapshotVersion
@@ -764,11 +800,11 @@ extension MainViewController {
                     ]
                 )
 
-                self.persistenceCoordinator.finishAutosaveRun(stillHasChanges: self.markupChangeVersion > 0) {
-                    self.scheduleAutosave()
-                }
+
             }
         }
+        if let scheduler = autosaveWorkScheduler { scheduler(work) }
+        else { DispatchQueue.global(qos: .utility).async(execute: work) }
     }
 
     func saveCurrentDocumentForClosePrompt() -> Bool {

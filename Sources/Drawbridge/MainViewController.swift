@@ -131,13 +131,184 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var secondaryPDFView: MarkupPDFView?
     // Moving the canonical document between panes is not a new PDF/tab session.
     private var isTransferringPDFPaneDocument = false
+    var retainsSplitDocumentSessions = false
+    private var splitDocumentSessions: [URL: SplitDocumentSession] = [:]
+
+    private(set) var isSyncDocumentsEnabled = false
+    private weak var syncAnchorPane: MarkupPDFView?
+    // Peer index minus anchor index, captured once (never updated by clamping).
+    private var syncPageOffset = 0
+    private var isApplyingDocumentSync = false
+
+    @objc func commandToggleSyncDocuments(_ sender: Any?) {
+        guard !isPDFProcessingBusy, let peer = secondaryPDFView,
+              let anchorState = pdfView.captureTabViewState(),
+              let peerState = peer.captureTabViewState() else { return }
+        if isSyncDocumentsEnabled {
+            stopSyncDocuments()
+        } else {
+            syncAnchorPane = pdfView
+            syncPageOffset = peerState.current.pageIndex - anchorState.current.pageIndex
+            isSyncDocumentsEnabled = true
+        }
+    }
+
+    private func stopSyncDocuments() {
+        isSyncDocumentsEnabled = false
+        syncAnchorPane = nil
+        syncPageOffset = 0
+    }
+
+    @objc private func syncPDFViewportNotification(_ notification: Notification) {
+        guard let pane = notification.object as? MarkupPDFView else { return }
+        synchronizeDocumentViewport(from: pane)
+    }
+
+    private func synchronizeDocumentViewport(from source: MarkupPDFView) {
+        guard isSyncDocumentsEnabled, !isApplyingDocumentSync, !isTransferringPDFPaneDocument,
+              let peer = secondaryPDFView, source === pdfView || source === peer,
+              let state = source.captureTabViewState() else { return }
+        let target = source === pdfView ? peer : pdfView
+        guard let targetDocument = target.document, targetDocument.pageCount > 0 else { return }
+        let offset = source === syncAnchorPane ? syncPageOffset : -syncPageOffset
+        let pageIndex = min(max(state.current.pageIndex + offset, 0), targetDocument.pageCount - 1)
+        isApplyingDocumentSync = true
+        defer { isApplyingDocumentSync = false }
+        if target.rectangleMarkup === source.rectangleMarkup, target !== pdfView,
+           let canonical = pdfView.document,
+           let targetState = target.captureTabViewState(), targetState.current.pageIndex != pageIndex {
+            // Detached same-document panes contain a real copy only for their
+            // current sheet; rebuild that sheet before navigating to it.
+            let mapped = MarkupPDFView.TabViewState(
+                current: .init(pageIndex: pageIndex, point: state.current.point, scale: state.current.scale),
+                back: targetState.back, forward: targetState.forward, autoScales: false,
+                viewportCenter: state.viewportCenter)
+            installSplitPresentation(on: target, from: canonical, state: mapped)
+        } else if let page = targetDocument.page(at: pageIndex), target.currentPage !== page {
+            target.go(to: page)
+        }
+        target.autoScales = false
+        if abs(target.scaleFactor - state.current.scale) > 0.000001 {
+            target.scaleFactor = state.current.scale
+        }
+        target.centerViewport(on: state.viewportCenter)
+    }
+
+    private func retainActiveSplitSession() {
+        guard let url = openDocumentURL, let document = pdfView.document else { return }
+        pdfView.rectangleMarkup.finishTextEditing()
+        let markup = pdfView.rectangleMarkup
+        if markup.documentUndoManager == nil { markup.documentUndoManager = markup.undo }
+        splitDocumentSessions[canonicalDocumentURL(url)] = SplitDocumentSession(
+            url: url, document: document, persistence: persistenceCoordinator, markup: markup, viewport: pdfView.captureTabViewState(),
+            labels: pageLabelOverrides, suppressedLabels: suppressedEmbeddedPageLabelIndexes,
+            scaleLocks: pageScaleLocks, bookmarkLabels: bookmarkLabelOverrides,
+            lastExplicitScaleSetDocumentID: lastExplicitScaleSetDocumentID,
+            lastExplicitScaleSetPageIndex: lastExplicitScaleSetPageIndex,
+            explicitScaleSetDocumentID: explicitScaleSetDocumentID,
+            explicitScaleSetPageIndexes: explicitScaleSetPageIndexes,
+            pendingScaleReminderSuppressionDocumentID: pendingScaleReminderSuppressionDocumentID,
+            pendingScaleReminderSuppressionPageIndex: pendingScaleReminderSuppressionPageIndex,
+            pendingScaleReminderSuppressionOneShot: pendingScaleReminderSuppressionOneShot,
+            dirty: hasUnsavedChanges() || markup.hasUnsavedChanges,
+            changeVersion: markupChangeVersion, autosavedVersion: lastAutosavedChangeVersion,
+            lastEdit: lastMarkupEditAt, lastInteraction: lastUserInteractionAt,
+            promptedForSaveCopy: hasPromptedForInitialMarkupSaveCopy,
+            searchQuery: toolbarSearchField.stringValue)
+    }
+
+    private func restoreSplitSession(_ session: SplitDocumentSession, in pane: MarkupPDFView,
+                                     restoreViewport: Bool) {
+        persistenceCoordinator.cancelScheduledAutosave()
+        persistenceCoordinator = session.persistence
+        pane.rectangleMarkup = session.markup
+        if pane.document !== session.document {
+            isTransferringPDFPaneDocument = true
+            pane.document = session.document
+            isTransferringPDFPaneDocument = false
+        }
+        pane.rectangleMarkup.install(on: pane)
+        openDocumentURL = session.url
+        pageLabelOverrides = session.labels
+        suppressedEmbeddedPageLabelIndexes = session.suppressedLabels
+        pageScaleLocks = session.scaleLocks
+        bookmarkLabelOverrides = session.bookmarkLabels
+        lastExplicitScaleSetDocumentID = session.lastExplicitScaleSetDocumentID
+        lastExplicitScaleSetPageIndex = session.lastExplicitScaleSetPageIndex
+        explicitScaleSetDocumentID = session.explicitScaleSetDocumentID
+        explicitScaleSetPageIndexes = session.explicitScaleSetPageIndexes
+        pendingScaleReminderSuppressionDocumentID = session.pendingScaleReminderSuppressionDocumentID
+        pendingScaleReminderSuppressionPageIndex = session.pendingScaleReminderSuppressionPageIndex
+        pendingScaleReminderSuppressionOneShot = session.pendingScaleReminderSuppressionOneShot
+        lastScaleLockAppliedPageIndex = -1
+        dominantDocumentPageSizeInInches = dominantPageSizeInInches(for: session.document)
+        markupChangeVersion = session.changeVersion
+        lastAutosavedChangeVersion = session.autosavedVersion
+        lastMarkupEditAt = session.lastEdit
+        lastUserInteractionAt = session.lastInteraction
+        hasPromptedForInitialMarkupSaveCopy = session.promptedForSaveCopy
+        configureAutosaveURL(for: session.url)
+        if session.changeVersion > 0 { scheduleAutosave() }
+        view.window?.isDocumentEdited = session.dirty || session.markup.hasUnsavedChanges
+        clearMarkupCache()
+        resetSearchState(clearQuery: false)
+        toolbarSearchField.stringValue = session.searchQuery
+        refreshSearchIfNeeded()
+        if restoreViewport, let state = session.viewport { _ = pane.restoreTabViewState(state) }
+        configureRectangleMarkup()
+        pane.rectangleMarkup.refresh(presentationChanged: false)
+        scheduleMarkupsRefresh(selecting: pane.rectangleMarkup.selected)
+        view.window?.title = "Drawbridge - \(session.url.lastPathComponent)"
+        refreshDocumentTabs()
+        updatePDFPaneFocus()
+        requestChromeRefresh(immediate: true)
+    }
+
+    /// Detach the outgoing canonical document before replacing the focused pane.
+    /// A same-document peer becomes the owner of that document; independent peers
+    /// already own their own document and must never be reassigned here.
+    private func prepareSplitDocumentReplacement() {
+        stopSyncDocuments()
+        retainsSplitDocumentSessions = true
+        retainActiveSplitSession()
+        if let peer = secondaryPDFView, peer.rectangleMarkup === pdfView.rectangleMarkup,
+           let document = pdfView.document {
+            let state = peer.captureTabViewState()
+            pdfView.document = nil
+            peer.document = document
+            if let state { _ = peer.restoreTabViewState(state) }
+            peer.rectangleMarkup.install(on: peer)
+        }
+        persistenceCoordinator.cancelScheduledAutosave()
+        persistenceCoordinator = DocumentPersistenceCoordinator(autosaveInterval: autosaveIntervalSeconds)
+        pdfView.rectangleMarkup = RectangleMarkupController(defaults: pdfView.rectangleMarkup.defaultPreferences)
+        pdfView.rectangleMarkup.documentUndoManager = UndoManager()
+        pdfView.rectangleMarkup.install(on: pdfView)
+        configureRectangleMarkup()
+        openDocumentURL = nil
+    }
+
+    private func focusVisibleSplitDocument(_ url: URL) -> Bool {
+        guard let peer = secondaryPDFView,
+              peer.rectangleMarkup !== pdfView.rectangleMarkup,
+              let session = splitDocumentSessions[url], peer.document === session.document else { return false }
+        activatePDFPane(peer)
+        view.window?.makeFirstResponder(peer)
+        return true
+    }
 
     func configurePaneActivation(_ pane: MarkupPDFView) {
+        for name in [Notification.Name.PDFViewPageChanged, .PDFViewScaleChanged] {
+            NotificationCenter.default.addObserver(self, selector: #selector(syncPDFViewportNotification(_:)), name: name, object: pane)
+        }
         pane.onActivatePane = { [weak self, weak pane] in
             guard let self, let pane else { return }
             self.activatePDFPane(pane)
         }
-        pane.onWillReplaceDocument = { [weak self] in self?.collapsePDFSplit() }
+        pane.onWillReplaceDocument = { [weak self] in
+            guard let self, !self.isTransferringPDFPaneDocument else { return }
+            self.collapsePDFSplit()
+        }
     }
 
     private func synchronizePDFPaneSettings(_ pane: MarkupPDFView) {
@@ -154,6 +325,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         guard pane !== pdfView,
               pdfPaneSplitView.arrangedSubviews.contains(where: { ($0 as? PDFPaneContainerView)?.pdfView === pane }),
               !isPDFProcessingBusy else { return }
+        let wasApplyingSync = isApplyingDocumentSync
+        isApplyingDocumentSync = true
+        defer { isApplyingDocumentSync = wasApplyingSync }
         let previous = pdfView
         previous.rectangleMarkup.finishTextEditing()
         previous.rectangleMarkup.cancelGesture()
@@ -161,6 +335,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pane.toolMode = previous.toolMode
         pane.polygonVertexEditModeEnabled = previous.polygonVertexEditModeEnabled
         synchronizePDFPaneSettings(pane)
+        let independentDocuments = pane.rectangleMarkup !== previous.rectangleMarkup
+        if independentDocuments {
+            retainActiveSplitSession()
+            pdfView = pane
+            secondaryPDFView = previous
+            if let session = splitDocumentSessions.values.first(where: { $0.document === pane.document }) {
+                restoreSplitSession(session, in: pane, restoreViewport: false)
+            }
+        } else {
         let canonical = previous.document
         let incomingState = pane.captureTabViewState()
         let outgoingState = previous.captureTabViewState()
@@ -183,6 +366,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         // One session owns dirty state, source stamps, layers, and undo across both views.
         pane.rectangleMarkup.install(on: pane)
         pane.rectangleMarkup.refresh(presentationChanged: false)
+        }
+        view.window?.makeFirstResponder(pane)
         updatePDFPaneFocus()
         for overlay in [selectedMarkupOverlayLayer, selectedTextOverlayLayer, selectedLineEndpointHaloLayer, selectedLineEndpointOverlayLayer] {
             overlay.removeFromSuperlayer()
@@ -218,7 +403,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pane.toolMode = pdfView.toolMode
         synchronizePDFPaneSettings(pane)
         pane.onViewportChanged = { [weak self, weak pane] in
-            guard let self, let pane, self.pdfView === pane else { return }
+            guard let self, let pane else { return }
+            self.synchronizeDocumentViewport(from: pane)
+            guard self.pdfView === pane else { return }
             self.requestChromeRefresh()
             self.updateSelectionOverlay()
         }
@@ -251,7 +438,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var splitPresentationSourcePages: [PDFPage] = []
 
     private func refreshSplitPresentationAfterStructureChange(document: PDFDocument) {
-        guard let peer = secondaryPDFView, let state = peer.captureTabViewState(),
+        guard let peer = secondaryPDFView, peer.rectangleMarkup === pdfView.rectangleMarkup,
+              let state = peer.captureTabViewState(),
               document.pageCount > 0 else { return }
         func remap(_ entry: MarkupPDFView.ViewportHistoryEntry, fallback: Bool) -> MarkupPDFView.ViewportHistoryEntry? {
             let source = splitPresentationSourcePages.indices.contains(entry.pageIndex) ? splitPresentationSourcePages[entry.pageIndex] : nil
@@ -324,7 +512,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private func updatePDFPaneHeaders() {
         for (index, container) in pdfPaneSplitView.arrangedSubviews.enumerated() {
             guard let container = container as? PDFPaneContainerView else { continue }
-            container.updateHeader(documentName: openDocumentURL?.lastPathComponent ?? "PDF",
+            let name = splitDocumentSessions.values.first(where: { $0.document === container.pdfView.document })?.url.lastPathComponent
+                ?? openDocumentURL?.lastPathComponent ?? "PDF"
+            container.updateHeader(documentName: name,
                                    side: index == 0 ? "Left" : "Right",
                                    active: container.pdfView === pdfView,
                                    split: secondaryPDFView != nil)
@@ -332,7 +522,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func collapsePDFSplit() {
+        stopSyncDocuments()
         guard let inactive = secondaryPDFView else { return }
+        for name in [Notification.Name.PDFViewPageChanged, .PDFViewScaleChanged] {
+            NotificationCenter.default.removeObserver(self, name: name, object: inactive)
+        }
         let inactiveContainer = inactive.superview
         pdfView.rectangleMarkup.finishTextEditing()
         pdfView.rectangleMarkup.cancelGesture()
@@ -559,7 +753,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var isPDFProcessingBusy: Bool { busyOperationDepth > 0 || isSavingDocumentOperation || isSwitchingDocument || pdfView.rectangleMarkup.isCapturingSnapshot }
     private var isSwitchingDocument = false
     private var busyOperationDepth = 0
-    var markupChangeVersion = 0
+    // Immutable revision identity prevents counter resets (clean -> edit) from
+    // making an old snapshot appear newer than the current edits.
+    var autosaveRevision = UUID()
+    var markupChangeVersion = 0 { didSet { autosaveRevision = UUID() } }
     var lastAutosavedChangeVersion = 0
     var openDocumentURL: URL? { didSet { pdfView.rectangleMarkup.rememberSource(openDocumentURL) } }
     var sessionDocumentURLs: [URL] = []
@@ -570,6 +767,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     lazy var persistenceCoordinator = DocumentPersistenceCoordinator(autosaveInterval: autosaveIntervalSeconds)
     // Internal presentation seam; normal saves still present their modal error alert.
     var saveErrorPresenter: ((String) -> NSApplication.ModalResponse)?
+    // Deterministic scheduling seam; the supplied work retains the real writer/completion.
+    var autosaveWorkScheduler: ((@escaping @Sendable () -> Void) -> Void)?
     var pendingMarkupsRefreshWorkItem: DispatchWorkItem?
     var pendingSearchWorkItem: DispatchWorkItem?
     private var pendingChromeRefreshWorkItem: DispatchWorkItem?
@@ -901,7 +1100,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         configureRectangleMarkup()
         pdfView.onViewportChanged = { [weak self, weak pane = pdfView] in
-            guard let self, let pane, self.pdfView === pane else { return }
+            guard let self, let pane else { return }
+            self.synchronizeDocumentViewport(from: pane)
+            guard self.pdfView === pane else { return }
             self.lastUserInteractionAt = Date()
             self.requestChromeRefresh()
             self.updateSelectionOverlay()
@@ -2774,9 +2975,51 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         updateDocumentTabsOverflow(nil)
     }
 
+    /// Returns true when retained-session closing handled (including Cancel).
+    func closeRetainedSplitDocument(at url: URL) -> Bool {
+        guard retainsSplitDocumentSessions else { return false }
+        guard !isPDFProcessingBusy else { NSSound.beep(); return true }
+        let normalized = canonicalDocumentURL(url)
+        let focused = openDocumentURL.map(canonicalDocumentURL) == normalized
+        // PDFKit may read a frozen snapshot URL, not the tab's canonical URL.
+        // Retained session identity is authoritative for visible pane ownership.
+        let visible = secondaryPDFView.map { peer in
+            splitDocumentSessions[normalized].map { peer.document === $0.document } ?? false
+        } ?? false
+        if !focused && !visible {
+            guard confirmRetainedDocumentForClose(at: normalized) else { return true }
+            unregisterSessionDocument(normalized)
+            return true
+        }
+        let previous = openDocumentURL
+        if openDocumentURL.map(canonicalDocumentURL) != normalized {
+            openDocument(at: normalized)
+        }
+        guard openDocumentURL.map(canonicalDocumentURL) == normalized else { return true }
+        guard confirmDiscardUnsavedChangesIfNeeded() else {
+            if let previous { openDocument(at: previous) }
+            return true
+        }
+        if let survivor = secondaryPDFView,
+           survivor.rectangleMarkup !== pdfView.rectangleMarkup {
+            activatePDFPane(survivor)
+            collapsePDFSplit()
+            unregisterSessionDocument(normalized)
+        } else {
+            collapsePDFSplit()
+            unregisterSessionDocument(normalized)
+            // Do not re-retain the just-closed editing session during replacement.
+            openDocumentURL = nil
+            if let fallback = sessionDocumentURLs.last { openDocument(at: fallback) }
+            else { clearToStartState() }
+        }
+        return true
+    }
+
     func closeDocumentTab(at url: URL) {
         let normalized = canonicalDocumentURL(url)
         guard sessionDocumentURLs.contains(normalized) else { return }
+        if closeRetainedSplitDocument(at: normalized) { return }
         if openDocumentURL.map({ canonicalDocumentURL($0) }) == normalized {
             commandCloseDocument(nil)
         } else {
@@ -2793,7 +3036,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         if openDocumentURL.map({ canonicalDocumentURL($0) }) == normalizedTarget {
             return
         }
-        guard confirmDiscardUnsavedChangesIfNeeded() else {
+        guard secondaryPDFView != nil || retainsSplitDocumentSessions || confirmDiscardUnsavedChangesIfNeeded() else {
             refreshDocumentTabs()
             return
         }
@@ -3781,7 +4024,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func invalidateVisibleMarkupRendering(on page: PDFPage) {
-        if let peer = secondaryPDFView, let canonical = pdfView.document,
+        if let peer = secondaryPDFView, peer.rectangleMarkup === pdfView.rectangleMarkup,
+           let canonical = pdfView.document,
            let state = peer.captureTabViewState(), canonical.index(for: page) == state.current.pageIndex {
             installSplitPresentation(on: peer, from: canonical, state: state)
         }
@@ -5059,6 +5303,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     func openDocument(at url: URL) {
         guard !isSwitchingDocument else { return }
+        guard !isPDFProcessingBusy else { NSSound.beep(); return }
+        let target = canonicalDocumentURL(url)
+        if focusVisibleSplitDocument(target) { return }
+        if retainsSplitDocumentSessions, let retained = splitDocumentSessions[target],
+           openDocumentURL.map(canonicalDocumentURL) != target {
+            prepareSplitDocumentReplacement()
+            restoreSplitSession(retained, in: pdfView, restoreViewport: true)
+            view.window?.makeFirstResponder(pdfView)
+            return
+        }
         let openSpan = PerformanceMetrics.begin(
             "open_document",
             thresholdMs: 250,
@@ -5106,8 +5360,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                     scaleLocks: pageScaleLocks), for: previousURL)
             } else { documentTabCache.remove(previousURL) }
         }
+        if (secondaryPDFView != nil || retainsSplitDocumentSessions),
+           openDocumentURL.map(canonicalDocumentURL) != normalizedURL {
+            prepareSplitDocumentReplacement()
+        }
         dominantDocumentPageSizeInInches = dominantPageSizeInInches(for: document)
+        isTransferringPDFPaneDocument = secondaryPDFView != nil
         pdfView.setMarkupDocument(document)
+        isTransferringPDFPaneDocument = false
         clearMarkupCache()
         // The replacement is active now, but its index is deliberately deferred.
         // Do not leave the departing document's published rows or selection live.
@@ -5128,6 +5388,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pendingScaleReminderSuppressionOneShot = false
         pageLabelOverrides.removeAll()
         suppressedEmbeddedPageLabelIndexes.removeAll()
+        bookmarkLabelOverrides.removeAll()
         hasPromptedForInitialMarkupSaveCopy = false
         isPresentingInitialMarkupSaveCopyPrompt = false
         if let cached {
@@ -5184,10 +5445,34 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         refreshDocumentTabs()
     }
 
+    /// A Save As may retire aliases of its own document, never another live session.
+    func savedDocumentDestinationIsOwnedByAnotherDocument(_ url: URL, document: PDFDocument) -> Bool {
+        let target = canonicalDocumentURL(url)
+        if openDocumentURL.map(canonicalDocumentURL) == target,
+           let active = pdfView.document, active !== document { return true }
+        return splitDocumentSessions.contains {
+            canonicalDocumentURL($0.key) == target && $0.value.document !== document
+        }
+    }
+
+    @discardableResult
+    func retireSessionAliases(for document: PDFDocument, adopting target: URL, origin: URL?) -> Bool {
+        guard !savedDocumentDestinationIsOwnedByAnotherDocument(target, document: document) else { return false }
+        let aliases = splitDocumentSessions.filter {
+            $0.value.document === document || $0.value.markup === pdfView.rectangleMarkup
+        }.map(\.key)
+        for alias in aliases where alias != target { unregisterSessionDocument(alias) }
+        if let origin, origin != target { unregisterSessionDocument(origin) }
+        documentTabCache.remove(target)
+        splitDocumentSessions.removeValue(forKey: target)
+        return true
+    }
+
     func unregisterSessionDocument(_ url: URL) {
         let normalized = canonicalDocumentURL(url)
         sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == normalized }
         documentTabCache.remove(normalized)
+        splitDocumentSessions.removeValue(forKey: normalized)
         tabViewStates.removeValue(forKey: normalized)
         tabSearchQueries.removeValue(forKey: normalized)
         refreshDocumentTabs()
@@ -5198,6 +5483,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func clearToStartState() {
+        splitDocumentSessions.removeAll()
+        retainsSplitDocumentSessions = false
         documentTabCache.removeAll()
         tabViewStates.removeAll()
         tabSearchQueries.removeAll()
@@ -7471,6 +7758,56 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         view.window?.isDocumentEdited == true
     }
 
+    // Injectable presentation boundary; production continues to use the native alert/save.
+    var unsavedChangesResponse: (() -> NSApplication.ModalResponse)?
+    var saveForClosePrompt: (() -> Bool)?
+
+    /// Inspect/save a hidden retained document without replacing either visible pane.
+    /// The controller's document-local fields are borrowed only for the synchronous
+    /// close prompt; both the owner and the focused session are captured afterward.
+    private func confirmRetainedDocumentForClose(at url: URL) -> Bool {
+        let key = canonicalDocumentURL(url)
+        if openDocumentURL.map(canonicalDocumentURL) == key {
+            return confirmDiscardUnsavedChangesIfNeeded()
+        }
+        retainActiveSplitSession()
+        guard let session = splitDocumentSessions[key],
+              let originalURL = openDocumentURL,
+              let original = splitDocumentSessions[canonicalDocumentURL(originalURL)] else { return true }
+        let canvas = pdfView
+        let visiblePeer = secondaryPDFView.flatMap { pane -> MarkupPDFView? in
+            pane.document === session.document ? pane : nil
+        }
+        if let visiblePeer {
+            activatePDFPane(visiblePeer)
+            defer { activatePDFPane(canvas) }
+            return confirmDiscardUnsavedChangesIfNeeded()
+        }
+        // Borrow an offscreen canvas for a hidden tab, never replace a visible PDF.
+        let scratch = MarkupPDFView()
+        pdfView = scratch
+        restoreSplitSession(session, in: scratch, restoreViewport: true)
+        defer {
+            retainActiveSplitSession()
+            scratch.document = nil
+            pdfView = canvas
+            restoreSplitSession(original, in: canvas, restoreViewport: false)
+            requestChromeRefresh()
+        }
+        return confirmDiscardUnsavedChangesIfNeeded()
+    }
+
+    func confirmAllDocumentsForClose() -> Bool {
+        guard !isPDFProcessingBusy else { NSSound.beep(); return false }
+        if !retainsSplitDocumentSessions { return confirmDiscardUnsavedChangesIfNeeded() }
+        retainActiveSplitSession()
+        // Stable tab order, including inactive visible and hidden retained sessions.
+        for url in sessionDocumentURLs {
+            if !confirmRetainedDocumentForClose(at: url) { return false }
+        }
+        return true
+    }
+
     func confirmDiscardUnsavedChangesIfNeeded() -> Bool {
         // Do not close or replace the document while a background save owns it.
         // This also prevents a second, modal save from racing the active save.
@@ -7486,10 +7823,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Discard Changes")
         alert.addButton(withTitle: "Cancel")
-        NSApp.activate(ignoringOtherApps: true)
-        let response = alert.runModal()
+        if unsavedChangesResponse == nil { NSApp.activate(ignoringOtherApps: true) }
+        let response = unsavedChangesResponse?() ?? alert.runModal()
         if response == .alertFirstButtonReturn {
-            return saveCurrentDocumentForClosePrompt()
+            return saveForClosePrompt?() ?? saveCurrentDocumentForClosePrompt()
         }
         if response == .alertSecondButtonReturn {
             return true

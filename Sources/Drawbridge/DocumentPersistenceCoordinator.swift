@@ -5,6 +5,7 @@ final class DocumentPersistenceCoordinator {
     private let autosaveInterval: TimeInterval
     private var pendingAutosaveWorkItem: DispatchWorkItem?
     private(set) var autosaveInFlight = false
+    private(set) var autosaveRunID: UUID?
     private(set) var autosaveQueued = false
     private(set) var manualSaveInFlight = false
 
@@ -15,11 +16,14 @@ final class DocumentPersistenceCoordinator {
     var isManualSaveInFlight: Bool { manualSaveInFlight }
 
     func resetState() {
-        pendingAutosaveWorkItem?.cancel()
-        pendingAutosaveWorkItem = nil
-        autosaveInFlight = false
+        cancelScheduledAutosave()
         autosaveQueued = false
         manualSaveInFlight = false
+    }
+
+    func cancelScheduledAutosave() {
+        pendingAutosaveWorkItem?.cancel()
+        pendingAutosaveWorkItem = nil
     }
 
     func beginManualSave() {
@@ -75,11 +79,13 @@ final class DocumentPersistenceCoordinator {
             return false
         }
         autosaveInFlight = true
+        autosaveRunID = UUID()
         return true
     }
 
     func finishAutosaveRun(stillHasChanges: Bool, reschedule: () -> Void) {
         autosaveInFlight = false
+        autosaveRunID = nil
         if autosaveQueued || stillHasChanges {
             autosaveQueued = false
             reschedule()

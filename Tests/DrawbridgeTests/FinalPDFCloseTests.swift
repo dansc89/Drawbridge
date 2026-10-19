@@ -83,10 +83,14 @@ import XCTest
             XCTAssertEqual(c.sessionDocumentURLs, [c.canonicalDocumentURL(a)])
             XCTAssertEqual(c.openDocumentURL, a)
             XCTAssertNotNil(c.pdfView.document)
-            XCTAssertNil(c.secondaryPDFView)
+            // Closing one tab must retain split mode while another document remains.
+            // Both panes now show the surviving document; closing that final tab
+            // must still remove the entire split presentation.
+            let peer = try XCTUnwrap(c.secondaryPDFView)
+            XCTAssertNotNil(peer.document)
+            XCTAssertEqual(c.pdfPaneSplitView.arrangedSubviews.count, 2)
             XCTAssertFalse(c.pdfPaneSplitView.isHidden)
-            c.commandToggleSplitView(nil)
-            c.activatePDFPane(try XCTUnwrap(c.secondaryPDFView))
+            c.activatePDFPane(peer)
             c.commandCloseDocument(nil)
             w.layoutIfNeeded()
             assertEmpty(c)
