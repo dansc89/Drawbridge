@@ -706,7 +706,7 @@ enum PDFRectangleWriter {
         return "q \(style) \(r.red) \(r.green) \(r.blue) RG \(r.lineWidth) w 1 J 1 j \(path) S Q\n" + MeasurementAppearance.pdf(r)
     }
 
-    private static func ownedRecordsMatch(_ json: [String: Any], records: [RectangleMarkupRecord]) throws -> Bool {
+    static func ownedRecordsMatch(_ json: [String: Any], records: [RectangleMarkupRecord]) throws -> Bool {
         let objects = try objectTable(json); let references = try pages(json)
         let recordsByID = Dictionary(uniqueKeysWithValues: records.map { ("u:" + $0.id, $0) })
         var found = Set<String>()
@@ -723,9 +723,12 @@ enum PDFRectangleWriter {
                       let appearance = (value["/AP"] as? [String: Any])?["/N"] as? String,
                       (objects["obj:\(appearance)"] as? [String: Any])?["stream"] != nil,
                       found.insert(id).inserted else { return false }
+                // Keep parsed decimal NSNumbers intact. Bridging them to Double
+                // can change a value that already passed serialized graph verification.
                 guard value["/DrawbridgeLinePattern"] as? String == "u:" + expected.linePattern.rawValue,
-                      value["/DrawbridgeStrokeOpacity"] as? Double == expected.strokeOpacity,
-                      value["/DrawbridgeFillOpacity"] as? Double == expected.fillOpacity else { return false }
+                      try PDFLosslessReducer.semanticGraphsMatch(
+                        comparisonGraph([value["/DrawbridgeStrokeOpacity"] ?? NSNull(), value["/DrawbridgeFillOpacity"] ?? NSNull()]),
+                        comparisonGraph([expected.strokeOpacity, expected.fillOpacity])) else { return false }
                 if value["/DrawbridgeLayerID"] as? String != expected.layerID.map({ "u:" + $0 }) || value["/DrawbridgeLayerCatalog"] as? String != expected.layerCatalog.map({ "u:" + $0 }) { return false }
                 if value["/DrawbridgeHatchStyle"] as? String != expected.hatch.map({ "u:" + $0.json }) { return false }
                 if let id = expected.layerID, value["/OC"] as? String != PDFMarkupLayersPatch.references(objects)[id] { return false }
@@ -743,9 +746,15 @@ enum PDFRectangleWriter {
                 if (value["/DrawbridgePageScaleCleared"] as? Bool ?? false) != expected.pageScaleCleared { return false }
                 if let measurement = expected.measurement, value["/Contents"] as? String != "u:" + measurement.label(points: expected.vertices) { return false }
                 if expected.kind == .polygon {
-                    guard value["/Vertices"] as? [Double] == expected.vertices.flatMap({ [Double($0.x),Double($0.y)] }) else { return false }
+                    guard try PDFLosslessReducer.semanticGraphsMatch(
+                        comparisonGraph([value["/Vertices"] ?? NSNull()]),
+                        comparisonGraph([expected.vertices.flatMap { [Double($0.x), Double($0.y)] }])) else { return false }
                 }
-                if [.rectangle, .ellipse, .polygon].contains(expected.kind), value["/IC"] as? [Double] != expected.fill { return false }
+                if [.rectangle, .ellipse, .polygon].contains(expected.kind) {
+                    guard try PDFLosslessReducer.semanticGraphsMatch(
+                        comparisonGraph([value["/IC"] ?? NSNull()]),
+                        comparisonGraph([expected.fill as Any? ?? NSNull()])) else { return false }
+                }
                 if expected.kind == .polyline {
                     let expectedVertices = expected.vertices.flatMap { [Double($0.x),Double($0.y)] }
                     guard let ink = value["/InkList"] as? [[Double]], ink.count == 1,

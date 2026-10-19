@@ -1315,12 +1315,83 @@ final class RectangleMarkupController {
               !annotation.isReadOnly, !layerIsLocked(annotation), !previous.isEmpty, points.count == previous.count,
               points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }), points != previous else { return }
         if let measurement = MeasurementMetadata.measurement(annotation), !measurement.valid(points: points) { onInvalidMeasurement?(); return }
-        undo.registerUndo(withTarget:self) { target in target.setVertexPositions(previous,of:annotation,on:page) }
-        undo.setActionName("Edit Markup Node")
+        replaceVertices(points, bounds: vertexBounds(points, annotation: annotation), of: annotation, on: page, action: "Edit Markup Node")
+    }
+
+    /// A context-menu request is tied to the exact geometry and document that supplied it.
+    struct NodeInsertion {
+        let annotation: PDFAnnotation
+        let page: PDFPage
+        let document: PDFDocument
+        let vertices: [CGPoint]
+        let bounds: CGRect
+        let closed: Bool
+        let index: Int
+        let point: CGPoint
+    }
+
+    private func canInsertNode(in annotation: PDFAnnotation, on page: PDFPage) -> Bool {
+        canEdit() && page.document === boundDocument && view?.document === boundDocument && view?.currentPage === page &&
+        annotation.page === page && page.annotations.contains(where: { $0 === annotation }) &&
+        RectangleMarkupRecord.owns(annotation) && !annotation.isReadOnly && !layerIsLocked(annotation) &&
+        annotation.shouldDisplay && layerIsVisible(annotation) &&
+        (annotation.type == "Polygon" || (annotation.type == "Ink" && annotation.value(forAnnotationKey: RectangleMarkupRecord.inkToolKey) as? String != "pen"))
+    }
+
+    func nodeInsertion(for annotation: PDFAnnotation, at point: CGPoint, tolerance: CGFloat) -> NodeInsertion? {
+        guard let page = annotation.page, let document = page.document, canInsertNode(in: annotation, on: page),
+              point.x.isFinite, point.y.isFinite, tolerance.isFinite, tolerance > 0 else { return nil }
+        let vertices = RectangleMarkupRecord.vertices(annotation)
+        guard vertices.count >= 2, vertices.count < 10000, vertices.allSatisfy({ $0.x.isFinite && $0.y.isFinite }),
+              !vertices.contains(where: { hypot($0.x-point.x, $0.y-point.y) <= tolerance }) else { return nil }
+        let closed = annotation.type == "Polygon"
+        var best: (index: Int, point: CGPoint, distance: CGFloat)?
+        for index in 0..<(closed ? vertices.count : vertices.count-1) {
+            let a = vertices[index], b = vertices[(index+1) % vertices.count]
+            let dx = b.x-a.x, dy = b.y-a.y, length = dx*dx+dy*dy
+            guard length.isFinite, length > 0 else { continue }
+            let t = ((point.x-a.x)*dx+(point.y-a.y)*dy)/length
+            guard t > 0, t < 1 else { continue }
+            let projected = CGPoint(x: a.x+t*dx, y: a.y+t*dy)
+            let distance = hypot(point.x-projected.x, point.y-projected.y)
+            guard distance <= tolerance, distance < (best?.distance ?? .infinity),
+                  !vertices.contains(where: { hypot($0.x-projected.x, $0.y-projected.y) <= tolerance }) else { continue }
+            best = (index+1, projected, distance)
+        }
+        guard let best else { return nil }
+        var inserted = vertices; inserted.insert(best.point, at: best.index)
+        if let measurement = MeasurementMetadata.measurement(annotation), !measurement.valid(points: inserted) { return nil }
+        return NodeInsertion(annotation: annotation, page: page, document: document, vertices: vertices,
+                             bounds: annotation.bounds, closed: closed, index: best.index, point: best.point)
+    }
+
+    func insertNode(_ request: NodeInsertion) {
+        let annotation = request.annotation, page = request.page
+        guard boundDocument === request.document, canInsertNode(in: annotation, on: page),
+              annotation.bounds == request.bounds, RectangleMarkupRecord.vertices(annotation) == request.vertices,
+              (annotation.type == "Polygon") == request.closed else { return }
+        var points = request.vertices; points.insert(request.point, at: request.index)
+        replaceVertices(points, bounds: vertexBounds(points, annotation: annotation), of: annotation, on: page, action: "Add Markup Node")
+    }
+
+    private func vertexBounds(_ points: [CGPoint], annotation: PDFAnnotation) -> CGRect {
         let measurement = MeasurementMetadata.measurement(annotation)
         let padding: CGFloat = measurement == nil ? 0 : (measurement!.closed ? 8 : 24)
-        annotation.bounds = Self.polylineBounds(points,width:annotation.border?.lineWidth ?? 2).insetBy(dx: -padding, dy: -padding)
-        RectangleMarkupRecord.setVertices(points,on:annotation)
+        return Self.polylineBounds(points, width: annotation.border?.lineWidth ?? 2).insetBy(dx: -padding, dy: -padding)
+    }
+
+    private func replaceVertices(_ points: [CGPoint], bounds: CGRect, of annotation: PDFAnnotation, on page: PDFPage, action: String) {
+        let previous = RectangleMarkupRecord.vertices(annotation), previousBounds = annotation.bounds
+        guard canEdit(), page.document === boundDocument, annotation.page === page, RectangleMarkupRecord.owns(annotation),
+              !annotation.isReadOnly, !layerIsLocked(annotation), points.count >= 2,
+              points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }), points != previous else { return }
+        if let measurement = MeasurementMetadata.measurement(annotation), !measurement.valid(points: points) { onInvalidMeasurement?(); return }
+        undo.registerUndo(withTarget: self) { target in
+            target.replaceVertices(previous, bounds: previousBounds, of: annotation, on: page, action: action)
+        }
+        undo.setActionName(action)
+        annotation.bounds = bounds
+        RectangleMarkupRecord.setVertices(points, on: annotation)
         selected = annotation; changed(page)
     }
 

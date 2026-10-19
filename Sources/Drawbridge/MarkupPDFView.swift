@@ -1259,6 +1259,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     @objc private func bringSelectedMarkupForward(_ sender: Any?) { rectangleMarkup.reorderSelected(.bringForward) }
     @objc private func sendSelectedMarkupBackward(_ sender: Any?) { rectangleMarkup.reorderSelected(.sendBackward) }
 
+    @objc private func addMarkupNode(_ sender: NSMenuItem) {
+        guard ownsMarkupInteraction, let request = sender.representedObject as? RectangleMarkupController.NodeInsertion else { return }
+        rectangleMarkup.insertNode(request)
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         onActivatePane?()
         let menu = NSMenu(title: "PDF")
@@ -1267,6 +1272,12 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             let point = convert(location, to: page)
             if let annotation = page.annotations.reversed().first(where: { $0.shouldDisplay && rectangleMarkup.layerIsVisible($0) && rectangleMarkup.canAssignLayer($0) && RectangleMarkupController.hitTest($0, at: point, tolerance: 8 / max(scaleFactor, 0.01)) }) {
                 if !rectangleMarkup.selectedItems.contains(where: { $0 === annotation }) { rectangleMarkup.selectFromList(annotation) }
+                if ownsMarkupInteraction, let request = rectangleMarkup.nodeInsertion(for: annotation, at: point, tolerance: 8 / max(scaleFactor, 0.01)) {
+                    let node = menu.addItem(withTitle: "Add Node", action: #selector(addMarkupNode(_:)), keyEquivalent: "")
+                    node.target = self; node.representedObject = request
+                    node.toolTip = "Insert a node on this segment, then drag its square handle to reshape the path."
+                    menu.addItem(.separator())
+                }
                 let item = NSMenuItem(title: "Assign to Layer", action: nil, keyEquivalent: "")
                 item.submenu = rectangleMarkup.layerAssignmentMenu(for: rectangleMarkup.selectedItems); menu.addItem(item)
                 let front = menu.addItem(withTitle: "Bring to Front", action: #selector(bringSelectedMarkupToFront(_:)), keyEquivalent: "")
