@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Drawbridge">
+  <title>Drawbridge</title>
+  <desc>Minimal white drawbridge with two towers and raised bridge leaves on an orange rounded square.</desc>
+  <rect x="64" y="64" width="896" height="896" rx="200" fill="#FF9F0A"/>
+  <g fill="#FFFFFF">
+    <path d="M248 688V344H288V380H320V344H360V688Z"/>
+    <path d="M664 688V344H704V380H736V344H776V688Z"/>
+    <path d="M344 588L472 508Q480 503 485 511L501 537Q506 545 498 550L360 636Z"/>
+    <path d="M680 588L552 508Q544 503 539 511L523 537Q518 545 526 550L664 636Z"/>
+  </g>
+  <g fill="#FF9F0A">
+    <rect x="292" y="432" width="24" height="64" rx="12"/>
+    <rect x="708" y="432" width="24" height="64" rx="12"/>
+  </g>
+</svg>

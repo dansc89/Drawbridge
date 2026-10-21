@@ -18,6 +18,18 @@ guard let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: sourcePath) a
     exit(1)
 }
 
+// Vector-designed icons already include intentional macOS optical padding.
+// Preserve those pixels rather than cropping the rounded tile to its bounds.
+if CommandLine.arguments.contains("--preserve-canvas") {
+    guard image.width == 1024, image.height == 1024 else {
+        fputs("Preserved icon canvas must be 1024 x 1024.\n", stderr)
+        exit(1)
+    }
+    let data = try Data(contentsOf: URL(fileURLWithPath: sourcePath))
+    try data.write(to: URL(fileURLWithPath: outputPath), options: .atomic)
+    exit(0)
+}
+
 let width = image.width
 let height = image.height
 let bytesPerPixel = 4

@@ -71,7 +71,7 @@ echo "Generating app icon..."
 mkdir -p "$ICONSET_DIR"
 if [[ -f "$ICON_SOURCE_PNG" ]]; then
   echo "Using icon source: $ICON_SOURCE_PNG"
-  swift Scripts/prepare-icon.swift "$ICON_SOURCE_PNG" "$ICONSET_DIR/icon_1024x1024.png" "$ICON_FILL_SCALE"
+  swift Scripts/prepare-icon.swift "$ICON_SOURCE_PNG" "$ICONSET_DIR/icon_1024x1024.png" "$ICON_FILL_SCALE" --preserve-canvas
 elif [[ ! -f "$ICONSET_DIR/icon_1024x1024.png" ]]; then
   swift Scripts/generate-icon.swift
 fi
