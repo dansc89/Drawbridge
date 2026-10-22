@@ -80,11 +80,11 @@ extension MainViewController {
             return nil
         }
 
-        if let action = shortcutAction(for: event), action == .invert || action == .hyperlinks {
+        if let action = shortcutAction(for: event), action == .invert || action == .hyperlinks || action == .highlight {
             guard !(view.window?.firstResponder is NSTextView),
                   !(view.window?.firstResponder is NSTextField),
                   pdfView.document != nil, !isPDFProcessingBusy else { return event }
-            if !event.isARepeat { performShortcutAction(action) }
+            if !event.isARepeat && !performShortcutAction(action) { return event }
             lastUserInteractionAt = Date()
             return nil
         }

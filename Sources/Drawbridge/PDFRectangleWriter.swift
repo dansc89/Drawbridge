@@ -235,6 +235,18 @@ enum PDFRectangleWriter {
                     guard NSArray(array: [expected]).isEqual(to: [b["/VP"] ?? NSNull()]) else { return false }
                     allowed.append("/VP")
                 }
+                if key == "obj:" + catalog, a["/Version"] as? String != b["/Version"] as? String {
+                    // Permit only the exact transparency-version upgrade, never an
+                    // arbitrary catalog mutation or a version downgrade.
+                    let oldVersion = a["/Version"] as? String
+                    guard b["/Version"] as? String == "/1.4",
+                          oldVersion == nil || oldVersion!.compare("/1.4", options: .numeric) == .orderedAscending,
+                          after.values.contains(where: { entry in
+                              guard let value = (entry as? [String: Any])?["value"] as? [String: Any] else { return false }
+                              return value["/Subtype"] as? String == "/Highlight" && ownedIdentity(value) != nil
+                          }) else { return false }
+                    allowed.append("/Version")
+                }
                 for field in allowed { a.removeValue(forKey: field); b.removeValue(forKey: field) }
                 guard NSDictionary(dictionary: a).isEqual(to: b) else { return false }
                 if key == "obj:" + catalog && !PDFMarkupLayersPatch.preservesForeignLayers(before: before, after: after, root: catalog) { return false }
@@ -542,6 +554,19 @@ enum PDFRectangleWriter {
             guard style.isValid else { continue }
             snapshotForms[try SnapshotFilterRenderer.filtered(data,style:style)] = fragment
         }
+        // Highlight transparency/blending is a PDF 1.4 feature. Incremental saves
+        // retain the original header, so upgrade through the catalog rather than
+        // rewriting original bytes (PDF 1.4's supported version-override mechanism).
+        if records.contains(where: { $0.kind == .highlight }),
+           let root = ((objects["trailer"] as? [String: Any])?["value"] as? [String: Any])?["/Root"] as? String,
+           var catalogObject = objects["obj:" + root] as? [String: Any],
+           var catalog = catalogObject["value"] as? [String: Any] {
+            let version = catalog["/Version"] as? String
+            if version == nil || version!.compare("/1.4", options: .numeric) == .orderedAscending {
+                catalog["/Version"] = "/1.4"
+                catalogObject["value"] = catalog; objects["obj:" + root] = catalogObject
+            }
+        }
         let references = try pages(json)
         guard records.allSatisfy({ $0.pageIndex < references.count }) else { throw CocoaError(.fileReadCorruptFile) }
         let recordsByPage = Dictionary(grouping: records, by: \.pageIndex)
@@ -566,6 +591,10 @@ enum PDFRectangleWriter {
                 if let tool = record.inkTool { annotation["/DrawbridgeInkTool"] = "u:" + tool }
                 annotation["/DrawbridgeLinePattern"] = "u:" + record.linePattern.rawValue
                 annotation["/DrawbridgeStrokeOpacity"] = record.strokeOpacity
+                if record.kind == .highlight {
+                    annotation["/QuadPoints"] = HighlightGeometry.pdfPoints(b)
+                    annotation["/CA"] = record.strokeOpacity
+                }
                 annotation["/DrawbridgeFillOpacity"] = record.fillOpacity
                 if let hatch = record.hatch { annotation["/DrawbridgeHatchStyle"] = "u:" + hatch.json }
                 annotation["/BS"] = ["/W": record.lineWidth, "/S": record.linePattern == .solid ? "/S" : "/D", "/D": record.linePattern.dash(width: CGFloat(record.lineWidth))]
@@ -633,7 +662,15 @@ enum PDFRectangleWriter {
                 }
                 let drawing = appearanceDrawing(record)
                 let isDimension = record.measurement?.isDistance(points: record.vertices) == true
-                var resources: [String: Any] = ["/ExtGState": ["/MarkupGS": ["/Type": "/ExtGState", "/CA": record.strokeOpacity, "/ca": record.kind == .text || isDimension ? record.strokeOpacity : record.fillOpacity]]]
+                var resources: [String: Any] = ["/ExtGState": ["/MarkupGS": ["/Type": "/ExtGState", "/CA": record.strokeOpacity, "/ca": record.kind == .text || record.kind == .highlight || isDimension ? record.strokeOpacity : record.fillOpacity]]]
+                if record.kind == .highlight {
+                    // Match PDFKit's live highlighter: multiply preserves black
+                    // artwork instead of washing it out with normal alpha-over.
+                    var states = resources["/ExtGState"] as! [String: Any]
+                    var state = states["/MarkupGS"] as! [String: Any]
+                    state["/BM"] = "/Multiply"
+                    states["/MarkupGS"] = state; resources["/ExtGState"] = states
+                }
                 if record.measurement != nil { resources["/Font"] = ["/MeasureFont": ["/Type": "/Font", "/Subtype": "/Type1", "/BaseFont": "/Helvetica"]] }
                 if record.hatch != nil {
                     var states = resources["/ExtGState"] as! [String: Any]
@@ -664,7 +701,7 @@ enum PDFRectangleWriter {
     }
 
     private static func subtype(_ kind: RectangleMarkupRecord.Kind) -> String {
-        switch kind { case .snapshot: return "/Stamp"; case .rectangle: return "/Square"; case .ellipse: return "/Circle"; case .line, .arrow: return "/Line"; case .text: return "/FreeText"; case .polyline: return "/Ink"; case .polygon: return "/Polygon" }
+        switch kind { case .highlight: return "/Highlight"; case .snapshot: return "/Stamp"; case .rectangle: return "/Square"; case .ellipse: return "/Circle"; case .line, .arrow: return "/Line"; case .text: return "/FreeText"; case .polyline: return "/Ink"; case .polygon: return "/Polygon" }
     }
 
     /// Appearance coordinates are local to the annotation; page rotation is untouched.
@@ -677,6 +714,7 @@ enum PDFRectangleWriter {
         let half = r.lineWidth/2, w = max(0,Double(r.bounds.width)-r.lineWidth), h = max(0,Double(r.bounds.height)-r.lineWidth)
         var path: String
         switch r.kind {
+        case .highlight: return "q /MarkupGS gs \(r.red) \(r.green) \(r.blue) rg 0 0 \(r.bounds.width) \(r.bounds.height) re f Q"
         case .snapshot: return ""
         case .polyline, .polygon:
             path = r.vertices.enumerated().map { i,p in "\(p.x-r.bounds.minX) \(p.y-r.bounds.minY) " + (i == 0 ? "m" : "l") }.joined(separator:" ")
@@ -735,6 +773,11 @@ enum PDFRectangleWriter {
                 if expected.layerCatalog != nil && value["/F"] as? Int != 98 { return false }
                 if let tool = expected.inkTool, value["/DrawbridgeInkTool"] as? String != "u:" + tool { return false }
                 if expected.kind == .snapshot, value["/DrawbridgeSnapshotStyle"] as? String != "u:" + expected.snapshotStyle.json { return false }
+                if expected.kind == .highlight {
+                    guard try PDFLosslessReducer.semanticGraphsMatch(
+                        comparisonGraph([value["/QuadPoints"] ?? NSNull(), value["/CA"] ?? NSNull()]),
+                        comparisonGraph([HighlightGeometry.pdfPoints(expected.bounds), expected.strokeOpacity])) else { return false }
+                }
                 let payloadValue = value["/DrawbridgeSnapshotPDF"] as? String
                 let payloadString = payloadValue.flatMap { ref in
                     (objects["obj:" + ref] as? [String:Any])?["value"] as? String ?? ref
@@ -794,7 +837,7 @@ enum PDFRectangleWriter {
     }
     private static func owned(_ entry: Any, objects: [String:Any]) -> Bool {
         let d = dictionary(entry, objects: objects)
-        return ["/Square","/Circle","/Line","/FreeText","/Ink","/Polygon","/Stamp"].contains(d["/Subtype"] as? String ?? "") && ownedIdentity(d) != nil
+        return ["/Square","/Circle","/Line","/FreeText","/Ink","/Polygon","/Stamp","/Highlight"].contains(d["/Subtype"] as? String ?? "") && ownedIdentity(d) != nil
     }
 }
 

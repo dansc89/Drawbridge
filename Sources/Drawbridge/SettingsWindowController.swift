@@ -121,7 +121,7 @@ import AppKit
     }
     private func buildShortcuts() {
         guard let editor else { return }
-        var views: [NSView] = [help("Customize Select Text, Invert, and Show/Hide Hyperlinks bindings. All other tool shortcuts remain unchanged. Use one letter, number, or supported punctuation character.")]
+        var views: [NSView] = [help("Customize Select Text, Invert, Show/Hide Hyperlinks, and Highlight bindings. All other tool shortcuts remain unchanged. Use one letter, number, or supported punctuation character.")]
         for action in ShortcutAction.allCases {
             let binding = editor.currentShortcutBinding(for: action)
             let key = field(NSTextField(), id: "shortcut.\(action.rawValue)", value: binding.key.uppercased())

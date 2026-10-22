@@ -78,7 +78,7 @@ private final class PDFMarkupSourceBaseline: @unchecked Sendable {
 
 struct RectangleMarkupRecord: Codable, Sendable, Equatable {
     static let prefix = "DrawbridgeRectangleV1:"
-    enum Kind: String, Codable, Sendable { case rectangle, ellipse, line, arrow, text, polyline, polygon, snapshot }
+    enum Kind: String, Codable, Sendable { case rectangle, ellipse, line, arrow, text, polyline, polygon, snapshot, highlight }
     static let inkToolKey = PDFAnnotationKey(rawValue: "DrawbridgeInkTool")
     var inkTool: String? = nil
     var linePattern: MarkupLinePattern = .solid
@@ -116,7 +116,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
         return annotation.userName.flatMap { $0.hasPrefix(prefix) ? $0 : nil }
     }
     static func owns(_ annotation: PDFAnnotation) -> Bool {
-        ["Square", "Circle", "Line", "FreeText", "Ink", "Polygon", "Stamp"].contains(annotation.type ?? "") && identity(annotation) != nil
+        ["Square", "Circle", "Line", "FreeText", "Ink", "Polygon", "Stamp", "Highlight"].contains(annotation.type ?? "") && identity(annotation) != nil
     }
 
     static let fillKey = PDFAnnotationKey(rawValue:"DrawbridgePolygonFill")
@@ -224,6 +224,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
                     record.kind = annotation.type == "Polygon" ? .polygon : .polyline; record.vertices = vertices(annotation)
                 }
                 if annotation.type == "Stamp" { record.lineWidth = 2; record.kind = .snapshot; record.snapshotStyle = SnapshotStyle.read(annotation); record.snapshotData = SnapshotPayload.read(annotation)?.data; record.textRotation = (((annotation.page?.rotation ?? 0) % 360) + 360) % 360 }
+                if annotation.type == "Highlight" { record.kind = .highlight }
                 if annotation.type == "Circle" { record.kind = .ellipse }
                 if annotation.type == "Line" {
                     record.kind = annotation.endLineStyle == .openArrow ? .arrow : .line
@@ -255,7 +256,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
 /// New annotation interaction state; deliberately independent of legacy ToolMode.
 @MainActor
 final class RectangleMarkupController {
-    enum Tool: String { case select, pen, rectangle, ellipse, line, arrow, text, polyline, polygon, area, perimeter, calibrate, snapshotBox, snapshotPolygon }
+    enum Tool: String { case select, pen, rectangle, ellipse, line, arrow, text, polyline, polygon, area, perimeter, calibrate, snapshotBox, snapshotPolygon, highlight }
     enum Corner: CaseIterable { case lowerLeft, lowerRight, upperLeft, upperRight }
     private enum Gesture {
         case create(PDFPage, CGPoint)
@@ -353,11 +354,14 @@ final class RectangleMarkupController {
         didSet {
             finishTextEditing(); cancelGesture()
             if oldValue != tool {
-                if let original = appearanceBeforeSavedTool, SavedMarkupAppearance.load(oldValue, from: defaultPreferences) != nil { applyDefaults(original) }
+                if let original = appearanceBeforeSavedTool, oldValue == .highlight || SavedMarkupAppearance.load(oldValue, from: defaultPreferences) != nil { applyDefaults(original) }
                 appearanceBeforeSavedTool = nil
                 if tool != .select && tool != .calibrate { appearanceBeforeSavedTool = currentAppearance }
                 if let saved = SavedMarkupAppearance.load(tool, from: defaultPreferences), tool != .select {
                     applyDefaults(saved)
+                } else if tool == .highlight {
+                    strokeColor = .yellow; strokeOpacity = 0.35; linePattern = .solid
+                    fillColor = nil; hatchStyle = nil
                 }
             }
             if tool != .select { selected = nil; onClickAway?() }; refresh(); (view as? MarkupPDFView)?.markupToolCursorChanged() }
@@ -878,7 +882,7 @@ final class RectangleMarkupController {
                 refresh(); return true
             }
             let kind: RectangleMarkupRecord.Kind
-            switch tool { case .ellipse: kind = .ellipse; case .line: kind = .line; case .arrow: kind = .arrow; case .text: kind = .text; default: kind = .rectangle }
+            switch tool { case .highlight: kind = .highlight; case .ellipse: kind = .ellipse; case .line: kind = .line; case .arrow: kind = .arrow; case .text: kind = .text; default: kind = .rectangle }
             if let endpoints, hypot(endpoints.0.x-endpoints.1.x,endpoints.0.y-endpoints.1.y) < 2 { return true }
             if kind == .text {
                 beginTextEditing(on:page,bounds:candidate)
@@ -993,7 +997,7 @@ final class RectangleMarkupController {
             guard (kind == .polygon || kind == .polyline), measurement.closed == (kind == .polygon),
                   measurement.valid(points: vertices), MeasurementMetadata.supportedPage(page) else { return nil }
         }
-        let type: PDFAnnotationSubtype = kind == .polygon ? PDFAnnotationSubtype(rawValue:"/Polygon") : kind == .polyline ? .ink : kind == .text ? .freeText : kind == .ellipse ? .circle : (kind == .line || kind == .arrow ? .line : .square)
+        let type: PDFAnnotationSubtype = kind == .highlight ? .highlight : kind == .polygon ? PDFAnnotationSubtype(rawValue:"/Polygon") : kind == .polyline ? .ink : kind == .text ? .freeText : kind == .ellipse ? .circle : (kind == .line || kind == .arrow ? .line : .square)
         if type == .line {
             guard let (a,b) = endpoints, [a.x,a.y,b.x,b.y].allSatisfy({ $0.isFinite }), bounds.contains(a), bounds.contains(b), hypot(a.x-b.x,a.y-b.y) >= 2 else { return nil }
         }
@@ -1011,6 +1015,7 @@ final class RectangleMarkupController {
         if kind == .text { RectangleMarkupRecord.setTextColor(strokeColor,on:annotation); RectangleMarkupRecord.setTextFontSize(fontSize,on:annotation) } else { annotation.color = strokeColor }
         let border = PDFBorder(); border.lineWidth = kind == .text ? 0 : lineWidth; annotation.border = border
         MarkupStyle.apply(pattern: linePattern, opacity: strokeOpacity, to: annotation)
+        if kind == .highlight { HighlightGeometry.update(annotation) }
         if kind == .polyline || kind == .polygon { RectangleMarkupRecord.setVertices(vertices,on:annotation) }
         if kind == .polygon || kind == .rectangle || kind == .ellipse { RectangleMarkupRecord.setPolygonFill(fillColor,on:annotation) }
         if kind == .polygon || kind == .rectangle || kind == .ellipse { DraftingHatch.apply(hatchStyle, to: annotation) }
@@ -1298,6 +1303,7 @@ final class RectangleMarkupController {
         undo.registerUndo(withTarget: self) { target in target.setGeometry(previous,endpoints:oldEndpoints,of:annotation,on:page,action:action) }
         undo.setActionName(action)
         annotation.bounds = bounds
+        if annotation.type == "Highlight" { HighlightGeometry.update(annotation) }
         if annotation.type == "Ink" || annotation.type == "Polygon" {
             RectangleMarkupRecord.setVertices(transformed,on:annotation)
         }
@@ -1580,7 +1586,9 @@ final class RectangleMarkupController {
         if let window = selectionWindow {
             path.addRect(Self.rect(window.start, window.end))
         }
-        overlay.strokeColor = (tool == .pen && polylinePage != nil ? strokeColor.withAlphaComponent(strokeOpacity) : NSColor.systemBlue).cgColor
+        let highlightPreview = tool == .highlight && preview != nil
+        overlay.fillColor = (highlightPreview ? strokeColor.withAlphaComponent(strokeOpacity) : NSColor.clear).cgColor
+        overlay.strokeColor = (highlightPreview ? NSColor.clear : tool == .pen && polylinePage != nil ? strokeColor.withAlphaComponent(strokeOpacity) : NSColor.systemBlue).cgColor
         overlay.lineDashPattern = tool == .pen && polylinePage != nil ? linePattern.dash(width: lineWidth).map { NSNumber(value: $0 * Double(view?.scaleFactor ?? 1)) } : nil
         if let window = selectionWindow {
             overlay.lineDashPattern = window.end.x < window.start.x ? [6, 4] : nil

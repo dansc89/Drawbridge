@@ -22,6 +22,7 @@ final class MarkupToolButton: NSButton {
 final class RectangleMarkupToolbar: ThemedToolbarStackView {
     let snapshotButton = MarkupToolButton(title: "Snapshot", target: nil, action: nil)
     let penButton = MarkupToolButton(title: "", target: nil, action: nil)
+    let highlightButton = MarkupToolButton(title: "Highlight", target: nil, action: nil)
     let selectButton = MarkupToolButton(title: "Select", target: nil, action: nil)
     let rectangleButton = MarkupToolButton(title: "Rectangle", target: nil, action: nil)
     let ellipseButton = MarkupToolButton(title: "Ellipse", target: nil, action: nil)
@@ -48,6 +49,14 @@ final class RectangleMarkupToolbar: ThemedToolbarStackView {
     override init(frame: NSRect) {
         super.init(frame: frame)
         orientation = .horizontal; spacing = 6; alignment = .centerY
+        highlightButton.identifier = NSUserInterfaceItemIdentifier("markup.highlight")
+        highlightButton.image = NSImage(systemSymbolName: "highlighter", accessibilityDescription: "Highlight")
+        highlightButton.imagePosition = .imageOnly; highlightButton.bezelStyle = .texturedRounded
+        highlightButton.setButtonType(.toggle); highlightButton.isBordered = false
+        highlightButton.setAccessibilityLabel("Highlight")
+        highlightButton.widthAnchor.constraint(equalToConstant: 30).isActive = true
+        highlightButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        addArrangedSubview(highlightButton)
         for (button, symbol, name) in [(selectButton,"cursorarrow","Select markups (V)"),(penButton,"pencil","Pen (P)"),(rectangleButton,"rectangle","Draw Rectangle (R)"),(ellipseButton,"circle","Draw Ellipse (E)"),(lineButton,"line.diagonal","Draw Line (L)"),(arrowButton,"arrow.up.right","Draw Arrow (A)"),(polygonButton,"pentagon","Draw Polygon (Shift+P)"),(polylineButton,"point.topleft.down.to.point.bottomright.curvepath","Draw Polyline (Shift+N)"),(textButton,"textformat","Draw Text Box (T)"),(snapshotButton,"camera","Snapshot (G): drag a box or click corners and double-click to finish"),(areaButton,"square.dashed","Measure Area (Shift+A)"),(perimeterButton,"ruler","Measure Perimeter or Length (Shift+L)"),(editTextButton,"square.and.pencil","Edit Text"),(deleteButton,"trash","Delete selected markup (Delete)"),(undoButton,"arrow.uturn.backward","Undo (⌘Z)"),(redoButton,"arrow.uturn.forward","Redo (⇧⌘Z)")] {
             button.bezelStyle = .texturedRounded; button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)
             button.imagePosition = .imageOnly; button.toolTip = name; button.setAccessibilityLabel(name)
@@ -127,6 +136,7 @@ extension MainViewController {
             let alert = NSAlert(); alert.messageText = "Could not complete Snapshot"; alert.informativeText = error.localizedDescription; alert.runModal()
         }
         rectangleToolbar.snapshotButton.target = self; rectangleToolbar.snapshotButton.action = #selector(snapshotCapture(_:))
+        rectangleToolbar.highlightButton.target = self; rectangleToolbar.highlightButton.action = #selector(highlightDraw(_:))
         rectangleToolbar.scaleButton.target = self
         rectangleToolbar.scaleButton.action = #selector(commandSetPageDrawingScale(_:))
         rectangleToolbar.areaButton.target = self; rectangleToolbar.areaButton.action = #selector(areaMeasure(_:))
@@ -142,6 +152,10 @@ extension MainViewController {
         refreshMeasurementScaleDisplay()
         let s = pdfView.rectangleMarkup
         let enabled = s.canEdit()
+        rectangleToolbar.highlightButton.isEnabled = enabled
+        rectangleToolbar.highlightButton.state = s.tool == .highlight ? .on : .off
+        rectangleToolbar.highlightButton.needsDisplay = true
+        rectangleToolbar.highlightButton.toolTip = "Highlight (\(shortcutDisplayString(for: .highlight)))"
         let importedSelected = s.selected.map(RectangleMarkupRecord.owns) == false
         let styleEnabled = enabled && !importedSelected && s.selected?.type != "Stamp"
         rectangleToolbar.editTextButton.toolTip = importedSelected
@@ -200,6 +214,7 @@ extension MainViewController {
     @objc func snapshotCapture(_ sender: Any?) { chooseShape(.snapshotBox) }
     @objc func polygonSnapshotCapture(_ sender: Any?) { chooseShape(.snapshotPolygon) }
     @objc func penDraw(_ sender: Any?) { chooseShape(.pen) }
+    @objc func highlightDraw(_ sender: Any?) { chooseShape(.highlight) }
     @objc func ellipseDraw(_ sender: Any?) { chooseShape(.ellipse) }
     @objc func lineDraw(_ sender: Any?) { chooseShape(.line) }
     @objc func arrowDraw(_ sender: Any?) { chooseShape(.arrow) }

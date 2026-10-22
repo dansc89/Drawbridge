@@ -98,7 +98,7 @@ extension RectangleMarkupRecord {
             annotation.setValue(snapshotStyle.json, forAnnotationKey: SnapshotStyle.key)
             annotation.setValue(rotation ?? textRotation, forAnnotationKey: MarkupClipboard.snapshotRotationKey)
         } else {
-            let type: PDFAnnotationSubtype = kind == .polygon ? PDFAnnotationSubtype(rawValue: "/Polygon") : kind == .polyline ? .ink : kind == .text ? .freeText : kind == .ellipse ? .circle : (kind == .line || kind == .arrow ? .line : .square)
+            let type: PDFAnnotationSubtype = kind == .highlight ? .highlight : kind == .polygon ? PDFAnnotationSubtype(rawValue: "/Polygon") : kind == .polyline ? .ink : kind == .text ? .freeText : kind == .ellipse ? .circle : (kind == .line || kind == .arrow ? .line : .square)
             if kind == .polygon { annotation = DrawbridgePolygonAnnotation(bounds: bounds, forType: type, withProperties: nil) }
             else if measurement != nil { annotation = DrawbridgeMeasuredPathAnnotation(bounds: bounds, forType: type, withProperties: nil) }
             else if kind == .rectangle || kind == .ellipse { annotation = DrawbridgeShapeAnnotation(bounds: bounds, forType: type, withProperties: nil) }
@@ -111,6 +111,7 @@ extension RectangleMarkupRecord {
             } else { annotation.color = color }
             let border = PDFBorder(); border.lineWidth = kind == .text ? 0 : lineWidth; annotation.border = border
             MarkupStyle.apply(pattern: linePattern, opacity: strokeOpacity, to: annotation)
+            if kind == .highlight { HighlightGeometry.update(annotation) }
             if [.rectangle, .ellipse, .polygon].contains(kind) {
                 let color = fill.map { NSColor(deviceRed: $0[0], green: $0[1], blue: $0[2], alpha: fillOpacity) }
                 RectangleMarkupRecord.setPolygonFill(color, on: annotation)

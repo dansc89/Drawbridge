@@ -57,6 +57,7 @@ extension RectangleMarkupController {
             if let measurement = MeasurementMetadata.measurement(annotation) { return measurement.kind == .area ? .area : .perimeter }
             if SnapshotPayload.isSnapshot(annotation) { return .snapshotBox }
             switch annotation.type {
+            case "Highlight": return .highlight
             case "Square": return .rectangle
             case "Circle": return .ellipse
             case "Line": return annotation.endLineStyle == .openArrow ? .arrow : .line

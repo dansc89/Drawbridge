@@ -21,17 +21,19 @@ enum ShortcutAction: String, CaseIterable {
     case selectTool
     case invert
     case hyperlinks
+    case highlight
 
     var toolMode: ToolMode? {
         switch self {
         case .selectTool: return .select
-        case .invert, .hyperlinks: return nil
+        case .invert, .hyperlinks, .highlight: return nil
         }
     }
 
     var defaultBinding: ShortcutBinding {
         switch self {
         case .selectTool: return ShortcutBinding(key: "v", modifier: .plain)
+        case .highlight: return ShortcutBinding(key: "h", modifier: .plain)
         case .invert: return ShortcutBinding(key: "3", modifier: .control)
         case .hyperlinks: return ShortcutBinding(key: "h", modifier: .commandOptionShift)
         }
@@ -40,6 +42,7 @@ enum ShortcutAction: String, CaseIterable {
     var displayName: String {
         switch self {
         case .selectTool: return "Select Text"
+        case .highlight: return "Highlight"
         case .invert: return "Invert"
         case .hyperlinks: return "Show/Hide Hyperlinks"
         }
@@ -104,6 +107,15 @@ extension MainViewController {
                   let binding = ShortcutBinding.decode(rawBinding) else { continue }
             loaded[action] = binding
         }
+        // Highlight was added after the other configurable actions. Preserve their
+        // saved bindings on upgrade and move only a colliding Highlight binding.
+        // A fixed order keeps repeated loads independent of dictionary iteration.
+        let occupied = ShortcutAction.allCases.filter { $0 != .highlight }.compactMap { loaded[$0] }
+        if let highlight = loaded[.highlight], occupied.contains(highlight) {
+            let candidates: [ShortcutModifier] = [.plain, .shift, .commandShift, .control, .commandOptionShift]
+            loaded[.highlight] = candidates.map { ShortcutBinding(key: "h", modifier: $0) }
+                .first { !occupied.contains($0) }
+        }
         shortcutBindings = loaded
     }
 
@@ -124,6 +136,7 @@ extension MainViewController {
     func updateShortcutHintLabel() {
         statusToolsHintLabel.stringValue = "Esc cancels current action. Shortcuts customizable in Drawbridge > Settings… > Keyboard Shortcuts"
         refreshToolbarShortcutTooltips()
+        rectangleToolbar.highlightButton.toolTip = "Highlight (\(shortcutDisplayString(for: .highlight)))"
         updateInvertMenuShortcut()
     }
 
@@ -203,6 +216,12 @@ extension MainViewController {
 
     @discardableResult
     func performShortcutAction(_ action: ShortcutAction) -> Bool {
+        if action == .highlight {
+            guard pdfView.document != nil, !isPDFProcessingBusy, pdfView.rectangleMarkup.canEdit() else { return false }
+            pdfView.rectangleMarkup.tool = .highlight
+            view.window?.makeFirstResponder(pdfView)
+            return true
+        }
         if action == .hyperlinks {
             guard pdfView.document != nil, !isPDFProcessingBusy else { return false }
             commandToggleHyperlinkHighlights(nil)
