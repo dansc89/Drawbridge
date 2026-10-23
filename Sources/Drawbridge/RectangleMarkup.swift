@@ -871,6 +871,9 @@ final class RectangleMarkupController {
             _ = createPolyline(on: page, points: points)
             selected = nil
             refresh()
+            // Creation publishes a transient selection before stroke completion.
+            // Clear the sidebar/overlays and supersede its deferred selection restore.
+            if tool == .highlight { onClickAway?() }
             return true
         }
         if pendingLine != nil { return true }
