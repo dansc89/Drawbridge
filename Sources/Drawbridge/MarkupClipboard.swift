@@ -99,7 +99,8 @@ extension RectangleMarkupRecord {
             annotation.setValue(rotation ?? textRotation, forAnnotationKey: MarkupClipboard.snapshotRotationKey)
         } else {
             let type: PDFAnnotationSubtype = kind == .highlight ? .highlight : kind == .polygon ? PDFAnnotationSubtype(rawValue: "/Polygon") : kind == .polyline ? .ink : kind == .text ? .freeText : kind == .ellipse ? .circle : (kind == .line || kind == .arrow ? .line : .square)
-            if kind == .polygon { annotation = DrawbridgePolygonAnnotation(bounds: bounds, forType: type, withProperties: nil) }
+            if kind == .polyline && inkTool == "highlight" { annotation = DrawbridgeHighlighterAnnotation(bounds: bounds, forType: type, withProperties: nil) }
+            else if kind == .polygon { annotation = DrawbridgePolygonAnnotation(bounds: bounds, forType: type, withProperties: nil) }
             else if measurement != nil { annotation = DrawbridgeMeasuredPathAnnotation(bounds: bounds, forType: type, withProperties: nil) }
             else if kind == .rectangle || kind == .ellipse { annotation = DrawbridgeShapeAnnotation(bounds: bounds, forType: type, withProperties: nil) }
             else { annotation = PDFAnnotation(bounds: bounds, forType: type, withProperties: nil) }

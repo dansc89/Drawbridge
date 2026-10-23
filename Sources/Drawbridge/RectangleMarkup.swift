@@ -237,7 +237,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
     var isValid: Bool {
         id.hasPrefix(Self.prefix) && pageIndex >= 0 &&
         (hatch == nil || (hatch!.isValid && [.rectangle, .ellipse, .polygon].contains(kind))) &&
-        (inkTool == nil || (kind == .polyline && ["pen", "polyline"].contains(inkTool!))) &&
+        (inkTool == nil || (kind == .polyline && ["pen", "polyline", "highlight"].contains(inkTool!))) &&
         (kind != .snapshot || (snapshotStyle.isValid && snapshotData != nil && SnapshotPayload(data: snapshotData!).page != nil)) &&
         (pageScale == nil || (kind == .rectangle && pageScale!.isValid && measurement == nil)) &&
         (!pageScaleCleared || (kind == .rectangle && pageScale == nil && measurement == nil)) &&
@@ -360,7 +360,8 @@ final class RectangleMarkupController {
                 if let saved = SavedMarkupAppearance.load(tool, from: defaultPreferences), tool != .select {
                     applyDefaults(saved)
                 } else if tool == .highlight {
-                    strokeColor = .yellow; strokeOpacity = 0.35; linePattern = .solid
+                    strokeColor = NSColor(deviceRed: 1, green: 1, blue: 0.25, alpha: 1)
+                    lineWidth = 20; strokeOpacity = 0.20; linePattern = .solid
                     fillColor = nil; hatchStyle = nil
                 }
             }
@@ -441,6 +442,20 @@ final class RectangleMarkupController {
                     if original.type == "FreeText" {
                         let size = RectangleMarkupRecord.textFontSize(original)
                         if size != original.font?.pointSize { RectangleMarkupRecord.setTextFontSize(size, on: original) }
+                        continue
+                    }
+                    let freehandHighlight = original.type == "Ink" && original.value(forAnnotationKey: RectangleMarkupRecord.inkToolKey) as? String == "highlight"
+                    if freehandHighlight && !(original is DrawbridgeHighlighterAnnotation),
+                       let record = RectangleMarkupRecord.capture(annotation: original, pageIndex: index),
+                       let replacement = try? record.clipboardAnnotation(contents: original.contents) {
+                        replacement.setValue(record.id, forAnnotationKey: RectangleMarkupRecord.identityKey)
+                        replacement.shouldDisplay = original.shouldDisplay
+                        replacement.shouldPrint = original.shouldPrint
+                        replacement.isReadOnly = original.isReadOnly
+                        original.shouldDisplay = false
+                        page.removeAnnotation(original); page.addAnnotation(replacement)
+                        replacements[ObjectIdentifier(original)] = replacement
+                        replacedAppearance = true
                         continue
                     }
                     let measuredPath = original.type == "Ink" && MeasurementMetadata.measurement(original) != nil
@@ -524,7 +539,7 @@ final class RectangleMarkupController {
         }
         bind(to: view.document)
         let point = view.convert(location, to: page)
-        if tool == .pen {
+        if tool == .pen || tool == .highlight {
             selected = nil
             view.setCurrentSelection(nil, animate: false)
             polylinePage = page
@@ -754,7 +769,7 @@ final class RectangleMarkupController {
             window.end = location; selectionWindow = window
             refresh(presentationChanged: false); return true
         }
-        if tool == .pen, let view, let page = polylinePage {
+        if (tool == .pen || tool == .highlight), let view, let page = polylinePage {
             var point = view.convert(location, to: page)
             if modifiers.contains(.shift), !polylinePoints.isEmpty {
                 let index = penConstraintAnchor ?? (polylinePoints.count-1)
@@ -849,7 +864,7 @@ final class RectangleMarkupController {
             } else { setSelectedItems(window.original) }
             refresh(); return true
         }
-        if tool == .pen, let page = polylinePage {
+        if (tool == .pen || tool == .highlight), let page = polylinePage {
             _ = pointerDragged(at: location, modifiers: modifiers)
             let points = polylinePoints
             polylinePage = nil; polylinePoints = []; polylineHover = nil; penConstraintAnchor = nil
@@ -1001,7 +1016,7 @@ final class RectangleMarkupController {
         if type == .line {
             guard let (a,b) = endpoints, [a.x,a.y,b.x,b.y].allSatisfy({ $0.isFinite }), bounds.contains(a), bounds.contains(b), hypot(a.x-b.x,a.y-b.y) >= 2 else { return nil }
         }
-        let annotation: PDFAnnotation = kind == .polygon ? DrawbridgePolygonAnnotation(bounds:bounds,forType:type,withProperties:nil) : measurement != nil ? DrawbridgeMeasuredPathAnnotation(bounds: bounds, forType: type, withProperties: nil) : (kind == .rectangle || kind == .ellipse) ? DrawbridgeShapeAnnotation(bounds: bounds, forType: type, withProperties: nil) : PDFAnnotation(bounds: bounds, forType: type, withProperties: nil)
+        let annotation: PDFAnnotation = kind == .polyline && measurement == nil && tool == .highlight ? DrawbridgeHighlighterAnnotation(bounds: bounds, forType: type, withProperties: nil) : kind == .polygon ? DrawbridgePolygonAnnotation(bounds:bounds,forType:type,withProperties:nil) : measurement != nil ? DrawbridgeMeasuredPathAnnotation(bounds: bounds, forType: type, withProperties: nil) : (kind == .rectangle || kind == .ellipse) ? DrawbridgeShapeAnnotation(bounds: bounds, forType: type, withProperties: nil) : PDFAnnotation(bounds: bounds, forType: type, withProperties: nil)
         if let (a,b) = endpoints {
             annotation.startPoint = CGPoint(x:a.x-bounds.minX,y:a.y-bounds.minY)
             annotation.endPoint = CGPoint(x:b.x-bounds.minX,y:b.y-bounds.minY)
@@ -1010,7 +1025,7 @@ final class RectangleMarkupController {
         annotation.setValue(RectangleMarkupRecord.prefix + UUID().uuidString, forAnnotationKey: RectangleMarkupRecord.identityKey)
         annotation.setValue(MarkupAuthorPreference.currentName, forAnnotationKey: PDFAnnotationKey(rawValue: "/T"))
         annotation.contents = kind == .text ? text : kind.rawValue.capitalized
-        if kind == .polyline && measurement == nil { annotation.setValue(tool == .pen ? "pen" : "polyline", forAnnotationKey: RectangleMarkupRecord.inkToolKey) }
+        if kind == .polyline && measurement == nil { annotation.setValue(tool == .highlight ? "highlight" : tool == .pen ? "pen" : "polyline", forAnnotationKey: RectangleMarkupRecord.inkToolKey) }
         if kind == .text { annotation.font = NSFont(name:"Helvetica",size:fontSize); annotation.fontColor = strokeColor; annotation.alignment = .left }
         if kind == .text { RectangleMarkupRecord.setTextColor(strokeColor,on:annotation); RectangleMarkupRecord.setTextFontSize(fontSize,on:annotation) } else { annotation.color = strokeColor }
         let border = PDFBorder(); border.lineWidth = kind == .text ? 0 : lineWidth; annotation.border = border
@@ -1024,7 +1039,7 @@ final class RectangleMarkupController {
         assignNewMarkupLayer(annotation)
         // Only a successfully validated placement finishes the drawing tool.
         // Pen stays active for repeated strokes; drafts and undo/redo do not enter here.
-        if tool != .pen { tool = .select }
+        if tool != .pen && tool != .highlight { tool = .select }
         setPresence(true, annotation: annotation, page: page, action: "Add " + kind.rawValue.capitalized)
         return annotation
     }
@@ -1341,7 +1356,7 @@ final class RectangleMarkupController {
         annotation.page === page && page.annotations.contains(where: { $0 === annotation }) &&
         RectangleMarkupRecord.owns(annotation) && !annotation.isReadOnly && !layerIsLocked(annotation) &&
         annotation.shouldDisplay && layerIsVisible(annotation) &&
-        (annotation.type == "Polygon" || (annotation.type == "Ink" && annotation.value(forAnnotationKey: RectangleMarkupRecord.inkToolKey) as? String != "pen"))
+        (annotation.type == "Polygon" || (annotation.type == "Ink" && !["pen", "highlight"].contains(annotation.value(forAnnotationKey: RectangleMarkupRecord.inkToolKey) as? String ?? "")))
     }
 
     func nodeInsertion(for annotation: PDFAnnotation, at point: CGPoint, tolerance: CGFloat) -> NodeInsertion? {
@@ -1586,14 +1601,14 @@ final class RectangleMarkupController {
         if let window = selectionWindow {
             path.addRect(Self.rect(window.start, window.end))
         }
-        let highlightPreview = tool == .highlight && preview != nil
+        let highlightPreview = false // Legacy rectangular highlights are editable, never newly drawn.
         overlay.fillColor = (highlightPreview ? strokeColor.withAlphaComponent(strokeOpacity) : NSColor.clear).cgColor
-        overlay.strokeColor = (highlightPreview ? NSColor.clear : tool == .pen && polylinePage != nil ? strokeColor.withAlphaComponent(strokeOpacity) : NSColor.systemBlue).cgColor
-        overlay.lineDashPattern = tool == .pen && polylinePage != nil ? linePattern.dash(width: lineWidth).map { NSNumber(value: $0 * Double(view?.scaleFactor ?? 1)) } : nil
+        overlay.strokeColor = ((tool == .pen || tool == .highlight) && polylinePage != nil ? strokeColor.withAlphaComponent(strokeOpacity) : NSColor.systemBlue).cgColor
+        overlay.lineDashPattern = (tool == .pen || tool == .highlight) && polylinePage != nil ? linePattern.dash(width: lineWidth).map { NSNumber(value: $0 * Double(view?.scaleFactor ?? 1)) } : nil
         if let window = selectionWindow {
             overlay.lineDashPattern = window.end.x < window.start.x ? [6, 4] : nil
         }
-        overlay.lineWidth = tool == .pen && polylinePage != nil ? lineWidth * (view?.scaleFactor ?? 1) : 2
+        overlay.lineWidth = (tool == .pen || tool == .highlight) && polylinePage != nil ? lineWidth * (view?.scaleFactor ?? 1) : 2
         overlay.lineCap = .round; overlay.lineJoin = .round
         overlay.path = path
         // Pointer previews change geometry only. Toolbar state changes on tool,
@@ -1638,6 +1653,25 @@ final class DrawbridgeShapeAnnotation: PDFAnnotation {
         }
         else if let fill = RectangleMarkupRecord.polygonFill(self) { context.setFillColor(fill.cgColor); context.drawPath(using: .fillStroke) }
         else { context.strokePath() }
+    }
+}
+
+/// Only marker Ink uses Multiply; ordinary Ink and legacy Highlight retain their renderers.
+final class DrawbridgeHighlighterAnnotation: PDFAnnotation {
+    override func draw(with box: PDFDisplayBox, in context: CGContext) {
+        guard shouldDisplay else { return }
+        let origin = page?.bounds(for: box).origin ?? .zero
+        let points = RectangleMarkupRecord.vertices(self).map { CGPoint(x: $0.x - origin.x, y: $0.y - origin.y) }
+        guard points.count >= 2 else { return }
+        context.saveGState(); defer { context.restoreGState() }
+        context.setBlendMode(.multiply)
+        context.setStrokeColor(color.cgColor)
+        context.setLineWidth(border?.lineWidth ?? 20)
+        context.setLineCap(.round); context.setLineJoin(.round)
+        context.setLineDash(phase: 0, lengths: MarkupStyle.pattern(self).dash(width: border?.lineWidth ?? 20).map { CGFloat($0) })
+        context.beginPath(); context.move(to: points[0])
+        for point in points.dropFirst() { context.addLine(to: point) }
+        context.strokePath()
     }
 }
 

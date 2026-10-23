@@ -243,7 +243,7 @@ enum PDFRectangleWriter {
                           oldVersion == nil || oldVersion!.compare("/1.4", options: .numeric) == .orderedAscending,
                           after.values.contains(where: { entry in
                               guard let value = (entry as? [String: Any])?["value"] as? [String: Any] else { return false }
-                              return value["/Subtype"] as? String == "/Highlight" && ownedIdentity(value) != nil
+                              return ownedIdentity(value) != nil && (value["/Subtype"] as? String == "/Highlight" || (value["/Subtype"] as? String == "/Ink" && value["/DrawbridgeInkTool"] as? String == "u:highlight"))
                           }) else { return false }
                     allowed.append("/Version")
                 }
@@ -557,7 +557,7 @@ enum PDFRectangleWriter {
         // Highlight transparency/blending is a PDF 1.4 feature. Incremental saves
         // retain the original header, so upgrade through the catalog rather than
         // rewriting original bytes (PDF 1.4's supported version-override mechanism).
-        if records.contains(where: { $0.kind == .highlight }),
+        if records.contains(where: { $0.kind == .highlight || ($0.kind == .polyline && $0.inkTool == "highlight") }),
            let root = ((objects["trailer"] as? [String: Any])?["value"] as? [String: Any])?["/Root"] as? String,
            var catalogObject = objects["obj:" + root] as? [String: Any],
            var catalog = catalogObject["value"] as? [String: Any] {
@@ -589,6 +589,7 @@ enum PDFRectangleWriter {
                 else if let oldReference, let old = (objects["obj:" + oldReference] as? [String: Any])?["value"] as? [String: Any], old["/DrawbridgeLayerID"] == nil { annotation["/OC"] = old["/OC"] }
                 if let catalog = record.layerCatalog { annotation["/DrawbridgeLayerCatalog"] = "u:" + catalog; annotation["/F"] = 98 }
                 if let tool = record.inkTool { annotation["/DrawbridgeInkTool"] = "u:" + tool }
+                if record.kind == .polyline && record.inkTool == "highlight" { annotation["/DrawbridgeMarkerAppearanceVersion"] = 1 }
                 annotation["/DrawbridgeLinePattern"] = "u:" + record.linePattern.rawValue
                 annotation["/DrawbridgeStrokeOpacity"] = record.strokeOpacity
                 if record.kind == .highlight {
@@ -663,7 +664,7 @@ enum PDFRectangleWriter {
                 let drawing = appearanceDrawing(record)
                 let isDimension = record.measurement?.isDistance(points: record.vertices) == true
                 var resources: [String: Any] = ["/ExtGState": ["/MarkupGS": ["/Type": "/ExtGState", "/CA": record.strokeOpacity, "/ca": record.kind == .text || record.kind == .highlight || isDimension ? record.strokeOpacity : record.fillOpacity]]]
-                if record.kind == .highlight {
+                if record.kind == .highlight || (record.kind == .polyline && record.inkTool == "highlight") {
                     // Match PDFKit's live highlighter: multiply preserves black
                     // artwork instead of washing it out with normal alpha-over.
                     var states = resources["/ExtGState"] as! [String: Any]

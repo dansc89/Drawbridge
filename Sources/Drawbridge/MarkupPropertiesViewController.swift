@@ -192,7 +192,8 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         setAsDefault.isEnabled = session.canEdit() && session.defaultTool != nil
         let selection = session.selected
         let text = selection.map { $0.type == "FreeText" } ?? (session.tool == .text)
-        let highlight = selection.map { $0.type == "Highlight" } ?? (session.tool == .highlight)
+        let legacyHighlight = selection?.type == "Highlight"
+        let highlight = selection.map { $0.type == "Highlight" || $0.value(forAnnotationKey: RectangleMarkupRecord.inkToolKey) as? String == "highlight" } ?? (session.tool == .highlight)
         let closedShape = selection.map { ["Square", "Circle", "Polygon"].contains($0.type ?? "") } ?? ([.rectangle, .ellipse, .polygon, .area].contains(session.tool))
         let snapshot = selection.map(SnapshotPayload.isSnapshot) == true
         let capturing = selection == nil && (session.tool == .snapshotBox || session.tool == .snapshotPolygon)
@@ -221,7 +222,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         linePattern.selectItem(at: MarkupLinePattern.allCases.firstIndex(of: selection.map(MarkupStyle.pattern) ?? session.linePattern) ?? 0)
         strokeOpacity.doubleValue = (selection.map(MarkupStyle.strokeOpacity) ?? session.strokeOpacity) * 100
         patternRow.isHidden = text || highlight || snapshot || capturing; fillOpacityRow.isHidden = !closedShape
-        weightRow.isHidden = text || highlight || snapshot || capturing; fontRow.isHidden = !text; fillRow.isHidden = !closedShape
+        weightRow.isHidden = text || legacyHighlight || snapshot || capturing; fontRow.isHidden = !text; fillRow.isHidden = !closedShape
         for control in [stroke, weight, fontSize, filled, linePattern, strokeOpacity] as [NSControl] { control.isEnabled = enabled }
         let hatch = selection.flatMap(DraftingHatch.read) ?? (selection == nil ? session.hatchStyle : nil)
         let patterned = hatch != nil && hatch?.preset != .solid

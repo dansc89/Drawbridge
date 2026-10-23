@@ -1206,7 +1206,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return NSCursor(image: image, hotSpot: NSPoint(x: 3, y: 21))
     }()
 
-    var usesPenCursor: Bool { rectangleMarkup.tool == .pen && !isRegionCaptureModeEnabled }
+    var usesPenCursor: Bool { (rectangleMarkup.tool == .pen || rectangleMarkup.tool == .highlight) && !isRegionCaptureModeEnabled }
 
     func markupToolCursorChanged() {
         window?.invalidateCursorRects(for: self)

@@ -63,7 +63,12 @@ extension RectangleMarkupController {
             case "Line": return annotation.endLineStyle == .openArrow ? .arrow : .line
             case "FreeText": return .text
             case "Polygon": return .polygon
-            case "Ink": return annotation.value(forAnnotationKey: RectangleMarkupRecord.inkToolKey) as? String == "pen" ? .pen : .polyline
+            case "Ink":
+                switch annotation.value(forAnnotationKey: RectangleMarkupRecord.inkToolKey) as? String {
+                case "highlight": return .highlight
+                case "pen": return .pen
+                default: return .polyline
+                }
             default: return nil
             }
         }

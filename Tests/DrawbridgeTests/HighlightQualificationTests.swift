@@ -239,9 +239,9 @@ import XCTest
         controller.tool = .highlight
         let inspector = MarkupPropertiesViewController(); inspector.session = controller; inspector.refresh()
         XCTAssertTrue(inspector.strokeOpacity.isEnabled); XCTAssertTrue(inspector.setAsDefault.isEnabled)
-        XCTAssertTrue(inspector.weight.isHiddenOrHasHiddenAncestor)
+        XCTAssertFalse(inspector.weight.isHiddenOrHasHiddenAncestor)
         XCTAssertTrue(inspector.linePattern.isHiddenOrHasHiddenAncestor)
-        XCTAssertEqual(inspector.strokeOpacity.doubleValue, 35, accuracy: 0.001)
+        XCTAssertEqual(inspector.strokeOpacity.doubleValue, 20, accuracy: 0.001)
         inspector.strokeOpacity.doubleValue = 45
         XCTAssertTrue(inspector.strokeOpacity.sendAction(inspector.strokeOpacity.action, to: inspector.strokeOpacity.target))
         XCTAssertEqual(controller.strokeOpacity, 0.45, accuracy: 0.001)

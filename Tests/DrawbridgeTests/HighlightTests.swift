@@ -50,7 +50,7 @@ import XCTest
         XCTAssertEqual(annotation.quadrilateralPoints?.map(\.pointValue), [CGPoint(x: 0, y: h), CGPoint(x: w, y: h), .zero, CGPoint(x: w, y: 0)], file: file, line: line)
     }
 
-    func testNativeDragAllDirectionsAndRotationsFinishesSelectWithUndoRedo() throws {
+    func testNativeFreehandDragAllDirectionsAndRotationsStaysHighlightWithUndoRedo() throws {
         for rotation in [0, 90, 180, 270] {
             try canvas(rotation: rotation) { window, view, page in
                 for (a, b) in [(CGPoint(x: 100, y: 100), CGPoint(x: 250, y: 140)), (CGPoint(x: 250, y: 140), CGPoint(x: 100, y: 100)), (CGPoint(x: 100, y: 140), CGPoint(x: 250, y: 100)), (CGPoint(x: 250, y: 100), CGPoint(x: 100, y: 140))] {
@@ -63,12 +63,11 @@ import XCTest
                     try mouse(.leftMouseUp, at: b, window: window, view: view, page: page)
                     undo.endUndoGrouping()
                     let annotation = try XCTUnwrap(page.annotations.first)
-                    XCTAssertEqual(page.annotations.count, 1); XCTAssertEqual(annotation.type, "Highlight")
-                    XCTAssertEqual(annotation.bounds.minX, 100, accuracy: 1e-6); XCTAssertEqual(annotation.bounds.minY, 100, accuracy: 1e-6)
-                    XCTAssertEqual(annotation.bounds.width, 150, accuracy: 1e-6); XCTAssertEqual(annotation.bounds.height, 40, accuracy: 1e-6)
-                    assertQuads(annotation)
-                    XCTAssertEqual(view.rectangleMarkup.tool, .select)
-                    XCTAssertTrue(view.rectangleMarkup.selected === annotation)
+                    XCTAssertEqual(page.annotations.count, 1); XCTAssertEqual(annotation.type, "Ink")
+                    XCTAssertEqual(RectangleMarkupRecord.vertices(annotation).count, 2)
+                    XCTAssertEqual(annotation.value(forAnnotationKey: RectangleMarkupRecord.inkToolKey) as? String, "highlight")
+                    XCTAssertEqual(view.rectangleMarkup.tool, .highlight)
+                    XCTAssertNil(view.rectangleMarkup.selected)
                     undo.undo(); XCTAssertTrue(page.annotations.isEmpty)
                     undo.redo(); XCTAssertTrue(page.annotations.first === annotation)
                     page.removeAnnotation(annotation)
@@ -103,8 +102,9 @@ import XCTest
         session.strokeColor = .red; session.strokeOpacity = 1
         session.tool = try highlightTool()
         let rgb = try XCTUnwrap(session.strokeColor.usingColorSpace(.deviceRGB))
-        XCTAssertEqual(rgb.redComponent, 1, accuracy: 0.01); XCTAssertEqual(rgb.greenComponent, 1, accuracy: 0.01); XCTAssertEqual(rgb.blueComponent, 0, accuracy: 0.01)
-        XCTAssertEqual(session.strokeOpacity, 0.35, accuracy: 0.001)
+        XCTAssertEqual(rgb.redComponent, 1, accuracy: 0.01); XCTAssertEqual(rgb.greenComponent, 1, accuracy: 0.01); XCTAssertEqual(rgb.blueComponent, 0.25, accuracy: 0.01)
+        XCTAssertEqual(session.strokeOpacity, 0.20, accuracy: 0.001)
+        XCTAssertEqual(session.lineWidth, 20)
         session.tool = .rectangle
         XCTAssertEqual(session.strokeOpacity, 1); XCTAssertEqual(session.strokeColor.usingColorSpace(.deviceRGB), NSColor.red.usingColorSpace(.deviceRGB))
         session.tool = try highlightTool(); session.strokeColor = .green; session.strokeOpacity = 0.25
@@ -130,7 +130,7 @@ import XCTest
             decoded.bounds = resized.offsetBy(dx: 30, dy: 20)
             let copy = try decoded.clipboardAnnotation(contents: nil)
             XCTAssertEqual(copy.type, "Highlight"); assertQuads(copy)
-            XCTAssertEqual(MarkupStyle.strokeOpacity(copy), 0.35, accuracy: 0.001)
+            XCTAssertEqual(MarkupStyle.strokeOpacity(copy), 0.20, accuracy: 0.001)
         }
     }
 
