@@ -619,6 +619,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let autoNameSheetsButton = NSButton(title: "", target: nil, action: nil)
     private let batchLinkSheetsButton = NSButton(title: "", target: nil, action: nil)
     private let flattenPDFButton = NSButton(title: "", target: nil, action: nil)
+    private let purgeLayersButton = NSButton(title: "Purge Layers", target: nil, action: nil)
     private let previousPageButton = NSButton(title: "", target: nil, action: nil)
     private let nextPageButton = NSButton(title: "", target: nil, action: nil)
     private let navigationBackButton = NSButton(title: "", target: nil, action: nil)
@@ -1029,6 +1030,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         batchLinkSheetsButton.action = #selector(commandBatchLinkSheetNumbers(_:))
         flattenPDFButton.target = self
         flattenPDFButton.action = #selector(commandFlattenPDF(_:))
+        purgeLayersButton.target = self
+        purgeLayersButton.action = #selector(commandPurgeLayers(_:))
         reduceFileSizeButton.target = self
         reduceFileSizeButton.action = #selector(commandReduceFileSize(_:))
         emptyStateOpenButton.title = "Open Existing PDF"
@@ -2561,6 +2564,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         flattenPDFButton.toolTip = "Flatten PDF — make visible markups permanent and save this PDF"
         flattenPDFButton.setAccessibilityLabel("Flatten PDF")
         flattenPDFButton.identifier = NSUserInterfaceItemIdentifier("drawbridgeFlattenPDF")
+        purgeLayersButton.image = NSImage(systemSymbolName: "square.3.layers.3d.slash", accessibilityDescription: "Purge Layers")
+            ?? NSImage(systemSymbolName: "square.stack.3d.up.slash", accessibilityDescription: "Purge Layers")
+        purgeLayersButton.imagePosition = .imageOnly
+        purgeLayersButton.bezelStyle = .texturedRounded
+        purgeLayersButton.toolTip = "Purge Layers — remove all layer controls in a saved copy; retain hidden content and annotations"
+        purgeLayersButton.setAccessibilityLabel("Purge Layers")
+        purgeLayersButton.identifier = NSUserInterfaceItemIdentifier("drawbridgePurgeLayers")
         reduceFileSizeButton.image = ToolbarIcons.compressionClamp()
         reduceFileSizeButton.imagePosition = .imageOnly
         reduceFileSizeButton.bezelStyle = .texturedRounded
@@ -2633,6 +2643,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             toolbarControlsStack.addArrangedSubview(autoNameSheetsButton)
             toolbarControlsStack.addArrangedSubview(batchLinkSheetsButton)
             toolbarControlsStack.addArrangedSubview(flattenPDFButton)
+            toolbarControlsStack.addArrangedSubview(purgeLayersButton)
             toolbarControlsStack.addArrangedSubview(reduceFileSizeButton)
             toolbarControlsStack.addArrangedSubview(goToSheetButton)
             toolbarControlsStack.addArrangedSubview(fitPageButton)
@@ -5787,6 +5798,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         goToSheetButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
         fitPageButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
         reduceFileSizeButton.isEnabled = pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy
+        purgeLayersButton.isEnabled = pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy && !isPDFFileProcessingOperation
         let recoverable = pdfView.document.map(PDFAnnotationFlattener.canUnflatten) ?? false
         flattenPDFButton.image = NSImage(systemSymbolName: recoverable ? "square.stack.3d.up" : "square.stack.3d.down.forward", accessibilityDescription: recoverable ? "Unflatten PDF" : "Flatten PDF")
         flattenPDFButton.toolTip = recoverable ? "Unflatten PDF — restore editable annotations and save this PDF" : "Flatten PDF — flatten annotations and save this PDF"
