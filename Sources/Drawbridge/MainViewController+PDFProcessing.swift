@@ -74,6 +74,62 @@ extension MainViewController {
         }
     }
 
+    private func saveCompressedCopy(to destination: URL, level: PDFCompressionLevel) {
+        guard let document = pdfView.document, let source = openDocumentURL,
+              !isPDFProcessingBusy, !isPDFFileProcessingOperation,
+              canonicalDocumentURL(source) != canonicalDocumentURL(destination),
+              !FileManager.default.fileExists(atPath: destination.path) else { runAlert(title: "Compression Not Started", informativeText: "Choose a new filename. Your original and existing PDFs stay unchanged."); return }
+        let snapshotDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeCompressionSnapshot-\(UUID())")
+        do { try FileManager.default.createDirectory(at: snapshotDirectory, withIntermediateDirectories: false) }
+        catch { runAlert(title: "Compression Not Started", informativeText: "Choose a new filename. Your original and existing PDFs stay unchanged."); return }
+        let snapshot = snapshotDirectory.appendingPathComponent("snapshot.pdf")
+        pdfView.rectangleMarkup.finishTextEditing()
+        let records = RectangleMarkupRecord.capture(document)
+        let navigation = PDFTKBookmarkWriter.captureNavigation(in: document)
+        let labels = embeddedPageLabelsForSave(in: document)
+        let stamp = pdfView.rectangleMarkup.sourceStamp
+        let imported = pdfView.rectangleMarkup.importedPlan()
+        let structure = pageStructureState?.document === document ? pageStructureState?.plan(for: document, forceOriginal: imported != nil) : nil
+        let box = PDFDocumentBox(document: document)
+        let cancellation = PDFProcessingCancellation()
+        isPDFFileProcessingOperation = true
+        beginBusyIndicator("Reducing File Size…", detail: "Capturing current edits into a private copy…")
+        updateStatusBar()
+        setBusyCancelAction { [weak self] in cancellation.cancel(); self?.setBusyCancelAction(nil) }
+        let controller = self
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = Result {
+                defer { try? FileManager.default.removeItem(at: snapshotDirectory) }
+                if cancellation.cancelled { throw CancellationError() }
+                let saved: Bool
+                if let structure {
+                    saved = structure.write(document: box.document, currentSource: source, destination: snapshot, expectedStamp: stamp, labels: labels, records: records, navigation: navigation, importedPlan: imported, onCommitted: { _ in })
+                } else {
+                    saved = Self.writePDFDocument(box.document, to: snapshot, pageLabels: labels, navigationSourceURL: source, rectangleRecords: records, rectangleSourceStamp: stamp, navigationSnapshot: navigation, importedPlan: imported)
+                }
+                guard saved else { throw CocoaError(.fileWriteUnknown) }
+                return try PDFCompression.saveCopy(source: snapshot, destination: destination, level: level, progress: { detail in
+                    DispatchQueue.main.async { controller.updateBusyIndicatorDetail(detail) }
+                }, cancelled: { cancellation.cancelled })
+            }
+            DispatchQueue.main.async {
+                controller.isPDFFileProcessingOperation = false
+                controller.endBusyIndicator()
+                controller.updateStatusBar()
+                switch result {
+                case .success(let report):
+                    let before = ByteCountFormatter.string(fromByteCount: Int64(report.originalBytes), countStyle: .file)
+                    let after = ByteCountFormatter.string(fromByteCount: Int64(report.reducedBytes), countStyle: .file)
+                    controller.runAlert(title: report.saved ? (level == .high ? "Rasterized Copy Saved" : "Compressed Copy Saved") : "PDF Already Compact", informativeText: report.saved
+                        ? "Before: \(before)\nAfter: \(after)\n\nSaved to \(destination.path). Your original PDF and current edits are unchanged.\n\n" + (level == .high ? "Pages are rasterized; text, links, layers, forms and markups are no longer editable. File size can increase for some PDFs." : "Vector linework and text were preserved. Images may have reduced quality.")
+                        : "No smaller result was available at this level. No copy was saved; your original and current edits are unchanged.")
+                case .failure(let error):
+                    if !(error is CancellationError) { controller.runAlert(title: "Compression Failed", informativeText: error.localizedDescription, style: .warning) }
+                }
+            }
+        }
+    }
+
     func flattenPDF() {
         guard let document = pdfView.document, let source = openDocumentURL,
               !isPDFProcessingBusy else { beep(); return }
@@ -133,10 +189,22 @@ extension MainViewController {
     }
 
     func reduceFileSize() {
+        guard pdfView.document != nil, openDocumentURL != nil, !isPDFProcessingBusy, !isPDFFileProcessingOperation else { beep(); return }
+        guard let level = PDFCompressionPicker().choose() else { return }
+        if level == .low { reduceFileSizeLosslessly(); return }
+        guard let source = openDocumentURL else { return }
+        let panel = NSSavePanel(); panel.title = level == .high ? "Save Rasterized Copy" : "Save Compressed Copy"
+        panel.nameFieldStringValue = source.deletingPathExtension().lastPathComponent + (level == .high ? " - Rasterized.pdf" : " - Compressed.pdf")
+        panel.allowedContentTypes = [.pdf]
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        saveCompressedCopy(to: destination, level: level)
+    }
+
+    private func reduceFileSizeLosslessly() {
         guard let document = pdfView.document, let source = openDocumentURL, !isPDFProcessingBusy else { beep(); return }
         if hasUnsavedChanges() {
             persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…", document: document, completion: { [weak self] saved in
-                if saved { self?.reduceFileSize() }
+                if saved { self?.reduceFileSizeLosslessly() }
             })
             return
         }

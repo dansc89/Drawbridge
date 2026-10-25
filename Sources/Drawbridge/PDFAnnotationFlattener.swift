@@ -256,8 +256,8 @@ enum PDFAnnotationFlattener {
         return Report(flattened: 0, retainedMarkups: 0, removedSHXComments: 0, restoredAnnotations: restored)
     }
 
-    /// Called only after the reducer proves the complete decoded graph is unchanged.
-    /// Validate old integrity checks before updating hashes for different compression.
+    /// Called after the reducer verifies the semantic graph (Medium allows image
+    /// encoding changes only). Validate old recovery before refreshing drawing hashes.
     static func refreshRecoveryAfterLosslessCompression(before: [String: Any], after: inout [String: Any]) throws -> Bool {
         let oldObjects = try objectTable(before)
         let oldCatalog = try dictionary(rootReference(oldObjects), oldObjects)

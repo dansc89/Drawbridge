@@ -1,11 +1,11 @@
 import Foundation
 import CryptoKit
 
-/// Repackages PDF objects without changing decoded drawing or image data.
-/// Never enables JPEG optimization, image resampling, or page rendering.
+/// Repackages PDF objects while verifying drawing content and document structure.
+/// Low is lossless. Medium may re-encode image streams; vector/text streams stay exact.
 enum PDFLosslessReducer {
     struct Report { let originalBytes: Int; let reducedBytes: Int; let saved: Bool }
-    static func reduce(source: URL, progress: @Sendable (String) -> Void = { _ in }, cancelled: @Sendable () -> Bool = { false }) throws -> Report {
+    static func reduce(source: URL, level: PDFCompressionLevel = .low, progress: @Sendable (String) -> Void = { _ in }, cancelled: @Sendable () -> Bool = { false }) throws -> Report {
         func failure(_ message: String) -> NSError { NSError(domain: "DrawbridgeReduce", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
         guard let executable = PDFTKBookmarkWriter.executableURL() else { throw failure("The PDF processing helper is unavailable.") }
         let destination = source.standardizedFileURL.resolvingSymlinksInPath()
@@ -33,12 +33,18 @@ enum PDFLosslessReducer {
             let value = (entry as? [String: Any])?["value"] as? [String: Any]
             return value?["/FT"] as? String == "/Sig" || value?["/Type"] as? String == "/Sig"
         }) else { throw failure("This PDF contains a signature field. Reduce an unsigned copy instead.") }
-        let beforeHash = try semanticHash(read(input, decoded: true, name: "decoded-before.json"))
+        guard level != .high else { throw failure("High compression must be saved as a rasterized copy.") }
+        func contentHash(_ json: [String: Any]) throws -> String {
+            try level == .medium ? imageIndependentSemanticHash(json) : semanticHash(json)
+        }
+        let beforeHash = try contentHash(read(input, decoded: true, name: "decoded-before.json"))
         let output = directory.appendingPathComponent("reduced.pdf")
-        progress("Compressing PDF streams without changing image resolution…")
-        try run([input.path, "--object-streams=generate", "--stream-data=compress", "--recompress-flate", "--compression-level=9", output.path])
+        progress(level == .low ? "Compressing PDF streams without changing image resolution…" : "Compressing images while retaining vector linework and text…")
+        var arguments = [input.path, "--object-streams=generate", "--stream-data=compress", "--recompress-flate", "--compression-level=9"]
+        if level == .medium { arguments += ["--optimize-images", "--jpeg-quality=80"] }
+        try run(arguments + [output.path])
         progress("Verifying image data, drawings, links and page geometry…")
-        guard try semanticHash(read(output, decoded: true, name: "decoded-after.json")) == beforeHash else {
+        guard try contentHash(read(output, decoded: true, name: "decoded-after.json")) == beforeHash else {
             throw failure("Content verification failed. The original PDF was left unchanged.")
         }
         var after = try read(output, decoded: false, name: "after.json")
@@ -47,9 +53,13 @@ enum PDFLosslessReducer {
             try PDFJSONPatchEncoder.data(withJSONObject: PDFAnnotationFlattener.metadataJSON(after), options: [.sortedKeys, .withoutEscapingSlashes]).write(to: metadata)
             let recovered = directory.appendingPathComponent("with-recovery.pdf")
             try run([output.path, "--stream-data=preserve", "--update-from-json=\(metadata.path)", recovered.path])
-            try FileManager.default.removeItem(at: output)
-            try FileManager.default.moveItem(at: recovered, to: output)
-            guard try semanticHash(read(output, decoded: true, name: "decoded-final.json")) == beforeHash else { throw failure("Recovery verification failed. The original file was left unchanged.") }
+            do {
+                try FileManager.default.removeItem(at: output)
+                try FileManager.default.moveItem(at: recovered, to: output)
+            } catch {
+                throw failure("Could not finalize recovery data: \(error.localizedDescription)")
+            }
+            guard try contentHash(read(output, decoded: true, name: "decoded-final.json")) == beforeHash else { throw failure("Recovery verification failed. The original file was left unchanged.") }
         }
         try run(["--check", output.path])
         let originalData = try Data(contentsOf: input, options: .mappedIfSafe)
@@ -61,6 +71,33 @@ enum PDFLosslessReducer {
         progress("Saving verified smaller PDF…")
         try MainViewController.commitStagedSave(from: output, to: destination)
         return Report(originalBytes: originalData.count, reducedBytes: bytes, saved: true)
+    }
+
+    /// Only image encoding is excluded. Every vector/text stream, image geometry,
+    /// navigation object and annotation must remain semantically identical.
+    static func imageIndependentSemanticHash(_ json: [String: Any]) throws -> String {
+        // qpdf's image optimizer may insert an empty XObject resource map into
+        // an appearance. Absence and an empty resource map both define no images.
+        func normalizedResources(_ value: Any) -> Any {
+            if var dict = value as? [String: Any] {
+                if let resources = dict["/XObject"] as? [String: Any], resources.isEmpty { dict.removeValue(forKey: "/XObject") }
+                return dict.mapValues(normalizedResources)
+            }
+            if let list = value as? [Any] { return list.map(normalizedResources) }
+            return value
+        }
+        var normalized = normalizedResources(json) as! [String: Any]
+        guard var qpdf = normalized["qpdf"] as? [[String: Any]], qpdf.count > 1 else { throw CocoaError(.fileReadCorruptFile) }
+        var table = qpdf[1]
+        for (key, value) in table {
+            guard var entry = value as? [String: Any], var stream = entry["stream"] as? [String: Any],
+                  var dict = stream["dict"] as? [String: Any], dict["/Subtype"] as? String == "/Image" else { continue }
+            stream["data"] = "image-encoding-excluded"
+            dict.removeValue(forKey: "/Filter"); dict.removeValue(forKey: "/DecodeParms")
+            stream["dict"] = dict; entry["stream"] = stream; table[key] = entry
+        }
+        qpdf[1] = table; normalized["qpdf"] = qpdf
+        return try semanticHash(normalized)
     }
 
     private static func objects(_ json: [String: Any]) throws -> [String: Any] {

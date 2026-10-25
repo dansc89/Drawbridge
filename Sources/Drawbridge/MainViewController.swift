@@ -2574,7 +2574,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         reduceFileSizeButton.image = ToolbarIcons.compressionClamp()
         reduceFileSizeButton.imagePosition = .imageOnly
         reduceFileSizeButton.bezelStyle = .texturedRounded
-        reduceFileSizeButton.toolTip = "Reduce File Size — lossless compression, preserving image resolution"
+        reduceFileSizeButton.toolTip = "Optimize PDF — choose lossless compression, image compression or rasterization"
         reduceFileSizeButton.setAccessibilityLabel("Reduce File Size")
 
         actionsPopup.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "Actions")
