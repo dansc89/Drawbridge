@@ -126,7 +126,7 @@ final class PDFLayerPurgerTests: XCTestCase {
         XCTAssertEqual(PDFDocument(url:second)?.string,b.string)
         print("PRIVATE PURGE QUALIFICATION pages=\(b.pageCount) annotations=\(annotations) textCharacters=\(characters) inputStreams=\(try streams(beforeObjects,normalize:false).count) outputStreams=\(try streams(afterObjects,normalize:false).count)")
     }
-    @MainActor func testDocumentToolbarOffersAccessiblePurgeSavedCopy() throws {
+    @MainActor func testDocumentToolbarOffersAccessiblePurgeInPlace() throws {
         _ = NSApplication.shared
         let c = MainViewController(); _ = c.view
         let window = NSWindow(contentRect:CGRect(x:0,y:0,width:1400,height:900), styleMask:[.titled], backing:.buffered, defer:false)
@@ -136,8 +136,14 @@ final class PDFLayerPurgerTests: XCTestCase {
         let button = try XCTUnwrap(Self.views(window.contentView!.superview!).compactMap { $0 as? NSButton }.first { $0.identifier?.rawValue == "drawbridgePurgeLayers" })
         XCTAssertEqual(button.title, "Purge Layers")
         XCTAssertEqual(button.accessibilityLabel(), "Purge Layers")
-        XCTAssertTrue(button.toolTip?.contains("saved copy") == true)
+        XCTAssertTrue(button.toolTip?.contains("save this PDF") == true)
         XCTAssertNotNil(button.image); XCTAssertTrue(button.target === c)
+        let siblings = try XCTUnwrap(button.superview as? NSStackView).arrangedSubviews.compactMap { $0 as? NSButton }
+        let purgeIndex = try XCTUnwrap(siblings.firstIndex(of: button))
+        XCTAssertEqual(siblings[0].title, "Open")
+        XCTAssertEqual(purgeIndex, 1)
+        XCTAssertTrue(siblings[purgeIndex + 1].toolTip?.contains("Auto-Generate Sheet Names") == true)
+        XCTAssertTrue(siblings[purgeIndex + 2].toolTip?.contains("Batch Link Sheet Numbers") == true)
         XCTAssertFalse(button.isEnabled)
         let dir = try directory(); defer { try? FileManager.default.removeItem(at:dir) }
         c.openDocument(at: try fixture(dir)); c.updateStatusBar()
@@ -146,7 +152,7 @@ final class PDFLayerPurgerTests: XCTestCase {
         XCTAssertFalse(button.isEnabled)
         c.isPDFFileProcessingOperation = false
     }
-    @MainActor func testToolbarConfirmationExplainsSavedCopyAndCancelPreservesDirtySession() throws {
+    @MainActor func testToolbarConfirmationExplainsInPlaceSaveAndCancelPreservesDirtySession() throws {
         _ = NSApplication.shared
         let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
         let source = try fixture(dir), original = try Data(contentsOf: source)
@@ -172,9 +178,9 @@ final class PDFLayerPurgerTests: XCTestCase {
                 XCTAssertTrue(text.contains("All layers will be removed"))
                 XCTAssertTrue(text.contains("artwork and annotations"))
                 XCTAssertTrue(text.contains("hidden content will become visible"))
-                XCTAssertTrue(text.contains("current edits stay unchanged"))
+                XCTAssertTrue(text.contains("current edits will be saved"))
                 let buttons = Self.views(content).compactMap { $0 as? NSButton }
-                XCTAssertTrue(buttons.contains { $0.title == "Save Purged Copy…" })
+                XCTAssertTrue(buttons.contains { $0.title == "Purge and Save" })
                 guard let cancel = buttons.first(where: { $0.title == "Cancel" }) else { NSApp.abortModal(); return }
                 cancel.performClick(nil)
             }
@@ -219,6 +225,65 @@ final class PDFLayerPurgerTests: XCTestCase {
         c.savePurgedLayersCopy(to:source) { rejected = $0 }
         XCTAssertEqual(rejected,false); XCTAssertEqual(try Data(contentsOf:source),original)
     }
+    @MainActor func testInPlacePurgeSavesDirtyAnnotationsAndReloadsBothSplitPanes() throws {
+        _ = NSApplication.shared
+        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let source = try fixture(dir)
+        let c = MainViewController(); _ = c.view
+        let window = NSWindow(contentRect: CGRect(x:0,y:0,width:1400,height:900), styleMask:[.titled], backing:.buffered, defer:false)
+        window.contentViewController = c
+        defer { window.contentViewController = nil }
+        c.openDocument(at: source)
+        let document = try XCTUnwrap(c.pdfView.document)
+        let note = PDFAnnotation(bounds: CGRect(x:80,y:80,width:80,height:20), forType: .freeText, withProperties: nil)
+        note.setValue(RectangleMarkupRecord.prefix + UUID().uuidString, forAnnotationKey: PDFAnnotationKey(rawValue:"/NM"))
+        note.contents = "Saved in place"; document.page(at: 0)!.addAnnotation(note)
+        window.isDocumentEdited = true; c.markupChangeVersion += 1
+        c.commandToggleSplitView(nil)
+        XCTAssertNotNil(c.secondaryPDFView)
+        var completed: Bool?
+        c.purgeLayersInPlace { completed = $0 }
+        let deadline = Date().addingTimeInterval(30)
+        while completed == nil && Date() < deadline { RunLoop.current.run(until:Date().addingTimeInterval(0.02)) }
+        XCTAssertEqual(completed, true)
+        XCTAssertEqual(c.openDocumentURL, source)
+        XCTAssertFalse(c.pdfView.document === document)
+        XCTAssertFalse(c.hasUnsavedChanges())
+        XCTAssertFalse(c.isPDFFileProcessingOperation)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath:dir.path), ["input.pdf"])
+        let reopened = try XCTUnwrap(PDFDocument(url: source))
+        XCTAssertTrue(reopened.page(at:0)?.annotations.contains { $0.contents == "Saved in place" } == true)
+        XCTAssertTrue(c.pdfView.document?.page(at:0)?.annotations.contains { $0.contents == "Saved in place" } == true)
+        XCTAssertTrue(c.secondaryPDFView?.document?.page(at:0)?.annotations.contains { $0.contents == "Saved in place" } == true)
+        let objects = try PDFLayerPurger.inspect(source)
+        XCTAssertFalse(String(describing: objects).contains("/OCProperties"))
+        XCTAssertNotNil(reopened.page(at:0)?.annotations.first { ($0.action as? PDFActionURL)?.url?.absoluteString == "https://example.com" })
+        XCTAssertEqual(reopened.outlineRoot?.child(at:0)?.label, "Bookmark")
+    }
+
+    @MainActor func testInPlacePurgeDoesNotOverwriteExternallyChangedSource() throws {
+        _ = NSApplication.shared
+        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let source = try fixture(dir)
+        let c = MainViewController(); _ = c.view
+        let window = NSWindow(contentRect:CGRect(x:0,y:0,width:1000,height:700),styleMask:[.titled],backing:.buffered,defer:false)
+        window.contentViewController = c; defer { window.contentViewController = nil }
+        c.openDocument(at: source)
+        let document = try XCTUnwrap(c.pdfView.document)
+        window.isDocumentEdited = true; c.markupChangeVersion += 1
+        var replacement = try Data(contentsOf: source); replacement.append(Data("\n% External revision\n".utf8))
+        try replacement.write(to:source)
+        var completed: Bool?
+        c.purgeLayersInPlace { completed = $0 }
+        let deadline = Date().addingTimeInterval(20)
+        while completed == nil && Date() < deadline { RunLoop.current.run(until:Date().addingTimeInterval(0.02)) }
+        XCTAssertEqual(completed,false)
+        XCTAssertEqual(try Data(contentsOf:source),replacement)
+        XCTAssertTrue(c.pdfView.document === document)
+        XCTAssertTrue(c.hasUnsavedChanges())
+        XCTAssertFalse(c.isPDFFileProcessingOperation)
+    }
+
     func testSplitOptionalContentOperandsFailClosedWithoutPublishing() throws {
         for parts in [["/OC /L", "BDC 10 10 20 20 re f EMC"], ["/OC", "/L BDC 10 10 20 20 re f EMC"], ["/OC /L % boundary", "BDC 10 10 20 20 re f EMC"]] {
             let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }

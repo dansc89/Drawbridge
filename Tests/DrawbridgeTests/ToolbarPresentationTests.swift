@@ -104,10 +104,10 @@ final class ToolbarPresentationTests: XCTestCase {
         XCTAssertGreaterThan(stack.frame.width, 0)
         let buttons = stack.arrangedSubviews.compactMap { $0 as? NSButton }
         XCTAssertEqual(buttons.count, 8)
-        XCTAssertEqual(buttons.map(\.action), [#selector(MainViewController.openPDF), #selector(MainViewController.commandAutoGenerateSheetNames(_:)), #selector(MainViewController.commandBatchLinkSheetNumbers(_:)), #selector(MainViewController.commandFlattenPDF(_:)), #selector(MainViewController.commandPurgeLayers(_:)), #selector(MainViewController.commandReduceFileSize(_:)), #selector(MainViewController.commandGoToSheet(_:)), #selector(MainViewController.commandFitPage(_:))])
+        XCTAssertEqual(buttons.map(\.action), [#selector(MainViewController.openPDF), #selector(MainViewController.commandPurgeLayers(_:)), #selector(MainViewController.commandAutoGenerateSheetNames(_:)), #selector(MainViewController.commandBatchLinkSheetNumbers(_:)), #selector(MainViewController.commandFlattenPDF(_:)), #selector(MainViewController.commandReduceFileSize(_:)), #selector(MainViewController.commandGoToSheet(_:)), #selector(MainViewController.commandFitPage(_:))])
         XCTAssertTrue(buttons.allSatisfy { $0.target === controller && !$0.isHidden && $0.image != nil })
         let purge = try XCTUnwrap(buttons.first { $0.action == #selector(MainViewController.commandPurgeLayers(_:)) })
-        XCTAssertTrue(purge.toolTip?.contains("saved copy") == true)
+        XCTAssertTrue(purge.toolTip?.contains("save this PDF") == true)
         let compression = try XCTUnwrap(buttons.first { $0.action == #selector(MainViewController.commandReduceFileSize(_:)) })
         XCTAssertEqual(compression.image?.name(), NSImage.Name("DrawbridgeCompressionClamp"))
         XCTAssertTrue(compression.image?.isTemplate == true)

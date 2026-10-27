@@ -2568,7 +2568,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             ?? NSImage(systemSymbolName: "square.stack.3d.up.slash", accessibilityDescription: "Purge Layers")
         purgeLayersButton.imagePosition = .imageOnly
         purgeLayersButton.bezelStyle = .texturedRounded
-        purgeLayersButton.toolTip = "Purge Layers — remove all layer controls in a saved copy; retain hidden content and annotations"
+        purgeLayersButton.toolTip = "Purge Layers — remove all layer controls and save this PDF; retain hidden content and annotations"
         purgeLayersButton.setAccessibilityLabel("Purge Layers")
         purgeLayersButton.identifier = NSUserInterfaceItemIdentifier("drawbridgePurgeLayers")
         reduceFileSizeButton.image = ToolbarIcons.compressionClamp()
@@ -2640,10 +2640,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         if toolbarControlsStack.arrangedSubviews.isEmpty {
             toolbarControlsStack.addArrangedSubview(openButton)
+            toolbarControlsStack.addArrangedSubview(purgeLayersButton)
             toolbarControlsStack.addArrangedSubview(autoNameSheetsButton)
             toolbarControlsStack.addArrangedSubview(batchLinkSheetsButton)
             toolbarControlsStack.addArrangedSubview(flattenPDFButton)
-            toolbarControlsStack.addArrangedSubview(purgeLayersButton)
             toolbarControlsStack.addArrangedSubview(reduceFileSizeButton)
             toolbarControlsStack.addArrangedSubview(goToSheetButton)
             toolbarControlsStack.addArrangedSubview(fitPageButton)
@@ -5310,6 +5310,17 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             """,
             style: .warning
         )
+    }
+
+    /// Reload the committed purge rather than retaining stale layer/undo state.
+    func reloadAfterPurgingLayers(at url: URL) {
+        let target = canonicalDocumentURL(url)
+        if let state = pdfView.captureTabViewState() { tabViewStates[target] = state }
+        documentTabCache.remove(target)
+        splitDocumentSessions.removeValue(forKey: target)
+        openDocument(at: url)
+        if let document = pdfView.document { refreshSplitPresentationAfterStructureChange(document: document) }
+        if retainsSplitDocumentSessions { retainActiveSplitSession() }
     }
 
     func openDocument(at url: URL) {

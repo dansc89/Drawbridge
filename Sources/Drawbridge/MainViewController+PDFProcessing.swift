@@ -15,30 +15,37 @@ extension MainViewController {
 
     @objc func commandPurgeLayers(_ sender: Any?) {
         guard let source = openDocumentURL, pdfView.document != nil, !isPDFProcessingBusy, !isPDFFileProcessingOperation else { beep(); return }
-        let response = runAlert(title: "Purge Layers", informativeText: "Save a new PDF copy? All layers will be removed, but artwork and annotations will be retained. Previously hidden content will become visible. Annotations remain editable. The original PDF and your current edits stay unchanged.", style: .warning, buttons: ["Save Purged Copy…", "Cancel"])
+        let response = runAlert(title: "Purge Layers", informativeText: "All layers will be removed from the PDF you have open, and current edits will be saved. Your artwork and annotations will be retained. Previously hidden content will become visible. Annotations remain editable.", style: .warning, buttons: ["Purge and Save", "Cancel"])
         guard response == .alertFirstButtonReturn else { return }
-        let panel = NSSavePanel()
-        panel.title = "Purge Layers — Save Copy"
-        panel.nameFieldStringValue = source.deletingPathExtension().lastPathComponent + " - Purged.pdf"
-        panel.allowedContentTypes = [.pdf]
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
-        savePurgedLayersCopy(to: destination) { [weak self] success in
-            self?.runAlert(title: success ? "Purged Copy Saved" : "Purge Layers Failed", informativeText: success ? "Saved to \(destination.path). Your original document is still open and unchanged." : "No purged copy was saved. Choose a new filename; existing files are never replaced. Your original and current edits remain unchanged.")
+        purgeLayersInPlace { [weak self] success in
+            self?.runAlert(title: success ? "Layers Purged and Saved" : "Purge Layers Failed", informativeText: success ? "Saved to \(source.path). Layer controls were removed; artwork and editable annotations were retained." : "The purge could not be completed. Check the PDF and try again.")
         }
+    }
+
+    func purgeLayersInPlace(completion: @escaping @MainActor @Sendable (Bool) -> Void) {
+        guard let source = openDocumentURL else { completion(false); return }
+        processPurgedLayers(to: canonicalDocumentURL(source), replacingOpenDocument: true, completion: completion)
     }
 
     /// Freeze the same structural/markup/navigation inputs as Save, but never run
     /// Save's adoption/clean-state callbacks and never write to the open source.
     func savePurgedLayersCopy(to destination: URL, completion: @escaping @MainActor @Sendable (Bool) -> Void) {
+        processPurgedLayers(to: destination, replacingOpenDocument: false, completion: completion)
+    }
+
+    private func processPurgedLayers(to destination: URL, replacingOpenDocument: Bool,
+                                     completion: @escaping @MainActor @Sendable (Bool) -> Void) {
         guard let document = pdfView.document, let source = openDocumentURL,
               !isPDFProcessingBusy, !isPDFFileProcessingOperation,
-              canonicalDocumentURL(source) != canonicalDocumentURL(destination),
-              !FileManager.default.fileExists(atPath: destination.path) else { completion(false); return }
+              replacingOpenDocument || (canonicalDocumentURL(source) != canonicalDocumentURL(destination)
+                && !FileManager.default.fileExists(atPath: destination.path)) else { completion(false); return }
         let snapshotDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgePurgeSnapshot-\(UUID())")
         do { try FileManager.default.createDirectory(at: snapshotDirectory, withIntermediateDirectories: false) }
         catch { completion(false); return }
         let snapshot = snapshotDirectory.appendingPathComponent("snapshot.pdf")
+        let purged = replacingOpenDocument ? snapshotDirectory.appendingPathComponent("purged.pdf") : destination
         pdfView.rectangleMarkup.finishTextEditing()
+        let changeVersion = markupChangeVersion
         let records = RectangleMarkupRecord.capture(document)
         let navigation = PDFTKBookmarkWriter.captureNavigation(in: document)
         let labels = embeddedPageLabelsForSave(in: document)
@@ -48,7 +55,7 @@ extension MainViewController {
         let box = PDFDocumentBox(document: document)
         let cancellation = PDFProcessingCancellation()
         isPDFFileProcessingOperation = true
-        beginBusyIndicator("Purging Layers…", detail: "Capturing current edits into a private copy…")
+        beginBusyIndicator("Purging Layers…", detail: "Preparing current edits…")
         updateStatusBar()
         setBusyCancelAction { [weak self] in cancellation.cancel(); self?.setBusyCancelAction(nil) }
         let controller = self
@@ -56,6 +63,10 @@ extension MainViewController {
             let result = Result {
                 defer { try? FileManager.default.removeItem(at: snapshotDirectory) }
                 if cancellation.cancelled { throw CancellationError() }
+                if replacingOpenDocument {
+                    guard let stamp, stamp.matchesSource(destination) else { throw CocoaError(.fileWriteUnknown) }
+                }
+                let original = replacingOpenDocument ? try Data(contentsOf: destination) : nil
                 let saved: Bool
                 if let structure {
                     saved = structure.write(document: box.document, currentSource: source, destination: snapshot, expectedStamp: stamp, labels: labels, records: records, navigation: navigation, importedPlan: imported, onCommitted: { _ in })
@@ -63,13 +74,27 @@ extension MainViewController {
                     saved = Self.writePDFDocument(box.document, to: snapshot, pageLabels: labels, navigationSourceURL: source, rectangleRecords: records, rectangleSourceStamp: stamp, navigationSnapshot: navigation, importedPlan: imported)
                 }
                 guard saved else { throw CocoaError(.fileWriteUnknown) }
-                try PDFLayerPurger.purge(source: snapshot, destination: destination, cancelled: { cancellation.cancelled })
+                try PDFLayerPurger.purge(source: snapshot, destination: purged, cancelled: { cancellation.cancelled })
+                if replacingOpenDocument {
+                    guard !cancellation.cancelled, try Data(contentsOf: destination) == original else { throw CocoaError(.fileWriteUnknown) }
+                    // Serialize the final identity check and commit with UI edits.
+                    try DispatchQueue.main.sync {
+                        guard !cancellation.cancelled, controller.pdfView.document === box.document,
+                              controller.openDocumentURL.map(controller.canonicalDocumentURL) == destination,
+                              controller.markupChangeVersion == changeVersion else { throw CancellationError() }
+                        try Self.commitStagedSave(from: purged, to: destination)
+                    }
+                }
             }
             DispatchQueue.main.async {
                 controller.isPDFFileProcessingOperation = false
                 controller.endBusyIndicator()
                 controller.updateStatusBar()
-                if case .success = result { completion(true) } else { completion(false) }
+                if case .success = result {
+                    if replacingOpenDocument, controller.pdfView.document === box.document,
+                       controller.markupChangeVersion == changeVersion { controller.reloadAfterPurgingLayers(at: destination) }
+                    completion(true)
+                } else { completion(false) }
             }
         }
     }
