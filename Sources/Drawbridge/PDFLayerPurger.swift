@@ -110,7 +110,7 @@ enum PDFLayerPurger {
 
     /// Lexical PDF scanner: strings, names and composite operands are opaque.
     /// Optional-content BDC is replaced by a neutral BMC; its EMC stays balanced.
-    /// Inline images fail closed rather than mistaking image bytes for operators.
+    /// Inline-image payloads are opaque; unsupported encodings fail closed.
     static func unconditional(_ data: Data) throws -> Data {
         let bytes = [UInt8](data); var i = 0, operands: [(String, Int)] = [], replacements: [(Range<Int>, [UInt8])] = []
         func whitespace(_ c: UInt8) -> Bool { [0, 9, 10, 12, 13, 32].contains(c) }
@@ -166,7 +166,59 @@ enum PDFLayerPurger {
             let (text,start) = try token()
             let first = text.utf8.first ?? 0
             if first == 47 || first == 40 || first == 60 || first == 91 || Double(text) != nil || ["true","false","null"].contains(text) { operands.append((text,start)); continue }
-            if text == "BI" { throw CocoaError(.featureUnsupported) }
+            if text == "BI" {
+                guard operands.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
+                func skipSpace() {
+                    while i < bytes.count {
+                        if whitespace(bytes[i]) { i += 1 }
+                        else if bytes[i] == 37 { while i < bytes.count && bytes[i] != 10 && bytes[i] != 13 { i += 1 } }
+                        else { break }
+                    }
+                }
+                var dictionary: [String:String] = [:]
+                while true {
+                    skipSpace(); guard i < bytes.count else { throw CocoaError(.fileReadCorruptFile) }
+                    let key = try token().0
+                    if key == "ID" { break }
+                    guard key.hasPrefix("/") else { throw CocoaError(.fileReadCorruptFile) }
+                    skipSpace(); guard i < bytes.count else { throw CocoaError(.fileReadCorruptFile) }
+                    dictionary[key] = try token().0
+                }
+                guard i < bytes.count, whitespace(bytes[i]) else { throw CocoaError(.fileReadCorruptFile) }
+                let separator = bytes[i]; i += 1
+                if separator == 13 && i < bytes.count && bytes[i] == 10 { i += 1 }
+                let filter = dictionary["/F"] ?? dictionary["/Filter"]
+                if let filter {
+                    // Only the first (outermost) filter determines the encoded boundary.
+                    let outer = filter.trimmingCharacters(in: CharacterSet(charactersIn: "[] \r\n\t")).split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+                    if ["/AHx", "/ASCIIHexDecode"].contains(outer) {
+                        while i < bytes.count && bytes[i] != 62 {
+                            guard whitespace(bytes[i]) || (48...57).contains(bytes[i]) || (65...70).contains(bytes[i]) || (97...102).contains(bytes[i]) else { throw CocoaError(.fileReadCorruptFile) }
+                            i += 1
+                        }
+                        guard i < bytes.count else { throw CocoaError(.fileReadCorruptFile) }; i += 1
+                    } else if ["/A85", "/ASCII85Decode"].contains(outer) {
+                        while i + 1 < bytes.count && !(bytes[i] == 126 && bytes[i+1] == 62) { i += 1 }
+                        guard i + 1 < bytes.count else { throw CocoaError(.fileReadCorruptFile) }; i += 2
+                    } else { throw CocoaError(.featureUnsupported) }
+                } else {
+                    guard let width = Int(dictionary["/W"] ?? dictionary["/Width"] ?? ""), width > 0,
+                          let height = Int(dictionary["/H"] ?? dictionary["/Height"] ?? ""), height > 0 else { throw CocoaError(.fileReadCorruptFile) }
+                    let mask = (dictionary["/IM"] ?? dictionary["/ImageMask"]) == "true"
+                    let bits = mask ? 1 : Int(dictionary["/BPC"] ?? dictionary["/BitsPerComponent"] ?? "") ?? 0
+                    let color = dictionary["/CS"] ?? dictionary["/ColorSpace"] ?? ""
+                    let components = mask || ["/G", "/DeviceGray"].contains(color) ? 1 : ["/RGB", "/DeviceRGB"].contains(color) ? 3 : ["/CMYK", "/DeviceCMYK"].contains(color) ? 4 : 0
+                    guard [1,2,4,8,16].contains(bits), components > 0,
+                          width <= (Int.max - 7) / components / bits else { throw CocoaError(.featureUnsupported) }
+                    let row = (width * components * bits + 7) / 8
+                    guard height <= (bytes.count - i) / row else { throw CocoaError(.fileReadCorruptFile) }
+                    i += row * height
+                }
+                guard i < bytes.count, whitespace(bytes[i]) else { throw CocoaError(.fileReadCorruptFile) }
+                skipSpace()
+                guard i < bytes.count, try token().0 == "EI" else { throw CocoaError(.fileReadCorruptFile) }
+                continue
+            }
             if text == "BDC", operands.count == 2, operands[0].0 == "/OC" {
                 replacements.append((operands[0].1..<i, Array("/Artifact BMC".utf8)))
             }

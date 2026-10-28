@@ -767,6 +767,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var autosaveURL: URL?
     lazy var persistenceCoordinator = DocumentPersistenceCoordinator(autosaveInterval: autosaveIntervalSeconds)
     // Internal presentation seam; normal saves still present their modal error alert.
+    var lastPurgeErrorMessage: String?
     var saveErrorPresenter: ((String) -> NSApplication.ModalResponse)?
     // Deterministic scheduling seam; the supplied work retains the real writer/completion.
     var autosaveWorkScheduler: ((@escaping @Sendable () -> Void) -> Void)?

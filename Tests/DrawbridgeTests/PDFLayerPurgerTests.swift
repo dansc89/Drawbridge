@@ -78,6 +78,59 @@ final class PDFLayerPurgerTests: XCTestCase {
         XCTAssertThrowsError(try PDFLayerPurger.purge(source:source,destination:source))
         XCTAssertEqual(try Data(contentsOf:source),original)
     }
+    func testInlineImageBytesSurviveLayerPurgeIncludingOperatorLikeData() throws {
+        let dir = try directory(); defer { try? FileManager.default.removeItem(at:dir) }
+        var image = Data("abc EI /OC /L BDC defghijklmnop".utf8)
+        while image.count % 3 != 0 { image.append(42) }
+        let content = "/OC /L BDC q 50 0 0 20 20 20 cm BI /W \(image.count / 3) /H 1 /CS /RGB /BPC 8 ID\n" + String(decoding:image,as:UTF8.self) + "\nEI Q EMC"
+        let source = try fixture(dir,contentStreams:[content]), original = try Data(contentsOf:source), out=dir.appendingPathComponent("purged.pdf")
+        try PDFLayerPurger.purge(source:source,destination:out)
+        let objects = try XCTUnwrap((try PDFLayerPurger.inspect(out)["qpdf"] as? [[String:Any]])?.last)
+        let streams = objects.values.compactMap { ($0 as? [String:Any])?["stream"] as? [String:Any] }
+        let expected = try PDFLayerPurger.unconditional(Data(content.utf8))
+        XCTAssertTrue(streams.contains { ($0["data"] as? String).flatMap { Data(base64Encoded:$0) } == expected })
+        XCTAssertTrue(expected.range(of:image) != nil)
+        XCTAssertFalse(String(describing:objects).contains("/OCProperties"))
+        XCTAssertEqual(try Data(contentsOf:source),original)
+    }
+
+    func testInlineImageEncodingsStayOpaqueAndMalformedImagesFailClosed() throws {
+        for encoded in [
+            "BI /W 1 /H 1 /IM true /BPC 1 /F [/AHx] ID\r\n00>\r\nEI",
+            "BI /W 1 /H 1 /CS /RGB /BPC 8 /F /A85 ID\n/OC BDC~>\nEI",
+            "BI /W 8 /H 1 /IM true /BPC 1 ID\nX\nEI"
+        ] {
+            let source = Data(("/OC /L BDC q " + encoded + " Q EMC").utf8)
+            XCTAssertEqual(try PDFLayerPurger.unconditional(source),Data(("/Artifact BMC q " + encoded + " Q EMC").utf8))
+        }
+        for malformed in [
+            "BI /W 1 /H 1 /CS /RGB /BPC 8 ID\nA\nEI",
+            "BI /W 1 /H 1 /F /AHx ID\n00\nEI",
+            "BI /W 1 /H 1 /F /DCT ID\nabc EI",
+            "BI /W 999999999999999999 /H 99 /CS /RGB /BPC 16 ID\nabc\nEI",
+            "BI /W 1 /H 1 /IM true ID\nX\nEX"
+        ] { XCTAssertThrowsError(try PDFLayerPurger.unconditional(Data(malformed.utf8))) }
+    }
+
+    @MainActor func testPrivateControllerPurgeInPlace() throws {
+        guard let path=ProcessInfo.processInfo.environment["DRAWBRIDGE_PURGE_PRIVATE_FIXTURE"] else { throw XCTSkip("Private controller fixture opt-in") }
+        _ = NSApplication.shared
+        let dir=try directory(); defer { try? FileManager.default.removeItem(at:dir) }
+        let source=dir.appendingPathComponent("input.pdf");try FileManager.default.copyItem(at:URL(fileURLWithPath:path),to:source)
+        let c=MainViewController();_ = c.view
+        let window=NSWindow(contentRect:CGRect(x:0,y:0,width:1200,height:800),styleMask:[.titled],backing:.buffered,defer:false)
+        window.contentViewController=c;defer { window.contentViewController=nil }
+        c.openDocument(at:source)
+        var complete:Bool?
+        c.purgeLayersInPlace { complete=$0 }
+        let deadline=Date().addingTimeInterval(240)
+        while complete==nil && Date()<deadline { RunLoop.current.run(until:Date().addingTimeInterval(0.05)) }
+        XCTAssertEqual(complete,true,c.lastPurgeErrorMessage ?? "No detailed error")
+        XCTAssertEqual(c.pdfView.document?.pageCount,PDFDocument(url:URL(fileURLWithPath:path))?.pageCount)
+        XCTAssertFalse(c.hasUnsavedChanges())
+        XCTAssertEqual(c.openDocumentURL,source)
+    }
+
     func testPrivateFixtureAllPagesAndDecodedStreamSafety() throws {
         guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_PURGE_PRIVATE_FIXTURE"] else { throw XCTSkip("Private fixture opt-in") }
         let source = URL(fileURLWithPath:path), dir = try directory(), out = dir.appendingPathComponent("purged.pdf")
@@ -281,6 +334,7 @@ final class PDFLayerPurgerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf:source),replacement)
         XCTAssertTrue(c.pdfView.document === document)
         XCTAssertTrue(c.hasUnsavedChanges())
+        XCTAssertTrue(c.lastPurgeErrorMessage?.contains("changed outside Drawbridge") == true)
         XCTAssertFalse(c.isPDFFileProcessingOperation)
     }
 
