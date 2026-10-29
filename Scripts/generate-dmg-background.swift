@@ -69,8 +69,14 @@ label("Once copied, open Drawbridge from Applications.", x: 52, y: 51, size: 13,
 image.unlockFocus()
 
 guard let tiff = image.tiffRepresentation,
-      let rep = NSBitmapImageRep(data: tiff),
-      let tiffData = rep.representation(using: .tiff, properties: [:]) else {
+      let rep = NSBitmapImageRep(data: tiff) else {
+    fputs("Failed to render bitmap\n", stderr)
+    exit(1)
+}
+// Both TIFF representations occupy the same logical Finder window.
+// The 2x image therefore carries 144 DPI rather than looking 2x larger.
+rep.size = size
+guard let tiffData = rep.representation(using: .tiff, properties: [:]) else {
     fputs("Failed to encode TIFF\n", stderr)
     exit(1)
 }

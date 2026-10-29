@@ -153,7 +153,9 @@ jobs:
           test -d "$mount_path/Drawbridge.app"
           test -L "$mount_path/Applications"
           test -f "$mount_path/.background/background.tiff"
-          tiffutil -info "$mount_path/.background/background.tiff"
+          info="$(tiffutil -info "$mount_path/.background/background.tiff")"
+          printf '%s\n' "$info"
+          [[ "$info" == *"Resolution: 144, 144"* ]]
           tiffutil -extract 0 "$mount_path/.background/background.tiff" -out dist/installer-1x.tiff
           tiffutil -extract 1 "$mount_path/.background/background.tiff" -out dist/installer-2x.tiff
           [[ "$(sips -g pixelWidth -g pixelHeight dist/installer-1x.tiff)" == *"pixelWidth: 860"*"pixelHeight: 520"* ]]

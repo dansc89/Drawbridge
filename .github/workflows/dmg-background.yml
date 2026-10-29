@@ -27,7 +27,9 @@ jobs:
           swift Scripts/generate-dmg-background.swift dist/background-1x.tiff 1
           swift Scripts/generate-dmg-background.swift dist/background-2x.tiff 2
           tiffutil -cathidpicheck dist/background-1x.tiff dist/background-2x.tiff -out dist/background.tiff
-          tiffutil -info dist/background.tiff
+          info="$(tiffutil -info dist/background.tiff)"
+          printf '%s\n' "$info"
+          [[ "$info" == *"Resolution: 144, 144"* ]]
           tiffutil -extract 0 dist/background.tiff -out dist/extracted-1x.tiff
           tiffutil -extract 1 dist/background.tiff -out dist/extracted-2x.tiff
           [[ "$(sips -g pixelWidth -g pixelHeight dist/extracted-1x.tiff)" == *"pixelWidth: 860"*"pixelHeight: 520"* ]]
