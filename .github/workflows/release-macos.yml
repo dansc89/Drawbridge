@@ -113,7 +113,7 @@ jobs:
 
       - name: Build app bundle
         env:
-          DRAWBRIDGE_BUILD_NUMBER: "257"
+          DRAWBRIDGE_BUILD_NUMBER: "258"
           DRAWBRIDGE_SKIP_INSTALL: "1"
           DRAWBRIDGE_SKIP_CHECKPOINT: "1"
         run: ./Scripts/package-app.sh
@@ -140,6 +140,21 @@ jobs:
 
           echo "DMG_PATH=$DMG_PATH" >> "$GITHUB_ENV"
           echo "ZIP_PATH=$ZIP_PATH" >> "$GITHUB_ENV"
+
+      - name: Verify installer contents and layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          hdiutil verify "$DMG_PATH"
+          mount_path="$RUNNER_TEMP/drawbridge-installer-check"
+          mkdir -p "$mount_path"
+          hdiutil attach "$DMG_PATH" -readonly -nobrowse -mountpoint "$mount_path"
+          trap 'hdiutil detach "$mount_path"' EXIT
+          test -d "$mount_path/Drawbridge.app"
+          test -L "$mount_path/Applications"
+          test -f "$mount_path/.background/background.png"
+          cp "$mount_path/.background/background.png" dist/installer-preview.png
+          sips -g pixelWidth -g pixelHeight dist/installer-preview.png
 
       - name: Notarize DMG
         env:
@@ -174,6 +189,7 @@ jobs:
           path: |
             ${{ env.DMG_PATH }}
             ${{ env.ZIP_PATH }}
+            dist/installer-preview.png
 
       - name: Publish GitHub Release
         if: false

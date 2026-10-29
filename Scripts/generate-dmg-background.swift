@@ -1,6 +1,8 @@
 #!/usr/bin/env swift
 import AppKit
 
+// Finder draws the application and Applications icons over this image.
+// Keep their centers at (200, 285) and (650, 285) in package-dmg.sh.
 guard CommandLine.arguments.count >= 2 else {
     fputs("Usage: generate-dmg-background.swift <output_png_path>\n", stderr)
     exit(1)
@@ -10,64 +12,59 @@ let outputPath = CommandLine.arguments[1]
 let size = NSSize(width: 860, height: 520)
 let image = NSImage(size: size)
 
+func color(_ hex: UInt32) -> NSColor {
+    NSColor(
+        calibratedRed: CGFloat((hex >> 16) & 0xff) / 255,
+        green: CGFloat((hex >> 8) & 0xff) / 255,
+        blue: CGFloat(hex & 0xff) / 255,
+        alpha: 1
+    )
+}
+
+func label(_ text: String, x: CGFloat, y: CGFloat, size: CGFloat, weight: NSFont.Weight, ink: NSColor) {
+    text.draw(at: NSPoint(x: x, y: y), withAttributes: [
+        .font: NSFont.systemFont(ofSize: size, weight: weight),
+        .foregroundColor: ink
+    ])
+}
+
 image.lockFocus()
+color(0xF7F6F2).setFill()
+NSRect(origin: .zero, size: size).fill()
 
-let rect = NSRect(origin: .zero, size: size)
-let gradient = NSGradient(colors: [
-    NSColor(calibratedRed: 0.95, green: 0.98, blue: 1.0, alpha: 1.0),
-    NSColor(calibratedRed: 0.88, green: 0.93, blue: 0.99, alpha: 1.0)
-])!
-gradient.draw(in: rect, angle: 90)
+// A quiet brand accent, not an illustration competing with the Finder icons.
+color(0xC27735).setFill()
+NSRect(x: 52, y: 481, width: 28, height: 3).fill()
+label("DRAWBRIDGE", x: 52, y: 454, size: 11, weight: .semibold, ink: color(0x81502D))
+label("Install Drawbridge", x: 52, y: 405, size: 30, weight: .semibold, ink: color(0x242526))
+label("Drag the app into Applications.", x: 53, y: 376, size: 16, weight: .regular, ink: color(0x606366))
 
-NSColor(calibratedWhite: 1.0, alpha: 0.8).setFill()
-let banner = NSBezierPath(roundedRect: NSRect(x: 110, y: 410, width: 640, height: 72), xRadius: 16, yRadius: 16)
-banner.fill()
+// Slim connector, aligned with the two actual Finder icons (not baked-in mock icons).
+let line = NSBezierPath()
+line.lineWidth = 2
+line.lineCapStyle = .round
+line.move(to: NSPoint(x: 331, y: 235))
+line.line(to: NSPoint(x: 517, y: 235))
+color(0xB9AFA2).setStroke()
+line.stroke()
+let arrow = NSBezierPath()
+arrow.lineWidth = 2
+arrow.lineCapStyle = .round
+arrow.lineJoinStyle = .round
+arrow.move(to: NSPoint(x: 505, y: 243))
+arrow.line(to: NSPoint(x: 517, y: 235))
+arrow.line(to: NSPoint(x: 505, y: 227))
+color(0xA0653B).setStroke()
+arrow.stroke()
 
-let title = "Drag Drawbridge to Applications"
-let titleAttrs: [NSAttributedString.Key: Any] = [
-    .font: NSFont.systemFont(ofSize: 34, weight: .bold),
-    .foregroundColor: NSColor(calibratedRed: 0.11, green: 0.23, blue: 0.40, alpha: 1.0)
-]
-let titleSize = title.size(withAttributes: titleAttrs)
-title.draw(
-    at: NSPoint(x: (size.width - titleSize.width) * 0.5, y: 430),
-    withAttributes: titleAttrs
-)
-
-let subtitle = "Install by dropping the app onto Applications"
-let subtitleAttrs: [NSAttributedString.Key: Any] = [
-    .font: NSFont.systemFont(ofSize: 18, weight: .medium),
-    .foregroundColor: NSColor(calibratedRed: 0.24, green: 0.34, blue: 0.47, alpha: 1.0)
-]
-let subtitleSize = subtitle.size(withAttributes: subtitleAttrs)
-subtitle.draw(
-    at: NSPoint(x: (size.width - subtitleSize.width) * 0.5, y: 392),
-    withAttributes: subtitleAttrs
-)
-
-let arrowPath = NSBezierPath()
-arrowPath.lineWidth = 14
-arrowPath.lineCapStyle = .round
-arrowPath.move(to: NSPoint(x: 300, y: 250))
-arrowPath.line(to: NSPoint(x: 560, y: 250))
-NSColor(calibratedRed: 0.22, green: 0.48, blue: 0.80, alpha: 0.95).setStroke()
-arrowPath.stroke()
-
-let arrowHead = NSBezierPath()
-arrowHead.move(to: NSPoint(x: 560, y: 250))
-arrowHead.line(to: NSPoint(x: 520, y: 285))
-arrowHead.line(to: NSPoint(x: 520, y: 215))
-arrowHead.close()
-NSColor(calibratedRed: 0.22, green: 0.48, blue: 0.80, alpha: 0.95).setFill()
-arrowHead.fill()
-
+color(0xDDDBD5).setFill()
+NSRect(x: 52, y: 80, width: 756, height: 1).fill()
+label("Once copied, open Drawbridge from Applications.", x: 52, y: 51, size: 13, weight: .regular, ink: color(0x777773))
 image.unlockFocus()
 
-guard
-    let tiff = image.tiffRepresentation,
-    let rep = NSBitmapImageRep(data: tiff),
-    let png = rep.representation(using: .png, properties: [:])
-else {
+guard let tiff = image.tiffRepresentation,
+      let rep = NSBitmapImageRep(data: tiff),
+      let png = rep.representation(using: .png, properties: [:]) else {
     fputs("Failed to encode PNG\n", stderr)
     exit(1)
 }
