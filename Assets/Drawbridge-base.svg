@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Drawbridge aged-metal orange icon with an inset dark drawbridge silhouette">
+  <title>Drawbridge — Aged Metal</title>
+  <defs>
+    <linearGradient id="bevel" x1=".1" y1="0" x2=".85" y2="1">
+      <stop stop-color="#ffdf8e"/><stop offset=".18" stop-color="#ffad36"/><stop offset=".72" stop-color="#ed771c"/><stop offset="1" stop-color="#b95620"/>
+    </linearGradient>
+    <linearGradient id="orange" x1=".12" y1="0" x2=".9" y2="1">
+      <stop stop-color="#ffae39"/><stop offset=".36" stop-color="#fb9e29"/><stop offset=".66" stop-color="#f5982e"/><stop offset="1" stop-color="#ed801e"/>
+    </linearGradient>
+    <radialGradient id="soft-light" cx=".24" cy=".04" r=".8">
+      <stop stop-color="#fff0b0" stop-opacity=".22"/><stop offset=".45" stop-color="#ffd96d" stop-opacity=".075"/><stop offset="1" stop-color="#fff5d6" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="top-reflection" x1="0" y1="0" x2="0" y2="1">
+      <stop stop-color="#fff7d6" stop-opacity=".095"/><stop offset=".28" stop-color="#fff7d6" stop-opacity=".035"/><stop offset=".58" stop-color="#fff7d6" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="warm-wear">
+      <stop stop-color="#a74c27" stop-opacity=".26"/><stop offset=".55" stop-color="#af5a31" stop-opacity=".12"/><stop offset="1" stop-color="#b75d35" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="light-wear">
+      <stop stop-color="#ffdc83" stop-opacity=".21"/><stop offset=".6" stop-color="#ffce73" stop-opacity=".08"/><stop offset="1" stop-color="#ffd68b" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#fff3bd" stop-opacity=".8"/><stop offset=".5" stop-color="#fff0aa" stop-opacity=".1"/><stop offset="1" stop-color="#a94d1e" stop-opacity=".6"/>
+    </linearGradient>
+    <clipPath id="tile"><rect x="23" y="23" width="978" height="978" rx="222"/></clipPath>
+
+    <clipPath id="leaf-rails-shine"><path d="M263 613 411 180 451 194 306 627Z"/></clipPath>
+    <g id="raised-leaf-shine" fill="none" stroke="#ffd083" stroke-linejoin="miter" stroke-linecap="square">
+      <!-- Two parallel steel chords and alternating triangular bracing. -->
+      <path d="M263 613 411 180 451 194 306 627" stroke-width="15"/>
+      <path d="M263 613 306 627 M411 180 451 194" stroke-width="18"/>
+      <path d="M277 570 321 577 292 528 335 535 306 485 349 492 320 442 363 449 334 399 377 406 348 356 391 363 362 313 405 320 376 270 419 277 390 227 434 235" stroke-width="10" clip-path="url(#leaf-rails-shine)"/>
+      <!-- A narrow solid diagonal at the root reads clearly at dock size. -->
+      <path d="M247 638 280 572 312 635Z" fill="#ffd083" stroke="none"/>
+    </g>
+
+    <clipPath id="leaf-rails-ink"><path d="M263 613 411 180 451 194 306 627Z"/></clipPath>
+    <g id="raised-leaf-ink" fill="none" stroke="#4a2b1d" stroke-linejoin="miter" stroke-linecap="square">
+      <!-- Two parallel steel chords and alternating triangular bracing. -->
+      <path d="M263 613 411 180 451 194 306 627" stroke-width="15"/>
+      <path d="M263 613 306 627 M411 180 451 194" stroke-width="18"/>
+      <path d="M277 570 321 577 292 528 335 535 306 485 349 492 320 442 363 449 334 399 377 406 348 356 391 363 362 313 405 320 376 270 419 277 390 227 434 235" stroke-width="10" clip-path="url(#leaf-rails-ink)"/>
+      <!-- A narrow solid diagonal at the root reads clearly at dock size. -->
+      <path d="M247 638 280 572 312 635Z" fill="#4a2b1d" stroke="none"/>
+    </g>
+  </defs>
+  <rect x="7" y="7" width="1010" height="1010" rx="235" fill="url(#bevel)"/>
+  <rect x="23" y="23" width="978" height="978" rx="222" fill="url(#orange)"/>
+  <g clip-path="url(#tile)">
+    <rect x="23" y="23" width="978" height="978" fill="url(#soft-light)"/>
+    <rect x="23" y="23" width="978" height="978" fill="url(#top-reflection)"/>
+    <!-- Soft underlying wear beneath the reproducible organic metal texture. -->
+    <ellipse cx="178" cy="310" rx="218" ry="178" fill="url(#warm-wear)"/>
+    <ellipse cx="885" cy="284" rx="192" ry="244" fill="url(#warm-wear)"/>
+    <ellipse cx="791" cy="823" rx="256" ry="190" fill="url(#warm-wear)"/>
+    <ellipse cx="461" cy="906" rx="319" ry="147" fill="url(#warm-wear)" opacity=".58"/>
+    <ellipse cx="337" cy="727" rx="194" ry="206" fill="url(#light-wear)"/>
+    <ellipse cx="637" cy="193" rx="278" ry="178" fill="url(#light-wear)"/>
+    <!-- AGED_METAL_TEXTURE -->
+  </g>
+  <rect x="23" y="23" width="978" height="978" rx="222" fill="none" stroke="url(#edge)" stroke-width="7"/>
+  <g transform="translate(87 135) scale(.84)" opacity=".64">
+  <!-- Cable first, behind the steelwork; the broad U echoes a 1950s industrial badge. -->
+  <g fill="none" stroke="#ffd083" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M320 438 Q379 553 512 597 Q645 553 704 438" stroke-width="15"/>
+    <path d="M379 530v96 M427 566v60 M474 589v37 M550 589v37 M597 566v60 M645 530v96" stroke-width="9"/>
+    <path d="M322 636h380" stroke-width="12" stroke-linecap="butt"/>
+  </g>
+  <!-- Two mirror-image raised spans, deliberately separated at their tips. -->
+  <use href="#raised-leaf-shine"/>
+  <use href="#raised-leaf-shine" transform="translate(1024 0) scale(-1 1)"/>
+  <!-- Pivot wheels, solid approach roads, low underbridge beam. -->
+  <g fill="#ffd083">
+    <path d="M116 620h183v35H116zM725 620h183v35H725z"/>
+    <circle cx="283" cy="616" r="39"/><circle cx="741" cy="616" r="39"/>
+    <path d="M116 679h140v-25h57v31h398v-31h57v25h140v32H785v49H239v-49H116z"/>
+  </g>
+  <!-- Clean negative cutouts, not painted white: works on any background. -->
+  <g fill="none" stroke="#ffd083" stroke-width="8" stroke-linecap="square">
+    <path d="M122 601h38M176 601h38M810 601h38M864 601h38"/>
+  </g>
+</g><g transform="translate(83 131) scale(.84)">
+  <!-- Cable first, behind the steelwork; the broad U echoes a 1950s industrial badge. -->
+  <g fill="none" stroke="#4a2b1d" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M320 438 Q379 553 512 597 Q645 553 704 438" stroke-width="15"/>
+    <path d="M379 530v96 M427 566v60 M474 589v37 M550 589v37 M597 566v60 M645 530v96" stroke-width="9"/>
+    <path d="M322 636h380" stroke-width="12" stroke-linecap="butt"/>
+  </g>
+  <!-- Two mirror-image raised spans, deliberately separated at their tips. -->
+  <use href="#raised-leaf-ink"/>
+  <use href="#raised-leaf-ink" transform="translate(1024 0) scale(-1 1)"/>
+  <!-- Pivot wheels, solid approach roads, low underbridge beam. -->
+  <g fill="#4a2b1d">
+    <path d="M116 620h183v35H116zM725 620h183v35H725z"/>
+    <circle cx="283" cy="616" r="39"/><circle cx="741" cy="616" r="39"/>
+    <path d="M116 679h140v-25h57v31h398v-31h57v25h140v32H785v49H239v-49H116z"/>
+  </g>
+  <!-- Clean negative cutouts, not painted white: works on any background. -->
+  <g fill="none" stroke="#4a2b1d" stroke-width="8" stroke-linecap="square">
+    <path d="M122 601h38M176 601h38M810 601h38M864 601h38"/>
+  </g>
+</g>
+</svg>
