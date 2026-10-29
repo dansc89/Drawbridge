@@ -1,0 +1,41 @@
+name: Check DMG background
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Scripts/generate-dmg-background.swift
+      - Scripts/package-dmg.sh
+      - .github/workflows/dmg-background.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render-background:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Generate and verify native 1x and 2x images
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          swift Scripts/generate-dmg-background.swift dist/background-1x.tiff 1
+          swift Scripts/generate-dmg-background.swift dist/background-2x.tiff 2
+          tiffutil -cathidpicheck dist/background-1x.tiff dist/background-2x.tiff -out dist/background.tiff
+          tiffutil -info dist/background.tiff
+          tiffutil -extract 0 dist/background.tiff -out dist/extracted-1x.tiff
+          tiffutil -extract 1 dist/background.tiff -out dist/extracted-2x.tiff
+          [[ "$(sips -g pixelWidth -g pixelHeight dist/extracted-1x.tiff)" == *"pixelWidth: 860"*"pixelHeight: 520"* ]]
+          [[ "$(sips -g pixelWidth -g pixelHeight dist/extracted-2x.tiff)" == *"pixelWidth: 1720"*"pixelHeight: 1040"* ]]
+          sips -s format png dist/extracted-2x.tiff --out dist/installer-preview@2x.png
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dmg-retina-background
+          path: |
+            dist/background.tiff
+            dist/installer-preview@2x.png

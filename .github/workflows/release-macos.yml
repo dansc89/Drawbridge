@@ -113,7 +113,7 @@ jobs:
 
       - name: Build app bundle
         env:
-          DRAWBRIDGE_BUILD_NUMBER: "258"
+          DRAWBRIDGE_BUILD_NUMBER: "259"
           DRAWBRIDGE_SKIP_INSTALL: "1"
           DRAWBRIDGE_SKIP_CHECKPOINT: "1"
         run: ./Scripts/package-app.sh
@@ -152,9 +152,13 @@ jobs:
           trap 'hdiutil detach "$mount_path"' EXIT
           test -d "$mount_path/Drawbridge.app"
           test -L "$mount_path/Applications"
-          test -f "$mount_path/.background/background.png"
-          cp "$mount_path/.background/background.png" dist/installer-preview.png
-          sips -g pixelWidth -g pixelHeight dist/installer-preview.png
+          test -f "$mount_path/.background/background.tiff"
+          tiffutil -info "$mount_path/.background/background.tiff"
+          tiffutil -extract 0 "$mount_path/.background/background.tiff" -out dist/installer-1x.tiff
+          tiffutil -extract 1 "$mount_path/.background/background.tiff" -out dist/installer-2x.tiff
+          [[ "$(sips -g pixelWidth -g pixelHeight dist/installer-1x.tiff)" == *"pixelWidth: 860"*"pixelHeight: 520"* ]]
+          [[ "$(sips -g pixelWidth -g pixelHeight dist/installer-2x.tiff)" == *"pixelWidth: 1720"*"pixelHeight: 1040"* ]]
+          sips -s format png dist/installer-2x.tiff --out dist/installer-preview@2x.png
 
       - name: Notarize DMG
         env:
@@ -189,7 +193,7 @@ jobs:
           path: |
             ${{ env.DMG_PATH }}
             ${{ env.ZIP_PATH }}
-            dist/installer-preview.png
+            dist/installer-preview@2x.png
 
       - name: Publish GitHub Release
         if: false

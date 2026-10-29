@@ -3,14 +3,16 @@ import AppKit
 
 // Finder draws the application and Applications icons over this image.
 // Keep their centers at (200, 285) and (650, 285) in package-dmg.sh.
-guard CommandLine.arguments.count >= 2 else {
-    fputs("Usage: generate-dmg-background.swift <output_png_path>\n", stderr)
+guard CommandLine.arguments.count == 3,
+      let scale = Int(CommandLine.arguments[2]),
+      scale == 1 || scale == 2 else {
+    fputs("Usage: generate-dmg-background.swift <output_tiff_path> <scale: 1|2>\n", stderr)
     exit(1)
 }
 
 let outputPath = CommandLine.arguments[1]
 let size = NSSize(width: 860, height: 520)
-let image = NSImage(size: size)
+let image = NSImage(size: NSSize(width: size.width * CGFloat(scale), height: size.height * CGFloat(scale)))
 
 func color(_ hex: UInt32) -> NSColor {
     NSColor(
@@ -29,6 +31,10 @@ func label(_ text: String, x: CGFloat, y: CGFloat, size: CGFloat, weight: NSFont
 }
 
 image.lockFocus()
+// Draw at native pixel density; never enlarge a finished 1x bitmap.
+let pixelTransform = NSAffineTransform()
+pixelTransform.scale(by: CGFloat(scale))
+pixelTransform.concat()
 color(0xF7F6F2).setFill()
 NSRect(origin: .zero, size: size).fill()
 
@@ -64,14 +70,14 @@ image.unlockFocus()
 
 guard let tiff = image.tiffRepresentation,
       let rep = NSBitmapImageRep(data: tiff),
-      let png = rep.representation(using: .png, properties: [:]) else {
-    fputs("Failed to encode PNG\n", stderr)
+      let tiffData = rep.representation(using: .tiff, properties: [:]) else {
+    fputs("Failed to encode TIFF\n", stderr)
     exit(1)
 }
 
 do {
-    try png.write(to: URL(fileURLWithPath: outputPath), options: .atomic)
+    try tiffData.write(to: URL(fileURLWithPath: outputPath), options: .atomic)
 } catch {
-    fputs("Failed to write PNG: \(error)\n", stderr)
+    fputs("Failed to write TIFF: \(error)\n", stderr)
     exit(1)
 }

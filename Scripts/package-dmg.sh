@@ -24,7 +24,9 @@ fi
 
 TMP_DIR="$(mktemp -d)"
 STAGING_DIR="$TMP_DIR/staging"
-BACKGROUND_PATH="$TMP_DIR/background.png"
+BACKGROUND_1X_PATH="$TMP_DIR/background-1x.tiff"
+BACKGROUND_2X_PATH="$TMP_DIR/background-2x.tiff"
+BACKGROUND_PATH="$TMP_DIR/background.tiff"
 cleanup() {
   rm -rf "$TMP_DIR"
 }
@@ -32,7 +34,9 @@ trap cleanup EXIT
 
 mkdir -p "$STAGING_DIR"
 cp -R "$APP_PATH" "$STAGING_DIR/"
-swift Scripts/generate-dmg-background.swift "$BACKGROUND_PATH"
+swift Scripts/generate-dmg-background.swift "$BACKGROUND_1X_PATH" 1
+swift Scripts/generate-dmg-background.swift "$BACKGROUND_2X_PATH" 2
+tiffutil -cathidpicheck "$BACKGROUND_1X_PATH" "$BACKGROUND_2X_PATH" -out "$BACKGROUND_PATH"
 
 rm -f "$OUTPUT_DMG"
 mkdir -p "$(dirname "$OUTPUT_DMG")"
