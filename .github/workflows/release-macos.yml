@@ -159,6 +159,7 @@ jobs:
           tiffutil -extract 0 "$mount_path/.background/background.tiff" -out dist/installer-1x.tiff
           tiffutil -extract 1 "$mount_path/.background/background.tiff" -out dist/installer-2x.tiff
           sips -g dpiWidth -g dpiHeight dist/installer-2x.tiff
+          python3 -c 'import subprocess; s=subprocess.check_output(["sips","-g","dpiWidth","-g","dpiHeight","dist/installer-2x.tiff"],text=True); assert "dpiWidth: 144.000" in s and "dpiHeight: 144.000" in s, s'
           [[ "$(sips -g pixelWidth -g pixelHeight dist/installer-1x.tiff)" == *"pixelWidth: 860"*"pixelHeight: 520"* ]]
           [[ "$(sips -g pixelWidth -g pixelHeight dist/installer-2x.tiff)" == *"pixelWidth: 1720"*"pixelHeight: 1040"* ]]
           sips -s format png dist/installer-2x.tiff --out dist/installer-preview@2x.png
