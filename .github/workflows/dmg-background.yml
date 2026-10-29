@@ -27,6 +27,7 @@ jobs:
           swift Scripts/generate-dmg-background.swift dist/background-1x.tiff 1
           swift Scripts/generate-dmg-background.swift dist/background-2x.tiff 2
           sips -s dpiWidth 144 -s dpiHeight 144 dist/background-2x.tiff
+          sips -g dpiWidth -g dpiHeight dist/background-2x.tiff
           tiffutil -cathidpicheck dist/background-1x.tiff dist/background-2x.tiff -out dist/background.tiff
           info="$(tiffutil -info dist/background.tiff)"
           printf '%s\n' "$info"
@@ -42,4 +43,5 @@ jobs:
           name: dmg-retina-background
           path: |
             dist/background.tiff
+            dist/background-2x.tiff
             dist/installer-preview@2x.png
