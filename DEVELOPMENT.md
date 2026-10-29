@@ -26,19 +26,6 @@ Launch:
 open /path/to/Drawbridge/dist/Drawbridge.app
 ```
 
-## App icon
-
-`Assets/Drawbridge-base.svg` is the editable vector design. The deterministic
-aged-metal texture is defined in `Scripts/render-aged-icon.py`. Regenerate the
-standalone SVG, the app's `Assets/db.png`, and all iconset sizes together:
-
-```bash
-uv run --with cairosvg --with pillow --with numpy python Scripts/render-aged-icon.py
-```
-
-`package-app.sh` uses `Assets/db.png` as its source when building the macOS
-`.icns`. Updating only the SVG will not update the installed app icon.
-
 ## Release versioning
 
 The public release series starts at v1.0. Earlier tags are retained as development history. Set `DRAWBRIDGE_VERSION_TAG` explicitly when packaging a release; local packaging defaults to v1.0. Keep `DRAWBRIDGE_BUILD_NUMBER` increasing even when the displayed version resets. The first public build is 163.
