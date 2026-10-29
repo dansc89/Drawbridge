@@ -36,6 +36,7 @@ mkdir -p "$STAGING_DIR"
 cp -R "$APP_PATH" "$STAGING_DIR/"
 swift Scripts/generate-dmg-background.swift "$BACKGROUND_1X_PATH" 1
 swift Scripts/generate-dmg-background.swift "$BACKGROUND_2X_PATH" 2
+sips -s dpiWidth 144 -s dpiHeight 144 "$BACKGROUND_2X_PATH" >/dev/null
 tiffutil -cathidpicheck "$BACKGROUND_1X_PATH" "$BACKGROUND_2X_PATH" -out "$BACKGROUND_PATH"
 
 rm -f "$OUTPUT_DMG"

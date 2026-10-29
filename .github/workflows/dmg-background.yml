@@ -26,12 +26,14 @@ jobs:
           mkdir -p dist
           swift Scripts/generate-dmg-background.swift dist/background-1x.tiff 1
           swift Scripts/generate-dmg-background.swift dist/background-2x.tiff 2
+          sips -s dpiWidth 144 -s dpiHeight 144 dist/background-2x.tiff
           tiffutil -cathidpicheck dist/background-1x.tiff dist/background-2x.tiff -out dist/background.tiff
           info="$(tiffutil -info dist/background.tiff)"
           printf '%s\n' "$info"
           [[ "$info" == *"Resolution: 144, 144"* ]]
           tiffutil -extract 0 dist/background.tiff -out dist/extracted-1x.tiff
           tiffutil -extract 1 dist/background.tiff -out dist/extracted-2x.tiff
+          sips -g dpiWidth -g dpiHeight dist/extracted-2x.tiff
           [[ "$(sips -g pixelWidth -g pixelHeight dist/extracted-1x.tiff)" == *"pixelWidth: 860"*"pixelHeight: 520"* ]]
           [[ "$(sips -g pixelWidth -g pixelHeight dist/extracted-2x.tiff)" == *"pixelWidth: 1720"*"pixelHeight: 1040"* ]]
           sips -s format png dist/extracted-2x.tiff --out dist/installer-preview@2x.png

@@ -158,6 +158,7 @@ jobs:
           [[ "$info" == *"Resolution: 144, 144"* ]]
           tiffutil -extract 0 "$mount_path/.background/background.tiff" -out dist/installer-1x.tiff
           tiffutil -extract 1 "$mount_path/.background/background.tiff" -out dist/installer-2x.tiff
+          sips -g dpiWidth -g dpiHeight dist/installer-2x.tiff
           [[ "$(sips -g pixelWidth -g pixelHeight dist/installer-1x.tiff)" == *"pixelWidth: 860"*"pixelHeight: 520"* ]]
           [[ "$(sips -g pixelWidth -g pixelHeight dist/installer-2x.tiff)" == *"pixelWidth: 1720"*"pixelHeight: 1040"* ]]
           sips -s format png dist/installer-2x.tiff --out dist/installer-preview@2x.png
