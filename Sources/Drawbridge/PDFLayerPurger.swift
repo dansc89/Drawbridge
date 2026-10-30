@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import zlib
 
 /// Saved-copy structural transformation. Never renders page content or mutates the input.
 enum PDFLayerPurger {
@@ -108,6 +109,32 @@ enum PDFLayerPurger {
         guard Darwin.renamex_np(candidate.path, destination.path, UInt32(RENAME_EXCL)) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 
+    /// Find the zlib endpoint without retaining decoded pixels or changing encoded
+    /// bytes. Neither EI-looking bytes nor predictor parameters delimit this stream.
+    private static func flateEncodedLength(_ bytes: [UInt8], startingAt offset: Int) throws -> Int {
+        guard offset < bytes.count, bytes.count - offset <= Int(UInt32.max) else { throw CocoaError(.fileReadCorruptFile) }
+        var stream = z_stream()
+        guard inflateInit_(&stream, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else { throw CocoaError(.fileReadCorruptFile) }
+        defer { inflateEnd(&stream) }
+        var scratch = [UInt8](repeating: 0, count: 32768)
+        return try bytes.withUnsafeBufferPointer { input in
+            stream.next_in = UnsafeMutablePointer(mutating: input.baseAddress! + offset)
+            stream.avail_in = UInt32(bytes.count - offset)
+            return try scratch.withUnsafeMutableBufferPointer { output in
+                while true {
+                    stream.next_out = output.baseAddress!
+                    stream.avail_out = UInt32(output.count)
+                    let before = stream.total_in
+                    let status = inflate(&stream, Z_NO_FLUSH)
+                    // Bound work on corrupt or malicious compressed image data.
+                    guard stream.total_out <= 512 * 1024 * 1024 else { throw CocoaError(.fileReadCorruptFile) }
+                    if status == Z_STREAM_END { return Int(stream.total_in) }
+                    guard status == Z_OK, stream.total_in > before || stream.avail_out == 0 else { throw CocoaError(.fileReadCorruptFile) }
+                }
+            }
+        }
+    }
+
     /// Lexical PDF scanner: strings, names and composite operands are opaque.
     /// Optional-content BDC is replaced by a neutral BMC; its EMC stays balanced.
     /// Inline-image payloads are opaque; unsupported encodings fail closed.
@@ -200,7 +227,11 @@ enum PDFLayerPurger {
                     } else if ["/A85", "/ASCII85Decode"].contains(outer) {
                         while i + 1 < bytes.count && !(bytes[i] == 126 && bytes[i+1] == 62) { i += 1 }
                         guard i + 1 < bytes.count else { throw CocoaError(.fileReadCorruptFile) }; i += 2
-                    } else { throw CocoaError(.featureUnsupported) }
+                    } else if ["/Fl", "/FlateDecode"].contains(outer) {
+                        i += try flateEncodedLength(bytes, startingAt: i)
+                    } else {
+                        throw NSError(domain: "DrawbridgePurge", code: 4, userInfo: [NSLocalizedDescriptionKey: "An inline image uses an unsupported encoding (\(outer)). No changes were saved."])
+                    }
                 } else {
                     guard let width = Int(dictionary["/W"] ?? dictionary["/Width"] ?? ""), width > 0,
                           let height = Int(dictionary["/H"] ?? dictionary["/Height"] ?? ""), height > 0 else { throw CocoaError(.fileReadCorruptFile) }

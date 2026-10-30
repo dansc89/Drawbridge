@@ -7,7 +7,7 @@ final class PDFLayerPurgerTests: XCTestCase {
     @MainActor private static func views(_ view: NSView) -> [NSView] {
         [view] + view.subviews.flatMap { views($0) }
     }
-    func fixture(_ dir: URL, layered: Bool = true, contentStreams: [String]? = nil) throws -> URL {
+    func fixture(_ dir: URL, layered: Bool = true, contentStreams: [String]? = nil, binaryContent: Data? = nil) throws -> URL {
         let content = contentStreams?.first ?? (layered ? "/OC /L BDC q 1 0 0 rg 10 10 50 50 re f /Span BMC /OC /M BDC BT /F1 12 Tf 10 80 Td (Hidden /OC BDC EMC) Tj ET EMC EMC Q EMC /X Do" : "q 10 10 50 50 re f Q /X Do")
         let form = "/OC /L BDC 0 0 1 rg 60 60 20 20 re f EMC"
         var objects = [
@@ -38,13 +38,22 @@ final class PDFLayerPurgerTests: XCTestCase {
             objects[7] = "<< /Type /XObject /Subtype /Form /BBox [0 0 200 200] /Length 0 >>\nstream\n\nendstream"
             objects[4] = "null"; objects[5] = "null"
         }
-        var pdf = "%PDF-1.7\n", offsets = [0]
-        for (i, object) in objects.enumerated() { offsets.append(pdf.utf8.count); pdf += "\(i+1) 0 obj\n\(object)\nendobj\n" }
-        let start = pdf.utf8.count
-        pdf += "xref\n0 \(objects.count+1)\n0000000000 65535 f \n"
-        for offset in offsets.dropFirst() { pdf += String(format: "%010d 00000 n \n", offset) }
-        pdf += "trailer\n<< /Size \(objects.count+1) /Root 1 0 R >>\nstartxref\n\(start)\n%%EOF\n"
-        let url = dir.appendingPathComponent("input.pdf"); try Data(pdf.utf8).write(to:url); return url
+        var pdf = Data("%PDF-1.7\n".utf8), offsets = [0]
+        for (i, object) in objects.enumerated() {
+            offsets.append(pdf.count)
+            pdf.append(Data("\(i+1) 0 obj\n".utf8))
+            if i == 3, let binaryContent {
+                pdf.append(Data("<< /Length \(binaryContent.count) >>\nstream\n".utf8))
+                pdf.append(binaryContent); pdf.append(Data("\nendstream".utf8))
+            } else { pdf.append(Data(object.utf8)) }
+            pdf.append(Data("\nendobj\n".utf8))
+        }
+        let start = pdf.count
+        var trailer = "xref\n0 \(objects.count+1)\n0000000000 65535 f \n"
+        for offset in offsets.dropFirst() { trailer += String(format: "%010d 00000 n \n", offset) }
+        trailer += "trailer\n<< /Size \(objects.count+1) /Root 1 0 R >>\nstartxref\n\(start)\n%%EOF\n"
+        pdf.append(Data(trailer.utf8))
+        let url = dir.appendingPathComponent("input.pdf"); try pdf.write(to:url); return url
     }
     func directory() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -112,6 +121,31 @@ final class PDFLayerPurgerTests: XCTestCase {
         ] { XCTAssertThrowsError(try PDFLayerPurger.unconditional(Data(malformed.utf8))) }
     }
 
+    func testFlateInlineImagesPreserveCompressedBytesAndIgnoreFalseEndMarkers() throws {
+        let dir = try directory(); defer { try? FileManager.default.removeItem(at:dir) }
+        // Stored zlib block contains literal EI and /OC BDC bytes; a search for
+        // an apparent PDF end marker would truncate this valid image.
+        let compressed = Data([120, 1, 1, 34, 0, 221, 255, 0, 97, 98, 99, 32, 69, 73, 32, 47, 79, 67, 32, 47, 76, 32, 66, 68, 67, 32, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 42, 42, 158, 147, 10, 16])
+        for filter in ["/Fl", "/FlateDecode", "[/Fl]"] {
+            let prefix = "/OC /L BDC q BI /W 11 /H 1 /CS /RGB /BPC 8 /F \(filter) /DP << /Predictor 15 /Columns 11 /Colors 3 >> ID\r\n"
+            let suffix = "\nEI Q EMC"
+            let content = Data(prefix.utf8) + compressed + Data(suffix.utf8)
+            let expected = Data(prefix.replacingOccurrences(of:"/OC /L BDC",with:"/Artifact BMC").utf8) + compressed + Data(suffix.utf8)
+            XCTAssertEqual(try PDFLayerPurger.unconditional(content),expected)
+            let source = try fixture(dir,binaryContent:content), original = try Data(contentsOf:source)
+            let out = dir.appendingPathComponent(UUID().uuidString+".pdf")
+            try PDFLayerPurger.purge(source:source,destination:out)
+            let objects = try XCTUnwrap((try PDFLayerPurger.inspect(out)["qpdf"] as? [[String:Any]])?.last)
+            let streams = objects.values.compactMap { ($0 as? [String:Any])?["stream"] as? [String:Any] }
+            XCTAssertTrue(streams.contains { ($0["data"] as? String).flatMap { Data(base64Encoded:$0) } == expected })
+            XCTAssertEqual(try Data(contentsOf:source),original)
+        }
+        var damaged=compressed;damaged[damaged.count-1] ^= 1
+        for invalid in [damaged,Data(compressed.dropLast(3)),Data([0,1,2,3])] {
+            XCTAssertThrowsError(try PDFLayerPurger.unconditional(Data("BI /F /Fl ID\n".utf8)+invalid+Data("\nEI".utf8)))
+        }
+    }
+
     @MainActor func testPrivateControllerPurgeInPlace() throws {
         guard let path=ProcessInfo.processInfo.environment["DRAWBRIDGE_PURGE_PRIVATE_FIXTURE"] else { throw XCTSkip("Private controller fixture opt-in") }
         _ = NSApplication.shared
@@ -177,6 +211,9 @@ final class PDFLayerPurgerTests: XCTestCase {
         try PDFLayerPurger.purge(source:out,destination:second)
         XCTAssertEqual(PDFDocument(url:second)?.pageCount,b.pageCount)
         XCTAssertEqual(PDFDocument(url:second)?.string,b.string)
+        if let output = ProcessInfo.processInfo.environment["DRAWBRIDGE_PURGE_PRIVATE_OUTPUT"] {
+            try FileManager.default.copyItem(at:out,to:URL(fileURLWithPath:output))
+        }
         print("PRIVATE PURGE QUALIFICATION pages=\(b.pageCount) annotations=\(annotations) textCharacters=\(characters) inputStreams=\(try streams(beforeObjects,normalize:false).count) outputStreams=\(try streams(afterObjects,normalize:false).count)")
     }
     @MainActor func testDocumentToolbarOffersAccessiblePurgeInPlace() throws {
