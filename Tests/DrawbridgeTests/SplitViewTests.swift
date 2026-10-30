@@ -37,6 +37,32 @@ import XCTest
         defer { w.makeFirstResponder(nil); w.contentViewController = nil }
         try body(c, w, doc)
     }
+    func testPaneCloseButtonsKeepOtherViewportAndSharedEdits() throws {
+        for closeActive in [false, true] {
+            try fixture { c, w, doc in
+                toggle(c);w.layoutIfNeeded()
+                let original=c.pdfView,peer=try XCTUnwrap(c.secondaryPDFView)
+                peer.go(to:try XCTUnwrap(peer.document?.page(at:4)));peer.scaleFactor=1.7
+                original.go(to:try XCTUnwrap(doc.page(at:2)));original.scaleFactor=1.3
+                original.rectangleMarkup.canEdit={true}
+                let mark=try XCTUnwrap(original.rectangleMarkup.create(on:try XCTUnwrap(doc.page(at:2)),bounds:CGRect(x:50,y:50,width:60,height:60),kind:.rectangle))
+                let closed=closeActive ? original : peer,kept=closeActive ? peer : original
+                let index=try XCTUnwrap(kept.currentPage.flatMap {kept.document?.index(for:$0)})
+                let scale=kept.scaleFactor
+                let container=try XCTUnwrap(closed.superview as? PDFPaneContainerView)
+                XCTAssertFalse(container.header.isHidden);XCTAssertNotNil(container.closeButton.action)
+                container.closeButton.performClick(nil);w.layoutIfNeeded()
+                XCTAssertNil(c.secondaryPDFView);XCTAssertTrue(c.pdfView === kept)
+                XCTAssertTrue(kept.document === doc)
+                XCTAssertEqual(kept.currentPage.flatMap {kept.document?.index(for:$0)},index)
+                XCTAssertEqual(kept.scaleFactor,scale,accuracy:0.01)
+                XCTAssertTrue(doc.page(at:2)?.annotations.contains {$0 === mark} == true)
+                XCTAssertTrue((kept.superview as? PDFPaneContainerView)?.header.isHidden == true)
+                XCTAssertNil(closed.document)
+            }
+        }
+    }
+
     func testDeletionRemapsDetachedPeerBySheetIdentityAcrossUndoRedo() throws {
         for displayedIndex in [3, 5] {
             for deleteDisplayed in [false, true] {

@@ -4,6 +4,8 @@ import AppKit
 final class PDFPaneContainerView: NSView {
     let pdfView: MarkupPDFView
     let header = NSView()
+    let closeButton = NSButton()
+    var onClose: (() -> Void)?
     let titleLabel = NSTextField(labelWithString: "")
     let modeLabel = NSTextField(labelWithString: "")
     private var headerHeight: NSLayoutConstraint!
@@ -18,6 +20,7 @@ final class PDFPaneContainerView: NSView {
         let colors = ChromeSelectionColors(active: isActive, appearance: header.effectiveAppearance)
         titleLabel.textColor = colors.foreground
         modeLabel.textColor = colors.foreground
+        closeButton.contentTintColor = colors.foreground
         header.layer?.backgroundColor = colors.background.cgColor
     }
 
@@ -30,6 +33,13 @@ final class PDFPaneContainerView: NSView {
         titleLabel.font = .systemFont(ofSize: 11, weight: .medium)
         titleLabel.lineBreakMode = .byTruncatingMiddle
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close split view")
+        closeButton.isBordered = false
+        closeButton.imagePosition = .imageOnly
+        closeButton.target = self
+        closeButton.action = #selector(closePane)
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(closeButton)
         modeLabel.font = .systemFont(ofSize: 10, weight: .semibold)
         modeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         for label in [titleLabel, modeLabel] {
@@ -47,7 +57,11 @@ final class PDFPaneContainerView: NSView {
             titleLabel.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 10),
             titleLabel.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: modeLabel.leadingAnchor, constant: -8),
-            modeLabel.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -10),
+            modeLabel.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -6),
+            closeButton.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -4),
+            closeButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 24),
+            closeButton.heightAnchor.constraint(equalToConstant: 24),
             modeLabel.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             pdfView.topAnchor.constraint(equalTo: header.bottomAnchor),
             pdfView.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -59,9 +73,13 @@ final class PDFPaneContainerView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    @objc private func closePane() { onClose?() }
+
     func updateHeader(documentName: String, side: String, active: Bool, split: Bool) {
         header.isHidden = !split
         headerHeight.constant = split ? 30 : 0
+        closeButton.toolTip = "Close \(side.lowercased()) view; keep the other view open"
+        closeButton.setAccessibilityLabel("Close \(side.lowercased()) split view")
         titleLabel.stringValue = documentName
         titleLabel.toolTip = documentName
         modeLabel.stringValue = "Split view · \(side)\(active ? " · Active" : "")"
@@ -69,7 +87,7 @@ final class PDFPaneContainerView: NSView {
         // Scope the override to the header: never propagate it into PDFKit.
         header.appearance = InterfaceTheme.current.nativeAppearance
         refreshHeaderColors()
-        header.toolTip = "Split view: two independent views of the same PDF. Click a pane to work in it. Drag the divider to resize."
+        header.toolTip = "Split view: two views of the same PDF or different PDFs. Click a pane to work in it. Drag the divider to resize, or close either view to keep the other."
         header.setAccessibilityLabel("\(side) split view, \(documentName)\(active ? ", active" : "")")
     }
 

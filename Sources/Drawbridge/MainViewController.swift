@@ -514,11 +514,27 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             guard let container = container as? PDFPaneContainerView else { continue }
             let name = splitDocumentSessions.values.first(where: { $0.document === container.pdfView.document })?.url.lastPathComponent
                 ?? openDocumentURL?.lastPathComponent ?? "PDF"
+            container.onClose = { [weak self, weak pane = container.pdfView] in
+                guard let self, let pane else { return }
+                self.closePDFPane(pane)
+            }
             container.updateHeader(documentName: name,
                                    side: index == 0 ? "Left" : "Right",
                                    active: container.pdfView === pdfView,
                                    split: secondaryPDFView != nil)
         }
+    }
+
+    /// Close a view, retaining the other viewport and all open document sessions.
+    func closePDFPane(_ pane: MarkupPDFView) {
+        guard !isPDFProcessingBusy, !isPDFFileProcessingOperation, !persistenceCoordinator.isManualSaveInFlight,
+              let peer = secondaryPDFView,
+              pane === pdfView || pane === peer else { return }
+        if pane === pdfView {
+            activatePDFPane(peer)
+            guard pdfView === peer else { return }
+        }
+        collapsePDFSplit()
     }
 
     func collapsePDFSplit() {

@@ -124,6 +124,25 @@ enum PDFPageScaleMetadata {
         return result
     }
 
+    /// Bluebeam reads /R for the displayed equation. Keep the chosen paper-side
+    /// amount instead of reducing every imperial scale to one real-world foot.
+    static func imperialRatio(_ scale: DrawingScale) -> String {
+        let feetPerInch = scale.unitsPerPoint * 72
+        var paper = feetPerInch >= 1 ? 1 : 1 / feetPerInch
+        let name = scale.name.replacingOccurrences(of: "″", with: "\"").replacingOccurrences(of: "′", with: "'")
+            .replacingOccurrences(of: "”", with: "\"").replacingOccurrences(of: "’", with: "'")
+        let sides = name.components(separatedBy: "=")
+        if sides.count == 2 {
+            let left = sides[0].replacingOccurrences(of: "in", with: "").replacingOccurrences(of: "\"", with: "")
+            if let inches = MeasurementParsing.parseArchitecturalInches(left), inches.isFinite, inches > 0,
+               let feet = MeasurementParsing.parseLength(sides[1], unit: "ft"), feet.isFinite, feet > 0,
+               abs(feet / inches - feetPerInch) <= feetPerInch * 1e-8 {
+                paper = inches
+            }
+        }
+        return String(format: "%.12g in = %.12g ft' in\"", locale: Locale(identifier: "en_US_POSIX"), paper, paper * feetPerInch)
+    }
+
     /// Copy-on-write avoids changing shared viewport/measure objects on other pages.
     /// Returns the exact authorized /VP value for the writer's preservation check.
     static func install(scale: DrawingScale?, page: inout [String: Any], objects: inout [String: Any], next: inout Int) -> Any {
@@ -139,7 +158,7 @@ enum PDFPageScaleMetadata {
                 ["/Type": "/NumberFormat", "/U": "u:" + unit, "/C": factor, "/D": precision, "/FD": true, "/SS": "u:"]
             }
             if scale.unit == "ft" {
-                measure["/R"] = "u:" + String(format: "%.12g in = 1 ft' in\"", 1 / (72 * scale.unitsPerPoint))
+                measure["/R"] = "u:" + imperialRatio(scale)
                 var x = format("'", scale.unitsPerPoint, precision: 4); x["/F"] = "/F"
                 measure["/X"] = [x]
                 var feet = format("'", 1, precision: 4); feet["/F"] = "/F"; feet["/PS"] = "u:"; feet["/SS"] = "u:-"

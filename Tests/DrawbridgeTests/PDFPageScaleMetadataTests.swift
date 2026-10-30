@@ -41,6 +41,34 @@ final class PDFPageScaleMetadataTests: XCTestCase {
         let ref = try XCTUnwrap((graph["pages"] as? [[String: Any]])?[index]["object"] as? String)
         return PDFPageScaleMetadata.dictionary(ref, objects: try table(graph))
     }
+    func testExportedImperialEquationPreservesPaperAmountAndCalibration() throws {
+        let cases: [(Double,Double,String,String)] = [
+            (1,10,"1\" = 10'", "1 in = 10 ft' in\""),
+            (1,20,"1″ = 20′-0″", "1 in = 20 ft' in\""),
+            (2,20,"2\" = 20'", "2 in = 20 ft' in\""),
+            (0.125,1,"1/8\" = 1'", "0.125 in = 1 ft' in\"")]
+        for (paper,feet,name,equation) in cases {
+            let source=try fixture(),out=source.appendingPathExtension("notation.pdf")
+            defer { try? FileManager.default.removeItem(at:source);try? FileManager.default.removeItem(at:out) }
+            let original=try Data(contentsOf:source),doc=try XCTUnwrap(PDFDocument(url:source))
+            let scale=try XCTUnwrap(DrawingScale.architectural(inches:paper,feet:feet,name:name))
+            let session=RectangleMarkupController();session.bind(to:doc)
+            session.applyDrawingScale(scale,to:(0..<doc.pageCount).compactMap {doc.page(at:$0)})
+            XCTAssertTrue(PDFRectangleWriter.write(document:doc,source:source,destination:out,pageLabels:[:],records:RectangleMarkupRecord.capture(doc)))
+            if paper == 1, feet == 10, let path=ProcessInfo.processInfo.environment["DRAWBRIDGE_SCALE_NOTATION_OUTPUT"] {
+                try Data(contentsOf:out).write(to:URL(fileURLWithPath:path))
+            }
+            let saved=try graph(out),objects=try table(saved),reopened=try XCTUnwrap(PDFDocument(url:out))
+            for index in 0..<4 {
+                let vp=PDFPageScaleMetadata.dictionary(PDFPageScaleMetadata.entries(try page(saved,index:index),objects:objects).first,objects:objects)
+                let measure=PDFPageScaleMetadata.dictionary(vp["/Measure"],objects:objects)
+                XCTAssertEqual(measure["/R"] as? String,"u:"+equation)
+                XCTAssertEqual(try XCTUnwrap(MeasurementMetadata.scale(on:reopened.page(at:index)!)).unitsPerPoint,scale.unitsPerPoint,accuracy:1e-12)
+            }
+            XCTAssertEqual(try Data(contentsOf:source),original)
+        }
+    }
+
     func testSharedBluebeamViewportImportRangeSaveAndDetailPreservation() throws {
         let source = try fixture(), output = source.appendingPathExtension("saved.pdf")
         defer { try? FileManager.default.removeItem(at: source); try? FileManager.default.removeItem(at: output) }

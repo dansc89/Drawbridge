@@ -43,6 +43,29 @@ import XCTest
         while Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.005)) }
     }
 
+    func testClosingEitherDifferentDocumentPaneRetainsDirtyDocumentSession() throws {
+        for closeActive in [false,true] {
+            try fixture { c,w,urls in
+                let (left,right)=try splitDifferent(c,w,urls)
+                let rightDocument=try XCTUnwrap(right.document)
+                right.rectangleMarkup.canEdit={true}
+                let mark=try XCTUnwrap(right.rectangleMarkup.create(on:try XCTUnwrap(right.currentPage),bounds:CGRect(x:30,y:30,width:80,height:60),kind:.rectangle))
+                c.markupChangeVersion += 1;w.isDocumentEdited=true
+                let closed=closeActive ? right : left,kept=closeActive ? left : right
+                let keptDocument=kept.document,keptIndex=index(kept),keptScale=kept.scaleFactor
+                let container=try XCTUnwrap(closed.superview as? PDFPaneContainerView)
+                container.closeButton.performClick(nil);w.layoutIfNeeded()
+                XCTAssertNil(c.secondaryPDFView);XCTAssertTrue(c.pdfView === kept)
+                XCTAssertTrue(c.pdfView.document === keptDocument);XCTAssertEqual(index(c.pdfView),keptIndex)
+                XCTAssertEqual(c.pdfView.scaleFactor,keptScale,accuracy:0.01)
+                select(c,urls[1]);w.layoutIfNeeded()
+                XCTAssertTrue(c.pdfView.document === rightDocument)
+                XCTAssertTrue(rightDocument.page(at:0)?.annotations.contains {$0 === mark} == true)
+                XCTAssertTrue(c.hasUnsavedChanges())
+            }
+        }
+    }
+
     func testSaveAsRejectsVisibleDirtyRetainedDestinationBeforeWriting() throws {
         try assertSaveAsCollisionPreservesSession(hidden: false)
     }
