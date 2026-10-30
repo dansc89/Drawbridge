@@ -194,7 +194,7 @@ final class PDFAnnotationFlattenerTests: XCTestCase {
             MainActor.assumeIsolated {
                 guard let content=NSApp.modalWindow?.contentView else { return }
                 let fields=descendants(content).compactMap { $0 as? NSTextField }.map(\.stringValue)
-                if let title=fields.first(where: { ["PDF Flattened and Saved","PDF Unflattened and Saved","Unflatten Failed","Flatten Failed"].contains($0) }) { titles.append(title) }
+                if let title=fields.first(where: { ["PDF Flattened and Saved","PDF Unflattened and Saved","No Markups Found","Unflatten Failed","Flatten Failed"].contains($0) }) { titles.append(title) }
                 if let ok=descendants(content).compactMap({$0 as? NSButton}).first(where:{$0.title=="OK"}) { ok.performClick(nil) }
                 else { NSApp.abortModal() }
             }
@@ -210,7 +210,7 @@ final class PDFAnnotationFlattenerTests: XCTestCase {
         }
         let original=try Data(contentsOf:source)
         finish { c.commandUnflattenPDF(nil) }
-        XCTAssertEqual(titles.last,"Unflatten Failed")
+        XCTAssertEqual(titles.last,"No Markups Found")
         XCTAssertEqual(try Data(contentsOf:source),original)
         finish { c.commandFlattenPDF(nil) }
         XCTAssertEqual(titles.last,"PDF Flattened and Saved")

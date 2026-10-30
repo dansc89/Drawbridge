@@ -21,8 +21,8 @@ enum PDFAnnotationFlattener {
     private static let recoveryKey = "/DrawbridgeUnflattenData"
     private static let marker = "/DrawbridgeFlattenProtectedAnnotations"
     private static let visualTypes: Set<String> = ["/Text", "/FreeText", "/Line", "/Square", "/Circle", "/Polygon", "/PolyLine", "/Highlight", "/Underline", "/Squiggly", "/StrikeOut", "/Stamp", "/Caret", "/Ink", "/Redact"]
-    private static func failure(_ message: String) -> NSError {
-        NSError(domain: "DrawbridgeFlatten", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    private static func failure(_ message: String, code: Int = 1) -> NSError {
+        NSError(domain: "DrawbridgeFlatten", code: code, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
     static func flatten(source originalSource: URL, destination: URL, progress: @Sendable (String) -> Void = { _ in }, cancelled: @Sendable () -> Bool = { false }) throws -> Report {
@@ -120,7 +120,7 @@ enum PDFAnnotationFlattener {
             page["/Annots"] = targets
             objects["obj:\(reference)"] = ["value": page]
         }
-        guard flattened + removedSHXComments > 0 else { throw failure("No visible markups with usable appearances were found. Links, forms, hidden items, and unsupported markups are left unchanged.") }
+        guard flattened + removedSHXComments > 0 else { throw failure("No visible markups with usable appearances were found. Links, forms, hidden items, and unsupported markups are left unchanged.", code: 2) }
         catalog[recoveryKey] = ["/Version": 1, "/Pages": recovery]
         catalog[marker] = protection
         objects["obj:\(root)"] = ["value": catalog]
@@ -387,7 +387,7 @@ enum PDFAnnotationFlattener {
                 restored += recovered.count
             }
         }
-        guard restored > 0 else { throw failure("No recoverable Drawbridge or Bluebeam markups were found. Unflatten requires recovery data saved when the markups were flattened.") }
+        guard restored > 0 else { throw failure("No recoverable Drawbridge or Bluebeam markups were found. Unflatten requires recovery data saved when the markups were flattened.", code: 2) }
         return restored
     }
 

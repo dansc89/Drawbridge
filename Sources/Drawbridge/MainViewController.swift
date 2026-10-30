@@ -2440,6 +2440,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         refreshBusyIndicatorDisplay()
     }
 
+    func updateBusyIndicatorIndeterminateProgress() {
+        busyProgressIndicator.isIndeterminate = true
+        busyProgressIndicator.startAnimation(nil)
+        refreshBusyIndicatorDisplay()
+    }
+
     func updateBusyIndicatorProgress(current: Int, total: Int) {
         guard total > 0 else { return }
         busyProgressIndicator.isIndeterminate = false

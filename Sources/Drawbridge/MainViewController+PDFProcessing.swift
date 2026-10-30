@@ -3,6 +3,12 @@ import PDFKit
 
 @MainActor
 extension MainViewController {
+    static func flatteningFailureTitle(_ error: Error, unflattening: Bool) -> String {
+        let failure = error as NSError
+        if failure.domain == "DrawbridgeFlatten", failure.code == 2 { return "No Markups Found" }
+        return unflattening ? "Unflatten Failed" : "Flatten Failed"
+    }
+
     func isExtraneousEmbeddedPDFAnnotation(_ annotation: PDFAnnotation) -> Bool {
         let userName = (annotation.userName ?? "").lowercased()
         let contents = (annotation.contents ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -56,9 +62,19 @@ extension MainViewController {
         let box = PDFDocumentBox(document: document)
         let cancellation = PDFProcessingCancellation()
         isPDFFileProcessingOperation = true
-        beginBusyIndicator("Purging Layers…", detail: "Preparing current edits…")
+        beginBusyIndicator("Purging Layers…", detail: "Preparing current edits before removing layers…")
+        let started = Date()
+        let elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isPDFFileProcessingOperation, !cancellation.cancelled else { return }
+                self.updateBusyIndicatorSubdetail("Elapsed: \(Int(Date().timeIntervalSince(started)))s · Original preserved until verified")
+            }
+        }
         updateStatusBar()
-        setBusyCancelAction { [weak self] in cancellation.cancel(); self?.setBusyCancelAction(nil) }
+        setBusyCancelAction { [weak self] in
+            cancellation.cancel(); self?.setBusyCancelAction(nil)
+            self?.updateBusyIndicatorDetail("Canceling after the current processing step…")
+        }
         let controller = self
         DispatchQueue.global(qos: .userInitiated).async {
             let result = Result {
@@ -81,7 +97,15 @@ extension MainViewController {
                     }
                     guard saved else { throw CocoaError(.fileWriteUnknown) }
                     stage = "Removing layer controls"
-                    try PDFLayerPurger.purge(source: snapshot, destination: purged, cancelled: { cancellation.cancelled })
+                    try PDFLayerPurger.purge(source: snapshot, destination: purged, cancelled: { cancellation.cancelled }, progress: { detail in
+                        DispatchQueue.main.async {
+                            guard !cancellation.cancelled else { return }
+                            controller.updateBusyIndicatorDetail(detail.detail)
+                            if let current = detail.completed, let total = detail.total, total > 0 {
+                                controller.updateBusyIndicatorProgress(current: current, total: total)
+                            } else { controller.updateBusyIndicatorIndeterminateProgress() }
+                        }
+                    })
                     if replacingOpenDocument {
                         stage = "Saving the purged PDF"
                         guard !cancellation.cancelled, try Data(contentsOf: destination) == original else { throw CocoaError(.fileWriteUnknown) }
@@ -97,6 +121,8 @@ extension MainViewController {
                 catch { throw NSError(domain: "DrawbridgePurge", code: 3, userInfo: [NSLocalizedDescriptionKey: "\(stage): \(error.localizedDescription)", NSUnderlyingErrorKey: error]) }
             }
             DispatchQueue.main.async {
+                cancellation.cancel()
+                elapsedTimer.invalidate()
                 controller.isPDFFileProcessingOperation = false
                 controller.endBusyIndicator()
                 controller.updateStatusBar()
@@ -222,7 +248,7 @@ extension MainViewController {
                     details.append("Saved to the PDF you have open. Links and forms were preserved.")
                     owner.runAlert(title: unflattening ? "PDF Unflattened and Saved" : "PDF Flattened and Saved", informativeText: details.joined(separator: "\n\n"))
                 case .failure(let error):
-                    if !(error is CancellationError) { owner.runAlert(title: unflattening ? "Unflatten Failed" : "Flatten Failed", informativeText: error.localizedDescription, style: .warning) }
+                    if !(error is CancellationError) { owner.runAlert(title: Self.flatteningFailureTitle(error, unflattening: unflattening), informativeText: error.localizedDescription, style: (error as NSError).domain == "DrawbridgeFlatten" && (error as NSError).code == 2 ? .informational : .warning) }
                 }
             }
         }

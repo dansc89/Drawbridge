@@ -4,15 +4,20 @@ import zlib
 
 /// Saved-copy structural transformation. Never renders page content or mutates the input.
 enum PDFLayerPurger {
-    static func inspect(_ url: URL) throws -> [String: Any] {
-        guard let helper = PDFTKBookmarkWriter.executableURL() else { throw CocoaError(.featureUnsupported) }
+    struct Progress: Sendable {
+        let detail: String
+        var completed: Int? = nil
+        var total: Int? = nil
+    }
+    static func inspect(_ url: URL, includeStreamData: Bool = true, helper: URL? = PDFTKBookmarkWriter.executableURL()) throws -> [String: Any] {
+        guard let helper else { throw CocoaError(.featureUnsupported) }
         let json = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
         defer { try? FileManager.default.removeItem(at: json) }
-        guard PDFTKBookmarkWriter.run(helper, arguments: ["--json=2", "--json-stream-data=inline", "--decode-level=generalized", url.path, json.path]),
+        guard PDFTKBookmarkWriter.run(helper, arguments: ["--json=2", "--json-stream-data=\(includeStreamData ? "inline" : "none")", "--decode-level=\(includeStreamData ? "generalized" : "none")", url.path, json.path]),
               let result = try JSONSerialization.jsonObject(with: Data(contentsOf: json)) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
         return result
     }
-    static func purge(source: URL, destination: URL, helper: URL? = PDFTKBookmarkWriter.executableURL(), cancelled: @Sendable () -> Bool = { false }) throws {
+    static func purge(source: URL, destination: URL, helper: URL? = PDFTKBookmarkWriter.executableURL(), cancelled: @Sendable () -> Bool = { false }, progress: @Sendable (Progress) -> Void = { _ in }) throws {
         func check() throws { if cancelled() { throw CancellationError() } }
         func rejectAlias() throws {
             guard source.standardizedFileURL.resolvingSymlinksInPath() != destination.standardizedFileURL.resolvingSymlinksInPath() else { throw CocoaError(.fileWriteInvalidFileName) }
@@ -26,8 +31,9 @@ enum PDFLayerPurger {
         defer { try? FileManager.default.removeItem(at: directory) }
         let input = directory.appendingPathComponent("input.pdf"), patch = directory.appendingPathComponent("patch.json"), candidate = directory.appendingPathComponent("purged.pdf")
         try FileManager.default.copyItem(at: source, to: input)
-        let original = try Data(contentsOf: input)
-        var json = try inspect(input)
+        let original = try Data(contentsOf: input, options: .mappedIfSafe)
+        progress(Progress(detail: "Reading page and layer information…"))
+        var json = try inspect(input, includeStreamData: false, helper: helper)
         guard (json["encrypt"] as? [String: Any])?["encrypted"] as? Bool != true,
               var tables = json["qpdf"] as? [[String: Any]], tables.count == 2 else { throw CocoaError(.fileReadCorruptFile) }
         var objects = tables[1]
@@ -46,6 +52,38 @@ enum PDFLayerPurger {
             if let stream = entry["stream"] as? [String: Any], let dict = stream["dict"] as? [String: Any],
                dict["/Subtype"] as? String == "/Form" || dict["/PatternType"] as? Int == 1 { content.insert(key) }
         }
+        // Request payloads only for executable streams. Embedded image/font data
+        // stays in the source PDF instead of passing through base64 JSON twice.
+        func drawingStreams(_ url: URL, keys: Set<String>, phase: String) throws -> [String: Data] {
+            let sorted = keys.sorted();var result: [String: Data] = [:]
+            for start in stride(from: 0, to: sorted.count, by: 1024) {
+                try check()
+                let batch = Array(sorted[start..<min(start + 1024, sorted.count)])
+                let jsonURL = directory.appendingPathComponent("drawing-streams.json")
+                var args = ["--json=2", "--json-key=qpdf", "--json-stream-data=inline", "--decode-level=generalized"]
+                for key in batch {
+                    let parts = key.dropFirst(4).split(separator: " ")
+                    guard parts.count == 3, Int(parts[0]) != nil, Int(parts[1]) != nil, parts[2] == "R" else { throw CocoaError(.fileReadCorruptFile) }
+                    args.append("--json-object=\(parts[0]),\(parts[1])")
+                }
+                args += [url.path, jsonURL.path]
+                guard PDFTKBookmarkWriter.run(helper, arguments: args),
+                      let selected = try JSONSerialization.jsonObject(with: Data(contentsOf: jsonURL)) as? [String: Any],
+                      let selectedObjects = (selected["qpdf"] as? [[String: Any]])?.last else { throw CocoaError(.fileReadCorruptFile) }
+                for key in batch {
+                    guard let stream = (selectedObjects[key] as? [String: Any])?["stream"] as? [String: Any],
+                          let encoded = stream["data"] as? String, let data = Data(base64Encoded: encoded) else { throw CocoaError(.fileReadCorruptFile) }
+                    result[key] = data
+                }
+                let done = min(start + batch.count, sorted.count)
+                progress(Progress(detail: "\(phase): \(done) of \(sorted.count) drawing sections", completed: done, total: sorted.count))
+            }
+            return result
+        }
+        let layerTotal = groups.count
+        progress(Progress(detail: "Found \(layerTotal) layer controls across \((json["pages"] as? [Any])?.count ?? 0) pages"))
+        let decoded = try drawingStreams(input, keys: content, phase: "Preparing drawings")
+        var layersPrepared = 0, streamsProcessed = 0
         func clean(_ value: Any) -> Any {
             if let dictionary = value as? [String: Any] {
                 var result: [String: Any] = [:]
@@ -58,12 +96,16 @@ enum PDFLayerPurger {
             if let array = value as? [Any] { return array.filter { !(($0 as? String).map { groups.contains($0) } ?? false) }.map { clean($0) } }
             return value
         }
-        for (key, value) in objects {
+        let objectKeys = objects.keys.sorted()
+        for (index, key) in objectKeys.enumerated() {
             try check()
-            if groups.contains(String(key.dropFirst(4))) { objects[key] = ["value": NSNull()]; continue }
+            let value = objects[key]!
+            if groups.contains(String(key.dropFirst(4))) { objects[key] = ["value": NSNull()]; layersPrepared += 1 }
+            else {
             var entry = clean(value) as! [String: Any]
             if content.contains(key), var stream = entry["stream"] as? [String: Any] {
-                guard let encoded = stream["data"] as? String, let data = Data(base64Encoded: encoded) else { throw CocoaError(.fileReadCorruptFile) }
+                guard let data = decoded[key] else { throw CocoaError(.fileReadCorruptFile) }
+                streamsProcessed += 1
                 let changed = try unconditional(data)
                 if changed != data {
                     var dictionary = stream["dict"] as? [String: Any] ?? [:]
@@ -72,13 +114,19 @@ enum PDFLayerPurger {
                 }
             }
             objects[key] = entry
+            }
+            if index % 128 == 0 || index + 1 == objectKeys.count {
+                progress(Progress(detail: "Layer controls: \(layersPrepared)/\(layerTotal) · Drawings: \(streamsProcessed)/\(content.count)", completed: index + 1, total: objectKeys.count))
+            }
         }
         tables[1] = objects; json["qpdf"] = tables
         try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys, .withoutEscapingSlashes]).write(to: patch)
         try check()
+        progress(Progress(detail: "Writing the working copy; verifying before saving…"))
         guard PDFTKBookmarkWriter.run(helper, arguments: [input.path, "--update-from-json=" + patch.path, candidate.path]),
               PDFTKBookmarkWriter.run(helper, arguments: ["--check", candidate.path]) else { throw CocoaError(.fileWriteUnknown) }
-        let verified = try inspect(candidate)
+        progress(Progress(detail: "Verifying page count and removed layer controls…"))
+        let verified = try inspect(candidate, includeStreamData: false, helper: helper)
         guard (verified["pages"] as? [Any])?.count == (json["pages"] as? [Any])?.count else { throw CocoaError(.fileReadCorruptFile) }
         // Assert no serialized optional-content graph survives the rewrite.
         func hasOC(_ value: Any) -> Bool {
@@ -88,7 +136,7 @@ enum PDFLayerPurger {
             }
             return (value as? [Any])?.contains { hasOC($0) } ?? false
         }
-        guard !hasOC(verified), try Data(contentsOf: source) == original else { throw CocoaError(.fileWriteUnknown) }
+        guard !hasOC(verified), try Data(contentsOf: source, options: .mappedIfSafe) == original else { throw CocoaError(.fileWriteUnknown) }
         // Re-discover executable streams in the written file: qpdf may renumber
         // objects. Graph validation alone cannot detect an escaped /OC BDC tag.
         guard let verifiedObjects = (verified["qpdf"] as? [[String: Any]])?.last else { throw CocoaError(.fileReadCorruptFile) }
@@ -99,12 +147,15 @@ enum PDFLayerPurger {
             if let stream = entry["stream"] as? [String: Any], let dictionary = stream["dict"] as? [String: Any],
                dictionary["/Subtype"] as? String == "/Form" || dictionary["/PatternType"] as? Int == 1 { content.insert(key) }
         }
-        for key in content {
+        let verifiedStreams = try drawingStreams(candidate, keys: content, phase: "Verifying drawings")
+        for (index, key) in content.sorted().enumerated() {
             try check()
-            guard let stream = (objects[key] as? [String: Any])?["stream"] as? [String: Any],
-                  let encoded = stream["data"] as? String, let data = Data(base64Encoded: encoded),
-                  try unconditional(data) == data else { throw CocoaError(.fileReadCorruptFile) }
+            guard let data = verifiedStreams[key], try unconditional(data) == data else { throw CocoaError(.fileReadCorruptFile) }
+            if index % 128 == 0 || index + 1 == content.count {
+                progress(Progress(detail: "Verified \(index + 1) of \(content.count) drawing sections; no layer controls remain", completed: index + 1, total: content.count))
+            }
         }
+        progress(Progress(detail: "Verification complete; saving the purged PDF…"))
         try check(); try rejectAlias()
         guard Darwin.renamex_np(candidate.path, destination.path, UInt32(RENAME_EXCL)) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
@@ -267,8 +318,15 @@ enum PDFLayerPurger {
         if let names = removingXObjects {
             guard Set(removed.keys) == names, removed.values.allSatisfy({ $0 == 1 }) else { throw CocoaError(.featureUnsupported) }
         }
-        var result = bytes
-        for (range,replacement) in replacements.reversed() { result.replaceSubrange(range,with:replacement) }
-        return Data(result)
+        // Build once in source order; repeated middle-of-buffer replacement is
+        // quadratic on drawing sections with thousands of optional-content tags.
+        var result = Data();result.reserveCapacity(bytes.count)
+        var cursor = 0
+        for (range,replacement) in replacements {
+            result.append(contentsOf: bytes[cursor..<range.lowerBound])
+            result.append(contentsOf: replacement);cursor = range.upperBound
+        }
+        result.append(contentsOf: bytes[cursor..<bytes.count])
+        return result
     }
 }

@@ -59,6 +59,53 @@ final class PDFLayerPurgerTests: XCTestCase {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:url,withIntermediateDirectories:true); return url
     }
+    private final class ProgressLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [PDFLayerPurger.Progress] = []
+        private var stopped = false
+        func append(_ value: PDFLayerPurger.Progress, cancel: Bool = false) { lock.lock();defer {lock.unlock()};values.append(value);stopped = stopped || cancel }
+        var events: [PDFLayerPurger.Progress] {lock.lock();defer {lock.unlock()};return values}
+        var cancelled: Bool {lock.lock();defer {lock.unlock()};return stopped}
+    }
+    func testProgressReportsCountsAndVerificationAndCanCancel() throws {
+        let dir=try directory();defer {try? FileManager.default.removeItem(at:dir)}
+        let source=try fixture(dir),original=try Data(contentsOf:source),out=dir.appendingPathComponent("progress.pdf"),log=ProgressLog()
+        try PDFLayerPurger.purge(source:source,destination:out,progress:{log.append($0)})
+        XCTAssertTrue(log.events.contains {$0.detail.contains("Layer controls: 2/2")})
+        XCTAssertTrue(log.events.contains {$0.detail.contains("no layer controls remain")})
+        XCTAssertTrue(log.events.contains {$0.detail.contains("Verification complete")})
+        for event in log.events {if let done=event.completed,let total=event.total {XCTAssertGreaterThan(total,0);XCTAssertTrue((0...total).contains(done))}}
+        let cancelled=ProgressLog(),absent=dir.appendingPathComponent("cancelled.pdf")
+        XCTAssertThrowsError(try PDFLayerPurger.purge(source:source,destination:absent,cancelled:{cancelled.cancelled},progress:{cancelled.append($0,cancel:$0.completed != nil)})) {XCTAssertTrue($0 is CancellationError)}
+        XCTAssertFalse(FileManager.default.fileExists(atPath:absent.path));XCTAssertEqual(try Data(contentsOf:source),original)
+    }
+    @MainActor func testNoMarkupAlertTitlesAndDescriptions() throws {
+        let dir=try directory();defer {try? FileManager.default.removeItem(at:dir)}
+        let source=try fixture(dir,layered:false),original=try Data(contentsOf:source)
+        for unflattening in [false,true] {
+            do {
+                if unflattening {_ = try PDFAnnotationFlattener.unflatten(source:source)}
+                else {_ = try PDFAnnotationFlattener.flatten(source:source,destination:dir.appendingPathComponent("flat.pdf"))}
+                XCTFail("Expected no-markups outcome")
+            } catch {
+                XCTAssertEqual(MainViewController.flatteningFailureTitle(error,unflattening:unflattening),"No Markups Found")
+                XCTAssertTrue(error.localizedDescription.hasPrefix(unflattening ? "No recoverable Drawbridge or Bluebeam markups were found." : "No visible markups with usable appearances were found."))
+            }
+        }
+        let other=NSError(domain:"DrawbridgeFlatten",code:1)
+        XCTAssertEqual(MainViewController.flatteningFailureTitle(other,unflattening:true),"Unflatten Failed")
+        XCTAssertEqual(MainViewController.flatteningFailureTitle(other,unflattening:false),"Flatten Failed")
+        XCTAssertEqual(try Data(contentsOf:source),original)
+    }
+
+    func testPurgePerformanceFixture() throws {
+        guard let path=ProcessInfo.processInfo.environment["DRAWBRIDGE_PURGE_BENCHMARK"] else { throw XCTSkip("Purge benchmark fixture opt-in") }
+        let dir=try directory();defer { try? FileManager.default.removeItem(at:dir) }
+        let source=URL(fileURLWithPath:path),start=Date()
+        try PDFLayerPurger.purge(source:source,destination:dir.appendingPathComponent("purged.pdf"))
+        print("PURGE_BENCHMARK seconds=\(Date().timeIntervalSince(start)) bytes=\((try FileManager.default.attributesOfItem(atPath:source.path)[.size] as? NSNumber)?.intValue ?? 0)")
+    }
+
     func testHiddenNestedContentFormsAnnotationsAndNavigationSurvive() throws {
         let dir = try directory(); defer { try? FileManager.default.removeItem(at:dir) }
         let source = try fixture(dir), original = try Data(contentsOf:source), out = dir.appendingPathComponent("out.pdf")
