@@ -209,6 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mergePDFWorkflow.controller = controller
         controller.configureWelcomeMerge(workflow: mergePDFWorkflow)
         fileMenu.addItem(withTitle: "Merge PDFs…", action: #selector(PDFMergeWorkflow.showMerge(_:)), keyEquivalent: "").target = mergePDFWorkflow
+        fileMenu.addItem(withTitle: "Extract Pages…", action: #selector(MainViewController.commandExtractPages(_:)), keyEquivalent: "").target = controller
         fileMenu.addItem(withTitle: "Close", action: #selector(MainViewController.commandCloseDocument(_:)), keyEquivalent: "w").target = controller
         let openRecentRoot = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
         let openRecentMenu = NSMenu(title: "Open Recent")
