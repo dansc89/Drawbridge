@@ -8,21 +8,38 @@ enum ToolbarIcons {
         if let existing = NSImage(named: name) { return existing }
         let image = NSImage(size: NSSize(width: 24, height: 24), flipped: false) { _ in
             NSColor.black.setStroke()
-            let path = NSBezierPath(); path.lineWidth = 1.6
-            path.lineCapStyle = .round; path.lineJoinStyle = .round
-            let centers: [CGFloat] = expanding ? [8, 16] : [10, 14]
-            for y in centers {
-                path.move(to: NSPoint(x: 4, y: y)); path.line(to: NSPoint(x: 12, y: y+3))
-                path.line(to: NSPoint(x: 20, y: y)); path.line(to: NSPoint(x: 12, y: y-3)); path.close()
+            let sheets = NSBezierPath()
+            sheets.lineWidth = 1.8
+            sheets.lineCapStyle = .round; sheets.lineJoinStyle = .round
+            // Nearly touching sheets for Flatten; a wide opening for Unflatten.
+            for y: CGFloat in expanding ? [3, 21] : [10, 14] {
+                sheets.move(to: NSPoint(x: 2, y: y))
+                sheets.line(to: NSPoint(x: 12, y: y+2))
+                sheets.line(to: NSPoint(x: 22, y: y))
+                sheets.line(to: NSPoint(x: 12, y: y-2)); sheets.close()
             }
-            let top: CGFloat = expanding ? 23 : 18
-            let bottom: CGFloat = expanding ? 1 : 6
-            for (tip, end, wing) in [(top, CGFloat(expanding ? 19 : 23), CGFloat(expanding ? 21 : 20)),
-                                     (bottom, CGFloat(expanding ? 5 : 1), CGFloat(expanding ? 3 : 4))] {
-                path.move(to: NSPoint(x: 12,y: end)); path.line(to: NSPoint(x: 12,y: tip))
-                path.move(to: NSPoint(x: 10,y: wing)); path.line(to: NSPoint(x: 12,y: tip)); path.line(to: NSPoint(x: 14,y: wing))
+            sheets.stroke()
+            NSColor.black.setFill()
+            func arrow(tip: CGFloat, tail: CGFloat) {
+                let direction: CGFloat = tip > tail ? 1 : -1
+                let shoulder = tip - direction * 3.5
+                let arrow = NSBezierPath()
+                for (index, point) in [NSPoint(x:12,y:tip), NSPoint(x:8.5,y:shoulder),
+                    NSPoint(x:10.75,y:shoulder), NSPoint(x:10.75,y:tail),
+                    NSPoint(x:13.25,y:tail), NSPoint(x:13.25,y:shoulder),
+                    NSPoint(x:15.5,y:shoulder)].enumerated() {
+                    if index == 0 { arrow.move(to:point) } else { arrow.line(to:point) }
+                }
+                arrow.close(); arrow.fill()
             }
-            path.stroke(); return true
+            if expanding {
+                // Bold outward arrowheads occupy the opening between the sheets.
+                arrow(tip:17.5,tail:12); arrow(tip:6.5,tail:12)
+            } else {
+                // Arrows sit outside the stack and visibly press toward its center.
+                arrow(tip:17.5,tail:23.5); arrow(tip:6.5,tail:0.5)
+            }
+            return true
         }
         image.isTemplate = true; image.setName(name); return image
     }
