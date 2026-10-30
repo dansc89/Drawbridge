@@ -709,6 +709,8 @@ extension MainViewController {
             return hasDocument || !sessionDocumentURLs.isEmpty
         case #selector(commandPrint(_:)), #selector(commandPrintCurrentSheet(_:)):
             return PDFPrinting.canPrint(pdfView.document)
+        case #selector(commandExtractPages(_:)):
+            return (pdfView.document?.pageCount ?? 0) > 0 && !isPDFFileProcessingOperation && !persistenceCoordinator.isManualSaveInFlight
         case #selector(commandReduceFileSize(_:)):
             return hasDocument && openDocumentURL != nil && !isPDFProcessingBusy
         case #selector(commandFlattenPDF(_:)):
