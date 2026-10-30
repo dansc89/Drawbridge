@@ -168,6 +168,7 @@ extension MainViewController {
     @objc func commandBatchLinkSheetNumbers(_ sender: Any?) { startAutoLinkSheetNumbersFlow() }
     @objc func commandAutoGenerateSheetNames(_ sender: Any?) { startAutoGenerateSheetNamesFlow() }
     @objc func commandFlattenPDF(_ sender: Any?) { flattenPDF() }
+    @objc func commandUnflattenPDF(_ sender: Any?) { unflattenPDF() }
     @objc func commandReduceFileSize(_ sender: Any?) { reduceFileSize() }
     @objc func commandSetScale(_ sender: Any?) { commandSetDrawingScale(sender) }
     @objc func commandLockScalePages(_ sender: Any?) { commandLockScaleToPages(sender) }
@@ -711,8 +712,11 @@ extension MainViewController {
         case #selector(commandReduceFileSize(_:)):
             return hasDocument && openDocumentURL != nil && !isPDFProcessingBusy
         case #selector(commandFlattenPDF(_:)):
-            menuItem.title = pdfView.document.map(PDFAnnotationFlattener.canUnflatten) == true ? "Unflatten PDF…" : "Flatten PDF…"
-            return hasDocument && openDocumentURL != nil && !isPDFProcessingBusy
+            menuItem.title = "Flatten PDF…"
+            return hasDocument && openDocumentURL != nil && !isPDFFileProcessingOperation && pdfView.document.map(PDFAnnotationFlattener.canUnflatten) != true
+        case #selector(commandUnflattenPDF(_:)):
+            menuItem.title = "Unflatten PDF…"
+            return hasDocument && openDocumentURL != nil && !isPDFFileProcessingOperation
         case #selector(renamePageLabelFromSidebar):
             return hasDocument && pagesTableView.selectedRowIndexes.count == 1
         case #selector(renameBookmarkFromSidebar):

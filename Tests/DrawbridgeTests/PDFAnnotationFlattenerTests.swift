@@ -49,11 +49,179 @@ final class PDFAnnotationFlattenerTests: XCTestCase {
         try bytes.write(to: url)
         return url
     }
+    private func bluebeamFixture(in directory: URL, duplicate: Bool = false, missing: Bool = false) throws -> URL {
+        let base = "0.8 g 0 0 200 200 re f\n"
+        let melted = "0 1 0 rg 120 120 20 20 re f\nq 1 0 0 1 50 60 cm /BB Do Q\n"
+        let permanent = "0 0 1 rg 10 10 20 20 re f\n"
+        let appearance = "1 0 0 rg 0 0 40 20 re f\n"
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Count 1 /Kids [3 0 R] /MediaBox [0 0 200 200] >>",
+            "<< /Type /Page /Parent 2 0 R /Resources << /XObject << /BB 8 0 R >> >> /Contents [4 0 R 5 0 R 6 0 R] /Annots [9 0 R \(duplicate ? "7 0 R" : "")] >>",
+            "<< /Length \(base.utf8.count) >>\nstream\n\(base)endstream",
+            "<< /BBType /Melted /Annots [\(missing ? "4" : "7") 0 R] /Length \(melted.utf8.count) >>\nstream\n\(melted)endstream",
+            "<< /BBType /Melted /Length \(permanent.utf8.count) >>\nstream\n\(permanent)endstream",
+            "<< /Type /Annot /Subtype /Stamp /P 3 0 R /Rect [50 60 90 80] /F 4 /NM (Recovered) /AP << /N 8 0 R >> >>",
+            "<< /Type /XObject /Subtype /Form /BBox [0 0 40 20] /Resources << >> /Length \(appearance.utf8.count) >>\nstream\n\(appearance)endstream",
+            "<< /Type /Annot /Subtype /Link /Rect [0 0 10 10] /A << /S /URI /URI (https://example.com) >> >>"
+        ]
+        var bytes = Data("%PDF-1.7\n".utf8), offsets = [0]
+        for (index, object) in objects.enumerated() {
+            offsets.append(bytes.count); bytes.append(Data("\(index+1) 0 obj\n\(object)\nendobj\n".utf8))
+        }
+        let xref = bytes.count
+        bytes.append(Data("xref\n0 \(objects.count+1)\n0000000000 65535 f \n".utf8))
+        for offset in offsets.dropFirst() { bytes.append(Data(String(format:"%010d 00000 n \n",offset).utf8)) }
+        bytes.append(Data("trailer\n<< /Size \(objects.count+1) /Root 1 0 R >>\nstartxref\n\(xref)\n%%EOF\n".utf8))
+        let url=directory.appendingPathComponent("bluebeam.pdf");try bytes.write(to:url);return url
+    }
+
+    @MainActor
+    func testBluebeamRecoveryRestoresOriginalAndRemovesOnlyRecoverableDrawing() throws {
+        let dir=try directory();defer { try? FileManager.default.removeItem(at:dir) }
+        let source=try bluebeamFixture(in:dir)
+        XCTAssertTrue(PDFAnnotationFlattener.canUnflatten(try XCTUnwrap(PDFDocument(url:source))))
+        XCTAssertEqual(try PDFAnnotationFlattener.unflatten(source:source).restoredAnnotations,1)
+        let doc=try XCTUnwrap(PDFDocument(url:source)), page=try XCTUnwrap(doc.page(at:0))
+        XCTAssertEqual(page.annotations.count,2)
+        let stamp=try XCTUnwrap(page.annotations.first {$0.type == "Stamp"})
+        XCTAssertEqual(stamp.bounds,CGRect(x:50,y:60,width:40,height:20))
+        XCTAssertTrue(ImportedMarkupState.selectable(stamp))
+        XCTAssertFalse(PDFAnnotationFlattener.canUnflatten(doc))
+        let restored=try Data(contentsOf:source)
+        XCTAssertThrowsError(try PDFAnnotationFlattener.unflatten(source:source))
+        XCTAssertEqual(try Data(contentsOf:source),restored)
+        // Removing the original annotation must remove its only visible appearance.
+        page.removeAnnotation(stamp)
+        XCTAssertTrue(doc.write(to:dir.appendingPathComponent("deleted.pdf")))
+        if let path=ProcessInfo.processInfo.environment["DRAWBRIDGE_BLUEBEAM_QA_OUTPUT"] {
+            let output=URL(fileURLWithPath:path);try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
+            _ = try bluebeamFixture(in:output)
+            try restored.write(to:output.appendingPathComponent("restored.pdf"))
+            try Data(contentsOf:dir.appendingPathComponent("deleted.pdf")).write(to:output.appendingPathComponent("deleted.pdf"))
+        }
+    }
+
+    func testBluebeamRecoveryRejectsDuplicateAndMissingAnnotationsWithoutChangingFile() throws {
+        for duplicate in [true,false] {
+            let dir=try directory();defer { try? FileManager.default.removeItem(at:dir) }
+            let source=try bluebeamFixture(in:dir,duplicate:duplicate,missing:!duplicate)
+            let before=try Data(contentsOf:source)
+            XCTAssertThrowsError(try PDFAnnotationFlattener.unflatten(source:source))
+            XCTAssertEqual(try Data(contentsOf:source),before)
+        }
+    }
+
+    func testBluebeamAppearanceStrippingPreservesOtherOperatorsAndOpaqueOperands() throws {
+        let input = Data("q /OC /Layer BDC (/BB Do) Tj % /BB Do\n/Other Do /B#42 Do EMC Q\n".utf8)
+        let result = try PDFLayerPurger.unconditional(input,removingXObjects:["/BB"])
+        XCTAssertEqual(String(decoding:result,as:UTF8.self),"q /OC /Layer BDC (/BB Do) Tj % /BB Do\n/Other Do  EMC Q\n")
+        XCTAssertThrowsError(try PDFLayerPurger.unconditional(Data("/BB Do /BB Do".utf8),removingXObjects:["/BB"]))
+        XCTAssertThrowsError(try PDFLayerPurger.unconditional(Data("/Other Do".utf8),removingXObjects:["/BB"]))
+    }
+
+    func testBluebeamRecoveryOnExternalCopy() throws {
+        guard let path=ProcessInfo.processInfo.environment["DRAWBRIDGE_BLUEBEAM_RECOVERY_PDF"],
+              let output=ProcessInfo.processInfo.environment["DRAWBRIDGE_BLUEBEAM_RECOVERY_OUTPUT"] else { throw XCTSkip("Set Bluebeam recovery corpus paths") }
+        let original=URL(fileURLWithPath:path), before=try Data(contentsOf:original)
+        let copy=URL(fileURLWithPath:output);try before.write(to:copy)
+        let result=try PDFAnnotationFlattener.unflatten(source:copy)
+        XCTAssertGreaterThan(result.restoredAnnotations,0)
+        let doc=try XCTUnwrap(PDFDocument(url:copy))
+        XCTAssertFalse(PDFAnnotationFlattener.canUnflatten(doc))
+        XCTAssertEqual(try Data(contentsOf:original),before)
+        print("Bluebeam recovered annotations: \(result.restoredAnnotations); pages: \(doc.pageCount)")
+    }
+
     private func directory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("FlattenTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory
     }
+    @MainActor
+    func testSeparateFlattenAndUnflattenControlsKeepStableRolesAcrossRecovery() throws {
+        _ = NSApplication.shared
+        let dir = try directory(); defer { try? FileManager.default.removeItem(at:dir) }
+        let source = try fixture(in:dir)
+        let controller = MainViewController(); _ = controller.view
+        let window = NSWindow(contentRect:NSRect(x:0,y:0,width:1400,height:900),styleMask:[.titled],backing:.buffered,defer:false)
+        window.contentViewController=controller;window.toolbar=controller.makeToolbar()
+        defer { window.toolbar=nil;window.contentViewController=nil }
+        let primary = try XCTUnwrap(window.toolbar?.items.first { $0.itemIdentifier == .drawbridgePrimaryControls }?.view as? NSStackView)
+        let buttons=primary.arrangedSubviews.compactMap { $0 as? NSButton }
+        let flatten=try XCTUnwrap(buttons.first { $0.identifier?.rawValue == "drawbridgeFlattenPDF" })
+        let unflatten=try XCTUnwrap(buttons.first { $0.identifier?.rawValue == "drawbridgeUnflattenPDF" })
+        XCTAssertEqual(flatten.action,#selector(MainViewController.commandFlattenPDF(_:)))
+        XCTAssertEqual(unflatten.action,#selector(MainViewController.commandUnflattenPDF(_:)))
+        XCTAssertEqual(flatten.image?.name(),NSImage.Name("DrawbridgeFlattenLayers"))
+        XCTAssertEqual(unflatten.image?.name(),NSImage.Name("DrawbridgeUnflattenLayers"))
+        XCTAssertTrue(flatten.image?.isTemplate == true);XCTAssertTrue(unflatten.image?.isTemplate == true)
+        XCTAssertFalse(flatten.isEnabled);XCTAssertFalse(unflatten.isEnabled)
+        let flattenMenu=NSMenuItem(title:"Flatten PDF…",action:#selector(MainViewController.commandFlattenPDF(_:)),keyEquivalent:"")
+        let unflattenMenu=NSMenuItem(title:"Unflatten PDF…",action:#selector(MainViewController.commandUnflattenPDF(_:)),keyEquivalent:"")
+        controller.openDocument(at:source);controller.updateStatusBar()
+        XCTAssertTrue(flatten.isEnabled);XCTAssertTrue(unflatten.isEnabled)
+        _ = try PDFAnnotationFlattener.flatten(source:source,destination:source)
+        controller.openDocument(at:source);controller.updateStatusBar()
+        XCTAssertFalse(flatten.isEnabled);XCTAssertTrue(unflatten.isEnabled)
+        XCTAssertFalse(controller.validateMenuItem(flattenMenu));XCTAssertTrue(controller.validateMenuItem(unflattenMenu))
+        XCTAssertEqual(flattenMenu.title,"Flatten PDF…");XCTAssertEqual(unflattenMenu.title,"Unflatten PDF…")
+        XCTAssertEqual(flatten.accessibilityLabel(),"Flatten PDF");XCTAssertEqual(unflatten.accessibilityLabel(),"Unflatten PDF")
+        XCTAssertEqual(flatten.image?.name(),NSImage.Name("DrawbridgeFlattenLayers"))
+        controller.isPDFFileProcessingOperation=true;controller.updateStatusBar()
+        XCTAssertFalse(flatten.isEnabled);XCTAssertFalse(unflatten.isEnabled)
+        XCTAssertFalse(controller.validateMenuItem(unflattenMenu))
+        controller.isPDFFileProcessingOperation=false
+        let restored=try PDFAnnotationFlattener.unflatten(source:source)
+        XCTAssertEqual(restored.restoredAnnotations,1)
+        controller.openDocument(at:source);controller.updateStatusBar()
+        XCTAssertTrue(flatten.isEnabled);XCTAssertTrue(unflatten.isEnabled)
+        XCTAssertEqual(controller.pdfView.document?.page(at:0)?.annotations.count,5)
+    }
+
+    @MainActor
+    func testExplicitControllerActionsFlattenThenUnflattenSavedPDF() throws {
+        _ = NSApplication.shared
+        let dir = try directory(); defer { try? FileManager.default.removeItem(at:dir) }
+        let source=try fixture(in:dir)
+        let c=MainViewController();_ = c.view
+        let window=NSWindow(contentRect:NSRect(x:0,y:0,width:1200,height:800),styleMask:[.titled],backing:.buffered,defer:false)
+        window.contentViewController=c;defer { window.contentViewController=nil }
+        c.openDocument(at:source)
+        var titles=[String]()
+        func descendants(_ v:NSView)->[NSView] { [v]+v.subviews.flatMap(descendants) }
+        let timer=Timer(timeInterval:0.02,repeats:true) { _ in
+            MainActor.assumeIsolated {
+                guard let content=NSApp.modalWindow?.contentView else { return }
+                let fields=descendants(content).compactMap { $0 as? NSTextField }.map(\.stringValue)
+                if let title=fields.first(where: { ["PDF Flattened and Saved","PDF Unflattened and Saved","Unflatten Failed","Flatten Failed"].contains($0) }) { titles.append(title) }
+                if let ok=descendants(content).compactMap({$0 as? NSButton}).first(where:{$0.title=="OK"}) { ok.performClick(nil) }
+                else { NSApp.abortModal() }
+            }
+        }
+        RunLoop.main.add(timer,forMode:.default);RunLoop.main.add(timer,forMode:.modalPanel)
+        defer { timer.invalidate() }
+        func finish(_ operation:()->Void) {
+            let count=titles.count;operation()
+            let end=Date().addingTimeInterval(15)
+            while titles.count==count && Date()<end { RunLoop.main.run(until:Date().addingTimeInterval(0.02)) }
+            XCTAssertEqual(titles.count,count+1)
+            XCTAssertFalse(c.isPDFFileProcessingOperation)
+        }
+        let original=try Data(contentsOf:source)
+        finish { c.commandUnflattenPDF(nil) }
+        XCTAssertEqual(titles.last,"Unflatten Failed")
+        XCTAssertEqual(try Data(contentsOf:source),original)
+        finish { c.commandFlattenPDF(nil) }
+        XCTAssertEqual(titles.last,"PDF Flattened and Saved")
+        XCTAssertTrue(PDFAnnotationFlattener.canUnflatten(try XCTUnwrap(c.pdfView.document)))
+        finish { c.commandUnflattenPDF(nil) }
+        XCTAssertEqual(titles.last,"PDF Unflattened and Saved")
+        XCTAssertFalse(PDFAnnotationFlattener.canUnflatten(try XCTUnwrap(c.pdfView.document)))
+        XCTAssertEqual(c.pdfView.document?.page(at:0)?.annotations.count,5)
+        XCTAssertFalse(c.hasUnsavedChanges())
+    }
+
     func testLosslessReductionKeepsUnflattenRecovery() throws {
         let directory = try directory()
         defer { try? FileManager.default.removeItem(at: directory) }

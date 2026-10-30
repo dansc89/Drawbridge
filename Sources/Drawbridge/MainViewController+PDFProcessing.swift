@@ -168,17 +168,19 @@ extension MainViewController {
         }
     }
 
-    func flattenPDF() {
+    func flattenPDF() { processFlattening(unflattening: false) }
+    func unflattenPDF() { processFlattening(unflattening: true) }
+
+    private func processFlattening(unflattening: Bool) {
         guard let document = pdfView.document, let source = openDocumentURL,
-              !isPDFProcessingBusy else { beep(); return }
+              !isPDFProcessingBusy, !isPDFFileProcessingOperation else { beep(); return }
         if hasUnsavedChanges() {
             persistDocument(to: source, adoptAsPrimaryDocument: false, busyMessage: "Saving PDF…", document: document, completion: { [weak self] saved in
-                if saved { self?.flattenPDF() }
+                if saved { self?.processFlattening(unflattening: unflattening) }
             })
             return
         }
         let cancellation = PDFProcessingCancellation()
-        let unflattening = PDFAnnotationFlattener.canUnflatten(document)
         let output = canonicalDocumentURL(source)
         isPDFFileProcessingOperation = true
         beginBusyIndicator(unflattening ? "Unflattening PDF…" : "Flattening PDF…", detail: "Checking annotations…")

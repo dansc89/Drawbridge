@@ -138,7 +138,8 @@ enum PDFLayerPurger {
     /// Lexical PDF scanner: strings, names and composite operands are opaque.
     /// Optional-content BDC is replaced by a neutral BMC; its EMC stays balanced.
     /// Inline-image payloads are opaque; unsupported encodings fail closed.
-    static func unconditional(_ data: Data) throws -> Data {
+    static func unconditional(_ data: Data, removingXObjects: Set<String>? = nil) throws -> Data {
+        var removed: [String:Int] = [:]
         let bytes = [UInt8](data); var i = 0, operands: [(String, Int)] = [], replacements: [(Range<Int>, [UInt8])] = []
         func whitespace(_ c: UInt8) -> Bool { [0, 9, 10, 12, 13, 32].contains(c) }
         func delimiter(_ c: UInt8) -> Bool { whitespace(c) || [40,41,60,62,91,93,123,125,47,37].contains(c) }
@@ -250,8 +251,12 @@ enum PDFLayerPurger {
                 guard i < bytes.count, try token().0 == "EI" else { throw CocoaError(.fileReadCorruptFile) }
                 continue
             }
-            if text == "BDC", operands.count == 2, operands[0].0 == "/OC" {
+            if removingXObjects == nil, text == "BDC", operands.count == 2, operands[0].0 == "/OC" {
                 replacements.append((operands[0].1..<i, Array("/Artifact BMC".utf8)))
+            }
+            if text == "Do", operands.count == 1, removingXObjects?.contains(operands[0].0) == true {
+                removed[operands[0].0, default:0] += 1
+                replacements.append((operands[0].1..<i, []))
             }
             operands.removeAll(keepingCapacity:true)
         }
@@ -259,6 +264,9 @@ enum PDFLayerPurger {
         // that could be completed by an operator in the next stream. Supporting
         // such programs requires concatenation; until then reject before publication.
         guard operands.isEmpty else { throw CocoaError(.featureUnsupported) }
+        if let names = removingXObjects {
+            guard Set(removed.keys) == names, removed.values.allSatisfy({ $0 == 1 }) else { throw CocoaError(.featureUnsupported) }
+        }
         var result = bytes
         for (range,replacement) in replacements.reversed() { result.replaceSubrange(range,with:replacement) }
         return Data(result)

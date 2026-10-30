@@ -187,7 +187,28 @@ enum PDFAnnotationFlattener {
     static func canUnflatten(_ document: PDFDocument) -> Bool {
         guard let ref = document.documentRef, let catalog = ref.catalog else { return false }
         var archive: CGPDFDictionaryRef?
-        return CGPDFDictionaryGetDictionary(catalog, "DrawbridgeUnflattenData", &archive)
+        if CGPDFDictionaryGetDictionary(catalog, "DrawbridgeUnflattenData", &archive) { return true }
+        func recoverable(_ stream: CGPDFStreamRef) -> Bool {
+            guard let dictionary = CGPDFStreamGetDictionary(stream) else { return false }
+            var kind: UnsafePointer<CChar>?
+            var annotations: CGPDFArrayRef?
+            return CGPDFDictionaryGetName(dictionary, "BBType", &kind) && kind.map { String(cString:$0) } == "Melted"
+                && CGPDFDictionaryGetArray(dictionary, "Annots", &annotations)
+                && annotations.map { CGPDFArrayGetCount($0) > 0 } == true
+        }
+        for index in 1...max(1,ref.numberOfPages) {
+            guard let page = ref.page(at:index), let dictionary = page.dictionary else { continue }
+            var stream: CGPDFStreamRef?
+            if CGPDFDictionaryGetStream(dictionary,"Contents",&stream), let stream, recoverable(stream) { return true }
+            var streams: CGPDFArrayRef?
+            if CGPDFDictionaryGetArray(dictionary,"Contents",&streams), let streams {
+                for position in 0..<CGPDFArrayGetCount(streams) {
+                    var item: CGPDFStreamRef?
+                    if CGPDFArrayGetStream(streams,position,&item), let item, recoverable(item) { return true }
+                }
+            }
+        }
+        return false
     }
 
     /// Recovery keeps references to original streams/annotations inside the PDF,
@@ -213,36 +234,58 @@ enum PDFAnnotationFlattener {
         }) else { throw failure("Unflatten an unsigned copy instead of changing a signed PDF.") }
         let root = try rootReference(objects)
         var catalog = try dictionary(root, objects)
-        guard let archive = catalog[recoveryKey] as? [String: Any], archive["/Version"] as? Int == 1,
-              let entries = archive["/Pages"] as? [[String: Any]] else { throw failure("This PDF has no Drawbridge unflatten recovery data.") }
         let pages = try pageReferences(json)
-        guard entries.count == pages.count else { throw failure("Pages have changed since flattening. Unflatten was cancelled to protect the newer edits.") }
         var restored = 0
-        for (index, entry) in entries.enumerated() {
-            guard let reference = entry["/Page"] as? String, reference == pages[index],
-                  let removed = entry["/Annots"] as? [Any], let contents = entry["/Contents"],
-                  let resources = entry["/Resources"] as? [String: Any],
-                  let flattenedContents = entry["/FlattenedContents"],
-                  let flattenedResources = entry["/FlattenedResources"] as? [String: Any],
-                  let flattenedHash = entry["/FlattenedDrawingHash"] as? String,
-                  let originalGeometry = entry["/Geometry"] as? [String: Any] else { throw failure("Invalid recovery data; no changes were saved.") }
-            var page = try dictionary(reference, objects)
-            guard NSDictionary(dictionary: try geometry(reference, objects)).isEqual(to: originalGeometry),
-                  NSArray(array: [contentSnapshot(page["/Contents"], objects)]).isEqual(to: [flattenedContents]),
-                  "u:" + (try drawingHash(reference, objects)) == flattenedHash,
-                  NSDictionary(dictionary: try resourceSnapshot(reference, objects)).isEqual(to: flattenedResources) else {
-                throw failure("Drawing content has changed since flattening. Unflatten was cancelled to protect the newer edits.")
+        var rewrittenStreams = Set<String>()
+        if catalog[recoveryKey] != nil {
+            guard let archive = catalog[recoveryKey] as? [String: Any], archive["/Version"] as? Int == 1,
+                  let entries = archive["/Pages"] as? [[String: Any]] else { throw failure("Invalid Drawbridge recovery data; no changes were saved.") }
+            guard entries.count == pages.count else { throw failure("Pages have changed since flattening. Unflatten was cancelled to protect the newer edits.") }
+            for (index, entry) in entries.enumerated() {
+                guard let reference = entry["/Page"] as? String, reference == pages[index],
+                      let removed = entry["/Annots"] as? [Any], let contents = entry["/Contents"],
+                      let resources = entry["/Resources"] as? [String: Any],
+                      let flattenedContents = entry["/FlattenedContents"],
+                      let flattenedResources = entry["/FlattenedResources"] as? [String: Any],
+                      let flattenedHash = entry["/FlattenedDrawingHash"] as? String,
+                      let originalGeometry = entry["/Geometry"] as? [String: Any] else { throw failure("Invalid recovery data; no changes were saved.") }
+                var page = try dictionary(reference, objects)
+                guard NSDictionary(dictionary: try geometry(reference, objects)).isEqual(to: originalGeometry),
+                      NSArray(array: [contentSnapshot(page["/Contents"], objects)]).isEqual(to: [flattenedContents]),
+                      "u:" + (try drawingHash(reference, objects)) == flattenedHash,
+                      NSDictionary(dictionary: try resourceSnapshot(reference, objects)).isEqual(to: flattenedResources) else {
+                    throw failure("Drawing content has changed since flattening. Unflatten was cancelled to protect the newer edits.")
+                }
+                page["/Contents"] = contents
+                page["/Resources"] = resources
+                page["/Annots"] = array(page["/Annots"], objects) + removed
+                restored += removed.count
+                objects["obj:\(reference)"] = ["value": page]
             }
-            page["/Contents"] = contents
-            page["/Resources"] = resources
-            page["/Annots"] = array(page["/Annots"], objects) + removed
-            restored += removed.count
-            objects["obj:\(reference)"] = ["value": page]
+            catalog.removeValue(forKey: recoveryKey)
+            objects["obj:\(root)"] = ["value": catalog]
+        } else {
+            restored = try restoreBluebeam(objects: &objects, pages: pages, rewrittenStreams: &rewrittenStreams) { reference in
+                let decoded = directory.appendingPathComponent("decoded-stream")
+                FileManager.default.createFile(atPath: decoded.path, contents: nil)
+                let handle = try FileHandle(forWritingTo: decoded)
+                defer { try? handle.close() }
+                let process = Process(); process.executableURL = executable
+                let parts = reference.split(separator: " ")
+                guard parts.count == 3, Int(parts[0]) != nil, Int(parts[1]) != nil else { throw failure("Invalid recovery object reference.") }
+                process.arguments = ["--show-object=\(parts[0]),\(parts[1])", "--filtered-stream-data", snapshot.path]
+                process.standardOutput = handle; process.standardError = FileHandle.nullDevice
+                try process.run(); process.waitUntilExit()
+                guard process.terminationStatus == 0 || process.terminationStatus == 3 else { throw failure("Could not decode Bluebeam recovery artwork; no changes were saved.") }
+                return try Data(contentsOf: decoded)
+            }
         }
-        catalog.removeValue(forKey: recoveryKey)
-        objects["obj:\(root)"] = ["value": catalog]
         setObjects(objects, in: &json)
-        try PDFJSONPatchEncoder.data(withJSONObject: metadataJSON(json), options: [.withoutEscapingSlashes, .sortedKeys]).write(to: jsonURL)
+        var patch = metadataJSON(json)
+        var patchObjects = try objectTable(patch)
+        for key in rewrittenStreams { patchObjects[key] = objects[key] }
+        setObjects(patchObjects, in: &patch)
+        try PDFJSONPatchEncoder.data(withJSONObject: patch, options: [.withoutEscapingSlashes, .sortedKeys]).write(to: jsonURL)
         if cancelled() { throw CancellationError() }
         progress("Restoring \(restored) editable annotations…")
         guard PDFTKBookmarkWriter.run(executable, arguments: [snapshot.path, "--stream-data=preserve", "--update-from-json=\(jsonURL.path)", output.path]),
@@ -254,6 +297,98 @@ enum PDFAnnotationFlattener {
         if cancelled() { throw CancellationError() }
         try MainViewController.commitStagedSave(from: output, to: destination)
         return Report(flattened: 0, retainedMarkups: 0, removedSHXComments: 0, restoredAnnotations: restored)
+    }
+
+    /// Revu stores recoverable annotations on /BBType /Melted content streams.
+    /// Remove their appearance invocations, then reattach the originals. Streams
+    /// can also contain base drawing content, which must remain untouched.
+    /// Melted streams without annotation recovery data remain permanent artwork.
+    private static func restoreBluebeam(objects: inout [String:Any], pages: [String], rewrittenStreams: inout Set<String>, decodedStream: (String) throws -> Data) throws -> Int {
+        func streams(_ value: Any?, visiting: Set<String> = []) throws -> [String] {
+            guard let value, !(value is NSNull) else { return [] }
+            if let items = value as? [Any] { return try items.flatMap { try streams($0,visiting:visiting) } }
+            guard let ref = value as? String, !visiting.contains(ref), visiting.count < 64,
+                  let entry = objects["obj:"+ref] as? [String:Any] else { throw failure("Invalid page content references; no changes were saved.") }
+            if entry["stream"] != nil { return [ref] }
+            guard let items = entry["value"] as? [Any] else { throw failure("Invalid page content array; no changes were saved.") }
+            return try streams(items,visiting:visiting.union([ref]))
+        }
+        let contents = try pages.map { try streams(dictionary($0,objects)["/Contents"]) }
+        var owners = [String:Int](), attached = Set<String>()
+        for (index,refs) in contents.enumerated() {
+            refs.forEach { owners[$0,default:0] += 1 }
+            let page = try dictionary(pages[index],objects)
+            if page["/Annots"] != nil {
+                guard let existing = resolve(page["/Annots"],objects) as? [Any], existing.allSatisfy({$0 is String}) else { throw failure("Invalid existing annotations; no changes were saved.") }
+                existing.compactMap { $0 as? String }.forEach { attached.insert($0) }
+            }
+        }
+        var restored = 0
+        for (index,pageRef) in pages.enumerated() {
+            var retained = [String](), recovered = [String]()
+            for ref in contents[index] {
+                guard let entry = objects["obj:"+ref] as? [String:Any], let stream = entry["stream"] as? [String:Any],
+                      let metadata = stream["dict"] as? [String:Any] else { throw failure("Invalid content stream; no changes were saved.") }
+                guard metadata["/BBType"] as? String == "/Melted", metadata["/Annots"] != nil else { retained.append(ref);continue }
+                guard let annotations = resolve(metadata["/Annots"],objects) as? [Any] else { throw failure("Invalid Bluebeam recovery data; no changes were saved.") }
+                if annotations.isEmpty { retained.append(ref);continue }
+                guard owners[ref] == 1 else { throw failure("Bluebeam recovery content is shared by multiple pages; no changes were saved.") }
+                var appearances = Set<String>()
+                for value in annotations {
+                    guard let annotationRef = value as? String, !attached.contains(annotationRef),
+                          let annotationEntry = objects["obj:"+annotationRef] as? [String:Any],
+                          let annotation = annotationEntry["value"] as? [String:Any],
+                          let subtype = annotation["/Subtype"] as? String, subtype.hasPrefix("/"), subtype != "/Widget",
+                          let rect = resolve(annotation["/Rect"],objects) as? [NSNumber], rect.count == 4,
+                          rect.allSatisfy({$0.doubleValue.isFinite && CFGetTypeID($0) != CFBooleanGetTypeID()}),
+                          annotation["/P"] == nil || annotation["/P"] as? String == pageRef else { throw failure("Bluebeam annotations are missing, duplicated or belong to another page; no changes were saved.") }
+                    guard let ap = resolve(annotation["/AP"],objects) as? [String:Any] else { throw failure("Missing Bluebeam appearance; no changes were saved.") }
+                    let normal = ap["/N"]
+                    let appearance = (normal as? String) ?? (resolve(normal,objects) as? [String:Any])?[annotation["/AS"] as? String ?? ""] as? String
+                    guard let appearance else { throw failure("Invalid Bluebeam appearance; no changes were saved.") }
+                    appearances.insert(appearance)
+                    attached.insert(annotationRef);recovered.append(annotationRef)
+                }
+                // Bluebeam may merge base artwork into a Melted stream. Strip only
+                // the exact original appearance invocations, never the whole stream.
+                let resources = try resourceSnapshot(pageRef,objects)
+                guard let xobjects = resolve(resources["/XObject"],objects) as? [String:Any] else { throw failure("Missing Bluebeam drawing resources; no changes were saved.") }
+                func appearanceSignature(_ ref: String) throws -> Data {
+                    guard let object = objects["obj:"+ref] as? [String:Any], var stream = object["stream"] as? [String:Any], var dict = stream["dict"] as? [String:Any] else { throw failure("Invalid Bluebeam appearance stream.") }
+                    dict.removeValue(forKey:"/Length"); stream["dict"] = dict
+                    return try JSONSerialization.data(withJSONObject:stream,options:[.sortedKeys])
+                }
+                // Revu sometimes duplicates an identical AP object when merging
+                // streams. Match exact bytes and dictionary, never name/order alone.
+                var signatures = [String:Data]()
+                for value in xobjects.values { if let ref = value as? String { signatures[ref] = try appearanceSignature(ref) } }
+                var names = Set<String>()
+                for appearance in appearances {
+                    let signature = try appearanceSignature(appearance)
+                    let matches = xobjects.compactMap { key,value -> String? in
+                        guard let ref = value as? String else { return nil }
+                        return ref == appearance || signatures[ref] == signature ? key : nil
+                    }
+                    guard matches.count == 1, names.insert(matches[0]).inserted else { throw failure("Ambiguous Bluebeam drawing resources; no changes were saved.") }
+                }
+                let clean = try PDFLayerPurger.unconditional(decodedStream(ref), removingXObjects:names)
+                var cleanMetadata = metadata
+                for key in ["/BBType","/Annots","/Filter","/DecodeParms","/Length"] { cleanMetadata.removeValue(forKey:key) }
+                objects["obj:"+ref] = ["stream":["dict":cleanMetadata,"data":clean.base64EncodedString()]]
+                rewrittenStreams.insert("obj:"+ref)
+                retained.append(ref)
+                // Original annotation dictionaries and appearances remain unchanged.
+            }
+            if !recovered.isEmpty {
+                var page = try dictionary(pageRef,objects)
+                page["/Contents"] = retained
+                page["/Annots"] = array(page["/Annots"],objects) + recovered
+                objects["obj:"+pageRef] = ["value":page]
+                restored += recovered.count
+            }
+        }
+        guard restored > 0 else { throw failure("No recoverable Drawbridge or Bluebeam markups were found. Unflatten requires recovery data saved when the markups were flattened.") }
+        return restored
     }
 
     /// Called after the reducer verifies the semantic graph (Medium allows image

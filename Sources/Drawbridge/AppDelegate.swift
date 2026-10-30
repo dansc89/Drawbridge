@@ -236,6 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         saveCopyItem.target = controller
         fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: "Flatten PDF…", action: #selector(MainViewController.commandFlattenPDF(_:)), keyEquivalent: "").target = controller
+        fileMenu.addItem(withTitle: "Unflatten PDF…", action: #selector(MainViewController.commandUnflattenPDF(_:)), keyEquivalent: "").target = controller
         fileMenu.addItem(withTitle: "Reduce File Size…", action: #selector(MainViewController.commandReduceFileSize(_:)), keyEquivalent: "").target = controller
         fileMenu.addItem(NSMenuItem.separator())
         fileMenu.addItem(withTitle: "Print…", action: #selector(MainViewController.commandPrint(_:)), keyEquivalent: "p").target = controller
