@@ -12,7 +12,6 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
     let layersView = MarkupLayersView()
     let membership = NSPopUpButton()
     private var propertiesContent = NSStackView()
-    var onHide: (() -> Void)?
     let setAsDefault = NSButton(title: "Set as Default", target: nil, action: nil)
     let defaultStatus = NSTextField(labelWithString: "")
     private var lastDefaultTool: RectangleMarkupController.Tool?
@@ -118,8 +117,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
             field.cell?.sendsActionOnEndEditing = true
             field.target = self; field.action = #selector(changeNumber(_:)); field.delegate = self
         }
-        let hide = NSButton(title: "Hide", target: self, action: #selector(hideInspector(_:)))
-        let header = NSStackView(views: [heading, hide]); header.spacing = 12
+        let header = NSStackView(views: [heading]); header.spacing = 12
         patternRow = row("Line pattern", linePattern)
         fillOpacityRow = row("Fill opacity", NSStackView(views: [fillOpacity, fillPercent]))
         note.stringValue = "Changes apply to the selected markup. With nothing selected, they set the next markup’s appearance. Line weights range from 0.25 to 72 pt."
@@ -253,7 +251,6 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
                                   color: [Double(rgb.redComponent), Double(rgb.greenComponent), Double(rgb.blueComponent)])
         session.styleSelectedSnapshot(style); refresh()
     }
-    @objc func hideInspector(_ sender: Any?) { onHide?() }
     @objc func changeAppearance(_ sender: NSControl) {
         guard let session else { return }
         if sender === fillOpacity { changeFill(sender); return }

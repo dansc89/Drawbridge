@@ -5,42 +5,6 @@ import PDFKit
 import UniformTypeIdentifiers
 import Vision
 
-private final class NavigationResizeHandleView: NSView {
-    private var trackingAreaRef: NSTrackingArea?
-
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        addCursorRect(bounds, cursor: .resizeLeftRight)
-    }
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingAreaRef {
-            removeTrackingArea(trackingAreaRef)
-        }
-        let tracking = NSTrackingArea(
-            rect: bounds,
-            options: [.activeAlways, .inVisibleRect, .cursorUpdate, .mouseEnteredAndExited, .mouseMoved, .enabledDuringMouseDrag],
-            owner: self,
-            userInfo: nil
-        )
-        addTrackingArea(tracking)
-        trackingAreaRef = tracking
-    }
-
-    override func cursorUpdate(with event: NSEvent) {
-        NSCursor.resizeLeftRight.set()
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        NSCursor.resizeLeftRight.set()
-    }
-
-    override func mouseMoved(with event: NSEvent) {
-        NSCursor.resizeLeftRight.set()
-    }
-}
-
 @MainActor
 final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemValidation, NSSplitViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTextFieldDelegate {
     struct PDFDocumentBox: @unchecked Sendable {
@@ -566,7 +530,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
     private let pdfCanvasContainer = StartupDropView(frame: .zero)
     private let bookmarksContainer = NSView(frame: .zero)
-    private let navigationResizeHandle = NavigationResizeHandleView(frame: .zero)
+    private let navigationResizeHandle = SidebarDividerView(frame: .zero)
     private let navigationTitleLabel = NSTextField(labelWithString: "Navigation")
     private let navigationModeControl = NSSegmentedControl(labels: ["Pages", "Bookmarks"], trackingMode: .selectOne, target: nil, action: nil)
     private let addPageButton = NSButton(title: "", target: nil, action: nil)
@@ -606,7 +570,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var contentsSummaryPageCount = 0
     private let pdfContentsSummaryLabel = NSTextField(labelWithString: "No PDF loaded")
     private let splitView = NSSplitView(frame: .zero)
-    private let propertiesResizeHandle = NavigationResizeHandleView(frame: .zero)
+    private let propertiesResizeHandle = SidebarDividerView(frame: .zero)
     private var propertiesWidthAtDragStart: CGFloat = 300
     private let emptyStateView = StartupDropView(frame: .zero)
     private let emptyStateTitle = NSTextField(labelWithString: "Open a drawing set to get started")
@@ -703,7 +667,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let measurementCountLabel = NSTextField(labelWithString: "Measurements: 0")
     private let measurementTotalLabel = NSTextField(labelWithString: "Total Length: 0")
     private let toolSettingsSidebarToggleButton = NSButton(title: "", target: nil, action: nil)
-    private let collapsedSidebarRevealButton = NSButton(title: "", target: nil, action: nil)
     private let snapSectionContent = NSStackView(frame: .zero)
     private let snapRowsStack = NSStackView(frame: .zero)
     private let selectedMarkupOverlayLayer: CAShapeLayer = {
@@ -1086,7 +1049,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfCanvasContainer.translatesAutoresizingMaskIntoConstraints = false
         statusBar.translatesAutoresizingMaskIntoConstraints = false
         configurePDFCanvasContainer()
-        configureCollapsedSidebarRevealButton()
 
         splitView.isVertical = true
         splitView.dividerStyle = .thin
@@ -1104,8 +1066,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         lastSidebarExpandedWidth = CGFloat(UserDefaults.standard.double(forKey: "DrawbridgeSidebarWidth"))
         if lastSidebarExpandedWidth < 260 { lastSidebarExpandedWidth = 300 }
         isSidebarCollapsed = UserDefaults.standard.bool(forKey: "DrawbridgeSidebarCollapsed")
-        inspector.onHide = { [weak self] in self?.toggleSidebar() }
-        collapsedSidebarRevealButton.isHidden = !isSidebarCollapsed
         configureEmptyStateView()
         pdfCanvasContainer.onOpenDroppedPDF = { [weak self] url in
             guard let self else { return }
@@ -1164,20 +1124,18 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         propertiesResizeHandle.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(propertiesResizeHandle)
         NSLayoutConstraint.activate([
-            propertiesResizeHandle.centerXAnchor.constraint(equalTo: inspector.view.leadingAnchor),
             propertiesResizeHandle.topAnchor.constraint(equalTo: splitView.topAnchor),
             propertiesResizeHandle.bottomAnchor.constraint(equalTo: splitView.bottomAnchor),
             propertiesResizeHandle.widthAnchor.constraint(equalToConstant: 12)
         ])
-        propertiesResizeHandle.addGestureRecognizer(NSPanGestureRecognizer(target: self, action: #selector(handlePropertiesResizePan(_:))))
-        propertiesResizeHandle.isHidden = isSidebarCollapsed
+        configureSidebarDividerControls()
+        updatePropertiesDividerPosition()
         view.addSubview(documentTabsBar)
         view.addSubview(statusBar)
         configureMarkupsPanel()
         configureStatusBar()
         view.addSubview(busyOverlayView)
         view.addSubview(captureToastView)
-        view.addSubview(collapsedSidebarRevealButton)
         configureDocumentTabsBar()
         configureBusyOverlay()
         configureCaptureToast()
@@ -1203,11 +1161,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             busyOverlayView.widthAnchor.constraint(equalToConstant: 420),
             captureToastView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 16),
             captureToastView.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            captureToastView.widthAnchor.constraint(lessThanOrEqualToConstant: 280),
-            collapsedSidebarRevealButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
-            collapsedSidebarRevealButton.centerYAnchor.constraint(equalTo: splitView.centerYAnchor),
-            collapsedSidebarRevealButton.widthAnchor.constraint(equalToConstant: 28),
-            collapsedSidebarRevealButton.heightAnchor.constraint(equalToConstant: 28)
+            captureToastView.widthAnchor.constraint(lessThanOrEqualToConstant: 280)
+
         ])
         view.layoutSubtreeIfNeeded()
         applySplitLayoutIfPossible(force: true)
@@ -1279,7 +1234,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         // Never set the editor window/root appearance: PDF content must retain its
         // inherited appearance and inversion state independently of chrome colors.
         for chrome in [bookmarksContainer, statusBar, busyOverlayView, captureToastView,
-                       emptyStateView, collapsedSidebarRevealButton, documentTabsBar,
+                       emptyStateView, documentTabsBar,
                        markupsPanel, toolbarControlsStack, toolbarModeGroupsStack] {
             chrome.appearance = chromeAppearance
         }
@@ -1299,7 +1254,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             busyOverlayView.layer?.backgroundColor = panelBackgroundColor.cgColor
             captureToastView.layer?.backgroundColor = panelBackgroundColor.cgColor
             emptyStateView.layer?.backgroundColor = panelBackgroundColor.cgColor
-            collapsedSidebarRevealButton.layer?.backgroundColor = panelBackgroundColor.cgColor
             documentTabsBar.layer?.backgroundColor = panelBackgroundColor.cgColor
             pdfView.refreshAppearanceColors()
             secondaryPDFView?.refreshAppearanceColors()
@@ -1377,7 +1331,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             navigationResizeHandle.topAnchor.constraint(equalTo: pdfCanvasContainer.topAnchor),
             navigationResizeHandle.bottomAnchor.constraint(equalTo: pdfCanvasContainer.bottomAnchor),
             navigationResizeHandle.centerXAnchor.constraint(equalTo: bookmarksContainer.trailingAnchor),
-            navigationResizeHandle.widthAnchor.constraint(equalToConstant: 26),
+            navigationResizeHandle.widthAnchor.constraint(equalToConstant: 12),
 
             pdfPaneSplitView.topAnchor.constraint(equalTo: pdfCanvasContainer.topAnchor),
             pdfPaneSplitView.leadingAnchor.constraint(equalTo: bookmarksContainer.trailingAnchor),
@@ -1389,26 +1343,70 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         navigationResizeHandle.wantsLayer = true
         navigationResizeHandle.layer?.backgroundColor = NSColor.clear.cgColor
         navigationResizeHandle.layer?.cornerRadius = 1
-        let resizePan = NSPanGestureRecognizer(target: self, action: #selector(handleNavigationResizePan(_:)))
-        navigationResizeHandle.addGestureRecognizer(resizePan)
         navigationResizeHandle.isHidden = !showNavigationPane
     }
 
-    @objc private func handleNavigationResizePan(_ recognizer: NSPanGestureRecognizer) {
-        guard showNavigationPane else { return }
-        switch recognizer.state {
-        case .began:
-            navigationWidthAtDragStart = bookmarksWidthConstraint?.constant ?? navigationWidth
-        case .changed:
-            let deltaX = recognizer.translation(in: pdfCanvasContainer).x
-            let proposed = navigationWidthAtDragStart + deltaX
-            let clamped = min(max(proposed, navigationWidthMin), navigationWidthMax)
-            navigationWidth = clamped
-            bookmarksWidthConstraint?.constant = clamped
-            view.layoutSubtreeIfNeeded()
-        default:
-            break
+    private var isNavigationCollapsed = false
+    private var propertiesDividerPosition: NSLayoutConstraint?
+
+    private func configureSidebarDividerControls() {
+        navigationResizeHandle.identifier = NSUserInterfaceItemIdentifier("navigationSidebarDivider")
+        propertiesResizeHandle.identifier = NSUserInterfaceItemIdentifier("propertiesSidebarDivider")
+        propertiesResizeHandle.leadingSide = false
+        navigationResizeHandle.onToggle = { [weak self] in self?.toggleNavigationSidebar() }
+        propertiesResizeHandle.onToggle = { [weak self] in self?.toggleSidebar() }
+        navigationResizeHandle.onResizeStart = { [weak self] in
+            guard let self, !self.isNavigationCollapsed else { return }
+            self.navigationWidthAtDragStart = self.navigationWidth
         }
+        navigationResizeHandle.onResize = { [weak self] delta in
+            guard let self, !self.isNavigationCollapsed else { return }
+            self.navigationWidth = min(max(self.navigationWidthAtDragStart + delta, self.navigationWidthMin), self.navigationWidthMax)
+            self.bookmarksWidthConstraint?.constant = self.navigationWidth
+            self.view.layoutSubtreeIfNeeded()
+        }
+        propertiesResizeHandle.onResizeStart = { [weak self] in
+            guard let self, !self.isSidebarCollapsed else { return }
+            self.propertiesWidthAtDragStart = self.sidebarContainerView?.frame.width ?? 300
+        }
+        propertiesResizeHandle.onResize = { [weak self] delta in
+            guard let self, !self.isSidebarCollapsed else { return }
+            let width = min(max(self.propertiesWidthAtDragStart - delta, 260), 420)
+            self.lastSidebarExpandedWidth = width
+            self.sidebarPreferredWidthConstraint?.constant = width
+            self.splitView.setPosition(self.splitView.bounds.width - width, ofDividerAt: 0)
+            self.view.layoutSubtreeIfNeeded()
+        }
+        updateSidebarDividerLabels()
+    }
+
+    func toggleNavigationSidebar() {
+        isNavigationCollapsed.toggle()
+        bookmarksContainer.isHidden = isNavigationCollapsed || !showNavigationPane
+        bookmarksWidthConstraint?.constant = showNavigationPane ? (isNavigationCollapsed ? 12 : navigationWidth) : 0
+        updateSidebarDividerLabels()
+        view.layoutSubtreeIfNeeded()
+    }
+
+    private func updateSidebarDividerLabels() {
+        for (divider, name, collapsed) in [(navigationResizeHandle, "Pages and Bookmarks", isNavigationCollapsed), (propertiesResizeHandle, "Markup Properties", isSidebarCollapsed)] {
+            divider.collapsed = collapsed
+            let action = collapsed ? "Show" : "Collapse"
+            divider.toolTip = "\(action) \(name). Click to toggle; drag to resize."
+            divider.setAccessibilityLabel("\(action) \(name) sidebar")
+        }
+    }
+
+    private func updatePropertiesDividerPosition() {
+        propertiesDividerPosition?.isActive = false
+        if isSidebarCollapsed {
+            propertiesDividerPosition = propertiesResizeHandle.centerXAnchor.constraint(equalTo: view.trailingAnchor, constant: -6)
+        } else if let sidebar = sidebarContainerView {
+            propertiesDividerPosition = propertiesResizeHandle.centerXAnchor.constraint(equalTo: sidebar.leadingAnchor)
+        }
+        propertiesDividerPosition?.isActive = true
+        propertiesResizeHandle.isHidden = false
+        updateSidebarDividerLabels()
     }
 
     private func configureBookmarksSidebar() {
@@ -2885,33 +2883,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         button.layer?.shadowOffset = .zero
     }
 
-    private func configureCollapsedSidebarRevealButton() {
-        if let image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: "Show Tool Settings Sidebar")
-            ?? NSImage(systemSymbolName: "sidebar.right", accessibilityDescription: "Show Tool Settings Sidebar")
-            ?? NSImage(systemSymbolName: "sidebar.trailing", accessibilityDescription: "Show Tool Settings Sidebar")
-            ?? NSImage(systemSymbolName: "sidebar.leading", accessibilityDescription: "Show Tool Settings Sidebar") {
-            collapsedSidebarRevealButton.image = image
-            collapsedSidebarRevealButton.title = ""
-        } else {
-            collapsedSidebarRevealButton.image = nil
-            collapsedSidebarRevealButton.title = ">"
-        }
-        collapsedSidebarRevealButton.imagePosition = .imageOnly
-        collapsedSidebarRevealButton.bezelStyle = .regularSquare
-        collapsedSidebarRevealButton.controlSize = .small
-        collapsedSidebarRevealButton.target = self
-        collapsedSidebarRevealButton.action = #selector(toggleSidebar)
-        collapsedSidebarRevealButton.toolTip = "Show Tool Settings Sidebar"
-        collapsedSidebarRevealButton.translatesAutoresizingMaskIntoConstraints = false
-        collapsedSidebarRevealButton.isBordered = true
-        collapsedSidebarRevealButton.wantsLayer = true
-        collapsedSidebarRevealButton.layer?.cornerRadius = 6
-        collapsedSidebarRevealButton.layer?.backgroundColor = panelBackgroundColor.cgColor
-        collapsedSidebarRevealButton.setContentHuggingPriority(.required, for: .horizontal)
-        collapsedSidebarRevealButton.setContentCompressionResistancePriority(.required, for: .horizontal)
-        collapsedSidebarRevealButton.isHidden = !isSidebarCollapsed
-    }
-
     private func configureDocumentTabsBar() {
         documentTabsBar.wantsLayer = true
         documentTabsBar.layer?.borderWidth = 0.5
@@ -3416,20 +3387,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
     }
 
-    @objc private func handlePropertiesResizePan(_ recognizer: NSPanGestureRecognizer) {
-        guard !isSidebarCollapsed else { return }
-        if recognizer.state == .began {
-            propertiesWidthAtDragStart = sidebarContainerView?.frame.width ?? 300
-        }
-        if recognizer.state == .changed {
-            let width = min(max(propertiesWidthAtDragStart - recognizer.translation(in: splitView).x, 260), 420)
-            lastSidebarExpandedWidth = width
-            sidebarPreferredWidthConstraint?.constant = width
-            splitView.setPosition(splitView.bounds.width - width, ofDividerAt: 0)
-            view.layoutSubtreeIfNeeded()
-        }
-    }
-
     @objc func toggleSidebar() {
         guard let sidebar = sidebarContainerView else { return }
         if isSidebarCollapsed {
@@ -3450,19 +3407,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         toolSettingsSidebarToggleButton.image = NSImage(systemSymbolName: isSidebarCollapsed ? "sidebar.left" : "sidebar.right", accessibilityDescription: "Toggle Sidebar")
         toolSettingsSidebarToggleButton.toolTip = isSidebarCollapsed ? "Show Tool Settings Sidebar" : "Hide Tool Settings Sidebar"
-        if let image = NSImage(systemSymbolName: isSidebarCollapsed ? "sidebar.left" : "sidebar.right", accessibilityDescription: "Toggle Sidebar")
-            ?? NSImage(systemSymbolName: "sidebar.trailing", accessibilityDescription: "Toggle Sidebar")
-            ?? NSImage(systemSymbolName: "sidebar.leading", accessibilityDescription: "Toggle Sidebar") {
-            collapsedSidebarRevealButton.image = image
-            collapsedSidebarRevealButton.title = ""
-            collapsedSidebarRevealButton.imagePosition = .imageOnly
-        } else {
-            collapsedSidebarRevealButton.image = nil
-            collapsedSidebarRevealButton.title = isSidebarCollapsed ? ">" : "<"
-            collapsedSidebarRevealButton.imagePosition = .noImage
-        }
-        collapsedSidebarRevealButton.isHidden = !isSidebarCollapsed
-        propertiesResizeHandle.isHidden = isSidebarCollapsed
+        updatePropertiesDividerPosition()
+        view.layoutSubtreeIfNeeded()
     }
 
     func splitView(_ splitView: NSSplitView, constrainSplitPosition proposedPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
@@ -7842,9 +7788,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         emptyStateSampleButton.isEnabled = true
         pdfView.isHidden = !hasDocument
         pdfPaneSplitView.isHidden = !hasDocument
-        bookmarksContainer.isHidden = !showNavigationPane
+        bookmarksContainer.isHidden = !showNavigationPane || isNavigationCollapsed
         navigationResizeHandle.isHidden = !showNavigationPane
-        bookmarksWidthConstraint?.constant = showNavigationPane ? navigationWidth : 0
+        bookmarksWidthConstraint?.constant = showNavigationPane ? (isNavigationCollapsed ? 12 : navigationWidth) : 0
         didApplyInitialSplitLayout = false
         applySplitLayoutIfPossible(force: true)
         view.layoutSubtreeIfNeeded()
