@@ -715,7 +715,7 @@ extension MainViewController {
             return hasDocument && openDocumentURL != nil && !isPDFProcessingBusy
         case #selector(commandFlattenPDF(_:)):
             menuItem.title = "Flatten PDF…"
-            return hasDocument && openDocumentURL != nil && !isPDFFileProcessingOperation && pdfView.document.map(PDFAnnotationFlattener.canUnflatten) != true
+            return hasDocument && openDocumentURL != nil && !isPDFFileProcessingOperation && !canUnflattenCurrentDocument()
         case #selector(commandUnflattenPDF(_:)):
             menuItem.title = "Unflatten PDF…"
             return hasDocument && openDocumentURL != nil && !isPDFFileProcessingOperation

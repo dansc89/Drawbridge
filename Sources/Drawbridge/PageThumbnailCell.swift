@@ -55,12 +55,16 @@ final class PageThumbnailCell: NSTableCellView {
         if representedPage !== page { preview.image = nil }
         representedPage = page
         caption.stringValue = "\(number) · \(label)"
+        setCurrent(current)
+        toolTip = "Page \(number): \(label)"
+        setAccessibilityLabel(toolTip)
+    }
+
+    func setCurrent(_ current: Bool) {
         caption.textColor = current ? .controlAccentColor : .labelColor
         caption.font = .systemFont(ofSize: 11, weight: current ? .semibold : .regular)
         preview.layer?.borderWidth = current ? 2 : 0
         preview.layer?.borderColor = NSColor.controlAccentColor.cgColor
-        toolTip = "Page \(number): \(label)"
-        setAccessibilityLabel(toolTip)
     }
 }
 

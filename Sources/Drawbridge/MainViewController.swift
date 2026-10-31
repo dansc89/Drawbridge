@@ -1603,9 +1603,44 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         updateBookmarkSelectionPresentation()
     }
 
+    private weak var sidebarDocument: PDFDocument?
+    private weak var sidebarOutline: PDFOutline?
+    private var sidebarPageCountSnapshot = -1
+    private var sidebarRootCountSnapshot = -1
+    private(set) var sidebarReloadCount = 0
+    let recoveryAvailabilityCache = PDFRecoveryAvailabilityCache()
+
+    func canUnflattenCurrentDocument() -> Bool {
+        recoveryAvailabilityCache.canUnflatten(pdfView.document)
+    }
+
     private func refreshRulers() {
-        if showNavigationPane {
-            reloadBookmarks()
+        guard showNavigationPane else { return }
+        let document = pdfView.document
+        let root = document?.outlineRoot
+        guard sidebarDocument !== document || sidebarOutline !== root
+                || sidebarPageCountSnapshot != (document?.pageCount ?? 0)
+                || sidebarRootCountSnapshot != (root?.numberOfChildren ?? 0) else { return }
+        reloadBookmarks()
+    }
+
+    /// Page navigation changes the current-page badge, not the sidebar model.
+    /// Update existing visible cells without rebuilding tables, losing selection,
+    /// changing expansion, or requesting new thumbnail renders.
+    private func refreshSidebarCurrentPageAppearance() {
+        let pages = pagesTableView.rows(in: pagesTableView.visibleRect)
+        if pages.location != NSNotFound, pages.location < pagesTableView.numberOfRows {
+            for row in pages.location..<min(NSMaxRange(pages), pagesTableView.numberOfRows) {
+                (pagesTableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? PageThumbnailCell)?.setCurrent(isSidebarCurrentPage(row))
+            }
+        }
+        let bookmarks = bookmarksOutlineView.rows(in: bookmarksOutlineView.visibleRect)
+        if bookmarks.location != NSNotFound, bookmarks.location < bookmarksOutlineView.numberOfRows {
+            for row in bookmarks.location..<min(NSMaxRange(bookmarks), bookmarksOutlineView.numberOfRows) {
+                guard let node = bookmarksOutlineView.item(atRow: row) as? PDFOutline,
+                      let cell = bookmarksOutlineView.view(atColumn: 0, row: row, makeIfNecessary: false) as? NSTextField else { continue }
+                cell.stringValue = (bookmarkContainsCurrentPage(node) ? "● " : "  ") + displayBookmarkTitle(for: node)
+            }
         }
     }
 
@@ -1639,6 +1674,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func reloadBookmarks() {
+        sidebarDocument = pdfView.document
+        sidebarOutline = pdfView.document?.outlineRoot
+        sidebarPageCountSnapshot = pdfView.document?.pageCount ?? 0
+        sidebarRootCountSnapshot = sidebarOutline?.numberOfChildren ?? 0
+        sidebarReloadCount += 1
         let selectedPages = pagesTableView.selectedRowIndexes
         let selectedBookmarks = bookmarksOutlineView.selectedRowIndexes.compactMap { bookmarksOutlineView.item(atRow: $0) as? PDFOutline }
         defer {
@@ -5846,7 +5886,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         fitPageButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
         reduceFileSizeButton.isEnabled = pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy
         purgeLayersButton.isEnabled = pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy && !isPDFFileProcessingOperation
-        let recoverable = pdfView.document.map(PDFAnnotationFlattener.canUnflatten) ?? false
+        let recoverable = canUnflattenCurrentDocument()
         let ready = pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy && !isPDFFileProcessingOperation
         flattenPDFButton.isEnabled = ready && !recoverable
         flattenPDFButton.toolTip = recoverable ? "Flatten PDF — unflatten the existing recovery data before flattening again" : "Flatten PDF — make visible markups permanent and save this PDF"
@@ -5857,6 +5897,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func updateStatusBar() {
+        refreshRulers()
         updatePDFPaneHeaders()
         refreshFlattenButtonState()
         invertColorsButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
@@ -5885,12 +5926,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             pageJumpField.stringValue = label
             if sidebarCurrentPageIndex != index {
                 sidebarCurrentPageIndex = index
-                let selectedPages = pagesTableView.selectedRowIndexes
-                let selectedBookmarks = bookmarksOutlineView.selectedRowIndexes
-                pagesTableView.reloadData()
-                bookmarksOutlineView.reloadData()
-                pagesTableView.selectRowIndexes(selectedPages, byExtendingSelection: false)
-                bookmarksOutlineView.selectRowIndexes(selectedBookmarks, byExtendingSelection: false)
+                refreshSidebarCurrentPageAppearance()
                 if navigationModeControl.selectedSegment == 0, pagesTableView.numberOfRows > index {
                     pagesTableView.scrollRowToVisible(index)
                 }
@@ -5909,8 +5945,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             pageJumpField.stringValue = ""
             if sidebarCurrentPageIndex != -1 {
                 sidebarCurrentPageIndex = -1
-                pagesTableView.reloadData()
-                bookmarksOutlineView.reloadData()
+                refreshSidebarCurrentPageAppearance()
             }
             if pdfView.document == nil { pagesTableView.deselectAll(nil) }
             pageJumpField.isEnabled = false

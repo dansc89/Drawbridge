@@ -43,7 +43,11 @@ extension MainViewController: NSTableViewDataSource, NSTableViewDelegate {
             text = item.annotation.contents?.isEmpty == false ? item.annotation.contents! : "(No text)"
         }
 
-        let cell = NSTextField(labelWithString: text)
+        let identifier = NSUserInterfaceItemIdentifier("markup.\(columnId)")
+        let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTextField
+            ?? NSTextField(labelWithString: "")
+        cell.identifier = identifier
+        cell.stringValue = text
         cell.lineBreakMode = .byTruncatingTail
         cell.font = NSFont.systemFont(ofSize: 12)
         return cell
