@@ -456,6 +456,98 @@ final class PDFLayerPurgerTests: XCTestCase {
         XCTAssertTrue(texts.contains { $0.contains("/Artifact BMC 10 10 20 20 re f EMC") })
         XCTAssertEqual(try Data(contentsOf: source), original)
     }
+    func testUnchangedScannerReusesInputStorageAfterFullValidation() throws {
+        let input = Data(String(repeating: "q 1 0 0 1 0 0 cm (opaque /OC /L BDC) Tj Q\n", count: 4096).utf8)
+        let output = try PDFLayerPurger.unconditional(input)
+        XCTAssertEqual(output, input)
+        input.withUnsafeBytes { original in
+            output.withUnsafeBytes { result in
+                XCTAssertEqual(original.baseAddress, result.baseAddress, "Unchanged programs must return shared input storage, not assemble a copy")
+            }
+        }
+        XCTAssertThrowsError(try PDFLayerPurger.unconditional(input + Data("(unterminated".utf8)))
+        XCTAssertThrowsError(try PDFLayerPurger.unconditional(input + Data("/OC /L".utf8)))
+    }
+
+    func testMalformedOptionalContentOperandCountsFailClosed() throws {
+        for program in ["/OC BDC EMC", "/OC /L /Extra BDC EMC"] {
+            XCTAssertThrowsError(try PDFLayerPurger.unconditional(Data(program.utf8)), program)
+        }
+    }
+
+    func testDrawingBatchesAreTransformedBeforeNextBatchIsLoaded() throws {
+        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let source = try fixture(dir, contentStreams: Array(repeating: "/OC /L BDC q Q EMC", count: 1025))
+        let log = ProgressLog()
+        try PDFLayerPurger.purge(source: source, destination: dir.appendingPathComponent("batched.pdf"), progress: { log.append($0) })
+        let details = log.events.map(\.detail)
+        let firstLoaded = try XCTUnwrap(details.firstIndex(of: "Preparing drawings: 1024 of 1026 drawing sections"))
+        XCTAssertTrue(details[..<firstLoaded].contains { $0.contains("Drawings: 1024/1026") }, "The first batch must be transformed and released before reporting its completion, not retained until all batches load")
+        let firstVerified = try XCTUnwrap(details.firstIndex(of: "Verifying drawings: 1024 of 1026 drawing sections"))
+        XCTAssertTrue(details[..<firstVerified].contains { $0.contains("Verified 1024 of 1026") }, "Candidate batches must be validated before reporting their completion")
+    }
+
+    func testCancellationInterruptsAndReapsOnlyTheActivePurgeHelper() throws {
+        let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
+        let source = try fixture(dir), original = try Data(contentsOf: source)
+        let helper = dir.appendingPathComponent("slow-helper"), started = dir.appendingPathComponent("started")
+        // exec leaves no shell children behind. The marker makes cancellation
+        // deterministic: it is requested only after the helper has launched.
+        try Data("#!/bin/sh\ntrap '' TERM\nprintf '%s' $$ > '\(started.path)'\nexec /bin/sleep 30\n".utf8).write(to: helper)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+        let destination = dir.appendingPathComponent("cancelled.pdf")
+        let unrelated = Process()
+        unrelated.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        unrelated.arguments = ["30"]
+        try unrelated.run()
+        defer { unrelated.terminate(); unrelated.waitUntilExit() }
+        let began = ProcessInfo.processInfo.systemUptime
+        XCTAssertThrowsError(try PDFLayerPurger.purge(source: source, destination: destination, helper: helper, cancelled: { FileManager.default.fileExists(atPath: started.path) })) { XCTAssertTrue($0 is CancellationError, "\($0)") }
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - began, 3, "SIGTERM-ignoring helpers must be forcibly stopped after bounded grace")
+        XCTAssertTrue(unrelated.isRunning, "Cancellation must not affect another client's child")
+        let pid = try XCTUnwrap(Int32(String(decoding: Data(contentsOf: started), as: UTF8.self)))
+        XCTAssertEqual(kill(pid, 0), -1, "The owned helper must be reaped before returning")
+        XCTAssertEqual(errno, ESRCH)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
+        XCTAssertEqual(try Data(contentsOf: source), original)
+    }
+
+    func testCancellationCheckpointsCoverLongLexicalAndInlineImageRegions() throws {
+        let long = String(repeating: "a", count: 32768)
+        let programs = [
+            long + " q",
+            "(" + long + ") Tj",
+            "%" + long + "\nq",
+            "[ (" + long + ") ] TJ",
+            "<< /Value (" + long + ") >> BDC EMC",
+            "<" + String(repeating: "ab", count: 32768) + "> Tj",
+            "BI /W 1 /H 1 /BPC 8 /CS /G /F /AHx ID " + long + "> EI",
+            "BI /W 1 /H 1 /BPC 8 /CS /G /F /A85 ID " + long + "~> EI"
+        ]
+        // This compact zlib stream expands into 128 KiB: cancellation must be
+        // checked between output chunks even though encoded input is tiny.
+        let flate = Data([120, 156, 237, 193, 49, 1, 0, 0, 0, 194, 160, 245, 79, 237, 97, 13, 160])
+            + Data(repeating: 0, count: 127) + Data([110, 0, 30, 0, 1])
+        var inputs: [Data] = programs.map { Data($0.utf8) }
+        var flateProgram = Data("BI /W 131072 /H 1 /BPC 8 /CS /G /F /Fl ID ".utf8)
+        flateProgram.append(flate)
+        flateProgram.append(Data(" EI".utf8))
+        inputs.append(flateProgram)
+        for (index, input) in inputs.enumerated() {
+            for validationOnly in [false, true] {
+                var checks = 0
+                let cancelled = { checks += 1; return checks == 3 }
+                XCTAssertThrowsError(try {
+                    if validationOnly { try PDFLayerPurger.validateUnconditional(input, cancelled: cancelled) }
+                    else { _ = try PDFLayerPurger.unconditional(input, cancelled: cancelled) }
+                }()) { XCTAssertTrue($0 is CancellationError, "region \(index), validation \(validationOnly): \($0)") }
+                XCTAssertEqual(checks, 3)
+            }
+        }
+        XCTAssertThrowsError(try PDFLayerPurger.validateUnconditional(Data("/OC /L BDC q Q EMC".utf8)))
+        XCTAssertNoThrow(try PDFLayerPurger.validateUnconditional(Data("/Artifact BMC q Q EMC".utf8)))
+    }
+
     func testNoLayersRetainsPageContent() throws {
         let dir = try directory(); defer { try? FileManager.default.removeItem(at:dir) }
         let source = try fixture(dir,layered:false), out = dir.appendingPathComponent("out.pdf")

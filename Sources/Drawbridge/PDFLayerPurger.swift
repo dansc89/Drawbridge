@@ -9,11 +9,47 @@ enum PDFLayerPurger {
         var completed: Int? = nil
         var total: Int? = nil
     }
-    static func inspect(_ url: URL, includeStreamData: Bool = true, helper: URL? = PDFTKBookmarkWriter.executableURL()) throws -> [String: Any] {
+    /// Cancellation is scoped to this invocation's child, never other qpdf clients.
+    /// Polling avoids a termination-handler/run-loop dependency on the calling queue.
+    private static func run(_ executable: URL, arguments: [String], cancelled: () -> Bool) throws -> Bool {
+        if cancelled() { throw CancellationError() }
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        // Check again immediately before launch, including cancellation during setup.
+        if cancelled() { throw CancellationError() }
+        do { try process.run() }
+        catch {
+            if cancelled() { throw CancellationError() }
+            return false
+        }
+        var wasCancelled = cancelled()
+        while process.isRunning {
+            if wasCancelled || cancelled() {
+                wasCancelled = true
+                process.terminate()
+                let deadline = ProcessInfo.processInfo.systemUptime + 0.2
+                while process.isRunning && ProcessInfo.processInfo.systemUptime < deadline {
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
+                if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) }
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        // Always reap our child before throwing or releasing staging files.
+        process.waitUntilExit()
+        if wasCancelled || cancelled() { throw CancellationError() }
+        return process.terminationStatus == 0 || process.terminationStatus == 3
+    }
+
+    static func inspect(_ url: URL, includeStreamData: Bool = true, helper: URL? = PDFTKBookmarkWriter.executableURL(), cancelled: () -> Bool = { false }) throws -> [String: Any] {
         guard let helper else { throw CocoaError(.featureUnsupported) }
         let json = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
         defer { try? FileManager.default.removeItem(at: json) }
-        guard PDFTKBookmarkWriter.run(helper, arguments: ["--json=2", "--json-stream-data=\(includeStreamData ? "inline" : "none")", "--decode-level=\(includeStreamData ? "generalized" : "none")", url.path, json.path]),
+        guard try run(helper, arguments: ["--json=2", "--json-stream-data=\(includeStreamData ? "inline" : "none")", "--decode-level=\(includeStreamData ? "generalized" : "none")", url.path, json.path], cancelled: cancelled),
               let result = try JSONSerialization.jsonObject(with: Data(contentsOf: json)) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
         return result
     }
@@ -33,7 +69,7 @@ enum PDFLayerPurger {
         try FileManager.default.copyItem(at: source, to: input)
         let original = try Data(contentsOf: input, options: .mappedIfSafe)
         progress(Progress(detail: "Reading page and layer information…"))
-        var json = try inspect(input, includeStreamData: false, helper: helper)
+        var json = try inspect(input, includeStreamData: false, helper: helper, cancelled: cancelled)
         guard (json["encrypt"] as? [String: Any])?["encrypted"] as? Bool != true,
               var tables = json["qpdf"] as? [[String: Any]], tables.count == 2 else { throw CocoaError(.fileReadCorruptFile) }
         var objects = tables[1]
@@ -54,9 +90,10 @@ enum PDFLayerPurger {
         }
         // Request payloads only for executable streams. Embedded image/font data
         // stays in the source PDF instead of passing through base64 JSON twice.
-        func drawingStreams(_ url: URL, keys: Set<String>, phase: String) throws -> [String: Data] {
-            let sorted = keys.sorted();var result: [String: Data] = [:]
+        func drawingStreams(_ url: URL, keys: Set<String>, phase: String, consume: (String, Data, Int) throws -> Void) throws {
+            let sorted = keys.sorted()
             for start in stride(from: 0, to: sorted.count, by: 1024) {
+                try autoreleasepool {
                 try check()
                 let batch = Array(sorted[start..<min(start + 1024, sorted.count)])
                 let jsonURL = directory.appendingPathComponent("drawing-streams.json")
@@ -67,23 +104,25 @@ enum PDFLayerPurger {
                     args.append("--json-object=\(parts[0]),\(parts[1])")
                 }
                 args += [url.path, jsonURL.path]
-                guard PDFTKBookmarkWriter.run(helper, arguments: args),
+                guard try run(helper, arguments: args, cancelled: cancelled),
                       let selected = try JSONSerialization.jsonObject(with: Data(contentsOf: jsonURL)) as? [String: Any],
                       let selectedObjects = (selected["qpdf"] as? [[String: Any]])?.last else { throw CocoaError(.fileReadCorruptFile) }
-                for key in batch {
+                for (offset, key) in batch.enumerated() {
+                    try check()
                     guard let stream = (selectedObjects[key] as? [String: Any])?["stream"] as? [String: Any],
                           let encoded = stream["data"] as? String, let data = Data(base64Encoded: encoded) else { throw CocoaError(.fileReadCorruptFile) }
-                    result[key] = data
+                    // One decoded original at a time. Only changed base64 payloads
+                    // survive this callback in the metadata patch.
+                    try consume(key, data, start + offset + 1)
                 }
                 let done = min(start + batch.count, sorted.count)
                 progress(Progress(detail: "\(phase): \(done) of \(sorted.count) drawing sections", completed: done, total: sorted.count))
+                }
             }
-            return result
         }
         let layerTotal = groups.count
         progress(Progress(detail: "Found \(layerTotal) layer controls across \((json["pages"] as? [Any])?.count ?? 0) pages"))
-        let decoded = try drawingStreams(input, keys: content, phase: "Preparing drawings")
-        var layersPrepared = 0, streamsProcessed = 0
+        var layersPrepared = 0
         func clean(_ value: Any) -> Any {
             if let dictionary = value as? [String: Any] {
                 var result: [String: Any] = [:]
@@ -102,31 +141,33 @@ enum PDFLayerPurger {
             let value = objects[key]!
             if groups.contains(String(key.dropFirst(4))) { objects[key] = ["value": NSNull()]; layersPrepared += 1 }
             else {
-            var entry = clean(value) as! [String: Any]
-            if content.contains(key), var stream = entry["stream"] as? [String: Any] {
-                guard let data = decoded[key] else { throw CocoaError(.fileReadCorruptFile) }
-                streamsProcessed += 1
-                let changed = try unconditional(data)
-                if changed != data {
-                    var dictionary = stream["dict"] as? [String: Any] ?? [:]
-                    dictionary.removeValue(forKey: "/Filter"); dictionary.removeValue(forKey: "/DecodeParms"); dictionary.removeValue(forKey: "/Length")
-                    stream["dict"] = dictionary; stream["data"] = changed.base64EncodedString(); entry["stream"] = stream
-                }
-            }
-            objects[key] = entry
+            objects[key] = clean(value)
             }
             if index % 128 == 0 || index + 1 == objectKeys.count {
-                progress(Progress(detail: "Layer controls: \(layersPrepared)/\(layerTotal) · Drawings: \(streamsProcessed)/\(content.count)", completed: index + 1, total: objectKeys.count))
+                progress(Progress(detail: "Preparing layer controls: \(layersPrepared)/\(layerTotal)", completed: index + 1, total: objectKeys.count))
+            }
+        }
+        try drawingStreams(input, keys: content, phase: "Preparing drawings") { key, data, done in
+            guard var entry = objects[key] as? [String: Any], var stream = entry["stream"] as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
+            let changed = try unconditional(data, cancelled: cancelled)
+            if changed != data {
+                var dictionary = stream["dict"] as? [String: Any] ?? [:]
+                dictionary.removeValue(forKey: "/Filter"); dictionary.removeValue(forKey: "/DecodeParms"); dictionary.removeValue(forKey: "/Length")
+                stream["dict"] = dictionary; stream["data"] = changed.base64EncodedString(); entry["stream"] = stream
+                objects[key] = entry
+            }
+            if done % 128 == 0 || done == content.count {
+                progress(Progress(detail: "Layer controls: \(layersPrepared)/\(layerTotal) · Drawings: \(done)/\(content.count)", completed: done, total: content.count))
             }
         }
         tables[1] = objects; json["qpdf"] = tables
         try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys, .withoutEscapingSlashes]).write(to: patch)
         try check()
         progress(Progress(detail: "Writing the working copy; verifying before saving…"))
-        guard PDFTKBookmarkWriter.run(helper, arguments: [input.path, "--update-from-json=" + patch.path, candidate.path]),
-              PDFTKBookmarkWriter.run(helper, arguments: ["--check", candidate.path]) else { throw CocoaError(.fileWriteUnknown) }
+        guard try run(helper, arguments: [input.path, "--update-from-json=" + patch.path, candidate.path], cancelled: cancelled),
+              try run(helper, arguments: ["--check", candidate.path], cancelled: cancelled) else { throw CocoaError(.fileWriteUnknown) }
         progress(Progress(detail: "Verifying page count and removed layer controls…"))
-        let verified = try inspect(candidate, includeStreamData: false, helper: helper)
+        let verified = try inspect(candidate, includeStreamData: false, helper: helper, cancelled: cancelled)
         guard (verified["pages"] as? [Any])?.count == (json["pages"] as? [Any])?.count else { throw CocoaError(.fileReadCorruptFile) }
         // Assert no serialized optional-content graph survives the rewrite.
         func hasOC(_ value: Any) -> Bool {
@@ -147,12 +188,11 @@ enum PDFLayerPurger {
             if let stream = entry["stream"] as? [String: Any], let dictionary = stream["dict"] as? [String: Any],
                dictionary["/Subtype"] as? String == "/Form" || dictionary["/PatternType"] as? Int == 1 { content.insert(key) }
         }
-        let verifiedStreams = try drawingStreams(candidate, keys: content, phase: "Verifying drawings")
-        for (index, key) in content.sorted().enumerated() {
+        try drawingStreams(candidate, keys: content, phase: "Verifying drawings") { _, data, done in
             try check()
-            guard let data = verifiedStreams[key], try unconditional(data) == data else { throw CocoaError(.fileReadCorruptFile) }
-            if index % 128 == 0 || index + 1 == content.count {
-                progress(Progress(detail: "Verified \(index + 1) of \(content.count) drawing sections; no layer controls remain", completed: index + 1, total: content.count))
+            try validateUnconditional(data, cancelled: cancelled)
+            if done % 128 == 0 || done == content.count {
+                progress(Progress(detail: "Verified \(done) of \(content.count) drawing sections; no layer controls remain", completed: done, total: content.count))
             }
         }
         progress(Progress(detail: "Verification complete; saving the purged PDF…"))
@@ -162,26 +202,25 @@ enum PDFLayerPurger {
 
     /// Find the zlib endpoint without retaining decoded pixels or changing encoded
     /// bytes. Neither EI-looking bytes nor predictor parameters delimit this stream.
-    private static func flateEncodedLength(_ bytes: [UInt8], startingAt offset: Int) throws -> Int {
+    private static func flateEncodedLength(_ bytes: UnsafeBufferPointer<UInt8>, startingAt offset: Int, cancelled: () -> Bool) throws -> Int {
         guard offset < bytes.count, bytes.count - offset <= Int(UInt32.max) else { throw CocoaError(.fileReadCorruptFile) }
         var stream = z_stream()
         guard inflateInit_(&stream, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else { throw CocoaError(.fileReadCorruptFile) }
         defer { inflateEnd(&stream) }
         var scratch = [UInt8](repeating: 0, count: 32768)
-        return try bytes.withUnsafeBufferPointer { input in
-            stream.next_in = UnsafeMutablePointer(mutating: input.baseAddress! + offset)
-            stream.avail_in = UInt32(bytes.count - offset)
-            return try scratch.withUnsafeMutableBufferPointer { output in
-                while true {
-                    stream.next_out = output.baseAddress!
-                    stream.avail_out = UInt32(output.count)
-                    let before = stream.total_in
-                    let status = inflate(&stream, Z_NO_FLUSH)
-                    // Bound work on corrupt or malicious compressed image data.
-                    guard stream.total_out <= 512 * 1024 * 1024 else { throw CocoaError(.fileReadCorruptFile) }
-                    if status == Z_STREAM_END { return Int(stream.total_in) }
-                    guard status == Z_OK, stream.total_in > before || stream.avail_out == 0 else { throw CocoaError(.fileReadCorruptFile) }
-                }
+        stream.next_in = UnsafeMutablePointer(mutating: bytes.baseAddress! + offset)
+        stream.avail_in = UInt32(bytes.count - offset)
+        return try scratch.withUnsafeMutableBufferPointer { output in
+            while true {
+                if cancelled() { throw CancellationError() }
+                stream.next_out = output.baseAddress!
+                stream.avail_out = UInt32(output.count)
+                let before = stream.total_in
+                let status = inflate(&stream, Z_NO_FLUSH)
+                // Bound work on corrupt or malicious compressed image data.
+                guard stream.total_out <= 512 * 1024 * 1024 else { throw CocoaError(.fileReadCorruptFile) }
+                if status == Z_STREAM_END { return Int(stream.total_in) }
+                guard status == Z_OK, stream.total_in > before || stream.avail_out == 0 else { throw CocoaError(.fileReadCorruptFile) }
             }
         }
     }
@@ -189,16 +228,90 @@ enum PDFLayerPurger {
     /// Lexical PDF scanner: strings, names and composite operands are opaque.
     /// Optional-content BDC is replaced by a neutral BMC; its EMC stays balanced.
     /// Inline-image payloads are opaque; unsupported encodings fail closed.
-    static func unconditional(_ data: Data, removingXObjects: Set<String>? = nil) throws -> Data {
+    static func unconditional(_ data: Data, removingXObjects: Set<String>? = nil, cancelled: () -> Bool = { false }) throws -> Data {
+        try scan(data, removingXObjects: removingXObjects, validationOnly: false, cancelled: cancelled)
+    }
+
+    /// Validation shares the complete lexer, but never constructs rewritten bytes.
+    static func validateUnconditional(_ data: Data, cancelled: () -> Bool = { false }) throws {
+        _ = try scan(data, removingXObjects: nil, validationOnly: true, cancelled: cancelled)
+    }
+
+    private static func scan(_ data: Data, removingXObjects: Set<String>?, validationOnly: Bool, cancelled: () -> Bool) throws -> Data {
+        try data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Data in
+        let bytes = raw.bindMemory(to: UInt8.self)
         var removed: [String:Int] = [:]
-        let bytes = [UInt8](data); var i = 0, operands: [(String, Int)] = [], replacements: [(Range<Int>, [UInt8])] = []
+        var i = 0, operands: [(Range<Int>, Int)] = [], replacements: [(Range<Int>, [UInt8])] = []
+        var nextCheckpoint = 0
+        func checkpoint() throws {
+            if i >= nextCheckpoint {
+                if cancelled() { throw CancellationError() }
+                nextCheckpoint = i + 4096
+            }
+        }
+        func hex(_ c: UInt8) -> UInt8? {
+            switch c {
+            case 48...57: return c - 48
+            case 65...70: return c - 65 + 10
+            case 97...102: return c - 97 + 10
+            default: return nil
+            }
+        }
+        // Operators compare byte ranges directly. Only inline-image dictionary
+        // values and explicitly targeted XObject names need materialized text.
+        func matches(_ range: Range<Int>, _ expected: StaticString) -> Bool {
+            expected.withUTF8Buffer { target in
+                var cursor = range.lowerBound, index = 0
+                while cursor < range.upperBound {
+                    var byte = bytes[cursor]; cursor += 1
+                    if bytes[range.lowerBound] == 47 && byte == 35 {
+                        guard cursor + 1 < range.upperBound, let high = hex(bytes[cursor]), let low = hex(bytes[cursor + 1]) else { return false }
+                        byte = high * 16 + low; cursor += 2
+                    }
+                    guard index < target.count, target[index] == byte else { return false }
+                    index += 1
+                }
+                return index == target.count
+            }
+        }
+        func text(_ range: Range<Int>) -> String {
+            guard bytes[range.lowerBound] == 47, bytes[range].contains(35) else { return String(decoding: bytes[range], as: UTF8.self) }
+            var decoded: [UInt8] = [], cursor = range.lowerBound
+            while cursor < range.upperBound {
+                if bytes[cursor] == 35, let high = hex(bytes[cursor + 1]), let low = hex(bytes[cursor + 2]) {
+                    decoded.append(high * 16 + low); cursor += 3
+                } else { decoded.append(bytes[cursor]); cursor += 1 }
+            }
+            return String(decoding: decoded, as: UTF8.self)
+        }
+        func number(_ range: Range<Int>) -> Bool {
+            var digit = false, dot = false
+            for cursor in range {
+                let c = bytes[cursor]
+                if (48...57).contains(c) { digit = true }
+                else if c == 46 && !dot { dot = true }
+                else if (c == 43 || c == 45) && cursor == range.lowerBound { continue }
+                else { return false }
+            }
+            return digit
+        }
         func whitespace(_ c: UInt8) -> Bool { [0, 9, 10, 12, 13, 32].contains(c) }
         func delimiter(_ c: UInt8) -> Bool { whitespace(c) || [40,41,60,62,91,93,123,125,47,37].contains(c) }
-        func token() throws -> (String, Int) {
+        func skipSpace() throws {
+            while i < bytes.count {
+                try checkpoint()
+                if whitespace(bytes[i]) { i += 1 }
+                else if bytes[i] == 37 {
+                    while i < bytes.count && bytes[i] != 10 && bytes[i] != 13 { try checkpoint(); i += 1 }
+                } else { break }
+            }
+        }
+        func token() throws -> (Range<Int>, Int) {
             let start = i
             if bytes[i] == 40 {
                 i += 1; var depth = 1
                 while i < bytes.count && depth > 0 {
+                    try checkpoint()
                     if bytes[i] == 92 { i = min(i + 2, bytes.count); continue }
                     if bytes[i] == 40 { depth += 1 }; if bytes[i] == 41 { depth -= 1 }; i += 1
                 }
@@ -206,62 +319,50 @@ enum PDFLayerPurger {
             } else if bytes[i] == 91 || (bytes[i] == 60 && i + 1 < bytes.count && bytes[i+1] == 60) {
                 let array = bytes[i] == 91; i += array ? 1 : 2
                 while i < bytes.count {
-                    if whitespace(bytes[i]) { i += 1; continue }
-                    if bytes[i] == 37 { while i < bytes.count && bytes[i] != 10 && bytes[i] != 13 { i += 1 }; continue }
-                    if array && bytes[i] == 93 { i += 1; return (String(decoding:bytes[start..<i],as:UTF8.self),start) }
-                    if !array && bytes[i] == 62 && i+1 < bytes.count && bytes[i+1] == 62 { i += 2; return (String(decoding:bytes[start..<i],as:UTF8.self),start) }
+                    try skipSpace()
+                    guard i < bytes.count else { break }
+                    if array && bytes[i] == 93 { i += 1; return (start..<i,start) }
+                    if !array && bytes[i] == 62 && i+1 < bytes.count && bytes[i+1] == 62 { i += 2; return (start..<i,start) }
                     _ = try token()
                 }
                 throw CocoaError(.fileReadCorruptFile)
             } else if bytes[i] == 60 {
-                i += 1; while i < bytes.count && bytes[i] != 62 { i += 1 }; guard i < bytes.count else { throw CocoaError(.fileReadCorruptFile) }; i += 1
+                i += 1
+                while i < bytes.count && bytes[i] != 62 { try checkpoint(); i += 1 }
+                guard i < bytes.count else { throw CocoaError(.fileReadCorruptFile) }; i += 1
             } else {
-                i += 1; while i < bytes.count && !delimiter(bytes[i]) { i += 1 }
+                i += 1
+                while i < bytes.count && !delimiter(bytes[i]) { try checkpoint(); i += 1 }
             }
-            // PDF name escapes are hexadecimal bytes, not case-sensitive text substitutions.
+            // Validate every name escape, including names inside composite operands.
+            // No decoded name buffer is needed merely to compare /OC.
             if bytes[start] == 47 {
-                func hex(_ c: UInt8) -> UInt8? {
-                    switch c {
-                    case 48...57: return c - 48
-                    case 65...70: return c - 65 + 10
-                    case 97...102: return c - 97 + 10
-                    default: return nil
-                    }
-                }
-                var decoded: [UInt8] = [], cursor = start
+                var cursor = start
                 while cursor < i {
                     if bytes[cursor] == 35 {
-                        guard cursor + 2 < i, let high = hex(bytes[cursor + 1]), let low = hex(bytes[cursor + 2]) else { throw CocoaError(.fileReadCorruptFile) }
-                        decoded.append(high * 16 + low); cursor += 3
-                    } else { decoded.append(bytes[cursor]); cursor += 1 }
+                        guard cursor + 2 < i, hex(bytes[cursor + 1]) != nil, hex(bytes[cursor + 2]) != nil else { throw CocoaError(.fileReadCorruptFile) }
+                        cursor += 3
+                    } else { cursor += 1 }
                 }
-                return (String(decoding: decoded, as: UTF8.self), start)
             }
-            return (String(decoding:bytes[start..<i],as:UTF8.self),start)
+            return (start..<i,start)
         }
         while i < bytes.count {
-            if whitespace(bytes[i]) { i += 1; continue }
-            if bytes[i] == 37 { while i < bytes.count && bytes[i] != 10 && bytes[i] != 13 { i += 1 }; continue }
-            let (text,start) = try token()
-            let first = text.utf8.first ?? 0
-            if first == 47 || first == 40 || first == 60 || first == 91 || Double(text) != nil || ["true","false","null"].contains(text) { operands.append((text,start)); continue }
-            if text == "BI" {
+            try skipSpace()
+            guard i < bytes.count else { break }
+            let (range,start) = try token()
+            let first = bytes[start]
+            if first == 47 || first == 40 || first == 60 || first == 91 || number(range) || matches(range, "true") || matches(range, "false") || matches(range, "null") { operands.append((range,start)); continue }
+            if matches(range, "BI") {
                 guard operands.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
-                func skipSpace() {
-                    while i < bytes.count {
-                        if whitespace(bytes[i]) { i += 1 }
-                        else if bytes[i] == 37 { while i < bytes.count && bytes[i] != 10 && bytes[i] != 13 { i += 1 } }
-                        else { break }
-                    }
-                }
                 var dictionary: [String:String] = [:]
                 while true {
-                    skipSpace(); guard i < bytes.count else { throw CocoaError(.fileReadCorruptFile) }
-                    let key = try token().0
+                    try skipSpace(); guard i < bytes.count else { throw CocoaError(.fileReadCorruptFile) }
+                    let key = text(try token().0)
                     if key == "ID" { break }
                     guard key.hasPrefix("/") else { throw CocoaError(.fileReadCorruptFile) }
-                    skipSpace(); guard i < bytes.count else { throw CocoaError(.fileReadCorruptFile) }
-                    dictionary[key] = try token().0
+                    try skipSpace(); guard i < bytes.count else { throw CocoaError(.fileReadCorruptFile) }
+                    dictionary[key] = text(try token().0)
                 }
                 guard i < bytes.count, whitespace(bytes[i]) else { throw CocoaError(.fileReadCorruptFile) }
                 let separator = bytes[i]; i += 1
@@ -272,15 +373,16 @@ enum PDFLayerPurger {
                     let outer = filter.trimmingCharacters(in: CharacterSet(charactersIn: "[] \r\n\t")).split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
                     if ["/AHx", "/ASCIIHexDecode"].contains(outer) {
                         while i < bytes.count && bytes[i] != 62 {
+                            try checkpoint()
                             guard whitespace(bytes[i]) || (48...57).contains(bytes[i]) || (65...70).contains(bytes[i]) || (97...102).contains(bytes[i]) else { throw CocoaError(.fileReadCorruptFile) }
                             i += 1
                         }
                         guard i < bytes.count else { throw CocoaError(.fileReadCorruptFile) }; i += 1
                     } else if ["/A85", "/ASCII85Decode"].contains(outer) {
-                        while i + 1 < bytes.count && !(bytes[i] == 126 && bytes[i+1] == 62) { i += 1 }
+                        while i + 1 < bytes.count && !(bytes[i] == 126 && bytes[i+1] == 62) { try checkpoint(); i += 1 }
                         guard i + 1 < bytes.count else { throw CocoaError(.fileReadCorruptFile) }; i += 2
                     } else if ["/Fl", "/FlateDecode"].contains(outer) {
-                        i += try flateEncodedLength(bytes, startingAt: i)
+                        i += try flateEncodedLength(bytes, startingAt: i, cancelled: cancelled)
                     } else {
                         throw NSError(domain: "DrawbridgePurge", code: 4, userInfo: [NSLocalizedDescriptionKey: "An inline image uses an unsupported encoding (\(outer)). No changes were saved."])
                     }
@@ -298,15 +400,16 @@ enum PDFLayerPurger {
                     i += row * height
                 }
                 guard i < bytes.count, whitespace(bytes[i]) else { throw CocoaError(.fileReadCorruptFile) }
-                skipSpace()
-                guard i < bytes.count, try token().0 == "EI" else { throw CocoaError(.fileReadCorruptFile) }
+                try skipSpace()
+                guard i < bytes.count, matches(try token().0, "EI") else { throw CocoaError(.fileReadCorruptFile) }
                 continue
             }
-            if removingXObjects == nil, text == "BDC", operands.count == 2, operands[0].0 == "/OC" {
+            if removingXObjects == nil, matches(range, "BDC"), let tag = operands.first, matches(tag.0, "/OC") {
+                guard operands.count == 2, !validationOnly else { throw CocoaError(.fileReadCorruptFile) }
                 replacements.append((operands[0].1..<i, Array("/Artifact BMC".utf8)))
             }
-            if text == "Do", operands.count == 1, removingXObjects?.contains(operands[0].0) == true {
-                removed[operands[0].0, default:0] += 1
+            if matches(range, "Do"), operands.count == 1, let names = removingXObjects, names.contains(text(operands[0].0)) {
+                removed[text(operands[0].0), default:0] += 1
                 replacements.append((operands[0].1..<i, []))
             }
             operands.removeAll(keepingCapacity:true)
@@ -320,6 +423,7 @@ enum PDFLayerPurger {
         }
         // Build once in source order; repeated middle-of-buffer replacement is
         // quadratic on drawing sections with thousands of optional-content tags.
+        guard !replacements.isEmpty else { return data }
         var result = Data();result.reserveCapacity(bytes.count)
         var cursor = 0
         for (range,replacement) in replacements {
@@ -328,5 +432,6 @@ enum PDFLayerPurger {
         }
         result.append(contentsOf: bytes[cursor..<bytes.count])
         return result
+        }
     }
 }
