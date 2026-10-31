@@ -779,6 +779,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var openDocumentURL: URL? { didSet { pdfView.rectangleMarkup.rememberSource(openDocumentURL) } }
     var sessionDocumentURLs: [URL] = []
     let documentTabCache = DocumentTabCache()
+    var readingPositionStore = SavedReadingPositionStore()
     private var tabViewStates: [URL: MarkupPDFView.TabViewState] = [:]
     private var tabSearchQueries: [URL: String] = [:]
     var autosaveURL: URL?
@@ -5358,6 +5359,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     func openDocument(at url: URL) {
         guard !isSwitchingDocument else { return }
         guard !isPDFProcessingBusy else { NSSound.beep(); return }
+        rememberReadingPositions()
         let target = canonicalDocumentURL(url)
         if focusVisibleSplitDocument(target) { return }
         if retainsSplitDocumentSessions, let retained = splitDocumentSessions[target],
@@ -5462,7 +5464,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         // A replacement document can inherit a scroll offset beyond its last
         // page. Establish a visible page before refreshing navigation/chrome.
-        if let state = tabViewStates[normalizedURL], pdfView.restoreTabViewState(state) {
+        if let state = tabViewStates[normalizedURL] ?? readingPositionStore.load(for: url, document: document), pdfView.restoreTabViewState(state) {
             // Restoring directly avoids laying out and fitting the first sheet
             // before immediately laying out the user's previous sheet again.
         } else if let firstPage = document.page(at: 0) {
@@ -5523,6 +5525,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func unregisterSessionDocument(_ url: URL) {
+        rememberReadingPositions()
         let normalized = canonicalDocumentURL(url)
         sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == normalized }
         documentTabCache.remove(normalized)
@@ -5537,6 +5540,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func clearToStartState() {
+        rememberReadingPositions()
         splitDocumentSessions.removeAll()
         retainsSplitDocumentSessions = false
         documentTabCache.removeAll()
@@ -7856,6 +7860,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func confirmAllDocumentsForClose() -> Bool {
+        rememberReadingPositions()
         guard !isPDFProcessingBusy else { NSSound.beep(); return false }
         if !retainsSplitDocumentSessions { return confirmDiscardUnsavedChangesIfNeeded() }
         retainActiveSplitSession()
@@ -7892,4 +7897,23 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         return false
     }
 
+}
+
+extension MainViewController {
+    /// The focused pane wins when two panes show the same PDF. Other documents
+    /// retain their own independent positions, including hidden editing sessions.
+    func rememberReadingPositions() {
+        for session in splitDocumentSessions.values {
+            if let state = session.viewport { readingPositionStore.save(state, for: session.url, document: session.document) }
+        }
+        if let peer = secondaryPDFView, let document = peer.document,
+           document !== pdfView.document,
+           let session = splitDocumentSessions.values.first(where: { $0.document === document }),
+           let state = peer.captureTabViewState() {
+            readingPositionStore.save(state, for: session.url, document: document)
+        }
+        if let url = openDocumentURL, let document = pdfView.document, let state = pdfView.captureTabViewState() {
+            readingPositionStore.save(state, for: url, document: document)
+        }
+    }
 }
