@@ -2,7 +2,7 @@ import AppKit
 import PDFKit
 
 @MainActor
-private final class DrawingScaleForm: NSView {
+final class DrawingScaleForm: NSView {
     let preset = NSPopUpButton()
     let paper = NSTextField(string: "1/8")
     let real = NSTextField(string: "1")
@@ -10,24 +10,40 @@ private final class DrawingScaleForm: NSView {
     let scope = NSPopUpButton()
     let currentPage: Int
     let pageCount: Int
+    let document: PDFDocument
+    let capturedPages: [PDFPage]
+    let selectedPageIndices: [Int]
+    // Reject any structural change: even Current/All/Custom must refer to the
+    // sheets shown when the modal opened, never replacement sheets at old indices.
+    func matches(_ document: PDFDocument) -> Bool {
+        self.document === document && document.pageCount == capturedPages.count &&
+            capturedPages.enumerated().allSatisfy { document.page(at: $0.offset) === $0.element }
+    }
     var pageIndices: [Int]? {
         switch scope.indexOfSelectedItem {
         case 0: return [currentPage]
         case 1: return Array(0..<pageCount)
-        default: return MeasurementGeometry.pages(pages.stringValue, count: pageCount)
+        case 2: return MeasurementGeometry.pages(pages.stringValue, count: pageCount)
+        case 3: return selectedPageIndices.isEmpty ? nil : selectedPageIndices
+        default: return nil
         }
     }
     let presets: [(String, DrawingScale)]
-    init(presets: [(String, DrawingScale)], current: DrawingScale?, pageText: String, currentPage: Int, pageCount: Int) {
+    init(presets: [(String, DrawingScale)], current: DrawingScale?, pageText: String, currentPage: Int, document: PDFDocument, selectedPageIndices: [Int], selectedRowCount: Int) {
+        self.document = document
+        self.capturedPages = (0..<document.pageCount).compactMap { document.page(at: $0) }
+        self.selectedPageIndices = selectedPageIndices
         self.presets = presets
-        self.currentPage = currentPage; self.pageCount = pageCount
+        self.currentPage = currentPage; self.pageCount = document.pageCount
         super.init(frame: CGRect(x: 0, y: 0, width: 420, height: 195))
         preset.addItems(withTitles: presets.map(\.0) + ["Custom architectural scale…"])
         let selected = presets.firstIndex { $0.1 == current } ?? presets.firstIndex { abs($0.1.unitsPerPoint - (current?.unitsPerPoint ?? 1.0/9)) < max($0.1.unitsPerPoint, 1e-9) * 1e-6 && $0.1.unit == (current?.unit ?? "ft") }
         preset.selectItem(at: selected ?? presets.count)
         if let current, current.unit == "ft" { paper.stringValue = String(format: "%.8g", 1 / (72 * current.unitsPerPoint)) }
-        scope.addItems(withTitles: ["Current page (\(currentPage + 1))", "All pages (1-\(pageCount))", "Custom range"])
-        scope.selectItem(at: pageText == String(currentPage + 1) ? 0 : 2)
+        scope.addItems(withTitles: ["Current page (\(currentPage + 1))", "All pages (1-\(pageCount))", "Custom range", "Selected Pages (\(selectedPageIndices.count))"])
+        scope.autoenablesItems = false
+        scope.item(at: 3)?.isEnabled = !selectedPageIndices.isEmpty
+        scope.selectItem(at: selectedRowCount > 1 && !selectedPageIndices.isEmpty ? 3 : 0)
         scope.setAccessibilityLabel("Scale page scope")
         scope.target = self; scope.action = #selector(changed)
         pages.stringValue = pageText
@@ -61,24 +77,63 @@ private final class DrawingScaleForm: NSView {
 
 @MainActor
 extension MainViewController {
-    @objc func commandSetPageDrawingScale(_ sender: Any?) {
-        guard pdfView.rectangleMarkup.canEdit(), let document = pdfView.document, let page = pdfView.currentPage else { beep(); return }
-        pdfView.rectangleMarkup.finishTextEditing()
-        pdfView.rectangleMarkup.cancelGesture()
+    func makeDrawingScaleForm() -> DrawingScaleForm? {
+        guard let document = pdfView.document, let page = pdfView.currentPage else { return nil }
         let architectural = drawingScalePresets.compactMap { preset -> (String,DrawingScale)? in
             DrawingScale.architectural(inches: preset.drawingInches, feet: preset.realFeet, name: preset.label).map { (preset.label, $0) }
         }
         let metric = [20.0,50,100,200,500].compactMap { DrawingScale.metric(ratio: $0).map { ($0.name + " (metric)", $0) } }
         let current = document.index(for: page)
-        let selected = pagesTableView.selectedRowIndexes
+        guard current != NSNotFound else { return nil }
+        // changeNavigationMode publishes the active tab through these scroll-view
+        // visibility flags. Do not use firstResponder (a menu/toolbar changes it)
+        // or isHiddenOrHasHiddenAncestor (the whole sidebar may be collapsed).
+        let selected: [Int]
+        let selectedRowCount: Int
+        if pagesTableView.enclosingScrollView?.isHidden == false {
+            selectedRowCount = pagesTableView.selectedRowIndexes.count
+            selected = pagesTableView.selectedRowIndexes.filter { (0..<document.pageCount).contains($0) }
+        } else if bookmarksOutlineView.enclosingScrollView?.isHidden == false {
+            selectedRowCount = bookmarksOutlineView.selectedRowIndexes.count
+            selected = Array(Set(bookmarksOutlineView.selectedRowIndexes.compactMap { row -> Int? in
+                guard let outline = bookmarksOutlineView.item(atRow: row) as? PDFOutline,
+                      let destination = outline.destination ?? (outline.action as? PDFActionGoTo)?.destination,
+                      let target = destination.page else { return nil }
+                let index = document.index(for: target)
+                guard index != NSNotFound, (0..<document.pageCount).contains(index),
+                      document.page(at: index) === target else { return nil }
+                // A destinationless group deliberately does not inherit a child's page.
+                return index
+            })).sorted()
+        } else {
+            selectedRowCount = 0
+            selected = []
+        }
         let numbers = selected.count > 1 ? selected.map { String($0+1) }.joined(separator: ", ") : String(current+1)
-        let form = DrawingScaleForm(presets: architectural+metric, current: MeasurementMetadata.scale(on: page), pageText: numbers, currentPage: current, pageCount: document.pageCount)
+        return DrawingScaleForm(presets: architectural+metric, current: MeasurementMetadata.scale(on: page), pageText: numbers, currentPage: current, document: document, selectedPageIndices: selected, selectedRowCount: selectedRowCount)
+    }
+    @discardableResult
+    func applyDrawingScaleForm(_ form: DrawingScaleForm) -> Bool {
+        guard pdfView.rectangleMarkup.canEdit(), let document = pdfView.document,
+              form.matches(document), let scale = form.scale, let indices = form.pageIndices,
+              !indices.isEmpty, indices.allSatisfy({ form.capturedPages.indices.contains($0) }) else { return false }
+        let pages = indices.map { form.capturedPages[$0] }
+        guard pages.allSatisfy(MeasurementMetadata.supportedPage) else { return false }
+        pdfView.rectangleMarkup.applyDrawingScale(scale, to: pages)
+        refreshMeasurementScaleDisplay()
+        return true
+    }
+    @objc func commandSetPageDrawingScale(_ sender: Any?) {
+        guard pdfView.rectangleMarkup.canEdit(), let document = pdfView.document, pdfView.currentPage != nil else { beep(); return }
+        pdfView.rectangleMarkup.finishTextEditing()
+        pdfView.rectangleMarkup.cancelGesture()
+        guard let form = makeDrawingScaleForm() else { return }
         let alert = NSAlert(); alert.messageText = "Set Drawing Scale"
         alert.informativeText = "Apply a scale to one or several sheets. Existing measurements on these pages will be recalculated."
         alert.accessoryView = form; alert.addButton(withTitle: "Apply Scale"); alert.addButton(withTitle: "Cancel")
         while alert.runModal() == .alertFirstButtonReturn {
-            guard pdfView.document === document else { return }
-            guard let scale = form.scale, let indices = form.pageIndices else {
+            guard pdfView.document === document, form.matches(document), pdfView.rectangleMarkup.canEdit() else { return }
+            guard form.scale != nil, let indices = form.pageIndices else {
                 runAlert(title: "Check the scale and page numbers", informativeText: "Enter a positive scale and valid page numbers, such as 1, 3-6. No pages have been changed.", style: .warning)
                 continue
             }
@@ -87,8 +142,7 @@ extension MainViewController {
                 runAlert(title: "Unsupported page units", informativeText: "One of these sheets uses non-standard PDF page units. Its scale cannot be set with this tool yet. No pages have been changed.", style: .warning)
                 continue
             }
-            pdfView.rectangleMarkup.applyDrawingScale(scale, to: pages)
-            refreshMeasurementScaleDisplay()
+            _ = applyDrawingScaleForm(form)
             return
         }
     }

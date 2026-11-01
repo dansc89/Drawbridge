@@ -142,6 +142,114 @@ import XCTest
         editor.insertText(value, replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
         return editor
     }
+    private func button(_ id: String, _ controller: MainViewController) throws -> NSButton {
+        try XCTUnwrap(descendants(controller.statusBar).first { $0.identifier?.rawValue == id } as? NSButton, "Missing footer button: \(id)")
+    }
+    func testEndpointButtonsSurroundOnlyPageArrowsWithAccessibleFixedGeometry() throws {
+        for scale: CGFloat in [1, 2] {
+            try withFooter(backingScale: scale) { controller, window, _ in
+                let ids = ["drawbridgeFirstPage", "drawbridgePreviousPage", "drawbridgeNextPage", "drawbridgeLastPage"]
+                let buttons = try ids.map { try button($0, controller) }
+                let pages = try XCTUnwrap(buttons[0].superview as? NSStackView)
+                XCTAssertEqual(pages.arrangedSubviews.compactMap { ($0 as? NSButton)?.identifier?.rawValue }, ids)
+                for (button, name, symbol) in [(buttons[0], "First Page", "backward.end.fill"), (buttons[3], "Last Page", "forward.end.fill")] {
+                    XCTAssertEqual(button.toolTip, name)
+                    XCTAssertEqual(button.accessibilityLabel(), name)
+                    XCTAssertNotNil(button.image)
+                    XCTAssertNotNil(NSImage(systemSymbolName: symbol, accessibilityDescription: nil))
+                }
+                window.layoutIfNeeded()
+                for button in buttons {
+                    let alignment = button.alignmentRect(forFrame: button.frame)
+                    XCTAssertEqual(alignment.width, 24, accuracy: 0.1)
+                    XCTAssertEqual(alignment.height, 20, accuracy: 0.1)
+                    XCTAssertGreaterThanOrEqual(button.frame.minX, 0)
+                    XCTAssertLessThanOrEqual(button.frame.maxX, pages.bounds.maxX + 0.1)
+                }
+                for (left, right) in zip(buttons, buttons.dropFirst()) {
+                    XCTAssertGreaterThan(right.frame.minX, left.frame.maxX)
+                }
+                let history = try button("drawbridgeNavigateForward", controller)
+                XCTAssertLessThan(history.convert(history.bounds, to: controller.statusBar).maxX,
+                                  buttons[0].convert(buttons[0].bounds, to: controller.statusBar).minX)
+                XCTAssertTrue(try field("drawbridgeFooterPageNumber", controller).isEditable)
+            }
+        }
+    }
+    func testEndpointClicksNavigateHistoryAndRefreshForEmptySingleAndReplacementDocuments() throws {
+        try withFooter { controller, _, document in
+            let first = try button("drawbridgeFirstPage", controller)
+            let last = try button("drawbridgeLastPage", controller)
+            XCTAssertFalse(first.isEnabled); XCTAssertTrue(last.isEnabled)
+            last.performClick(nil)
+            XCTAssertTrue(controller.pdfView.currentPage === document.page(at: 7))
+            XCTAssertTrue(first.isEnabled); XCTAssertFalse(last.isEnabled)
+            XCTAssertEqual(try field("drawbridgeFooterPageNumber", controller).stringValue, "8")
+            try button("drawbridgeNavigateBack", controller).performClick(nil)
+            XCTAssertTrue(controller.pdfView.currentPage === document.page(at: 0))
+            controller.pdfView.go(to: document.page(at: 3)!); controller.updateStatusBar()
+            first.performClick(nil)
+            XCTAssertTrue(controller.pdfView.currentPage === document.page(at: 0))
+            XCTAssertFalse(first.isEnabled); XCTAssertTrue(last.isEnabled)
+            for replacement in [nil, PDFDocument()] as [PDFDocument?] {
+                controller.pdfView.setMarkupDocument(replacement); controller.updateStatusBar()
+                XCTAssertFalse(first.isEnabled); XCTAssertFalse(last.isEnabled)
+                first.performClick(nil); last.performClick(nil)
+                XCTAssertNil(controller.pdfView.currentPage)
+            }
+            let single = PDFDocument(); single.insert(document.page(at: 0)!.copy() as! PDFPage, at: 0)
+            controller.pdfView.setMarkupDocument(single); controller.pdfView.go(to: single.page(at: 0)!)
+            controller.updateStatusBar()
+            XCTAssertFalse(first.isEnabled); XCTAssertFalse(last.isEnabled)
+            let replacement = PDFDocument()
+            for index in 0..<3 { replacement.insert(document.page(at: index)!.copy() as! PDFPage, at: index) }
+            controller.pdfView.setMarkupDocument(replacement); controller.pdfView.go(to: replacement.page(at: 1)!)
+            controller.updateStatusBar(); last.performClick(nil)
+            XCTAssertTrue(controller.pdfView.currentPage === replacement.page(at: 2))
+            first.performClick(nil)
+            XCTAssertTrue(controller.pdfView.currentPage === replacement.page(at: 0))
+        }
+    }
+    func testEndpointClicksFollowFocusedIndependentSplitDocument() throws {
+        try withFooter { controller, window, document in
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let leftURL = directory.appendingPathComponent("left.pdf")
+            let rightURL = directory.appendingPathComponent("right.pdf")
+            try XCTUnwrap(document.dataRepresentation()).write(to: leftURL)
+            let rightDocument = PDFDocument()
+            for index in 0..<3 { rightDocument.insert(document.page(at: index)!.copy() as! PDFPage, at: index) }
+            try XCTUnwrap(rightDocument.dataRepresentation()).write(to: rightURL)
+            controller.openDocument(at: rightURL); controller.openDocument(at: leftURL)
+            let left = controller.pdfView
+            controller.commandToggleSplitView(nil); window.layoutIfNeeded()
+            let right = try XCTUnwrap(controller.secondaryPDFView)
+            controller.activatePDFPane(right)
+            let tab = NSButton(); tab.identifier = NSUserInterfaceItemIdentifier(rightURL.path)
+            XCTAssertTrue(controller.tryToPerform(NSSelectorFromString("selectDocumentTab:"), with: tab))
+            window.layoutIfNeeded()
+            // Synchronize the hidden fixture's footer after cached-tab setup/layout.
+            controller.updateStatusBar()
+            XCTAssertFalse(left.document === right.document)
+            let first = try button("drawbridgeFirstPage", controller)
+            let last = try button("drawbridgeLastPage", controller)
+            XCTAssertTrue(controller.pdfView === right)
+            XCTAssertEqual(right.document?.pageCount, 3)
+            XCTAssertTrue(last.isEnabled, "Last must reflect the newly focused document")
+            last.performClick(nil)
+            XCTAssertEqual(right.currentPage.flatMap { right.document?.index(for: $0) }, 2)
+            XCTAssertEqual(left.currentPage.flatMap { left.document?.index(for: $0) }, 0)
+            first.performClick(nil)
+            XCTAssertEqual(right.currentPage.flatMap { right.document?.index(for: $0) }, 0)
+            controller.activatePDFPane(left); last.performClick(nil)
+            XCTAssertEqual(left.currentPage.flatMap { left.document?.index(for: $0) }, 7)
+            XCTAssertEqual(right.currentPage.flatMap { right.document?.index(for: $0) }, 0)
+            first.performClick(nil)
+            XCTAssertEqual(left.currentPage.flatMap { left.document?.index(for: $0) }, 0)
+            XCTAssertFalse(window.isVisible)
+        }
+    }
     func testEnterJumpsToPhysicalPageNotCustomLabel() throws {
         try withFooter { controller, window, document in
             controller.pageLabelOverrides[0] = "5"

@@ -549,6 +549,14 @@ extension MainViewController {
     @objc func commandZoomOut(_ sender: Any?) { zoom(by: 1.0 / 1.12) }
     @objc func commandPreviousPage(_ sender: Any?) { navigatePage(delta: -1) }
     @objc func commandNextPage(_ sender: Any?) { navigatePage(delta: 1) }
+    @objc func commandFirstPage(_ sender: Any?) {
+        guard !isPDFProcessingBusy else { return }
+        goToPageIndex(0, anchor: currentPageNavigationAnchor())
+    }
+    @objc func commandLastPage(_ sender: Any?) {
+        guard !isPDFProcessingBusy, let document = pdfView.document else { return }
+        goToPageIndex(document.pageCount - 1, anchor: currentPageNavigationAnchor())
+    }
     @objc func commandNavigateBack(_ sender: Any?) {
         guard guardOrBeep(pdfView.navigateBackInHistory()) else { return }
         updateStatusBar()

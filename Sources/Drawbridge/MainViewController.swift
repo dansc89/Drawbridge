@@ -644,6 +644,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let flattenPDFButton = NSButton(title: "", target: nil, action: nil)
     private let unflattenPDFButton = NSButton(title: "", target: nil, action: nil)
     private let purgeLayersButton = NSButton(title: "Purge Layers", target: nil, action: nil)
+    private let firstPageButton = NSButton(title: "", target: nil, action: nil)
+    private let lastPageButton = NSButton(title: "", target: nil, action: nil)
     private let previousPageButton = NSButton(title: "", target: nil, action: nil)
     private let nextPageButton = NSButton(title: "", target: nil, action: nil)
     private let navigationBackButton = NSButton(title: "", target: nil, action: nil)
@@ -2220,8 +2222,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         for (button, symbol, name, action, identifier) in [
             (navigationBackButton, "arrow.uturn.backward", "Back to previous view (⌥←)", #selector(commandNavigateBack(_:)), "drawbridgeNavigateBack"),
             (navigationForwardButton, "arrow.uturn.forward", "Forward to next view (⌥→)", #selector(commandNavigateForward(_:)), "drawbridgeNavigateForward"),
+            (firstPageButton, "backward.end.fill", "First Page", #selector(commandFirstPage(_:)), "drawbridgeFirstPage"),
             (previousPageButton, "arrowtriangle.left.fill", "Previous Page", #selector(commandPreviousPage(_:)), "drawbridgePreviousPage"),
-            (nextPageButton, "arrowtriangle.right.fill", "Next Page", #selector(commandNextPage(_:)), "drawbridgeNextPage")
+            (nextPageButton, "arrowtriangle.right.fill", "Next Page", #selector(commandNextPage(_:)), "drawbridgeNextPage"),
+            (lastPageButton, "forward.end.fill", "Last Page", #selector(commandLastPage(_:)), "drawbridgeLastPage")
         ] {
             button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)
             button.imagePosition = .imageOnly; button.bezelStyle = .texturedRounded; button.controlSize = .small
@@ -2240,7 +2244,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             return stack
         }
         let history = group("History",[navigationBackButton,navigationForwardButton])
-        let pages = group("Pages",[previousPageButton,nextPageButton])
+        let pages = group("Pages",[firstPageButton,previousPageButton,nextPageButton,lastPageButton])
         invertColorsButton.image = NSImage(systemSymbolName: "circle.lefthalf.filled", accessibilityDescription: "Invert PDF colors")
         invertColorsButton.imagePosition = .imageLeading
         invertColorsButton.bezelStyle = .texturedRounded
@@ -2258,7 +2262,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         markupsToggleButton.identifier = NSUserInterfaceItemIdentifier("drawbridgeMarkupsList")
         // The fixed control block is centered independently of the trailing sheet label.
         let slots: [(NSView, CGFloat)] = [
-            (history, 100), (pages, 90), (statusPageSizeLabel, 145), (pageEntry, 158),
+            (history, 100), (pages, 148), (statusPageSizeLabel, 145), (pageEntry, 158),
             (statusZoomLabel, 92), (invertColorsButton, 68), (markupsToggleButton, 82),
             (rectangleToolbar.scaleButton, 150)
         ]
@@ -5898,6 +5902,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let pageIndex = pdfView.currentPage.flatMap { page in pdfView.document.map { $0.index(for:page) } }
         previousPageButton.isEnabled = !isPDFProcessingBusy && (pageIndex ?? 0) > 0
         nextPageButton.isEnabled = !isPDFProcessingBusy && pageIndex != nil && pageIndex! < (pdfView.document?.pageCount ?? 0)-1
+        firstPageButton.isEnabled = previousPageButton.isEnabled
+        lastPageButton.isEnabled = nextPageButton.isEnabled
         statusToolLabel.stringValue = "Tool: \(pdfView.rectangleMarkup.tool)"
         applyScaleLockForCurrentPageIfNeeded()
 
