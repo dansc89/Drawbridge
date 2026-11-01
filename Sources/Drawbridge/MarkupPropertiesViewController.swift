@@ -25,11 +25,11 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
     private var fillOpacityRow = NSStackView()
     let heading = NSTextField(labelWithString: "Markup Properties")
     let editingContext = NSTextField(labelWithString: "New markup defaults")
-    let stroke = NSColorWell()
-    let fill = NSColorWell()
+    let stroke = SwatchColorWell()
+    let fill = SwatchColorWell()
     let hatchPattern = NSPopUpButton()
-    let hatchForeground = NSColorWell()
-    let hatchBackground = NSColorWell()
+    let hatchForeground = SwatchColorWell()
+    let hatchBackground = SwatchColorWell()
     let hatchTransparent = NSButton(checkboxWithTitle: "Transparent background", target: nil, action: nil)
     let hatchScale = NSTextField()
     let hatchAngle = NSTextField()
@@ -47,7 +47,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
     private var snapshotRows = NSStackView()
     let snapshotOverlay = NSButton(checkboxWithTitle: "Overlay (multiply)", target: nil, action: nil)
     let snapshotFilter = NSPopUpButton()
-    let snapshotColor = NSColorWell()
+    let snapshotColor = SwatchColorWell()
     let snapshotOpacity = NSTextField()
     private let captureHint = NSTextField(wrappingLabelWithString: "Drag a rectangle, or click polygon corners and double-click to finish. Paste with Cmd+V, or paste in place with Cmd+Shift+V. Select a pasted snapshot to adjust its appearance.")
     private let note = NSTextField(wrappingLabelWithString: "")
@@ -55,6 +55,8 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
 
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 500))
+        fill.allowsNoColor = true; hatchBackground.allowsNoColor = true
+        hatchForeground.allowsOpacity = false; hatchBackground.allowsOpacity = false
         heading.font = .systemFont(ofSize: 12, weight: .semibold)
         editingContext.font = .systemFont(ofSize: 11)
         editingContext.textColor = .secondaryLabelColor
@@ -203,7 +205,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
             let style = SnapshotStyle.read(selection)
             snapshotOverlay.state = style.overlay ? .on : .off
             snapshotFilter.selectItem(at: SnapshotStyle.Filter.allCases.firstIndex(of: style.filter) ?? 0)
-            snapshotColor.color = style.nsColor; snapshotOpacity.doubleValue = style.opacity * 100
+            snapshotColor.color = style.nsColor.withAlphaComponent(CGFloat(style.opacity)); snapshotOpacity.doubleValue = style.opacity * 100
             let editable = session.canEdit() && !selection.isReadOnly && !session.layerIsLocked(selection) && RectangleMarkupRecord.owns(selection)
             for control in [snapshotOverlay, snapshotFilter, snapshotOpacity] as [NSControl] { control.isEnabled = editable }
             snapshotColor.isEnabled = editable
@@ -217,8 +219,10 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         filled.state = color == nil ? .off : .on
         if let color { fill.color = color; fillOpacity.doubleValue = Double(color.alphaComponent) * 100 }
         else { fillOpacity.doubleValue = 100 }
+        fill.isNoColor = color == nil
         linePattern.selectItem(at: MarkupLinePattern.allCases.firstIndex(of: selection.map(MarkupStyle.pattern) ?? session.linePattern) ?? 0)
         strokeOpacity.doubleValue = (selection.map(MarkupStyle.strokeOpacity) ?? session.strokeOpacity) * 100
+        stroke.color = stroke.color.withAlphaComponent(CGFloat(strokeOpacity.doubleValue / 100))
         patternRow.isHidden = text || highlight || snapshot || capturing; fillOpacityRow.isHidden = !closedShape
         weightRow.isHidden = text || legacyHighlight || snapshot || capturing; fontRow.isHidden = !text; fillRow.isHidden = !closedShape
         for control in [stroke, weight, fontSize, filled, linePattern, strokeOpacity] as [NSControl] { control.isEnabled = enabled }
@@ -231,11 +235,12 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         hatchForeground.color = NSColor(deviceRed: appearance.foreground[0], green: appearance.foreground[1], blue: appearance.foreground[2], alpha: 1)
         if let background = appearance.background { hatchBackground.color = NSColor(deviceRed: background[0], green: background[1], blue: background[2], alpha: 1) }
         hatchTransparent.state = appearance.background == nil ? .on : .off
+        hatchBackground.isNoColor = appearance.background == nil
         hatchScale.doubleValue = appearance.scale * 100; hatchAngle.doubleValue = appearance.angle; hatchWeight.doubleValue = appearance.lineWidth
         for control in [hatchPattern, hatchForeground, hatchBackground, hatchTransparent, hatchScale, hatchAngle, hatchWeight] as [NSControl] { control.isEnabled = enabled && closedShape }
-        hatchBackground.isEnabled = enabled && appearance.background != nil
+        hatchBackground.isEnabled = enabled && closedShape
         fillRow.isHidden = !closedShape || patterned; fillOpacityRow.isHidden = !closedShape || patterned
-        fill.isEnabled = enabled && color != nil
+        fill.isEnabled = enabled && closedShape
         fillOpacity.isEnabled = enabled && color != nil
     }
     @objc func saveDefault(_ sender: Any?) {
@@ -245,6 +250,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
     }
     @objc func changeSnapshot(_ sender: NSControl) {
         guard let session, let rgb = snapshotColor.color.usingColorSpace(.deviceRGB) else { return }
+        if sender === snapshotColor, snapshotColor.isCommittingSelection { snapshotOpacity.doubleValue = Double(snapshotColor.color.alphaComponent) * 100 }
         if sender === snapshotColor { snapshotFilter.selectItem(at: SnapshotStyle.Filter.allCases.firstIndex(of: .colorize)!) }
         let style = SnapshotStyle(overlay: snapshotOverlay.state == .on, opacity: snapshotOpacity.doubleValue / 100,
                                   filter: SnapshotStyle.Filter.allCases[max(0, snapshotFilter.indexOfSelectedItem)],
@@ -260,7 +266,13 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
     }
     @objc func changeStroke(_ sender: Any?) {
         guard let session else { return }
+        let opacity = stroke.isCommittingSelection ? Double(stroke.color.alphaComponent)
+            : (session.selected.map(MarkupStyle.strokeOpacity) ?? session.strokeOpacity)
+        session.undo.beginUndoGrouping()
         session.styleSelected(color: stroke.color, width: session.selected?.border?.lineWidth ?? session.lineWidth)
+        session.setLineAppearance(pattern: session.selected.map(MarkupStyle.pattern) ?? session.linePattern, opacity: opacity)
+        session.undo.endUndoGrouping()
+        refresh()
     }
     func controlTextDidEndEditing(_ notification: Notification) {
         if let field = notification.object as? NSTextField { changeNumber(field) }
@@ -279,6 +291,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
     }
     @objc func changeHatch(_ sender: NSControl) {
         guard let session, session.canEdit(), hatchPattern.isEnabled else { refresh(); return }
+        if sender === hatchBackground { hatchTransparent.state = hatchBackground.isNoColor ? .on : .off }
         let preset = DraftingHatch.Preset.allCases[max(0, hatchPattern.indexOfSelectedItem)]
         if preset == .solid { session.hatchSelected(nil); refresh(); return }
         // UI percentages are converted only here; documents/defaults retain 1x factors.
@@ -295,6 +308,10 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
     }
     @objc func changeFill(_ sender: Any?) {
         guard let session else { return }
+        if let sender = sender as? SwatchColorWell, sender === fill {
+            filled.state = fill.isNoColor ? .off : .on
+            if fill.isCommittingSelection { fillOpacity.doubleValue = Double(fill.color.alphaComponent) * 100 }
+        }
         let rgb = fill.color.usingColorSpace(.deviceRGB)
         let color = rgb.map { NSColor(deviceRed: $0.redComponent, green: $0.greenComponent, blue: $0.blueComponent, alpha: CGFloat(fillOpacity.doubleValue / 100)) }
         session.fillSelected(filled.state == .on ? color : nil)

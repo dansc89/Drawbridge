@@ -158,7 +158,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         target.centerViewport(on: state.viewportCenter)
     }
 
-    private func retainActiveSplitSession() {
+    func retainActiveSplitSession() {
         guard let url = openDocumentURL, let document = pdfView.document else { return }
         pdfView.rectangleMarkup.finishTextEditing()
         let markup = pdfView.rectangleMarkup
@@ -220,6 +220,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         refreshSearchIfNeeded()
         if restoreViewport, let state = session.viewport { _ = pane.restoreTabViewState(state) }
         configureRectangleMarkup()
+        configureNativePDFLayerControls()
         pane.rectangleMarkup.refresh(presentationChanged: false)
         scheduleMarkupsRefresh(selecting: pane.rectangleMarkup.selected)
         view.window?.title = "Drawbridge - \(session.url.lastPathComponent)"
@@ -249,6 +250,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pdfView.rectangleMarkup.documentUndoManager = UndoManager()
         pdfView.rectangleMarkup.install(on: pdfView)
         configureRectangleMarkup()
+        configureNativePDFLayerControls()
         openDocumentURL = nil
     }
 
@@ -535,6 +537,47 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let navigationModeControl = NSSegmentedControl(labels: ["Pages", "Bookmarks"], trackingMode: .selectOne, target: nil, action: nil)
     private let addPageButton = NSButton(title: "", target: nil, action: nil)
     let pagesTableView = PageThumbnailTableView(frame: .zero)
+    private let nativeWorkingSources = NSMapTable<PDFDocument, NativePDFWorkingSource>.weakToStrongObjects()
+    var nativeWorkingSource: NativePDFWorkingSource? {
+        pdfView.document.flatMap { nativeWorkingSources.object(forKey: $0) }
+    }
+    func currentPDFWorkingSource(fallback: URL?) -> URL? { nativeWorkingSource?.output.url ?? fallback }
+    var currentPDFWorkingStamp: PDFMarkupSourceStamp? { nativeWorkingSource?.stamp ?? pdfView.rectangleMarkup.sourceStamp }
+    var currentPDFOriginalStamp: PDFMarkupSourceStamp? { nativeWorkingSource?.original?.stamp ?? pdfView.rectangleMarkup.sourceStamp }
+
+    /// Restore exact document/controller pairs. Never bind a retained controller:
+    /// its earlier undo actions still target its original page objects.
+    func installNativePDFSession(_ document: PDFDocument, markup: RectangleMarkupController) {
+        let state = pdfView.captureTabViewState()
+        let previousMarkup = pdfView.rectangleMarkup
+        if secondaryPDFView?.rectangleMarkup === previousMarkup {
+            secondaryPDFView?.rectangleMarkup = markup
+        }
+        isTransferringPDFPaneDocument = true
+        pdfView.rectangleMarkup = markup
+        pdfView.document = document
+        isTransferringPDFPaneDocument = false
+        if let original = nativeWorkingSource?.original {
+            markup.acceptPersistedSource(at: original.url, stamp: original.stamp)
+        }
+        markup.install(on: pdfView)
+        if let state { _ = pdfView.restoreTabViewState(state) }
+        configureRectangleMarkup()
+        configureNativePDFLayerControls()
+        clearMarkupCache()
+        refreshSplitPresentationAfterStructureChange(document: document)
+        retainActiveSplitSession()
+        scheduleMarkupsRefresh(selecting: nil)
+        requestChromeRefresh(immediate: true)
+    }
+    func retainNativePDFSource(_ source: NativePDFWorkingSource, document: PDFDocument) {
+        nativeWorkingSources.setObject(source, forKey: document)
+        // Existing states own page identities referenced by earlier structural undo.
+        if pageStructureStates.object(forKey: document) == nil {
+            pageStructureStates.setObject(PDFPageStructureState(document: document, stamp: source.stamp, source: source.output.url), forKey: document)
+        }
+    }
+
     private let pageStructureStates = NSMapTable<PDFDocument, PDFPageStructureState>.weakToStrongObjects()
     var pageStructureState: PDFPageStructureState? {
         get { pdfView.document.flatMap { pageStructureStates.object(forKey: $0) } }
@@ -1083,6 +1126,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             self.openDocument(at: url)
         }
         configureRectangleMarkup()
+        configureNativePDFLayerControls()
         pdfView.onViewportChanged = { [weak self, weak pane = pdfView] in
             guard let self, let pane else { return }
             self.synchronizeDocumentViewport(from: pane)

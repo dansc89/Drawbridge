@@ -200,7 +200,10 @@ extension MainViewController {
         // file-provider volume.  That URL is often gone by the time Save runs,
         // which used to force the slow, full-PDFKit rewrite.  The opened file is
         // the authoritative pre-edit source for a metadata-only navigation save.
+        let nativeSource = nativeWorkingSource
+        let nativeOriginalStamp = currentPDFOriginalStamp
         let navigationSourceURL: URL? = {
+            if let nativeSource { return nativeSource.output.url }
             if let recoverySourceURL { return recoverySourceURL }
             if let originDocumentURLForAdoption,
                FileManager.default.fileExists(atPath: originDocumentURLForAdoption.path) {
@@ -213,7 +216,7 @@ extension MainViewController {
             return nil
         }()
         let startedAt = CFAbsoluteTimeGetCurrent()
-        let rectangleSourceStamp = recoverySourceURL.flatMap(PDFMarkupSourceStamp.capture) ?? pdfView.rectangleMarkup.sourceStamp
+        let rectangleSourceStamp = nativeSource?.stamp ?? recoverySourceURL.flatMap(PDFMarkupSourceStamp.capture) ?? pdfView.rectangleMarkup.sourceStamp
         let captureStartedAt = CFAbsoluteTimeGetCurrent()
         pdfView.rectangleMarkup.ensureLayerCatalogMarker()
         let capturedRectangles = RectangleMarkupRecord.capture(document)
@@ -244,7 +247,30 @@ extension MainViewController {
             var writeElapsed: Double = 0
             var commitElapsed: Double = 0
 
-            if let structurePlan, let navigationSourceURL {
+            if nativeSource != nil, let navigationSourceURL {
+                // Stage from immutable transformed content, but arbitrate overwrite
+                // against the user's ORIGINAL source immediately before commit.
+                let candidate = Self.temporaryLocalSaveURL(for: targetURL)
+                defer { try? FileManager.default.removeItem(at: candidate) }
+                if let structurePlan {
+                    success = structurePlan.write(document: documentBox.document, currentSource: navigationSourceURL, destination: candidate, expectedStamp: rectangleSourceStamp, labels: pageLabelsForEmbeddedSave, records: capturedRectangles, navigation: navigationSnapshot, importedPlan: importedPlan, onCommitted: { _ in })
+                } else {
+                    success = Self.writePDFDocument(documentBox.document, to: candidate, pageLabels: pageLabelsForEmbeddedSave, navigationSourceURL: navigationSourceURL, rectangleRecords: capturedRectangles, rectangleSourceStamp: rectangleSourceStamp, navigationSnapshot: navigationSnapshot, importedPlan: importedPlan)
+                }
+                if success {
+                    let overwritingOriginal = originDocumentURLForAdoption == canonicalTargetURL
+                    if overwritingOriginal && nativeOriginalStamp?.matchesSource(targetURL) != true {
+                        success = false
+                        errorDescription = "The original PDF changed outside Drawbridge. Your native layer edits remain open; save a copy with a new filename."
+                    } else {
+                        do {
+                            try Self.commitStagedSave(from: candidate, to: targetURL)
+                            committedMarkupStamp = PDFMarkupSourceStamp.capture(targetURL)
+                        } catch { success = false; errorDescription = error.localizedDescription }
+                    }
+                }
+                if !success && errorDescription == nil { errorDescription = "Native layer edits could not be saved losslessly. Your edits remain open." }
+            } else if let structurePlan, let navigationSourceURL {
                 let writeStartedAt = CFAbsoluteTimeGetCurrent()
                 success = structurePlan.write(document: documentBox.document, currentSource: navigationSourceURL, destination: targetURL, expectedStamp: rectangleSourceStamp, labels: pageLabelsForEmbeddedSave, records: capturedRectangles, navigation: navigationSnapshot, importedPlan: importedPlan, onCommitted: { committedMarkupStamp = $0 })
                 if !success { errorDescription = "The page deletion could not be verified. Your original PDF is unchanged and your edits remain open." }
@@ -516,6 +542,11 @@ extension MainViewController {
                 if saveContextStillActive || adoptAsPrimaryDocument {
                     if structurePlan != nil { structureState?.savedPages = savedPageIdentities }
                     self.pdfView.rectangleMarkup.acceptPersistedSource(at: targetURL, stamp: completedMarkupStamp)
+                    if let stamp = completedMarkupStamp, let original = nativeSource?.original,
+                       adoptAsPrimaryDocument || canonicalTargetURL == originDocumentURLForAdoption {
+                        original.url = targetURL
+                        original.stamp = stamp
+                    }
                     if embeddedSaveToken > 0 {
                         self.lastEmbeddedSaveCompletedVersion = max(self.lastEmbeddedSaveCompletedVersion, embeddedSaveToken)
                     } else {
@@ -523,6 +554,7 @@ extension MainViewController {
                     }
                     if self.markupChangeVersion <= startedMarkupVersion {
                         self.pdfView.rectangleMarkup.markSaved(at: targetURL, stamp: completedMarkupStamp)
+                        nativeSource?.requiresPDFSave = false
                         self.markDocumentClean(updateStatusBarValue: false)
                     } else {
                         self.lastAutosavedChangeVersion = max(self.lastAutosavedChangeVersion, startedMarkupVersion)
@@ -725,6 +757,8 @@ extension MainViewController {
     func scheduleAutosave() {
         // A sidecar is not a saved PDF. New markup stays dirty until the verified PDF commit.
         guard !pdfView.rectangleMarkup.hasUnsavedChanges else { return }
+        // Retain PDF dirty state without repeatedly writing the same sidecar.
+        guard nativeWorkingSource?.requiresPDFSave != true || markupChangeVersion > lastAutosavedChangeVersion else { return }
         persistenceCoordinator.scheduleAutosaveIfNeeded(
             canAutosave: hasPromptedForInitialMarkupSaveCopy
                 && (autosaveURL ?? openDocumentURL) != nil
@@ -785,7 +819,8 @@ extension MainViewController {
 
                 if success {
                     self.lastAutosaveAt = Date()
-                    if self.autosaveRevision == revision {
+                    if self.autosaveRevision == revision && self.nativeWorkingSource?.requiresPDFSave != true
+                        && !self.pdfView.rectangleMarkup.hasUnsavedChanges {
                         self.markDocumentClean()
                     } else {
                         self.lastAutosavedChangeVersion = snapshotVersion

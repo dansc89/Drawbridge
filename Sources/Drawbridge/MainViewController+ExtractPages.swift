@@ -90,8 +90,8 @@ extension MainViewController {
         let structure=pageStructureState?.document === document ? pageStructureState?.plan(for:document,forceOriginal:imported != nil) : nil
         let navigation=PDFTKBookmarkWriter.captureNavigation(in:document)
         let labels=embeddedPageLabelsForSave(in:document)
-        let source=openDocumentURL ?? document.documentURL
-        let stamp=pdfView.rectangleMarkup.sourceStamp
+        let source=currentPDFWorkingSource(fallback: openDocumentURL ?? document.documentURL)
+        let stamp=currentPDFWorkingStamp
         let protected=sessionDocumentURLs + (source.map { [$0] } ?? [])
         let box=PDFDocumentBox(document:document)
         isPDFFileProcessingOperation=true;beginBusyIndicator("Extracting pages…",detail:"Preparing current markups…")

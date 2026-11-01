@@ -1,7 +1,14 @@
 import AppKit
 import PDFKit
 
-private final class LayerColorChipButton: NSButton {
+final class LayerColorChipButton: NSButton {
+    // The legacy dictionary remains NSButton-typed; retain its picker on the chip.
+    let tintWell: SwatchColorWell = {
+        let well = SwatchColorWell()
+        well.allowsOpacity = false
+        well.allowsNoColor = false
+        return well
+    }()
     var swatchColor: NSColor = .white {
         didSet { needsDisplay = true }
     }
@@ -74,12 +81,14 @@ extension MainViewController {
     func refreshLayerTintColorWell(for layer: String) {
         guard let colorButton = layerTintColorWells[layer] as? LayerColorChipButton else { return }
         colorButton.isEnabled = (layer != "DEFAULT")
+        colorButton.tintWell.isEnabled = colorButton.isEnabled
         if let tint = tintColor(forSnapshotLayer: layer) {
             colorButton.swatchColor = tint.withAlphaComponent(1.0)
         } else {
             colorButton.swatchColor = .white
         }
         colorButton.alphaValue = (layer == "DEFAULT") ? 0.65 : 1.0
+        colorButton.tintWell.color = colorButton.swatchColor
     }
 
     func refreshLayerVisibilityButton(for layer: String) {
@@ -129,18 +138,21 @@ extension MainViewController {
             refreshLayerTintColorWell(for: layer)
             return
         }
-        activeLayerTintSelection = layer
-        let panel = NSColorPanel.shared
-        panel.color = (tintColor(forSnapshotLayer: layer) ?? .white).withAlphaComponent(1.0)
-        panel.setTarget(self)
-        panel.setAction(#selector(layerTintColorPanelChanged(_:)))
-        panel.orderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        guard sender.isEnabled, let chip = sender as? LayerColorChipButton else { return }
+        let well = chip.tintWell
+        well.identifier = sender.identifier
+        well.target = self
+        well.action = #selector(layerTintSwatchChanged(_:))
+        well.color = (tintColor(forSnapshotLayer: layer) ?? .white).withAlphaComponent(1.0)
+        well.isEnabled = true
+        well.showSwatches(relativeTo: sender)
     }
 
-    @objc func layerTintColorPanelChanged(_ sender: NSColorPanel) {
-        guard let layer = activeLayerTintSelection, layer != "DEFAULT" else { return }
-        layerTintColorByName[layer] = sender.color.withAlphaComponent(1.0)
+    @objc func layerTintSwatchChanged(_ sender: SwatchColorWell) {
+        guard sender.isEnabled, !sender.isNoColor,
+              let layer = sender.identifier?.rawValue, !layer.isEmpty, layer != "DEFAULT",
+              let rgb = sender.color.usingColorSpace(.sRGB) else { return }
+        layerTintColorByName[layer] = rgb.withAlphaComponent(1.0)
         applyLayerTintColorToAllSnapshots(layer: layer)
         refreshLayerTintColorWell(for: layer)
     }

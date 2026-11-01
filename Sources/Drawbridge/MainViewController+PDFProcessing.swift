@@ -56,7 +56,9 @@ extension MainViewController {
         let records = RectangleMarkupRecord.capture(document)
         let navigation = PDFTKBookmarkWriter.captureNavigation(in: document)
         let labels = embeddedPageLabelsForSave(in: document)
-        let stamp = pdfView.rectangleMarkup.sourceStamp
+        let originalStamp = pdfView.rectangleMarkup.sourceStamp
+        let stamp = currentPDFWorkingStamp
+        let workingSource = currentPDFWorkingSource(fallback: source) ?? source
         let imported = pdfView.rectangleMarkup.importedPlan()
         let structure = pageStructureState?.document === document ? pageStructureState?.plan(for: document, forceOriginal: imported != nil) : nil
         let box = PDFDocumentBox(document: document)
@@ -83,7 +85,7 @@ extension MainViewController {
                     defer { try? FileManager.default.removeItem(at: snapshotDirectory) }
                     if cancellation.cancelled { throw CancellationError() }
                     if replacingOpenDocument {
-                        guard let stamp, stamp.matchesSource(destination) else {
+                        guard let originalStamp, originalStamp.matchesSource(destination) else {
                             throw NSError(domain: "DrawbridgePurge", code: 2, userInfo: [NSLocalizedDescriptionKey: "The PDF changed outside Drawbridge or is no longer accessible. Reload it before purging layers."])
                         }
                     }
@@ -91,9 +93,9 @@ extension MainViewController {
                     stage = "Preparing current edits"
                     let saved: Bool
                     if let structure {
-                        saved = structure.write(document: box.document, currentSource: source, destination: snapshot, expectedStamp: stamp, labels: labels, records: records, navigation: navigation, importedPlan: imported, onCommitted: { _ in })
+                        saved = structure.write(document: box.document, currentSource: workingSource, destination: snapshot, expectedStamp: stamp, labels: labels, records: records, navigation: navigation, importedPlan: imported, onCommitted: { _ in })
                     } else {
-                        saved = Self.writePDFDocument(box.document, to: snapshot, pageLabels: labels, navigationSourceURL: source, rectangleRecords: records, rectangleSourceStamp: stamp, navigationSnapshot: navigation, importedPlan: imported)
+                        saved = Self.writePDFDocument(box.document, to: snapshot, pageLabels: labels, navigationSourceURL: workingSource, rectangleRecords: records, rectangleSourceStamp: stamp, navigationSnapshot: navigation, importedPlan: imported)
                     }
                     guard saved else { throw CocoaError(.fileWriteUnknown) }
                     stage = "Removing layer controls"
@@ -151,7 +153,9 @@ extension MainViewController {
         let records = RectangleMarkupRecord.capture(document)
         let navigation = PDFTKBookmarkWriter.captureNavigation(in: document)
         let labels = embeddedPageLabelsForSave(in: document)
-        let stamp = pdfView.rectangleMarkup.sourceStamp
+        let originalStamp = pdfView.rectangleMarkup.sourceStamp
+        let stamp = currentPDFWorkingStamp
+        let workingSource = currentPDFWorkingSource(fallback: source) ?? source
         let imported = pdfView.rectangleMarkup.importedPlan()
         let structure = pageStructureState?.document === document ? pageStructureState?.plan(for: document, forceOriginal: imported != nil) : nil
         let box = PDFDocumentBox(document: document)
@@ -167,9 +171,9 @@ extension MainViewController {
                 if cancellation.cancelled { throw CancellationError() }
                 let saved: Bool
                 if let structure {
-                    saved = structure.write(document: box.document, currentSource: source, destination: snapshot, expectedStamp: stamp, labels: labels, records: records, navigation: navigation, importedPlan: imported, onCommitted: { _ in })
+                    saved = structure.write(document: box.document, currentSource: workingSource, destination: snapshot, expectedStamp: stamp, labels: labels, records: records, navigation: navigation, importedPlan: imported, onCommitted: { _ in })
                 } else {
-                    saved = Self.writePDFDocument(box.document, to: snapshot, pageLabels: labels, navigationSourceURL: source, rectangleRecords: records, rectangleSourceStamp: stamp, navigationSnapshot: navigation, importedPlan: imported)
+                    saved = Self.writePDFDocument(box.document, to: snapshot, pageLabels: labels, navigationSourceURL: workingSource, rectangleRecords: records, rectangleSourceStamp: stamp, navigationSnapshot: navigation, importedPlan: imported)
                 }
                 guard saved else { throw CocoaError(.fileWriteUnknown) }
                 return try PDFCompression.saveCopy(source: snapshot, destination: destination, level: level, progress: { detail in
