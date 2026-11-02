@@ -594,24 +594,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     let bookmarksOutlineView = SidebarBookmarkOutlineView(frame: .zero)
     private let bookmarksEmptyLabel = NSTextField(labelWithString: "No Bookmarks")
     private let bookmarksSelectionLabel = NSTextField(labelWithString: "")
-    private let pdfContentsTitleLabel = NSTextField(labelWithString: "PDF Contents")
-    private let pdfContentsDisclosure = NSButton(title: "", target: nil, action: nil)
-    private weak var contentsSummaryDocument: PDFDocument?
-    private var cachedContentsSummary: String?
-    // Keep only counts and short samples, never annotation/page objects. A
-    // markup mutation invalidates one page rather than recounting the full set.
-    private struct PageContentsSummary {
-        var annotations = 0
-        var extraneous = 0
-        var nonPrint = 0
-        var hidden = 0
-        var links = 0
-        var types: [String: Int] = [:]
-        var samples: [String] = []
-    }
-    private var contentsSummaryByPage: [Int: PageContentsSummary] = [:]
-    private var contentsSummaryPageCount = 0
-    private let pdfContentsSummaryLabel = NSTextField(labelWithString: "No PDF loaded")
+
     private let splitView = NSSplitView(frame: .zero)
     private let propertiesResizeHandle = SidebarDividerView(frame: .zero)
     private var propertiesWidthAtDragStart: CGFloat = 300
@@ -1588,39 +1571,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         bookmarksSelectionLabel.alignment = .center
         bookmarksSelectionLabel.lineBreakMode = .byTruncatingTail
         bookmarksSelectionLabel.isHidden = true
-        pdfContentsTitleLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        pdfContentsTitleLabel.textColor = .secondaryLabelColor
-        pdfContentsTitleLabel.setContentCompressionResistancePriority(.required, for: .vertical)
-        pdfContentsDisclosure.bezelStyle = .disclosure
-        pdfContentsDisclosure.setButtonType(.onOff)
-        pdfContentsDisclosure.controlSize = .small
-        pdfContentsDisclosure.state = .off
-        pdfContentsDisclosure.target = self
-        pdfContentsDisclosure.action = #selector(togglePDFContentsDetails)
-        pdfContentsDisclosure.setAccessibilityLabel("Show PDF contents details")
-        pdfContentsDisclosure.toolTip = "Show or hide PDF contents details"
-        pdfContentsSummaryLabel.isHidden = true
-        pdfContentsSummaryLabel.font = NSFont.systemFont(ofSize: 10)
-        pdfContentsSummaryLabel.textColor = .tertiaryLabelColor
-        pdfContentsSummaryLabel.maximumNumberOfLines = 0
-        pdfContentsSummaryLabel.lineBreakMode = .byWordWrapping
-        pdfContentsSummaryLabel.setContentCompressionResistancePriority(.required, for: .vertical)
-
-        let contentsSeparator = NSBox()
-        contentsSeparator.boxType = .separator
-        contentsSeparator.translatesAutoresizingMaskIntoConstraints = false
-
-        let contentsHeader = NSStackView(views: [pdfContentsDisclosure, pdfContentsTitleLabel])
-        contentsHeader.orientation = .horizontal
-        contentsHeader.alignment = .centerY
-        contentsHeader.spacing = 4
-        let pdfContentsStack = NSStackView(views: [
-            contentsSeparator,
-            contentsHeader,
-            pdfContentsSummaryLabel
-        ])
-        pdfContentsStack.orientation = .vertical
-        pdfContentsStack.spacing = 5
 
         let stack = NSStackView(views: [
             navigationTitleLabel,
@@ -1629,8 +1579,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             thumbnailsEmptyLabel,
             bookmarksSelectionLabel,
             bookmarksScrollView,
-            bookmarksEmptyLabel,
-            pdfContentsStack
+            bookmarksEmptyLabel
         ])
         stack.orientation = .vertical
         stack.spacing = 8
@@ -1732,7 +1681,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         pageThumbnailCache.bind(pdfView.document)
         pagesTableView.reloadData()
-        updatePDFContentsSummary()
         if navigationModeControl.selectedSegment < 0 {
             navigationModeControl.selectedSegment = 1
         }
@@ -1767,108 +1715,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         bookmarksSelectionLabel.isHidden = !shouldShow
         guard shouldShow else { return }
         bookmarksSelectionLabel.stringValue = "(selectedCount) bookmarks selected • Delete to remove"
-    }
-
-    @objc private func togglePDFContentsDetails() {
-        let expanded = pdfContentsDisclosure.state == .on
-        pdfContentsSummaryLabel.isHidden = !expanded
-        pdfContentsDisclosure.setAccessibilityLabel(expanded ? "Hide PDF contents details" : "Show PDF contents details")
-    }
-
-    func updatePDFContentsSummary() {
-        guard let document = pdfView.document else {
-            contentsSummaryDocument = nil
-            cachedContentsSummary = nil
-            contentsSummaryByPage.removeAll()
-            contentsSummaryPageCount = 0
-            pdfContentsSummaryLabel.stringValue = "No PDF loaded"
-            return
-        }
-
-        if contentsSummaryDocument !== document || contentsSummaryPageCount != document.pageCount {
-            contentsSummaryByPage.removeAll()
-            cachedContentsSummary = nil
-            contentsSummaryDocument = document
-            contentsSummaryPageCount = document.pageCount
-        }
-        if let cachedContentsSummary {
-            pdfContentsSummaryLabel.stringValue = cachedContentsSummary
-            return
-        }
-        var totalAnnotations = 0
-        var extraneousAnnotations = 0
-        var nonPrintAnnotations = 0
-        var hiddenAnnotations = 0
-        var linkAnnotations = 0
-        var typeCounts: [String: Int] = [:]
-        var shxSamples: [String] = []
-
-        for pageIndex in 0..<document.pageCount {
-            var pageSummary: PageContentsSummary
-            if let cached = contentsSummaryByPage[pageIndex] {
-                pageSummary = cached
-            } else {
-                guard let page = document.page(at: pageIndex) else { continue }
-                pageSummary = PageContentsSummary()
-                for annotation in page.annotations {
-                    pageSummary.annotations += 1
-                    let type = (annotation.type ?? "Unknown").trimmingCharacters(in: .whitespacesAndNewlines)
-                    pageSummary.types[type.isEmpty ? "Unknown" : type, default: 0] += 1
-                    if isExtraneousEmbeddedPDFAnnotation(annotation) {
-                        pageSummary.extraneous += 1
-                        if pageSummary.samples.count < 3,
-                           let contents = annotation.contents?.trimmingCharacters(in: .whitespacesAndNewlines),
-                           !contents.isEmpty {
-                            pageSummary.samples.append(contents)
-                        }
-                    }
-                    if !annotation.shouldPrint {
-                        pageSummary.nonPrint += 1
-                    }
-                    if !annotation.shouldDisplay {
-                        pageSummary.hidden += 1
-                    }
-                    if (annotation.type ?? "").localizedCaseInsensitiveContains("link") {
-                        pageSummary.links += 1
-                    }
-                }
-                contentsSummaryByPage[pageIndex] = pageSummary
-            }
-            totalAnnotations += pageSummary.annotations
-            extraneousAnnotations += pageSummary.extraneous
-            nonPrintAnnotations += pageSummary.nonPrint
-            hiddenAnnotations += pageSummary.hidden
-            linkAnnotations += pageSummary.links
-            for (type, count) in pageSummary.types { typeCounts[type, default: 0] += count }
-            shxSamples.append(contentsOf: pageSummary.samples.prefix(max(0, 3 - shxSamples.count)))
-        }
-
-        let topTypes = typeCounts
-            .sorted { lhs, rhs in
-                lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value > rhs.value
-            }
-            .prefix(3)
-            .map { "\($0.key): \($0.value)" }
-            .joined(separator: "\n")
-
-        var lines: [String] = [
-            "Pages: \(document.pageCount)",
-            "Annotations: \(totalAnnotations)",
-            "Extraneous CAD boxes: \(extraneousAnnotations)",
-            "Non-print items: \(nonPrintAnnotations)",
-            "Hidden items: \(hiddenAnnotations)",
-            "Links: \(linkAnnotations)"
-        ]
-        if !topTypes.isEmpty {
-            lines.append("Top types:\n\(topTypes)")
-        }
-        if !shxSamples.isEmpty {
-            lines.append("Samples:\n\(shxSamples.joined(separator: "\n"))")
-        }
-        let summary = lines.joined(separator: "\n")
-        contentsSummaryDocument = document
-        cachedContentsSummary = summary
-        pdfContentsSummaryLabel.stringValue = summary
     }
 
     @objc private func selectPageFromSidebar() {
@@ -4054,10 +3900,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func clearMarkupCache() {
-        contentsSummaryDocument = nil
-        cachedContentsSummary = nil
-        contentsSummaryByPage.removeAll()
-        contentsSummaryPageCount = 0
         cancelSearchIndexWarmup()
         cachedMarkupDocumentID = nil
         pendingMarkupIndexPublicationDocumentID = nil
@@ -4082,9 +3924,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func markPageMarkupCacheDirty(_ page: PDFPage?) {
-        cachedContentsSummary = nil
         guard let page, let document = pdfView.document else {
-            contentsSummaryByPage.removeAll()
             pageThumbnailCache.invalidate(nil)
             pagesTableView.reloadData()
             return
@@ -4092,7 +3932,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         ensureMarkupCacheDocumentIdentity(for: document)
         let pageIndex = document.index(for: page)
         guard pageIndex >= 0, pageIndex < document.pageCount else { return }
-        contentsSummaryByPage.removeValue(forKey: pageIndex)
         dirtyMarkupPageIndexes.insert(pageIndex)
         pageThumbnailCache.invalidate(page)
         if navigationModeControl.selectedSegment == 0 {
@@ -4412,7 +4251,6 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         )
         markMarkupChanged()
         performRefreshMarkups(selecting: selectedAnnotation, forceImmediate: forceImmediateRefresh)
-        updatePDFContentsSummary()
         if shouldScheduleAutosave {
             scheduleAutosave()
         }

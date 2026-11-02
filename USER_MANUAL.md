@@ -12,7 +12,7 @@ Drawbridge is a macOS PDF viewer for architectural drawing sets, with sheet book
 
 ## Manage Pages and Bookmarks
 
-In **Pages**, click a thumbnail to open a sheet. The highlighted thumbnail follows the current page, and thumbnails refresh after markup changes. PDF Contents details can be expanded when needed.
+In **Pages**, click a thumbnail to open a sheet. The highlighted thumbnail follows the current page, and thumbnails refresh after markup changes. The sidebar is dedicated to Pages and Bookmarks; the PDF Contents summary has been removed to leave more room for navigation. PDF drawing content and annotations are unchanged.
 
 Use **Shift-click** for a range or **Command-click** for separate selections in either sidebar. With the sidebar focused, **Cmd+A** selects all entries. Press **Backspace/Delete**, or right-click and choose **Delete Selected Page(s)…** or **Delete Selected Bookmark(s)…**. Confirm the deletion, or cancel to retain the selection.
 

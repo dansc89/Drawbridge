@@ -34,7 +34,7 @@ Version 1.0 starts the public release series. Fixes use patch versions such as 1
 - **Reduce file size:** lossless compression with content verification. Image resolution is preserved; already-compressed images may not get smaller.
 - **Read and print:** document text search, text selection/copy, fit-page/fit-width views, and native macOS printing. Invert changes on-screen colors only, leaving saved and printed colors unchanged.
 
-PDF Contents details are collapsed by default to leave more space for navigation.
+The navigation sidebar is dedicated to Pages and Bookmarks, without a PDF Contents summary. This does not remove any PDF drawing content or annotations.
 
 ## Quick start
 
