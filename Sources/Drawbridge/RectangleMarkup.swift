@@ -1682,7 +1682,19 @@ final class DrawbridgeHighlighterAnnotation: PDFAnnotation {
 final class DrawbridgePolygonAnnotation: PDFAnnotation {
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
         guard shouldDisplay else { return }
-        let origin = page?.bounds(for:box).origin ?? .zero
+        let pageBounds = page?.bounds(for: box) ?? .zero
+        let clip = context.boundingBoxOfClipPath
+        let rotation = ((page?.rotation ?? 0) % 360 + 360) % 360
+        let displayedSize = rotation % 180 == 0 ? pageBounds.size : CGSize(width: pageBounds.height, height: pageBounds.width)
+        let internalPreview = rotation != 0 && context.ctm == .identity
+            && abs(clip.width - displayedSize.width) < 1 && abs(clip.height - displayedSize.height) < 1
+            && abs(clip.minX) < 1 && abs(clip.minY) < 1
+        // PDFKit composites live annotations over this cached upright page preview.
+        // Do not bake a duplicate polygon or measurement label into its background.
+        // Native PDF printing uses this same whole-page signature but has no live overlay.
+        if internalPreview && NSPrintOperation.current == nil
+            && !SnapshotPageRendering.isPreview && !SnapshotPageRendering.isVectorOutput { return }
+        let origin = pageBounds.origin
         let points = RectangleMarkupRecord.vertices(self).map { CGPoint(x:$0.x-origin.x,y:$0.y-origin.y) }
         guard points.count >= 3 else { return }
         context.saveGState(); defer { context.restoreGState() }
