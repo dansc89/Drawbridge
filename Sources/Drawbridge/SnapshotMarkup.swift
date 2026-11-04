@@ -213,7 +213,7 @@ enum SnapshotAppearance {
         let box = bounds.applying(p)
         let t = SnapshotPayload.transform(size: size, bounds: bounds, rotation: rotation)
         let drawing = "q /SnapshotGS gs \(p.a) \(p.b) \(p.c) \(p.d) \(p.tx) \(p.ty) cm \(t.a) \(t.b) \(t.c) \(t.d) \(t.tx) \(t.ty) cm /Snapshot Do Q"
-        return ["stream":["dict":["/Type":"/XObject", "/Subtype":"/Form", "/BBox":[box.minX,box.minY,box.maxX,box.maxY], "/Matrix":[inverse.a,inverse.b,inverse.c,inverse.d,inverse.tx,inverse.ty], "/Resources":["/XObject":["/Snapshot":fragmentRef], "/ExtGState":["/SnapshotGS":["/Type":"/ExtGState", "/ca":style.opacity, "/CA":style.opacity, "/BM":style.overlay ? "/Multiply" : "/Normal"]]], "/DrawbridgeRectangleAppearance":true], "data":Data(drawing.utf8).base64EncodedString()]]
+        return ["stream":["dict":["/Type":"/XObject", "/Subtype":"/Form", "/BBox":[box.minX,box.minY,box.maxX,box.maxY], "/Matrix":[inverse.a,inverse.b,inverse.c,inverse.d,inverse.tx,inverse.ty], "/Resources":["/XObject":["/Snapshot":fragmentRef], "/ExtGState":["/SnapshotGS":["/Type":"/ExtGState", "/ca":style.opacity, "/CA":style.opacity, "/BM":"/Normal"]]], "/DrawbridgeRectangleAppearance":true], "data":Data(drawing.utf8).base64EncodedString()]]
     }
 }
 
@@ -300,7 +300,9 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         }
         context.saveGState()
         context.setAlpha(style.opacity)
-        context.setBlendMode(style.overlay ? .multiply : .normal)
+        // Paper is already transparent in the fragment. Normal preserves upper
+        // colored ink where it crosses lower linework, including isolated tiles.
+        context.setBlendMode(.normal)
         let pageBounds = page?.bounds(for: box) ?? .zero
         // PDFView supplies page-space contexts. Whole-page PDFKit previews instead
         // draw custom annotations in display space; that entry point scopes this flag.

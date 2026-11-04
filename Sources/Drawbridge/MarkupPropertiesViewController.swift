@@ -45,7 +45,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
     private var strokeRow = NSStackView()
     private var strokeOpacityRow = NSStackView()
     private var snapshotRows = NSStackView()
-    let snapshotOverlay = NSButton(checkboxWithTitle: "Overlay (multiply)", target: nil, action: nil)
+    let snapshotOverlay = NSButton(checkboxWithTitle: "Overlay (transparent white)", target: nil, action: nil)
     let snapshotFilter = NSPopUpButton()
     let snapshotColor = SwatchColorWell()
     let snapshotOpacity = NSTextField()

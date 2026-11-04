@@ -873,7 +873,7 @@ final class RectangleMarkupController {
             refresh()
             // Creation publishes a transient selection before stroke completion.
             // Clear the sidebar/overlays and supersede its deferred selection restore.
-            if tool == .highlight { onClickAway?() }
+            onClickAway?()
             return true
         }
         if pendingLine != nil { return true }

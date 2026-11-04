@@ -43,11 +43,20 @@ enum SnapshotFilterRenderer {
     nonisolated(unsafe) private static let cache = NSCache<NSString, NSData>()
     static func filtered(_ data: Data, style: SnapshotStyle) throws -> Data {
         guard style.isValid else { throw CocoaError(.fileReadCorruptFile) }
-        if style.filter == .original { return data }
+        if style.filter == .original && !style.overlay { return data }
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        let key = (digest + style.filter.rawValue + style.color.description) as NSString
+        let key = (digest + style.filter.rawValue + style.color.description + String(style.overlay)) as NSString
         cache.totalCostLimit = 64 * 1024 * 1024
         if let cached = cache.object(forKey: key) { return cached as Data }
+        if style.overlay {
+            // Paper must be removed before PDFKit isolates its stamp surface.
+            // Backdrop-dependent Multiply cannot expose the page beneath it.
+            var base = style; base.overlay = false
+            let source = try filtered(data, style: base)
+            let result = try vectorColorize(source, style: style, removeWhite: true)
+            cache.setObject(result as NSData, forKey: key, cost: result.count)
+            return result
+        }
         guard let page = SnapshotPayload(data: data).page else { throw CocoaError(.fileReadCorruptFile) }
         if style.filter == .colorize {
             let filtered = try vectorColorize(data, style: style)
@@ -100,7 +109,7 @@ enum SnapshotFilterRenderer {
     /// Paint white through the source alpha, then tint through its inverse
     /// luminosity. PDF transparency evaluates the original paths/fonts/images at
     /// the reader's output resolution, not at a preselected bitmap density.
-    private static func vectorColorize(_ data: Data, style: SnapshotStyle) throws -> Data {
+    private static func vectorColorize(_ data: Data, style: SnapshotStyle, removeWhite: Bool = false) throws -> Data {
         guard let executable = PDFTKBookmarkWriter.executableURL(),
               let source = SnapshotPayload(data: data).page else { throw CocoaError(.fileReadCorruptFile) }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeSnapshotColor-" + UUID().uuidString)
@@ -140,14 +149,21 @@ enum SnapshotFilterRenderer {
         let form = addStream(["/Type": "/XObject", "/Subtype": "/Form", "/BBox": [media.minX, media.minY, media.maxX, media.maxY],
                               "/Resources": page["/Resources"] ?? [String: Any](), "/Group": group], commands)
         let inverse: [String: Any] = ["/FunctionType": 2, "/Domain": [0, 1], "/C0": [1], "/C1": [0], "/N": 1]
-        let resources: [String: Any] = ["/ExtGState": [
+        // A white-only knockout, not inverse luminance (which fades colors).
+        // Keep paths, fonts and original colors at the reader's resolution.
+        let paperTransfer = removeWhite ? addStream(["/FunctionType": 4, "/Domain": [0, 1], "/Range": [0, 1]],
+            Data("{ 0.99999 ge { 0 } { 1 } ifelse }".utf8)) : nil
+        let transfer: Any = paperTransfer.map { $0 as Any } ?? inverse
+        var resources: [String: Any] = ["/ExtGState": [
             "/SourceAlpha": ["/Type": "/ExtGState", "/SMask": ["/S": "/Alpha", "/G": form]],
-            "/SourceInk": ["/Type": "/ExtGState", "/SMask": ["/S": "/Luminosity", "/G": form, "/BC": [1, 1, 1], "/TR": inverse]]]]
+            "/SourceInk": ["/Type": "/ExtGState", "/SMask": ["/S": "/Luminosity", "/G": form, "/BC": [1, 1, 1], "/TR": transfer]]]]
+        if removeWhite { resources["/XObject"] = ["/SourceOriginal": form] }
         // Decimal formatting avoids PDF's unsupported exponent notation.
         func number(_ value: Double) -> String { String(format: "%.9f", locale: Locale(identifier: "en_US_POSIX"), value) }
         let rect = "\(number(media.minX)) \(number(media.minY)) \(number(media.width)) \(number(media.height)) re f"
         let tint = style.color.map(number).joined(separator: " ")
-        let drawing = "q /SourceAlpha gs 1 1 1 rg \(rect) Q\nq /SourceInk gs \(tint) rg \(rect) Q\n"
+        let drawing = removeWhite ? "q /SourceInk gs /SourceOriginal Do Q\n"
+            : "q /SourceAlpha gs 1 1 1 rg \(rect) Q\nq /SourceInk gs \(tint) rg \(rect) Q\n"
         page["/Contents"] = addStream([:], Data(drawing.utf8))
         page["/Resources"] = resources
         page["/Group"] = group
