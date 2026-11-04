@@ -1,172 +1,293 @@
-// Reproducible, dependency-free flat vertical-lift bridge icon.
+// Reproducible approved solid-black vector bridge on metallic orange backing.
+// Metallic reflection, bevel and patina affect the orange plate ONLY.
 // Run from repository root: swift Scripts/generate-icon.swift
-// Writes the packaging source, complete iconset, Assets/Drawbridge.icns,
-// and review previews under ignored .build/icon-redesign-preview.
 import AppKit
-import CoreGraphics
-import Foundation
 import ImageIO
 import UniformTypeIdentifiers
+let root=URL(fileURLWithPath:FileManager.default.currentDirectoryPath)
+let assets=root.appendingPathComponent("Assets")
+let out=root.appendingPathComponent(".build/icon-black-metal-preview")
+let iconset=assets.appendingPathComponent("AppIcon.iconset")
+for d in [out,iconset]{try FileManager.default.createDirectory(at:d,withIntermediateDirectories:true)}
+let space=CGColorSpace(name:CGColorSpace.sRGB)!
+func col(_ r:CGFloat,_ g:CGFloat,_ b:CGFloat,_ a:CGFloat=1)->CGColor{CGColor(colorSpace:space,components:[r/255,g/255,b/255,a])!}
+func context(_ w:Int,_ h:Int)->CGContext{CGContext(data:nil,width:w,height:h,bitsPerComponent:8,bytesPerRow:w*4,space:space,bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue)!}
+func write(_ im:CGImage,_ name:String){let d=CGImageDestinationCreateWithURL(out.appendingPathComponent(name) as CFURL,UTType.png.identifier as CFString,1,nil)!;CGImageDestinationAddImage(d,im,nil);precondition(CGImageDestinationFinalize(d))}
+func bridge()->CGPath{let p=CGMutablePath()
+p.move(to: CGPoint(x: 238.6363575271514, y: 268.1915634598399))
+p.addLine(to: CGPoint(x: 330.6363575271514, y: 380.1915634598399))
+p.addLine(to: CGPoint(x: 321.3636424728486, y: 387.8084365401601))
+p.addLine(to: CGPoint(x: 229.3636424728486, y: 275.8084365401601))
+p.closeSubpath()
+p.move(to: CGPoint(x: 330.6363575271514, y: 275.8084365401601))
+p.addLine(to: CGPoint(x: 238.6363575271514, y: 387.8084365401601))
+p.addLine(to: CGPoint(x: 229.3636424728486, y: 380.1915634598399))
+p.addLine(to: CGPoint(x: 321.3636424728486, y: 268.1915634598399))
+p.closeSubpath()
+p.move(to: CGPoint(x: 238.6363575271514, y: 396.1915634598399))
+p.addLine(to: CGPoint(x: 330.6363575271514, y: 508.1915634598399))
+p.addLine(to: CGPoint(x: 321.3636424728486, y: 515.8084365401601))
+p.addLine(to: CGPoint(x: 229.3636424728486, y: 403.8084365401601))
+p.closeSubpath()
+p.move(to: CGPoint(x: 330.6363575271514, y: 403.8084365401601))
+p.addLine(to: CGPoint(x: 238.6363575271514, y: 515.8084365401601))
+p.addLine(to: CGPoint(x: 229.3636424728486, y: 508.1915634598399))
+p.addLine(to: CGPoint(x: 321.3636424728486, y: 396.1915634598399))
+p.closeSubpath()
+p.move(to: CGPoint(x: 238.6363575271514, y: 524.1915634598399))
+p.addLine(to: CGPoint(x: 330.6363575271514, y: 636.1915634598399))
+p.addLine(to: CGPoint(x: 321.3636424728486, y: 643.8084365401601))
+p.addLine(to: CGPoint(x: 229.3636424728486, y: 531.8084365401601))
+p.closeSubpath()
+p.move(to: CGPoint(x: 330.6363575271514, y: 531.8084365401601))
+p.addLine(to: CGPoint(x: 238.6363575271514, y: 643.8084365401601))
+p.addLine(to: CGPoint(x: 229.3636424728486, y: 636.1915634598399))
+p.addLine(to: CGPoint(x: 321.3636424728486, y: 524.1915634598399))
+p.closeSubpath()
+p.move(to: CGPoint(x: 238.6363575271514, y: 652.1915634598399))
+p.addLine(to: CGPoint(x: 330.6363575271514, y: 764.1915634598399))
+p.addLine(to: CGPoint(x: 321.3636424728486, y: 771.8084365401601))
+p.addLine(to: CGPoint(x: 229.3636424728486, y: 659.8084365401601))
+p.closeSubpath()
+p.move(to: CGPoint(x: 330.6363575271514, y: 659.8084365401601))
+p.addLine(to: CGPoint(x: 238.6363575271514, y: 771.8084365401601))
+p.addLine(to: CGPoint(x: 229.3636424728486, y: 764.1915634598399))
+p.addLine(to: CGPoint(x: 321.3636424728486, y: 652.1915634598399))
+p.closeSubpath()
+p.move(to: CGPoint(x: 224, y: 260))
+p.addLine(to: CGPoint(x: 336, y: 260))
+p.addLine(to: CGPoint(x: 336, y: 276))
+p.addLine(to: CGPoint(x: 224, y: 276))
+p.closeSubpath()
+p.move(to: CGPoint(x: 224, y: 388))
+p.addLine(to: CGPoint(x: 336, y: 388))
+p.addLine(to: CGPoint(x: 336, y: 404))
+p.addLine(to: CGPoint(x: 224, y: 404))
+p.closeSubpath()
+p.move(to: CGPoint(x: 224, y: 516))
+p.addLine(to: CGPoint(x: 336, y: 516))
+p.addLine(to: CGPoint(x: 336, y: 532))
+p.addLine(to: CGPoint(x: 224, y: 532))
+p.closeSubpath()
+p.move(to: CGPoint(x: 224, y: 644))
+p.addLine(to: CGPoint(x: 336, y: 644))
+p.addLine(to: CGPoint(x: 336, y: 660))
+p.addLine(to: CGPoint(x: 224, y: 660))
+p.closeSubpath()
+p.move(to: CGPoint(x: 224, y: 756))
+p.addLine(to: CGPoint(x: 336, y: 756))
+p.addLine(to: CGPoint(x: 336, y: 772))
+p.addLine(to: CGPoint(x: 224, y: 772))
+p.closeSubpath()
+p.move(to: CGPoint(x: 224, y: 252))
+p.addLine(to: CGPoint(x: 244, y: 252))
+p.addLine(to: CGPoint(x: 244, y: 772))
+p.addLine(to: CGPoint(x: 224, y: 772))
+p.closeSubpath()
+p.move(to: CGPoint(x: 316, y: 252))
+p.addLine(to: CGPoint(x: 336, y: 252))
+p.addLine(to: CGPoint(x: 336, y: 772))
+p.addLine(to: CGPoint(x: 316, y: 772))
+p.closeSubpath()
+p.move(to: CGPoint(x: 212, y: 232))
+p.addLine(to: CGPoint(x: 348, y: 232))
+p.addLine(to: CGPoint(x: 348, y: 252))
+p.addLine(to: CGPoint(x: 212, y: 252))
+p.closeSubpath()
+p.move(to: CGPoint(x: 224, y: 220))
+p.addLine(to: CGPoint(x: 336, y: 220))
+p.addLine(to: CGPoint(x: 336, y: 232))
+p.addLine(to: CGPoint(x: 224, y: 232))
+p.closeSubpath()
+p.move(to: CGPoint(x: 212, y: 772))
+p.addLine(to: CGPoint(x: 348, y: 772))
+p.addLine(to: CGPoint(x: 348, y: 792))
+p.addLine(to: CGPoint(x: 212, y: 792))
+p.closeSubpath()
+p.move(to: CGPoint(x: 702.6363575271514, y: 268.1915634598399))
+p.addLine(to: CGPoint(x: 794.6363575271514, y: 380.1915634598399))
+p.addLine(to: CGPoint(x: 785.3636424728486, y: 387.8084365401601))
+p.addLine(to: CGPoint(x: 693.3636424728486, y: 275.8084365401601))
+p.closeSubpath()
+p.move(to: CGPoint(x: 794.6363575271514, y: 275.8084365401601))
+p.addLine(to: CGPoint(x: 702.6363575271514, y: 387.8084365401601))
+p.addLine(to: CGPoint(x: 693.3636424728486, y: 380.1915634598399))
+p.addLine(to: CGPoint(x: 785.3636424728486, y: 268.1915634598399))
+p.closeSubpath()
+p.move(to: CGPoint(x: 702.6363575271514, y: 396.1915634598399))
+p.addLine(to: CGPoint(x: 794.6363575271514, y: 508.1915634598399))
+p.addLine(to: CGPoint(x: 785.3636424728486, y: 515.8084365401601))
+p.addLine(to: CGPoint(x: 693.3636424728486, y: 403.8084365401601))
+p.closeSubpath()
+p.move(to: CGPoint(x: 794.6363575271514, y: 403.8084365401601))
+p.addLine(to: CGPoint(x: 702.6363575271514, y: 515.8084365401601))
+p.addLine(to: CGPoint(x: 693.3636424728486, y: 508.1915634598399))
+p.addLine(to: CGPoint(x: 785.3636424728486, y: 396.1915634598399))
+p.closeSubpath()
+p.move(to: CGPoint(x: 702.6363575271514, y: 524.1915634598399))
+p.addLine(to: CGPoint(x: 794.6363575271514, y: 636.1915634598399))
+p.addLine(to: CGPoint(x: 785.3636424728486, y: 643.8084365401601))
+p.addLine(to: CGPoint(x: 693.3636424728486, y: 531.8084365401601))
+p.closeSubpath()
+p.move(to: CGPoint(x: 794.6363575271514, y: 531.8084365401601))
+p.addLine(to: CGPoint(x: 702.6363575271514, y: 643.8084365401601))
+p.addLine(to: CGPoint(x: 693.3636424728486, y: 636.1915634598399))
+p.addLine(to: CGPoint(x: 785.3636424728486, y: 524.1915634598399))
+p.closeSubpath()
+p.move(to: CGPoint(x: 702.6363575271514, y: 652.1915634598399))
+p.addLine(to: CGPoint(x: 794.6363575271514, y: 764.1915634598399))
+p.addLine(to: CGPoint(x: 785.3636424728486, y: 771.8084365401601))
+p.addLine(to: CGPoint(x: 693.3636424728486, y: 659.8084365401601))
+p.closeSubpath()
+p.move(to: CGPoint(x: 794.6363575271514, y: 659.8084365401601))
+p.addLine(to: CGPoint(x: 702.6363575271514, y: 771.8084365401601))
+p.addLine(to: CGPoint(x: 693.3636424728486, y: 764.1915634598399))
+p.addLine(to: CGPoint(x: 785.3636424728486, y: 652.1915634598399))
+p.closeSubpath()
+p.move(to: CGPoint(x: 688, y: 260))
+p.addLine(to: CGPoint(x: 800, y: 260))
+p.addLine(to: CGPoint(x: 800, y: 276))
+p.addLine(to: CGPoint(x: 688, y: 276))
+p.closeSubpath()
+p.move(to: CGPoint(x: 688, y: 388))
+p.addLine(to: CGPoint(x: 800, y: 388))
+p.addLine(to: CGPoint(x: 800, y: 404))
+p.addLine(to: CGPoint(x: 688, y: 404))
+p.closeSubpath()
+p.move(to: CGPoint(x: 688, y: 516))
+p.addLine(to: CGPoint(x: 800, y: 516))
+p.addLine(to: CGPoint(x: 800, y: 532))
+p.addLine(to: CGPoint(x: 688, y: 532))
+p.closeSubpath()
+p.move(to: CGPoint(x: 688, y: 644))
+p.addLine(to: CGPoint(x: 800, y: 644))
+p.addLine(to: CGPoint(x: 800, y: 660))
+p.addLine(to: CGPoint(x: 688, y: 660))
+p.closeSubpath()
+p.move(to: CGPoint(x: 688, y: 756))
+p.addLine(to: CGPoint(x: 800, y: 756))
+p.addLine(to: CGPoint(x: 800, y: 772))
+p.addLine(to: CGPoint(x: 688, y: 772))
+p.closeSubpath()
+p.move(to: CGPoint(x: 688, y: 252))
+p.addLine(to: CGPoint(x: 708, y: 252))
+p.addLine(to: CGPoint(x: 708, y: 772))
+p.addLine(to: CGPoint(x: 688, y: 772))
+p.closeSubpath()
+p.move(to: CGPoint(x: 780, y: 252))
+p.addLine(to: CGPoint(x: 800, y: 252))
+p.addLine(to: CGPoint(x: 800, y: 772))
+p.addLine(to: CGPoint(x: 780, y: 772))
+p.closeSubpath()
+p.move(to: CGPoint(x: 676, y: 232))
+p.addLine(to: CGPoint(x: 812, y: 232))
+p.addLine(to: CGPoint(x: 812, y: 252))
+p.addLine(to: CGPoint(x: 676, y: 252))
+p.closeSubpath()
+p.move(to: CGPoint(x: 688, y: 220))
+p.addLine(to: CGPoint(x: 800, y: 220))
+p.addLine(to: CGPoint(x: 800, y: 232))
+p.addLine(to: CGPoint(x: 688, y: 232))
+p.closeSubpath()
+p.move(to: CGPoint(x: 676, y: 772))
+p.addLine(to: CGPoint(x: 812, y: 772))
+p.addLine(to: CGPoint(x: 812, y: 792))
+p.addLine(to: CGPoint(x: 676, y: 792))
+p.closeSubpath()
+p.move(to: CGPoint(x: 318.4078264843629, y: 561.4783137965919))
+p.addLine(to: CGPoint(x: 364.9078264843629, y: 421.478313796592))
+p.addLine(to: CGPoint(x: 380.0921735156371, y: 426.521686203408))
+p.addLine(to: CGPoint(x: 333.5921735156371, y: 566.5216862034081))
+p.closeSubpath()
+p.move(to: CGPoint(x: 380.0921735156371, y: 421.478313796592))
+p.addLine(to: CGPoint(x: 426.5921735156371, y: 561.4783137965919))
+p.addLine(to: CGPoint(x: 411.4078264843629, y: 566.5216862034081))
+p.addLine(to: CGPoint(x: 364.9078264843629, y: 426.521686203408))
+p.closeSubpath()
+p.move(to: CGPoint(x: 411.4078264843629, y: 561.4783137965919))
+p.addLine(to: CGPoint(x: 457.9078264843629, y: 421.478313796592))
+p.addLine(to: CGPoint(x: 473.0921735156371, y: 426.521686203408))
+p.addLine(to: CGPoint(x: 426.5921735156371, y: 566.5216862034081))
+p.closeSubpath()
+p.move(to: CGPoint(x: 473.0921735156371, y: 421.478313796592))
+p.addLine(to: CGPoint(x: 519.5921735156371, y: 561.4783137965919))
+p.addLine(to: CGPoint(x: 504.4078264843629, y: 566.5216862034081))
+p.addLine(to: CGPoint(x: 457.9078264843629, y: 426.521686203408))
+p.closeSubpath()
+p.move(to: CGPoint(x: 504.4078264843629, y: 561.4783137965919))
+p.addLine(to: CGPoint(x: 550.9078264843629, y: 421.478313796592))
+p.addLine(to: CGPoint(x: 566.0921735156371, y: 426.521686203408))
+p.addLine(to: CGPoint(x: 519.5921735156371, y: 566.5216862034081))
+p.closeSubpath()
+p.move(to: CGPoint(x: 566.0921735156371, y: 421.478313796592))
+p.addLine(to: CGPoint(x: 612.5921735156371, y: 561.4783137965919))
+p.addLine(to: CGPoint(x: 597.4078264843629, y: 566.5216862034081))
+p.addLine(to: CGPoint(x: 550.9078264843629, y: 426.521686203408))
+p.closeSubpath()
+p.move(to: CGPoint(x: 597.4078264843629, y: 561.4783137965919))
+p.addLine(to: CGPoint(x: 643.9078264843629, y: 421.478313796592))
+p.addLine(to: CGPoint(x: 659.0921735156371, y: 426.521686203408))
+p.addLine(to: CGPoint(x: 612.5921735156371, y: 566.5216862034081))
+p.closeSubpath()
+p.move(to: CGPoint(x: 659.0921735156371, y: 421.478313796592))
+p.addLine(to: CGPoint(x: 705.5921735156371, y: 561.4783137965919))
+p.addLine(to: CGPoint(x: 690.4078264843629, y: 566.5216862034081))
+p.addLine(to: CGPoint(x: 643.9078264843629, y: 426.521686203408))
+p.closeSubpath()
+p.move(to: CGPoint(x: 316, y: 412))
+p.addLine(to: CGPoint(x: 708, y: 412))
+p.addLine(to: CGPoint(x: 708, y: 432))
+p.addLine(to: CGPoint(x: 316, y: 432))
+p.closeSubpath()
+p.move(to: CGPoint(x: 316, y: 556))
+p.addLine(to: CGPoint(x: 708, y: 556))
+p.addLine(to: CGPoint(x: 708, y: 580))
+p.addLine(to: CGPoint(x: 316, y: 580))
+p.closeSubpath()
+p.move(to: CGPoint(x: 128, y: 708))
+p.addLine(to: CGPoint(x: 336, y: 708))
+p.addLine(to: CGPoint(x: 336, y: 732))
+p.addLine(to: CGPoint(x: 128, y: 732))
+p.closeSubpath()
+p.move(to: CGPoint(x: 688, y: 708))
+p.addLine(to: CGPoint(x: 896, y: 708))
+p.addLine(to: CGPoint(x: 896, y: 732))
+p.addLine(to: CGPoint(x: 688, y: 732))
+p.closeSubpath()
 
-let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-let assets = root.appendingPathComponent("Assets")
-let iconset = assets.appendingPathComponent("AppIcon.iconset")
-let preview = root.appendingPathComponent(".build/icon-redesign-preview")
-for dir in [iconset, preview] { try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true) }
-let space = CGColorSpace(name: CGColorSpace.sRGB)!
-func context(_ w: Int, _ h: Int) -> CGContext {
-    CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
-              bytesPerRow: w * 4, space: space,
-              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+return p}
+func grad(_ c:CGContext,_ colors:[CGColor],_ stops:[CGFloat],_ a:CGPoint,_ b:CGPoint){let g=CGGradient(colorsSpace:space,colors:colors as CFArray,locations:stops)!;c.drawLinearGradient(g,start:a,end:b,options:[.drawsBeforeStartLocation,.drawsAfterEndLocation])}
+func render()->CGImage{
+let c=context(2048,2048);c.scaleBy(x:2,y:2);c.translateBy(x:0,y:1024);c.scaleBy(x:1,y:-1)
+let plate=CGPath(roundedRect:CGRect(x:16,y:16,width:992,height:992),cornerWidth:220,cornerHeight:220,transform:nil)
+c.saveGState();c.addPath(plate);c.clip()
+grad(c,[col(255,174,8),col(255,146,0),col(255,111,12),col(250,83,25)],[0,0.32,0.68,1],CGPoint(x:300,y:0),CGPoint(x:650,y:1024))
+// Broad metallic reflection, not an opaque white gloss stripe.
+grad(c,[col(255,244,188,0.02),col(255,240,185,0.23),col(255,210,120,0),col(116,40,9,0.06),col(255,218,145,0.08)],[0,0.23,0.42,0.65,1],CGPoint(x:0,y:0),CGPoint(x:1024,y:950))
+// Fine deterministic weathering. Keep saturation and broad clean areas.
+var seed:UInt64=921733
+func rand()->CGFloat{seed=seed &* 6364136223846793005 &+ 1;return CGFloat(seed>>32)/CGFloat(UInt32.max)}
+for _ in 0..<16000{let x=rand()*1024,y=rand()*1024;let w=rand()*3+0.5;c.setFillColor(col(99,47,15,0.015+rand()*0.022));c.fill(CGRect(x:x,y:y,width:w,height:0.5))}
+// Soft oxide confined around perimeter, away from polished center.
+let radial=CGGradient(colorsSpace:space,colors:[col(102,47,19,0),col(104,49,16,0.02),col(110,48,18,0.16)] as CFArray,locations:[0,0.7,1])!
+c.drawRadialGradient(radial,startCenter:CGPoint(x:500,y:450),startRadius:0,endCenter:CGPoint(x:500,y:450),endRadius:730,options:.drawsAfterEndLocation)
+c.restoreGState()
+// Precision rolled rim, light above and dark below.
+c.saveGState();c.addPath(plate);c.replacePathWithStrokedPath();c.restoreGState()
+c.saveGState();c.addPath(plate);c.setLineWidth(12);c.replacePathWithStrokedPath();c.clip()
+grad(c,[col(255,244,184),col(255,191,70),col(206,66,12),col(255,169,80)],[0,0.25,0.75,1],CGPoint(x:180,y:16),CGPoint(x:820,y:1008));c.restoreGState()
+c.addPath(CGPath(roundedRect:CGRect(x:25,y:25,width:974,height:974),cornerWidth:212,cornerHeight:212,transform:nil));c.setStrokeColor(col(255,227,154,0.45));c.setLineWidth(2);c.strokePath()
+let mark=bridge().union(bridge())
+// Solid black logo; metallic finish belongs only to backing.
+c.addPath(mark);c.setFillColor(col(0,0,0));c.fillPath()
+return c.makeImage()!
 }
-func color(_ r: CGFloat, _ g: CGFloat, _ b: CGFloat, _ a: CGFloat = 1) -> CGColor {
-    CGColor(colorSpace: space, components: [r / 255, g / 255, b / 255, a])!
-}
-func write(_ image: CGImage, _ url: URL) {
-    let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)!
-    CGImageDestinationAddImage(destination, image, nil)
-    precondition(CGImageDestinationFinalize(destination), "Cannot write \(url.path)")
-}
-
-let ctx = context(1024, 1024)
-// Top-left coordinate system keeps the steel elevation easy to edit.
-ctx.translateBy(x: 0, y: 1024)
-ctx.scaleBy(x: 1, y: -1)
-ctx.saveGState()
-ctx.addPath(CGPath(roundedRect: CGRect(x: 0, y: 0, width: 1024, height: 1024),
-                   cornerWidth: 220, cornerHeight: 220, transform: nil))
-ctx.clip()
-// Seeded copper-orange patina, not a lighting gradient or a drop shadow.
-// Broad oxide variation plus fine grain stays deliberately low contrast.
-var state: UInt64 = 0x4452415742524944
-func random() -> Double {
-    state = state &* 6364136223846793005 &+ 1442695040888963407
-    return Double(state >> 32) / Double(UInt32.max)
-}
-var pixels = [UInt8](repeating: 255, count: 1024 * 1024 * 4)
-for y in 0..<1024 {
-    for x in 0..<1024 {
-        let u = Double(x), v = Double(y)
-        let broad = sin(u * 0.013 + sin(v * 0.009) * 2.2) * sin(v * 0.017 + u * 0.003)
-        let oxide = sin(u * 0.039 + v * 0.018) * sin(v * 0.031 - u * 0.011)
-        let grain = (random() - 0.5) * 7
-        let delta = broad * 7 + oxide * 2.6 + grain
-        let i = (y * 1024 + x) * 4
-        pixels[i] = UInt8(max(0, min(255, 219 + delta)))
-        pixels[i + 1] = UInt8(max(0, min(255, 116 + delta * 0.80)))
-        pixels[i + 2] = UInt8(max(0, min(255, 49 + delta * 0.48)))
-    }
-}
-let data = Data(pixels) as CFData
-let patina = CGImage(width: 1024, height: 1024, bitsPerComponent: 8, bitsPerPixel: 32,
-                     bytesPerRow: 4096, space: space,
-                     bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                     provider: CGDataProvider(data: data)!, decode: nil,
-                     shouldInterpolate: false, intent: .defaultIntent)!
-ctx.draw(patina, in: CGRect(x: 0, y: 0, width: 1024, height: 1024))
-// Sparse horizontal weather marks in the same orange family.
-for _ in 0..<1100 {
-    let x = random() * 1024, y = random() * 1024
-    ctx.setFillColor(color(113, 53, 21, CGFloat(0.025 + random() * 0.035)))
-    ctx.fill(CGRect(x: x, y: y, width: 1 + random() * 7, height: 0.6 + random()))
-}
-ctx.restoreGState()
-
-// A single deep-rust silhouette: two rectangular steel lift towers, modest
-// machinery caps, elevated Warren-truss span, and lower approach decks.
-// No perspective faces, masonry, crenellations, cables, or decorative shadows.
-let rust = color(87, 39, 18)
-ctx.setFillColor(rust)
-ctx.setStrokeColor(rust)
-ctx.setLineCap(.square)
-ctx.setLineJoin(.miter)
-func rect(_ x: CGFloat, _ y: CGFloat, _ w: CGFloat, _ h: CGFloat) {
-    ctx.fill(CGRect(x: x, y: y, width: w, height: h))
-}
-func line(_ points: [(CGFloat, CGFloat)], _ width: CGFloat) {
-    ctx.setLineWidth(width)
-    ctx.beginPath()
-    ctx.move(to: CGPoint(x: points[0].0, y: points[0].1))
-    for point in points.dropFirst() { ctx.addLine(to: CGPoint(x: point.0, y: point.1)) }
-    ctx.strokePath()
-}
-for x: CGFloat in [210, 700] {
-    // Little flat caps and open, braced rectangular towers.
-    rect(x - 12, 226, 136, 25)
-    rect(x + 3, 216, 106, 12)
-    rect(x, 250, 21, 520)
-    rect(x + 91, 250, 21, 520)
-    for y: CGFloat in [263, 393, 523, 653] {
-        rect(x + 14, y, 84, 13)
-    }
-    for y: CGFloat in [276, 536, 666] {
-        let bottom = min(y + 112, 756)
-        line([(x + 22, y), (x + 90, bottom)], 12)
-        line([(x + 90, y), (x + 22, bottom)], 12)
-    }
-    // Upper open tower bracing remains visible above the raised span.
-    line([(x + 22, 276), (x + 90, 388)], 12)
-    rect(x - 14, 769, 140, 25)
-}
-// Raised center span: strong top and bottom chords with four clear triangles.
-rect(306, 409, 412, 21)
-rect(306, 552, 412, 27)
-let nodes: [CGFloat] = [317, 414.5, 512, 609.5, 707]
-for i in 0..<4 {
-    line([(nodes[i], 550), ((nodes[i] + nodes[i + 1]) / 2, 433), (nodes[i + 1], 550)], 17)
-}
-// Short approach spans below the lifted deck make the mechanism unambiguous.
-rect(134, 706, 178, 24)
-rect(712, 706, 178, 24)
-line([(145, 737), (191, 773), (238, 737)], 14)
-line([(786, 737), (833, 773), (879, 737)], 14)
-
-let master = ctx.makeImage()!
-write(master, assets.appendingPathComponent("db.png"))
-write(master, preview.appendingPathComponent("drawbridge-1024.png"))
-let names: [(String, Int)] = [
-    ("icon_16x16", 16), ("icon_16x16@2x", 32),
-    ("icon_32x32", 32), ("icon_32x32@2x", 64), ("icon_64x64", 64),
-    ("icon_128x128", 128), ("icon_128x128@2x", 256),
-    ("icon_256x256", 256), ("icon_256x256@2x", 512),
-    ("icon_512x512", 512), ("icon_512x512@2x", 1024), ("icon_1024x1024", 1024)
-]
-var images: [Int: CGImage] = [1024: master]
-for (name, size) in names {
-    if images[size] == nil {
-        let small = context(size, size)
-        small.interpolationQuality = .high
-        small.draw(master, in: CGRect(x: 0, y: 0, width: size, height: size))
-        images[size] = small.makeImage()!
-    }
-    write(images[size]!, iconset.appendingPathComponent(name + ".png"))
-}
-let tool = Process()
-tool.executableURL = URL(fileURLWithPath: "/usr/bin/iconutil")
-tool.arguments = ["-c", "icns", iconset.path, "-o", assets.appendingPathComponent("Drawbridge.icns").path]
-try tool.run()
-tool.waitUntilExit()
-precondition(tool.terminationStatus == 0, "iconutil failed")
-
-// Native-pixel previews on light/dark surroundings.
-let sheet = context(1100, 640)
-sheet.setFillColor(color(241, 235, 224))
-sheet.fill(CGRect(x: 0, y: 320, width: 1100, height: 320))
-sheet.setFillColor(color(34, 30, 27))
-sheet.fill(CGRect(x: 0, y: 0, width: 1100, height: 320))
-NSGraphicsContext.saveGraphicsState()
-NSGraphicsContext.current = NSGraphicsContext(cgContext: sheet, flipped: false)
-let sizes = [16, 32, 64, 128, 256]
-for (index, size) in sizes.enumerated() {
-    let x = CGFloat([55, 165, 285, 445, 695][index])
-    for dark in [false, true] {
-        let base: CGFloat = dark ? 0 : 320
-        sheet.draw(images[size]!, in: CGRect(x: x, y: base + 45, width: CGFloat(size), height: CGFloat(size)))
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 13, weight: .medium), .foregroundColor: dark ? NSColor.white : NSColor.black]
-        ("\(size) px" as NSString).draw(at: CGPoint(x: x, y: base + 15), withAttributes: attrs)
-    }
-}
-NSGraphicsContext.restoreGraphicsState()
-write(sheet.makeImage()!, preview.appendingPathComponent("small-size-contact-sheet.png"))
-print("Generated Assets/db.png, 12 iconset PNGs, Assets/Drawbridge.icns")
-print("Previews: \(preview.path)")
+let master=render();write(master,"black-bridge-emblem-2048.png")
+func resized(_ size:Int)->CGImage{let c=context(size,size);c.interpolationQuality = .high;c.draw(master,in:CGRect(x:0,y:0,width:size,height:size));return c.makeImage()!}
+let source=resized(1024);write(source,"black-bridge-emblem-1024.png")
+func save(_ image:CGImage,_ url:URL){let d=CGImageDestinationCreateWithURL(url as CFURL,UTType.png.identifier as CFString,1,nil)!;CGImageDestinationAddImage(d,image,nil);precondition(CGImageDestinationFinalize(d))}
+save(source,assets.appendingPathComponent("db.png"))
+let entries:[(String,Int)]=[("icon_16x16.png",16),("icon_16x16@2x.png",32),("icon_32x32.png",32),("icon_32x32@2x.png",64),("icon_64x64.png",64),("icon_128x128.png",128),("icon_128x128@2x.png",256),("icon_256x256.png",256),("icon_256x256@2x.png",512),("icon_512x512.png",512),("icon_512x512@2x.png",1024),("icon_1024x1024.png",1024)]
+for (name,size) in entries{save(resized(size),iconset.appendingPathComponent(name))}
+let tool=Process();tool.executableURL=URL(fileURLWithPath:"/usr/bin/iconutil");tool.arguments=["-c","icns",iconset.path,"-o",assets.appendingPathComponent("Drawbridge.icns").path];try tool.run();tool.waitUntilExit();precondition(tool.terminationStatus==0)
+print("Generated approved black bridge / metallic orange icon, all icon sizes and ICNS")
