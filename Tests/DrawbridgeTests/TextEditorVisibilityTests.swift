@@ -56,4 +56,36 @@ import XCTest
         XCTAssertFalse(updated.shouldDisplay);XCTAssertFalse(updated.shouldPrint)
         s.setLayerVisible(layer,true);XCTAssertTrue(updated.shouldDisplay);XCTAssertTrue(updated.shouldPrint)
     }
+    func testEditorBackingCoversWholeBoxAndIsRemovedOnCancel() throws {
+        let(page,s,view)=fixture();defer{withExtendedLifetime(view){}}
+        let text=try XCTUnwrap(s.create(on:page,bounds:CGRect(x:60,y:120,width:120,height:60),kind:.text,text:"Original"))
+        s.beginTextEditing(on:page,bounds:text.bounds,annotation:text)
+        let backing=try XCTUnwrap(view.subviews.compactMap{$0 as? MarkupTextEditorBacking}.first)
+        let editor=try XCTUnwrap(view.subviews.compactMap{$0 as? NSTextView}.first)
+        XCTAssertTrue(backing.isOpaque);XCTAssertNil(backing.hitTest(.zero))
+        XCTAssertEqual(backing.frame,view.convert(text.bounds,from:page).standardized)
+        XCTAssertLessThan(try XCTUnwrap(view.subviews.firstIndex(of:backing)),try XCTUnwrap(view.subviews.firstIndex(of:editor)))
+        s.finishTextEditing(cancel:true);XCTAssertNil(backing.superview);XCTAssertNil(editor.superview)
+        XCTAssertTrue(text.shouldDisplay);XCTAssertEqual(text.contents,"Original")
+    }
+    func testTranslucentEditorFillStillOccludesUnderlyingCachedText() throws {
+        let backing=MarkupTextEditorBacking(frame:CGRect(x:0,y:0,width:80,height:40))
+        backing.fillColor=NSColor.red.withAlphaComponent(0.25)
+        let image=try XCTUnwrap(backing.bitmapImageRepForCachingDisplay(in:backing.bounds))
+        backing.cacheDisplay(in:backing.bounds,to:image)
+        let pixel=try XCTUnwrap(image.colorAt(x:20,y:20)?.usingColorSpace(.deviceRGB))
+        XCTAssertEqual(pixel.alphaComponent,1,accuracy:0.01)
+        XCTAssertEqual(pixel.redComponent,1,accuracy:0.02)
+        XCTAssertGreaterThan(pixel.greenComponent,0.7);XCTAssertGreaterThan(pixel.blueComponent,0.7)
+    }
+
+    func testLightTextGetsContrastMatteWithoutChangingAttributedColors() {
+        let backing=MarkupTextEditorBacking()
+        let content=NSAttributedString(string:"Light",attributes:[.foregroundColor:NSColor.white])
+        backing.configure(fill:.clear,text:content)
+        XCTAssertLessThan(backing.fillColor.usingColorSpace(.deviceRGB)!.redComponent,0.7)
+        XCTAssertEqual(content.attribute(.foregroundColor,at:0,effectiveRange:nil) as? NSColor,.white)
+        backing.configure(fill:.black,text:content);XCTAssertEqual(backing.fillColor,.black)
+    }
+
 }

@@ -367,7 +367,7 @@ final class RectangleMarkupController {
             }
             if tool != .select { selected = nil; onClickAway?() }; refresh(); (view as? MarkupPDFView)?.markupToolCursorChanged() }
     }
-    private var inlineText: (page:PDFPage, bounds:CGRect, annotation:PDFAnnotation?, editor:MarkupInlineTextView, wasDirty:Bool, scale:CGFloat, insets:NSEdgeInsets, rotation:Int, wasDisplayed:Bool)?
+    private var inlineText: (page:PDFPage, bounds:CGRect, annotation:PDFAnnotation?, editor:MarkupInlineTextView, backing:MarkupTextEditorBacking, wasDirty:Bool, scale:CGFloat, insets:NSEdgeInsets, rotation:Int, wasDisplayed:Bool)?
     var isEditingText: Bool { inlineText != nil }
     var fontSize: CGFloat = 18
     var fillColor: NSColor? = .orange
@@ -1077,7 +1077,9 @@ final class RectangleMarkupController {
         if let annotation,let state=layerState,state.originalFlags.object(forKey:annotation)==nil {
             state.originalFlags.setObject(MarkupLayerFlags(annotation),forKey:annotation)
         }
-        inlineText = (page,bounds,annotation,editor,hasUnsavedChanges,view.scaleFactor,importedInsets,importedRotation,annotation?.shouldDisplay ?? true)
+        let backing=MarkupTextEditorBacking()
+        backing.configure(fill:annotation.map { RectangleMarkupRecord.owns($0) ? .white : $0.color } ?? .white, text:editor.attributedString())
+        inlineText = (page,bounds,annotation,editor,backing,hasUnsavedChanges,view.scaleFactor,importedInsets,importedRotation,annotation?.shouldDisplay ?? true)
         onDraftBegan?()
         annotation?.shouldDisplay = false
         if annotation != nil {invalidateTextEditingPresentation(on:page,in:view)}
@@ -1089,7 +1091,7 @@ final class RectangleMarkupController {
             else { self.onMutation?(draft.page) }
             self.refresh()
         }
-        view.addSubview(editor); positionTextEditor(); view.needsDisplay = true
+        view.addSubview(backing);view.addSubview(editor); positionTextEditor(); view.needsDisplay = true
         view.window?.makeFirstResponder(editor); editor.setSelectedRange(NSRange(location:editor.string.utf16.count,length:0))
         refresh()
     }
@@ -1107,6 +1109,7 @@ final class RectangleMarkupController {
     private func positionTextEditor() {
         guard let draft = inlineText, let view else { return }
         let rect = view.convert(draft.bounds,from:draft.page).standardized
+        draft.backing.frame = rect
         let scale = view.scaleFactor
         let editor = draft.editor
         editor.frameCenterRotation = 0
@@ -1141,7 +1144,7 @@ final class RectangleMarkupController {
         let wasFirstResponder = view?.window?.firstResponder === draft.editor
         let editingView=draft.editor.superview as? PDFView
         draft.annotation?.shouldDisplay = draft.wasDisplayed
-        draft.editor.removeFromSuperview(); hasUnsavedChanges = draft.wasDirty
+        draft.editor.removeFromSuperview();draft.backing.removeFromSuperview(); hasUnsavedChanges = draft.wasDirty
         if !cancel && !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && text.utf8.count <= 100000 {
             if let annotation = draft.annotation {
                 selected = annotation
@@ -1830,5 +1833,29 @@ final class MarkupInlineTextView: NSTextView, NSTextViewDelegate {
         let result = super.resignFirstResponder()
         if result && wasEditing { onFinish?(false) }
         return result
+    }
+}
+
+/// An editing surface, never PDF content. PDFKit can retain an imported /AP in
+/// its compositor even after shouldDisplay changes. Cover the whole box (not
+/// only the inset text container) while the sole editable text view is present.
+@MainActor final class MarkupTextEditorBacking:NSView {
+    var fillColor:NSColor = .white {didSet{needsDisplay=true}}
+    func configure(fill:NSColor,text:NSAttributedString) {
+        // Keep light imported/owned glyphs readable on the temporary surface.
+        // This affects only the matte, never the attributed text saved to PDF.
+        let rgb=fill.usingColorSpace(.deviceRGB) ?? .white
+        let brightness=(rgb.redComponent+rgb.greenComponent+rgb.blueComponent)/3*rgb.alphaComponent+(1-rgb.alphaComponent)
+        var hasLightText=false
+        text.enumerateAttribute(.foregroundColor,in:NSRange(location:0,length:text.length)) {value,_,_ in
+            if let c=(value as? NSColor)?.usingColorSpace(.deviceRGB),min(c.redComponent,c.greenComponent,c.blueComponent)>0.7 {hasLightText=true}
+        }
+        fillColor=brightness>0.7 && hasLightText ? NSColor(calibratedWhite:0.45,alpha:1) : fill
+    }
+    override var isOpaque:Bool {true}
+    override func hitTest(_ point:NSPoint)->NSView? {nil}
+    override func draw(_ dirtyRect:NSRect) {
+        NSColor.white.setFill();bounds.fill()
+        fillColor.setFill();bounds.fill()
     }
 }
