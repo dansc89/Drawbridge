@@ -367,7 +367,7 @@ final class RectangleMarkupController {
             }
             if tool != .select { selected = nil; onClickAway?() }; refresh(); (view as? MarkupPDFView)?.markupToolCursorChanged() }
     }
-    private var inlineText: (page:PDFPage, bounds:CGRect, annotation:PDFAnnotation?, editor:MarkupInlineTextView, wasDirty:Bool, scale:CGFloat, insets:NSEdgeInsets, rotation:Int)?
+    private var inlineText: (page:PDFPage, bounds:CGRect, annotation:PDFAnnotation?, editor:MarkupInlineTextView, wasDirty:Bool, scale:CGFloat, insets:NSEdgeInsets, rotation:Int, wasDisplayed:Bool)?
     var isEditingText: Bool { inlineText != nil }
     var fontSize: CGFloat = 18
     var fillColor: NSColor? = .orange
@@ -1074,9 +1074,13 @@ final class RectangleMarkupController {
         }
         editor.setAccessibilityLabel("Edit text on PDF page")
         editor.wantsLayer = true; editor.layer?.borderColor = NSColor.controlAccentColor.cgColor; editor.layer?.borderWidth = 1
-        inlineText = (page,bounds,annotation,editor,hasUnsavedChanges,view.scaleFactor,importedInsets,importedRotation)
+        if let annotation,let state=layerState,state.originalFlags.object(forKey:annotation)==nil {
+            state.originalFlags.setObject(MarkupLayerFlags(annotation),forKey:annotation)
+        }
+        inlineText = (page,bounds,annotation,editor,hasUnsavedChanges,view.scaleFactor,importedInsets,importedRotation,annotation?.shouldDisplay ?? true)
         onDraftBegan?()
         annotation?.shouldDisplay = false
+        if annotation != nil {invalidateTextEditingPresentation(on:page,in:view)}
         editor.onFinish = { [weak self] cancel in self?.finishTextEditing(cancel:cancel) }
         editor.onChange = { [weak self] in
             guard let self, let draft = self.inlineText else { return }
@@ -1088,6 +1092,17 @@ final class RectangleMarkupController {
         view.addSubview(editor); positionTextEditor(); view.needsDisplay = true
         view.window?.makeFirstResponder(editor); editor.setSelectedRange(NSRange(location:editor.string.utf16.count,length:0))
         refresh()
+    }
+    func isEditingTextAnnotation(_ annotation:PDFAnnotation)->Bool {
+        inlineText?.annotation === annotation || (view as? MarkupPDFView)?.isEditingLegacyTextAnnotation(annotation) == true
+    }
+    private func invalidateTextEditingPresentation(on page:PDFPage,in target:PDFView?) {
+        guard let target,target.document === page.document else{return}
+        if let markup=target as? MarkupPDFView {
+            markup.refreshAnnotationRendering(on:page,importedAppearanceChanged:true,reason:.textEditorVisibilityChanged)
+        } else {
+            target.annotationsChanged(on:page);target.needsDisplay=true;target.documentView?.needsDisplay=true
+        }
     }
     private func positionTextEditor() {
         guard let draft = inlineText, let view else { return }
@@ -1124,7 +1139,8 @@ final class RectangleMarkupController {
         inlineText = nil; draft.editor.onFinish = nil; draft.editor.onChange = nil
         let text = draft.editor.string
         let wasFirstResponder = view?.window?.firstResponder === draft.editor
-        draft.annotation?.shouldDisplay = true
+        let editingView=draft.editor.superview as? PDFView
+        draft.annotation?.shouldDisplay = draft.wasDisplayed
         draft.editor.removeFromSuperview(); hasUnsavedChanges = draft.wasDirty
         if !cancel && !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && text.utf8.count <= 100000 {
             if let annotation = draft.annotation {
@@ -1135,6 +1151,10 @@ final class RectangleMarkupController {
                 } else { editSelectedText(text,size:annotation.font?.pointSize ?? fontSize) }
             }
             else { _ = create(on:draft.page,bounds:draft.bounds,kind:.text,text:text) }
+        }
+        applyLayerVisibility()
+        if draft.annotation != nil {
+            invalidateTextEditingPresentation(on:draft.page,in:editingView ?? view)
         }
         if wasFirstResponder { view?.window?.makeFirstResponder(view) }
         view?.needsDisplay = true; refresh()

@@ -174,6 +174,8 @@ enum MarkupLayers {
             guard let page = document.page(at: index) else { continue }
             var changedVisibility = false
             for annotation in page.annotations where MarkupLayers.id(annotation) != nil || state.originalFlags.object(forKey: annotation) != nil {
+                // Editor visibility is transient: never restore or capture it as a layer default.
+                if isEditingTextAnnotation(annotation) {continue}
                 let flags = state.originalFlags.object(forKey: annotation) ?? MarkupLayerFlags(annotation)
                 state.originalFlags.setObject(flags, forKey: annotation)
                 let visible = layerIsVisible(annotation)

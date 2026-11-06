@@ -789,7 +789,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
     }
 
-    enum AnnotationRefreshReason { case markupChanged, snapshotDetailReady }
+    enum AnnotationRefreshReason { case markupChanged, snapshotDetailReady, textEditorVisibilityChanged }
 
     func refreshAnnotationRendering(on page: PDFPage, importedAppearanceChanged: Bool = false, region: CGRect? = nil, reason: AnnotationRefreshReason = .markupChanged) {
         let hadViewportTiles = page.annotations.contains { $0 is SnapshotViewportTileAnnotation }
@@ -801,7 +801,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             updateSnapshotViewportTiles()
             updateSnapshotPreviewViewports()
         }
-        if importedAppearanceChanged && window?.isVisible == true && !snapshotPreviewPages.contains(page) {
+        if importedAppearanceChanged && window?.isVisible == true && (reason == .textEditorVisibilityChanged || !snapshotPreviewPages.contains(page)) {
             // Detached or hidden views have no on-screen tiles to clear.
             // Rotating them queues PDFKit layout work that can outlive the view.
             // PDFKit bakes external AP streams into page tiles. A geometry
@@ -829,7 +829,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             for child in target.subviews { invalidate(child) }
         }
         invalidate(self)
-        if reason == .markupChanged && hadViewportTiles && window?.isVisible == true {
+        if (reason == .markupChanged || reason == .textEditorVisibilityChanged) && hadViewportTiles && window?.isVisible == true {
             // PDFKit retains a composited high-zoom surface after Stamp removal.
             // Retile at an adjacent scale, then restore the exact scale and anchor.
             // Plain needsDisplay and page rotation do not retire that surface.
@@ -1979,6 +1979,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         inlineLiveTextAnnotation = annotation
         inlineAnnotationWasDisplayed = annotation.shouldDisplay
         annotation.shouldDisplay = false
+        refreshAnnotationRendering(on:page,importedAppearanceChanged:true,reason:.textEditorVisibilityChanged)
         field.frame = inlineEditorFrame(for: annotation, on: page)
         startTextEditCaretBlink(for: annotation, page: page)
 
@@ -2013,6 +2014,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         inlineOriginalTextContents = annotation.contents ?? ""
         inlineAnnotationWasDisplayed = annotation.shouldDisplay
         annotation.shouldDisplay = false
+        refreshAnnotationRendering(on:page,importedAppearanceChanged:true,reason:.textEditorVisibilityChanged)
         field.frame = inlineEditorFrame(for: annotation, on: page)
         startTextEditCaretBlink(for: annotation, page: page)
 
@@ -2023,10 +2025,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
     }
 
+    func isEditingLegacyTextAnnotation(_ annotation:PDFAnnotation)->Bool {inlineLiveTextAnnotation === annotation && inlineTextField != nil}
+
     private func commitInlineTextEditor(cancel: Bool, selectCommittedAnnotation: Bool = false) -> PDFAnnotation? {
         guard let field = inlineTextField else { return nil }
         let wasEditingExisting = inlineEditingExistingAnnotation
         let originalText = inlineOriginalTextContents
+        let editingPage=inlineTextPage
         defer {
             stopTextEditCaretBlink()
             field.removeFromSuperview()
@@ -2036,6 +2041,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             inlineLiveTextAnnotation = nil
             inlineEditingExistingAnnotation = false
             inlineOriginalTextContents = nil
+            rectangleMarkup.applyLayerVisibility()
+            if let editingPage {refreshAnnotationRendering(on:editingPage,importedAppearanceChanged:true,reason:.textEditorVisibilityChanged)}
         }
 
         guard let page = inlineTextPage else { return nil }
