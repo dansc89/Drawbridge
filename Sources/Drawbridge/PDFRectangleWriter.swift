@@ -512,8 +512,8 @@ enum PDFRectangleWriter {
         tables[1] = objects; json["qpdf"] = tables
     }
 
-    private static func applyImportedEdit(_ edit: ImportedMarkupEdit, to value: inout [String: Any], objects: inout [String: Any], next: inout Int) throws {
-        guard edit.fields.isSubset(of: ImportedMarkupEdit.allowedFields), !edit.metadata.isEmpty, edit.metadata.count < 32 * 1024 * 1024,
+    private static func applyImportedEdit(_ edit: ImportedMarkupEdit, to value: inout [String: Any], objects: inout [String: Any], next: inout Int, allowedFields: Set<String> = ImportedMarkupEdit.allowedFields) throws {
+        guard edit.fields.isSubset(of: allowedFields), !edit.metadata.isEmpty, edit.metadata.count < 32 * 1024 * 1024,
               !edit.appearance.isEmpty, edit.appearance.count < 32 * 1024 * 1024,
               let executable = PDFTKBookmarkWriter.executableURL() else { throw CocoaError(.fileReadCorruptFile) }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeImportedEdit-\(UUID())")
@@ -714,6 +714,16 @@ enum PDFRectangleWriter {
                     objects["obj:\(appearanceRef)"] = try SnapshotAppearance.install(data: record.snapshotData!, bounds: b, rotation: record.textRotation, pageTransform: destinationPage.transform(for: .mediaBox), style: record.snapshotStyle, objects: &objects, next: &next, forms: &snapshotForms)
                     objects["obj:\(annotationRef)"] = ["value": annotation]; entries.append(annotationRef); continue
                 }
+                if let payload = record.copiedMarkup {
+                    // Shape/line records already carry canonical current style and geometry.
+                    // Reapplying PDFKit metadata can also round-trip colors through a
+                    // different color space and fail semantic fill verification.
+                    let fields = record.kind == .text ? CopiedMarkupPayload.textPersistenceFields : []
+                    let edit = ImportedMarkupEdit(metadata: payload.metadata, appearance: payload.appearance, fields: fields)
+                    try applyImportedEdit(edit, to: &annotation, objects: &objects, next: &next, allowedFields: CopiedMarkupPayload.textPersistenceFields)
+                    annotation["/DrawbridgeCopiedMarkup"] = "u:" + String(data: try JSONEncoder().encode(payload), encoding: .utf8)!
+                    objects["obj:\(annotationRef)"] = ["value": annotation]; entries.append(annotationRef); continue
+                }
                 let drawing = appearanceDrawing(record)
                 let isDimension = record.measurement?.isDistance(points: record.vertices) == true
                 var resources: [String: Any] = ["/ExtGState": ["/MarkupGS": ["/Type": "/ExtGState", "/CA": record.strokeOpacity, "/ca": record.kind == .text || record.kind == .highlight || isDimension ? record.strokeOpacity : record.fillOpacity]]]
@@ -823,6 +833,13 @@ enum PDFRectangleWriter {
                         comparisonGraph([expected.strokeOpacity, expected.fillOpacity])) else { return false }
                 if value["/DrawbridgeLayerID"] as? String != expected.layerID.map({ "u:" + $0 }) || value["/DrawbridgeLayerCatalog"] as? String != expected.layerCatalog.map({ "u:" + $0 }) { return false }
                 if value["/DrawbridgeHatchStyle"] as? String != expected.hatch.map({ "u:" + $0.json }) { return false }
+                if let payload = expected.copiedMarkup {
+                    guard let encoded = value["/DrawbridgeCopiedMarkup"] as? String,
+                          encoded.hasPrefix("u:"),
+                          let data = String(encoded.dropFirst(2)).data(using: .utf8),
+                          let actual = try? JSONDecoder().decode(CopiedMarkupPayload.self, from: data),
+                          actual == payload else { return false }
+                } else if value["/DrawbridgeCopiedMarkup"] != nil { return false }
                 if let id = expected.layerID, value["/OC"] as? String != PDFMarkupLayersPatch.references(objects)[id] { return false }
                 if expected.layerCatalog != nil && value["/F"] as? Int != 98 { return false }
                 if let tool = expected.inkTool, value["/DrawbridgeInkTool"] as? String != "u:" + tool { return false }

@@ -23,7 +23,24 @@ enum MarkupClipboard {
     // Detached clipboard annotations have no page from which to recover rotation.
     static let snapshotRotationKey = PDFAnnotationKey(rawValue: "DrawbridgeClipboardSnapshotRotation")
     static func capture(_ annotation: PDFAnnotation) -> RectangleMarkupRecord? {
-        guard var record = RectangleMarkupRecord.capture(annotation: annotation, pageIndex: 0) else { return nil }
+        let source: PDFAnnotation
+        if RectangleMarkupRecord.owns(annotation) { source = annotation }
+        else {
+            guard ImportedMarkupState.selectable(annotation), ["FreeText", "Square", "Circle", "Line"].contains(annotation.type ?? ""),
+                  annotation.value(forAnnotationKey: PDFAnnotationKey(rawValue: "/CL")) == nil,
+                  annotation.type != "Line" || (annotation.startLineStyle == .none && annotation.endLineStyle == .none && annotation.value(forAnnotationKey: PDFAnnotationKey(rawValue: "/LL")) == nil),
+                  let payload = CopiedMarkupPayload.capture(annotation), let copy = payload.annotation(bounds: annotation.bounds) else { return nil }
+            copy.setValue(RectangleMarkupRecord.prefix + UUID().uuidString, forAnnotationKey: RectangleMarkupRecord.identityKey)
+            if let layer = MarkupLayers.id(annotation) { copy.setValue(layer, forAnnotationKey: MarkupLayers.membershipKey) }
+            // PDFKit may pad/rebase /L while serializing the appearance carrier.
+            // Clipboard geometry comes from the live source, not that carrier.
+            if annotation.type == "Line" {
+                copy.startPoint = annotation.startPoint
+                copy.endPoint = annotation.endPoint
+            }
+            source = copy
+        }
+        guard var record = RectangleMarkupRecord.capture(annotation: source, pageIndex: 0) else { return nil }
         if record.kind == .snapshot, annotation.page == nil,
            let rotation = annotation.value(forAnnotationKey: snapshotRotationKey) as? Int {
             record.textRotation = rotation
@@ -92,7 +109,15 @@ extension RectangleMarkupRecord {
     @MainActor func clipboardAnnotation(contents: String?, rotation: Int? = nil) throws -> PDFAnnotation {
         guard isValid else { throw CocoaError(.fileReadCorruptFile) }
         let annotation: PDFAnnotation
-        if kind == .snapshot {
+        if let payload = copiedMarkup {
+            guard let copy = payload.annotation(bounds: bounds),
+                  ["text": "FreeText", "rectangle": "Square", "ellipse": "Circle", "line": "Line", "arrow": "Line"][kind.rawValue] == copy.type else { throw CocoaError(.fileReadCorruptFile) }
+            annotation = copy
+            if let start, let end {
+                annotation.startPoint = CGPoint(x: start.x - bounds.minX, y: start.y - bounds.minY)
+                annotation.endPoint = CGPoint(x: end.x - bounds.minX, y: end.y - bounds.minY)
+            }
+        } else if kind == .snapshot {
             annotation = try SnapshotStampFactory.make(payload: SnapshotPayload(data: snapshotData!), bounds: bounds, rotation: rotation ?? textRotation, style: snapshotStyle)
             annotation.setValue(snapshotData!.base64EncodedString(), forAnnotationKey: SnapshotPayload.key)
             annotation.setValue(snapshotStyle.json, forAnnotationKey: SnapshotStyle.key)

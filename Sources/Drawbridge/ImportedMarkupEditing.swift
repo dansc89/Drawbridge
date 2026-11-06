@@ -102,8 +102,10 @@ final class ImportedTextAnnotation: PDFAnnotation {
 }
 
 @MainActor enum ImportedTextContent {
-    static func read(_ annotation:PDFAnnotation)->NSAttributedString {
-        if let custom=annotation as? ImportedTextAnnotation { return custom.richText }
+    static func read(_ annotation: PDFAnnotation) -> NSAttributedString {
+        if let text=annotation as? ImportedTextAnnotation { return text.richText }
+        if let data = CopiedMarkupPayload.read(annotation)?.richText,
+           let text = try? NSAttributedString(data: data, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil) { return text }
         let contents=annotation.contents ?? ""
         let fallbackStyle=NSMutableParagraphStyle();fallbackStyle.alignment=annotation.alignment
         let fallback=NSAttributedString(string:contents,attributes:[.font:annotation.font ?? NSFont.systemFont(ofSize:13),.foregroundColor:annotation.fontColor ?? .black,.paragraphStyle:fallbackStyle])
@@ -238,6 +240,14 @@ final class ImportedTextAnnotation: PDFAnnotation {
         ImportedMarkupState.selectable(annotation) && annotation.type != "Stamp" && annotation.type != "Text" && annotation.type != "Caret"
     }
     @discardableResult func replaceImported(_ old:PDFAnnotation,with replacement:PDFAnnotation,on page:PDFPage,fields:Set<String>,action:String)->Bool {
+        if RectangleMarkupRecord.owns(old), CopiedMarkupPayload.read(old) != nil {
+            guard canEdit(), page.document === view?.document, old.page === page, !old.isReadOnly, !layerIsLocked(old), let payload = CopiedMarkupPayload.capture(replacement) else { return false }
+            payload.install(on: replacement)
+            undo.registerUndo(withTarget: self) { target in _ = target.replaceImported(replacement, with: old, on: page, fields: fields, action: action) }
+            undo.setActionName(action)
+            page.removeAnnotation(old); page.addAnnotation(replacement); selected = replacement; changed(page)
+            return true
+        }
         guard canEdit(),page.document===view?.document,old.page===page,!old.isReadOnly,!layerIsLocked(old),canEditImportedAppearance(old),let state=importedState,
               state.replace(old,with:replacement,fields:fields) else{return false}
         undo.registerUndo(withTarget:self){target in _=target.replaceImported(replacement,with:old,on:page,fields:fields,action:action)};undo.setActionName(action)

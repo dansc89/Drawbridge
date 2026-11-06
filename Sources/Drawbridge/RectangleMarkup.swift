@@ -87,6 +87,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
     var hatch: DraftingHatch? = nil
     var layerID: String? = nil
     var layerCatalog: String? = nil
+    var copiedMarkup: CopiedMarkupPayload? = nil
     var snapshotStyle = SnapshotStyle()
     var snapshotData: Data? = nil
     var measurement: DrawingMeasurement? = nil
@@ -208,7 +209,11 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
                 record.strokeOpacity = MarkupStyle.strokeOpacity(annotation)
                 record.fillOpacity = MarkupStyle.fillOpacity(annotation)
                 record.hatch = DraftingHatch.read(annotation)
-                if ["Square", "Circle", "Polygon"].contains(annotation.type ?? ""), let rgb = polygonFill(annotation)?.usingColorSpace(.deviceRGB) { record.fill = [Double(rgb.redComponent), Double(rgb.greenComponent), Double(rgb.blueComponent)] }
+                // Foreign copies use standard /IC, not our polygon fill key.
+                // Read that fallback only for copies; never adopt or rewrite originals.
+                let copiedPayload = CopiedMarkupPayload.read(annotation)
+                let fill = polygonFill(annotation) ?? (copiedPayload != nil ? annotation.interiorColor : nil)
+                if ["Square", "Circle", "Polygon"].contains(annotation.type ?? ""), let rgb = fill?.usingColorSpace(.deviceRGB) { record.fill = [Double(rgb.redComponent), Double(rgb.greenComponent), Double(rgb.blueComponent)] }
                 record.measurement = MeasurementMetadata.measurement(annotation)
                 record.pageScale = MeasurementMetadata.isPageScaleMetadata(annotation) ? (annotation.page.flatMap { MeasurementMetadata.scale(on: $0) } ?? MeasurementMetadata.pageScale(annotation)) : nil
                 record.pageScaleCleared = record.pageScale == nil && annotation.value(forAnnotationKey: MeasurementMetadata.clearedScaleKey) as? Bool == true
@@ -231,11 +236,13 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
                     record.start = CGPoint(x: annotation.bounds.minX + annotation.startPoint.x, y: annotation.bounds.minY + annotation.startPoint.y)
                     record.end = CGPoint(x: annotation.bounds.minX + annotation.endPoint.x, y: annotation.bounds.minY + annotation.endPoint.y)
                 }
+                record.copiedMarkup = copiedPayload
                 return record
     }
 
     var isValid: Bool {
-        id.hasPrefix(Self.prefix) && pageIndex >= 0 &&
+        if let copiedMarkup, !copiedMarkup.isValid { return false }
+        return id.hasPrefix(Self.prefix) && pageIndex >= 0 &&
         (hatch == nil || (hatch!.isValid && [.rectangle, .ellipse, .polygon].contains(kind))) &&
         (inkTool == nil || (kind == .polyline && ["pen", "polyline", "highlight"].contains(inkTool!))) &&
         (kind != .snapshot || (snapshotStyle.isValid && snapshotData != nil && SnapshotPayload(data: snapshotData!).page != nil)) &&
@@ -278,6 +285,9 @@ final class RectangleMarkupController {
     private var additionalSelection: [PDFAnnotation] = []
     var selectedItems: [PDFAnnotation] { (selected.map { [$0] } ?? []) + additionalSelection }
     private var groupMove: (page: PDFPage, start: CGPoint, originals: [(PDFAnnotation, CGRect)], offset: CGPoint)?
+    // Like ordinary moves, duplication is previewed during tracking and committed
+    // atomically on mouse-up. Never use the system clipboard as a drag scratchpad.
+    private var optionDrag = false
     private var selectionWindow: (page: PDFPage, start: CGPoint, end: CGPoint, additive: Bool, original: [PDFAnnotation])?
 
     func setSelectedItems(_ items: [PDFAnnotation]) {
@@ -458,6 +468,10 @@ final class RectangleMarkupController {
                         replacedAppearance = true
                         continue
                     }
+                    // Copied foreign shapes retain their standard PDFKit renderer and
+                    // frozen payload. Native wrappers would discard that payload and
+                    // detach the live annotation used by subsequent style edits.
+                    if CopiedMarkupPayload.read(original) != nil { continue }
                     let measuredPath = original.type == "Ink" && MeasurementMetadata.measurement(original) != nil
                     let closedShape = ["Square", "Circle"].contains(original.type ?? "")
                     guard (closedShape && !(original is DrawbridgeShapeAnnotation)) || (original.type == "Polygon" && !(original is DrawbridgePolygonAnnotation)) || (measuredPath && !(original is DrawbridgeMeasuredPathAnnotation)) else { continue }
@@ -526,6 +540,7 @@ final class RectangleMarkupController {
     func acceptPersistedSource(at url: URL, stamp: PDFMarkupSourceStamp? = nil) { sourceStamp = stamp ?? PDFMarkupSourceStamp.capture(url) }
 
     func pointerDown(at location: CGPoint, clickCount: Int = 1, modifiers: NSEvent.ModifierFlags = []) -> Bool {
+        optionDrag = modifiers.contains(.option)
         guard !isCapturingSnapshot else { return true }
         finishTextEditing()
         guard let view else { return false }
@@ -619,13 +634,14 @@ final class RectangleMarkupController {
         if let selected, selected.page === page, RectangleMarkupRecord.owns(selected), !selected.isReadOnly, !layerIsLocked(selected) {
             let vertices = RectangleMarkupRecord.vertices(selected)
             if let index = vertices.indices.first(where: { i in
+                guard !optionDrag else { return false }
                 let p = view.convert(vertices[i],from:page)
                 return hypot(location.x-p.x,location.y-p.y) <= 8
             }) {
                 gesture = .vertex(page,selected,index); previewVertices = vertices
                 preview = (page,selected.bounds); refresh(); return true
             }
-            let corners: [Corner] = !vertices.isEmpty || selected.type == "Stamp" ? [] : selected.type == "Line" ? [.lowerLeft, .upperRight] : Corner.allCases
+            let corners: [Corner] = optionDrag || !vertices.isEmpty || selected.type == "Stamp" ? [] : selected.type == "Line" ? [.lowerLeft, .upperRight] : Corner.allCases
             let corner = corners.first { corner in
                 let p = view.convert(handlePoint(corner, annotation: selected), from: page)
                 return hypot(location.x - p.x, location.y - p.y) <= 8
@@ -757,6 +773,7 @@ final class RectangleMarkupController {
 
     @discardableResult
     func pointerDragged(at location: CGPoint, modifiers: NSEvent.ModifierFlags = []) -> Bool {
+        if modifiers.contains(.option) { optionDrag = true }
         if var move = groupMove, let view {
             var end = view.convert(location, to: move.page)
             if modifiers.contains(.shift) { end = MeasurementGeometry.constrained(end, from: move.start) }
@@ -847,6 +864,17 @@ final class RectangleMarkupController {
             _ = pointerDragged(at: location, modifiers: modifiers)
             let offset = groupMove?.offset ?? .zero
             groupMove = nil
+            if optionDrag {
+                optionDrag = false
+                if offset != .zero {
+                    let union = move.originals.reduce(CGRect.null) { $0.union($1.1) }
+                    undo.beginUndoGrouping()
+                    _ = pasteMarkups(move.originals.map { $0.0 }, on: move.page, center: CGPoint(x: union.midX + offset.x, y: union.midY + offset.y))
+                    undo.setActionName("Duplicate Markups")
+                    undo.endUndoGrouping()
+                }
+                refresh(); return true
+            }
             undo.beginUndoGrouping()
             for (annotation, original) in move.originals { setGeometry(original.offsetBy(dx: offset.x, dy: offset.y), endpoints: nil, of: annotation, on: move.page, action: "Move Markups") }
             undo.endUndoGrouping()
@@ -906,6 +934,16 @@ final class RectangleMarkupController {
                 beginTextEditing(on:page,bounds:candidate)
             } else { _ = create(on: page, bounds: candidate, kind: kind, endpoints: endpoints) }
         case .edit(let page, let annotation, let original, _, let corner):
+            if optionDrag && corner == nil {
+                optionDrag = false
+                if candidate != original {
+                    undo.beginUndoGrouping()
+                    _ = pasteMarkups([annotation], on: page, center: CGPoint(x: candidate.midX, y: candidate.midY))
+                    undo.setActionName("Duplicate Markups")
+                    undo.endUndoGrouping()
+                }
+                refresh(); return true
+            }
             if candidate != original || endpoints != nil { setGeometry(candidate, endpoints: endpoints, of: annotation, on: page, action: corner == nil ? "Move Markup" : "Resize Markup") }
         }
         refresh(); return true
@@ -1065,7 +1103,7 @@ final class RectangleMarkupController {
         editor.insertionPointColor = .controlAccentColor
         editor.string = annotation?.contents ?? ""
         var importedInsets=NSEdgeInsets(),importedRotation=0
-        if let annotation, !RectangleMarkupRecord.owns(annotation) {
+        if let annotation, !RectangleMarkupRecord.owns(annotation) || CopiedMarkupPayload.read(annotation) != nil {
             importedRotation=(annotation.value(forAnnotationKey:PDFAnnotationKey(rawValue:"/Rotate")) as? NSNumber)?.intValue ?? 0
             editor.isRichText = true
             let rich=ImportedTextContent.scaled(ImportedTextContent.read(annotation),factor:view.scaleFactor)
@@ -1148,7 +1186,7 @@ final class RectangleMarkupController {
         if !cancel && !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && text.utf8.count <= 100000 {
             if let annotation = draft.annotation {
                 selected = annotation
-                if !RectangleMarkupRecord.owns(annotation) {
+                if !RectangleMarkupRecord.owns(annotation) || CopiedMarkupPayload.read(annotation) != nil {
                     let rich=ImportedTextContent.scaled(draft.editor.attributedString(),factor:1/max(0.01,draft.scale))
                     if text != annotation.contents { editImportedText(annotation, on: draft.page, text: text, size: annotation.font?.pointSize ?? fontSize, rich: rich) }
                 } else { editSelectedText(text,size:annotation.font?.pointSize ?? fontSize) }
@@ -1329,7 +1367,7 @@ final class RectangleMarkupController {
     }
 
     private func setStyle(_ annotation: PDFAnnotation, page: PDFPage, color: NSColor, width: CGFloat) {
-        if !RectangleMarkupRecord.owns(annotation) {
+        if !RectangleMarkupRecord.owns(annotation) || (annotation.type == "FreeText" && CopiedMarkupPayload.read(annotation) != nil) {
             let copy: PDFAnnotation
             if annotation.type == "FreeText" {
                 let rich = NSMutableAttributedString(attributedString: ImportedTextContent.read(annotation))
@@ -1367,7 +1405,7 @@ final class RectangleMarkupController {
               !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty, text.utf8.count <= 100000, size.isFinite, (6...144).contains(size) else { return }
         let oldText = annotation.contents ?? "", oldSize = RectangleMarkupRecord.textFontSize(annotation)
         guard oldText != text || oldSize != size else { return }
-        if !RectangleMarkupRecord.owns(annotation) { editImportedText(annotation, on: page, text: text, size: size); return }
+        if !RectangleMarkupRecord.owns(annotation) || CopiedMarkupPayload.read(annotation) != nil { editImportedText(annotation, on: page, text: text, size: size); return }
         undo.registerUndo(withTarget:self) { target in target.editSelectedTextAnnotation(annotation,page:page,text:oldText,size:oldSize) }
         undo.setActionName("Edit Text")
         annotation.contents = text; RectangleMarkupRecord.setTextFontSize(size,on:annotation); changed(page)
@@ -1621,6 +1659,12 @@ final class RectangleMarkupController {
             selected.removeValue(forAnnotationKey: PDFAnnotationKey(rawValue: "/AP"))
         }
         if let selected, selected.page === page { MeasurementMetadata.updateLabel(selected) }
+        // Record capture runs off actor; keep copied payloads synchronized here,
+        // after mutations (including undo), never serialize their old AP again.
+        for annotation in page.annotations where CopiedMarkupPayload.read(annotation) != nil {
+            annotation.removeValue(forAnnotationKey: PDFAnnotationKey(rawValue: "/AP"))
+            if let payload = CopiedMarkupPayload.capture(annotation) { payload.install(on: annotation) }
+        }
         // A real style mutation during drafting survives cancellation of the text.
         if var draft = inlineText { draft.wasDirty = true; inlineText = draft }
         hasUnsavedChanges = true; (view as? MarkupPDFView)?.refreshAnnotationRendering(on: page, importedAppearanceChanged: importedAppearanceChanged); refresh(); onMutation?(page)
