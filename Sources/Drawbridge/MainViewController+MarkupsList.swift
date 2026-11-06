@@ -40,6 +40,29 @@ extension MainViewController {
             markupsPanel.bottomAnchor.constraint(equalTo: statusBar.topAnchor), height
         ])
         markupsPanel.isHidden = true
+        markupsDivider.translatesAutoresizingMaskIntoConstraints = false
+        markupsDivider.horizontal = true
+        markupsDivider.identifier = NSUserInterfaceItemIdentifier("markupsPanelDivider")
+        markupsDivider.collapsed = true
+        markupsDivider.onToggle = { [weak self] in self?.commandToggleMarkupsList(nil) }
+        markupsDivider.onResizeStart = { [weak self] in
+            guard let self, self.isMarkupsPanelVisible else { return }
+            self.markupsHeightAtDragStart = self.markupsPanel.frame.height
+        }
+        markupsDivider.onResize = { [weak self] delta in
+            guard let self, self.isMarkupsPanelVisible else { return }
+            self.markupsExpandedHeight = min(max(120, self.markupsHeightAtDragStart + delta), max(120, self.view.bounds.height * 0.6))
+            self.markupsPanelHeight?.constant = self.markupsExpandedHeight
+            self.view.layoutSubtreeIfNeeded()
+        }
+        view.addSubview(markupsDivider)
+        NSLayoutConstraint.activate([
+            markupsDivider.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            markupsDivider.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            markupsDivider.bottomAnchor.constraint(equalTo: markupsPanel.topAnchor),
+            markupsDivider.heightAnchor.constraint(equalToConstant: 12)
+        ])
+        updateMarkupsDividerLabel()
         let title = NSTextField(labelWithString: "Markups List")
         title.font = .systemFont(ofSize: 12, weight: .semibold)
         markupsCountLabel.font = .systemFont(ofSize: 11)
@@ -50,9 +73,7 @@ extension MainViewController {
         markupsSearchField.widthAnchor.constraint(equalToConstant: 240).isActive = true
         markupsDeleteButton.target = self; markupsDeleteButton.action = #selector(deleteListedMarkups(_:))
         markupsDeleteButton.bezelStyle = .rounded; markupsDeleteButton.controlSize = .small
-        let close = NSButton(title: "Hide", target: self, action: #selector(commandToggleMarkupsList(_:)))
-        close.bezelStyle = .rounded; close.controlSize = .small
-        let header = NSStackView(views: [title, markupsCountLabel, markupsSearchField, markupsDeleteButton, close])
+        let header = NSStackView(views: [title, markupsCountLabel, markupsSearchField, markupsDeleteButton])
         header.spacing = 12; header.alignment = .centerY; header.translatesAutoresizingMaskIntoConstraints = false
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true
@@ -88,11 +109,26 @@ extension MainViewController {
         ])
     }
     @objc func commandToggleMarkupsList(_ sender: Any?) {
+        if isMarkupsPanelVisible, let window = view.window {
+            let responder = window.firstResponder as? NSView
+            if responder?.isDescendant(of: markupsPanel) == true ||
+                (markupsSearchField.currentEditor() != nil && window.firstResponder === markupsSearchField.currentEditor()) {
+                window.makeFirstResponder(pdfView)
+            }
+        }
         isMarkupsPanelVisible.toggle()
         markupsPanel.isHidden = !isMarkupsPanelVisible
-        markupsPanelHeight?.constant = isMarkupsPanelVisible ? 200 : 0
-        markupsToggleButton.state = isMarkupsPanelVisible ? .on : .off
-        if isMarkupsPanelVisible { scheduleMarkupsRefresh(selecting: pdfView.rectangleMarkup.selected) }
+        markupsPanelHeight?.constant = isMarkupsPanelVisible ? min(markupsExpandedHeight, max(120, view.bounds.height * 0.6)) : 0
+        markupsDivider.collapsed = !isMarkupsPanelVisible
+        updateMarkupsDividerLabel()
+        view.layoutSubtreeIfNeeded()
+        // The list is maintained by document/edit notifications even while hidden.
+        // A visibility toggle must not rebuild it or discard a multi-selection.
+    }
+    private func updateMarkupsDividerLabel() {
+        let action = isMarkupsPanelVisible ? "Collapse" : "Show"
+        markupsDivider.toolTip = "\(action) Markups List. Click to toggle; drag to resize."
+        markupsDivider.setAccessibilityLabel("\(action) Markups List")
     }
     @objc func filterListedMarkups(_ sender: Any?) {
         markupFilterText = markupsSearchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()

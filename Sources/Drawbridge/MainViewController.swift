@@ -614,7 +614,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var markupsPanelHeight: NSLayoutConstraint?
     var isMarkupsPanelVisible = false
     var isRestoringMarkupSelection = false
-    let markupsToggleButton = NSButton(title: "Markups", target: nil, action: nil)
+    let markupsDivider = SidebarDividerView(frame: .zero)
+    var markupsExpandedHeight: CGFloat = 200
+    var markupsHeightAtDragStart: CGFloat = 200
     let markupsSearchField = NSSearchField()
     let markupsDeleteButton = NSButton(title: "Delete Selected", target: nil, action: nil)
     let markupsCountLabel = NSTextField(labelWithString: "0 items")
@@ -998,6 +1000,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     override func viewDidLayout() {
         super.viewDidLayout()
+        if isMarkupsPanelVisible {
+            let height = min(markupsExpandedHeight, max(120, view.bounds.height * 0.6))
+            if markupsPanelHeight?.constant != height { markupsPanelHeight?.constant = height }
+        }
         refreshToolbarThemeBackground()
         applySplitLayoutIfPossible(force: false)
         let thumbnailWidth = thumbnailScrollView.contentSize.width
@@ -1179,7 +1185,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             splitView.topAnchor.constraint(equalTo: documentTabsBar.bottomAnchor),
             splitView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            splitView.bottomAnchor.constraint(equalTo: markupsPanel.topAnchor),
+            splitView.bottomAnchor.constraint(equalTo: markupsDivider.topAnchor),
 
             statusBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             statusBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -2101,15 +2107,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         invertColorsButton.identifier = NSUserInterfaceItemIdentifier("drawbridgeInvertColors")
         invertColorsButton.toolTip = "Invert PDF colors on screen. Saved and printed colors stay unchanged."
         invertColorsButton.setAccessibilityLabel("Invert PDF colors")
-        markupsToggleButton.bezelStyle = .texturedRounded
-        markupsToggleButton.controlSize = .small
-        markupsToggleButton.setButtonType(.toggle)
-        markupsToggleButton.target = self; markupsToggleButton.action = #selector(commandToggleMarkupsList(_:))
-        markupsToggleButton.identifier = NSUserInterfaceItemIdentifier("drawbridgeMarkupsList")
         // The fixed control block is centered independently of the trailing sheet label.
         let slots: [(NSView, CGFloat)] = [
             (history, 100), (pages, 148), (statusPageSizeLabel, 145), (pageEntry, 158),
-            (statusZoomLabel, 92), (invertColorsButton, 68), (markupsToggleButton, 82),
+            (statusZoomLabel, 92), (invertColorsButton, 68),
             (rectangleToolbar.scaleButton, 150)
         ]
         slots.forEach { $0.0.widthAnchor.constraint(equalToConstant: $0.1).isActive = true }

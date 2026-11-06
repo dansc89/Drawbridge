@@ -15,12 +15,12 @@ final class MarkupInteractionTests: XCTestCase {
         return (controller, page)
     }
 
-    func testScaleControlFollowsMarkupsInStatusBar() throws {
+    func testScaleControlFollowsInvertInStatusBar() throws {
         let (controller, _) = setup()
         let scale = controller.rectangleToolbar.scaleButton
         XCTAssertFalse(controller.rectangleToolbar.arrangedSubviews.contains { $0 === scale })
-        let stack = try XCTUnwrap(controller.markupsToggleButton.superview as? NSStackView)
-        let index = try XCTUnwrap(stack.arrangedSubviews.firstIndex { $0 === controller.markupsToggleButton })
+        let stack = try XCTUnwrap(scale.superview as? NSStackView)
+        let index = try XCTUnwrap(stack.arrangedSubviews.firstIndex { $0.identifier?.rawValue == "drawbridgeInvertColors" })
         XCTAssertTrue(stack.arrangedSubviews.count > index + 1)
         if stack.arrangedSubviews.count > index + 1 { XCTAssertTrue(stack.arrangedSubviews[index + 1] === scale) }
         XCTAssertTrue(scale.target === controller)

@@ -390,6 +390,7 @@ enum PDFRectangleWriter {
                                        arrays: inout [Int: [Any]], objects authorized: inout [String: [String: Any]]) throws {
         let originalObjects = try objectTable(original), originalPages = try pages(original)
         var tables = try tableArray(json), objects = tables[1]
+        var next = max(tables[0]["maxobjectid"] as? Int ?? 0, objects.keys.compactMap { Int($0.dropFirst(4).split(separator: " ").first ?? "") }.max() ?? 0) + 1
         let currentPages = try pages(json)
         func generated(_ entry: Any, _ table: [String: Any]) -> Bool {
             let d = dictionary(entry, objects: table)
@@ -424,6 +425,12 @@ enum PDFRectangleWriter {
                 let geometry = ["/Rect", "/L", "/Vertices", "/InkList", "/QuadPoints", "/CL"]
                 var a = value, b = existing
                 for field in geometry { a.removeValue(forKey: field); b.removeValue(forKey: field) }
+                if let edit = change.edit {
+                    guard edit.fields.isSubset(of: ImportedMarkupEdit.allowedFields) else { throw CocoaError(.fileReadCorruptFile) }
+                    // Only fields explicitly changed by this imported annotation's
+                    // editing transaction may differ across repeated saves.
+                    for field in edit.fields.union(["/AP"]) { a.removeValue(forKey: field); b.removeValue(forKey: field) }
+                }
                 // Previous saves may have assigned this imported annotation to a
                 // Drawbridge OCG. Validate that ownership before ignoring only
                 // those two membership fields in the immutable metadata check.
@@ -451,6 +458,9 @@ enum PDFRectangleWriter {
                         guard let paths = raw as? [Any] else { throw CocoaError(.fileReadCorruptFile) }
                         value[field] = try paths.map(translated)
                     } else { value[field] = try translated(raw) }
+                }
+                if let edit = change.edit, !change.deleted {
+                    try applyImportedEdit(edit, to: &value, objects: &objects, next: &next)
                 }
                 if change.layerChanged {
                     if let id = change.layerID {
@@ -498,7 +508,50 @@ enum PDFRectangleWriter {
             page["/Annots"] = ordered; object["value"] = page; objects[pageKey] = object
             arrays[order.page] = ordered.filter { !owned($0, objects: objects) && !generated($0, objects) }
         }
+        tables[0]["maxobjectid"] = max(tables[0]["maxobjectid"] as? Int ?? 0, next - 1)
         tables[1] = objects; json["qpdf"] = tables
+    }
+
+    private static func applyImportedEdit(_ edit: ImportedMarkupEdit, to value: inout [String: Any], objects: inout [String: Any], next: inout Int) throws {
+        guard edit.fields.isSubset(of: ImportedMarkupEdit.allowedFields), !edit.metadata.isEmpty, edit.metadata.count < 32 * 1024 * 1024,
+              !edit.appearance.isEmpty, edit.appearance.count < 32 * 1024 * 1024,
+              let executable = PDFTKBookmarkWriter.executableURL() else { throw CocoaError(.fileReadCorruptFile) }
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeImportedEdit-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = dir.appendingPathComponent("annotation.pdf"), output = dir.appendingPathComponent("annotation.json")
+        try edit.metadata.write(to: input)
+        guard PDFTKBookmarkWriter.run(executable, arguments: ["--json=2", "--json-stream-data=inline", "--decode-level=none", input.path, output.path]),
+              (try output.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max) < 128 * 1024 * 1024,
+              let graph = try JSONSerialization.jsonObject(with: Data(contentsOf: output)) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
+        let source = try objectTable(graph), pageRefs = try pages(graph)
+        guard pageRefs.count == 1 else { throw CocoaError(.fileReadCorruptFile) }
+        let entries = annotations(dictionary(pageRefs[0], objects: source)["/Annots"], objects: source)
+        guard entries.count == 1 else { throw CocoaError(.fileReadCorruptFile) }
+        let edited = dictionary(entries[0], objects: source)
+        guard edited["/Subtype"] as? String == value["/Subtype"] as? String else { throw CocoaError(.fileReadCorruptFile) }
+        var mapping: [String: String] = [:]
+        func remap(_ raw: Any) throws -> Any {
+            if let ref = raw as? String, ref.range(of: #"^\d+ \d+ R$"#, options: .regularExpression) != nil {
+                if let mapped = mapping[ref] { return mapped }
+                guard let object = source["obj:" + ref] else { throw CocoaError(.fileReadCorruptFile) }
+                let mapped = "\(next) 0 R"; next += 1; mapping[ref] = mapped
+                objects["obj:" + mapped] = try remap(object); return mapped
+            }
+            if let array = raw as? [Any] { return try array.map(remap) }
+            if let dictionary = raw as? [String: Any] { return try dictionary.mapValues(remap) }
+            return raw
+        }
+        for field in edit.fields {
+            if let raw = edited[field] { value[field] = try remap(raw) }
+            else { value.removeValue(forKey: field) }
+        }
+        guard let rect = value["/Rect"] as? [NSNumber], rect.count == 4 else { throw CocoaError(.fileReadCorruptFile) }
+        let size = CGSize(width: rect[2].doubleValue - rect[0].doubleValue, height: rect[3].doubleValue - rect[1].doubleValue)
+        guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { throw CocoaError(.fileReadCorruptFile) }
+        let appearance = "\(next) 0 R"; next += 1; var forms: [Data: String] = [:]
+        let stream = try SnapshotAppearance.install(data: edit.appearance, bounds: CGRect(origin: .zero, size: size), rotation: 0, pageTransform: .identity, objects: &objects, next: &next, forms: &forms)
+        objects["obj:" + appearance] = stream; value["/AP"] = ["/N": appearance]
     }
 
     private static func refreshImportedLayerReferences(_ json: inout [String: Any], authorized: inout [String: [String: Any]]) throws {

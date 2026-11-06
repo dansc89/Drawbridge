@@ -108,4 +108,69 @@ import XCTest
         divider.mouseUp(with:try event(.leftMouseUp,NSPoint(x:7,y:100),window:w));XCTAssertEqual(clicks,1)
         divider.mouseUp(with:try event(.leftMouseUp,start,window:w));XCTAssertEqual(clicks,1)
     }
+    func testBottomDividerTogglePreservesListStateAndPDF() throws {
+        try fixture { c,w,_,_,url in
+            let bytes=try Data(contentsOf:url), divider=c.markupsDivider
+            XCTAssertTrue(divider.horizontal);XCTAssertTrue(divider.collapsed)
+            XCTAssertFalse(divider.isHidden);XCTAssertEqual(divider.frame.height,12,accuracy:0.5)
+            let canvasHeight=c.pdfView.bounds.height
+            try click(divider,window:w)
+            XCTAssertTrue(c.isMarkupsPanelVisible);XCTAssertFalse(c.markupsPanel.isHidden)
+            XCTAssertLessThan(c.pdfView.bounds.height,canvasHeight-150)
+            c.markupsSearchField.stringValue="Keep filter"
+            c.markupFilterText="keep filter"
+            c.markupItems=[MarkupItem(pageIndex:0,annotation:PDFAnnotation(bounds:.zero,forType:.square,withProperties:nil)),MarkupItem(pageIndex:1,annotation:PDFAnnotation(bounds:.zero,forType:.circle,withProperties:nil))]
+            c.markupsTable.reloadData()
+            c.isRestoringMarkupSelection=true
+            c.markupsTable.selectRowIndexes(IndexSet(integersIn:0..<2),byExtendingSelection:false)
+            c.isRestoringMarkupSelection=false
+            c.pendingMarkupsRefreshWorkItem?.cancel();c.pendingMarkupsRefreshWorkItem=nil
+            try click(divider,window:w)
+            XCTAssertTrue(c.markupsPanel.isHidden);XCTAssertTrue(divider.collapsed)
+            XCTAssertEqual(c.pdfView.bounds.height,canvasHeight,accuracy:2)
+            try click(divider,window:w)
+            XCTAssertEqual(c.markupsTable.selectedRowIndexes,IndexSet(integersIn:0..<2))
+            XCTAssertEqual(c.markupsSearchField.stringValue,"Keep filter")
+            XCTAssertNil(c.pendingMarkupsRefreshWorkItem,"Toggling must not enqueue a selection-resetting rebuild")
+            XCTAssertFalse(descendants(c.markupsPanel).contains{($0 as? NSButton)?.title=="Hide"})
+            XCTAssertFalse(descendants(c.view).contains{$0.identifier?.rawValue=="drawbridgeMarkupsList"})
+            XCTAssertFalse(c.hasUnsavedChanges());XCTAssertEqual(try Data(contentsOf:url),bytes)
+        }
+    }
+    func testBottomDividerVerticalResizeReopenAndSplitLayout() throws {
+        try fixture { c,w,left,right,_ in
+            let divider=c.markupsDivider
+            try click(divider,window:w)
+            let original=c.markupsPanel.frame.height
+            let start=divider.convert(NSPoint(x:divider.bounds.midX,y:divider.bounds.midY),to:nil)
+            let end=NSPoint(x:start.x,y:start.y+70)
+            divider.mouseDown(with:try event(.leftMouseDown,start,window:w))
+            divider.mouseDragged(with:try event(.leftMouseDragged,end,window:w))
+            divider.mouseUp(with:try event(.leftMouseUp,end,window:w));w.layoutIfNeeded()
+            XCTAssertTrue(c.isMarkupsPanelVisible)
+            XCTAssertEqual(c.markupsPanel.frame.height,original+70,accuracy:2)
+            try click(divider,window:w);try click(divider,window:w)
+            XCTAssertEqual(c.markupsPanel.frame.height,original+70,accuracy:2)
+            c.commandToggleSplitView(nil);w.layoutIfNeeded()
+            try click(left,window:w);try click(right,window:w)
+            try click(divider,window:w);try click(divider,window:w)
+            XCTAssertNotNil(c.secondaryPDFView);XCTAssertTrue(c.isMarkupsPanelVisible)
+            w.setContentSize(NSSize(width:1300,height:700));w.layoutIfNeeded()
+            try click(divider,window:w);try click(divider,window:w)
+            XCTAssertGreaterThan(c.pdfView.bounds.height,100)
+        }
+    }
+    func testBottomDividerAccessibilityMenuAndHiddenFocus() throws {
+        try fixture { c,w,_,_,_ in
+            let divider=c.markupsDivider
+            XCTAssertEqual(divider.accessibilityLabel(),"Show Markups List")
+            XCTAssertTrue(divider.accessibilityPerformPress());w.layoutIfNeeded()
+            XCTAssertEqual(divider.accessibilityLabel(),"Collapse Markups List")
+            XCTAssertTrue(w.makeFirstResponder(c.markupsSearchField))
+            c.commandToggleMarkupsList(nil);w.layoutIfNeeded()
+            XCTAssertTrue(divider.collapsed);XCTAssertTrue(w.firstResponder === c.pdfView)
+            XCTAssertTrue(divider.accessibilityPerformPress());w.layoutIfNeeded()
+            XCTAssertFalse(divider.collapsed)
+        }
+    }
 }

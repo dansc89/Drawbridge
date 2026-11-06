@@ -33,9 +33,18 @@ enum MarkupStyle {
     static let strokeOpacityKey = PDFAnnotationKey(rawValue: "DrawbridgeStrokeOpacity")
     static let fillOpacityKey = PDFAnnotationKey(rawValue: "DrawbridgeFillOpacity")
     static func pattern(_ annotation: PDFAnnotation) -> MarkupLinePattern {
-        (annotation.value(forAnnotationKey: patternKey) as? String).flatMap(MarkupLinePattern.init(rawValue:)) ?? .solid
+        if let explicit = (annotation.value(forAnnotationKey: patternKey) as? String).flatMap(MarkupLinePattern.init(rawValue:)) { return explicit }
+        guard let border=annotation.border,border.style == .dashed,let dash=border.dashPattern,!dash.isEmpty else{return .solid}
+        let values=dash.compactMap{($0 as? NSNumber)?.doubleValue}
+        return MarkupLinePattern.allCases.first { pattern in
+            let expected=pattern.dash(width:border.lineWidth)
+            return expected.count==values.count && zip(expected,values).allSatisfy{abs($0-$1)<0.001}
+        } ?? .dashed
     }
-    static func strokeOpacity(_ annotation: PDFAnnotation) -> Double { opacity(annotation, key: strokeOpacityKey) }
+    static func strokeOpacity(_ annotation: PDFAnnotation) -> Double {
+        if annotation.value(forAnnotationKey:strokeOpacityKey)==nil, let value=annotation.value(forAnnotationKey:PDFAnnotationKey(rawValue:"/CA")) as? NSNumber,value.doubleValue.isFinite {return min(1,max(0,value.doubleValue))}
+        return opacity(annotation,key:strokeOpacityKey)
+    }
     static func fillOpacity(_ annotation: PDFAnnotation) -> Double { opacity(annotation, key: fillOpacityKey) }
     private static func opacity(_ annotation: PDFAnnotation, key: PDFAnnotationKey) -> Double {
         guard let value = annotation.value(forAnnotationKey: key) as? NSNumber, value.doubleValue.isFinite else { return 1 }

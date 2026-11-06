@@ -9,6 +9,7 @@ final class SidebarDividerView: NSView {
     var onResize: ((CGFloat) -> Void)?
     var collapsed = false { didSet { needsDisplay = true; window?.invalidateCursorRects(for: self) } }
     var leadingSide = true
+    var horizontal = false
     private var downPoint: NSPoint?
     private var dragged = false
     private var hovered = false
@@ -23,7 +24,7 @@ final class SidebarDividerView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     override func resetCursorRects() {
         super.resetCursorRects()
-        addCursorRect(bounds, cursor: collapsed ? .pointingHand : .resizeLeftRight)
+        addCursorRect(bounds, cursor: collapsed ? .pointingHand : (horizontal ? .resizeUpDown : .resizeLeftRight))
     }
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -38,8 +39,10 @@ final class SidebarDividerView: NSView {
     }
     override func mouseDragged(with event: NSEvent) {
         guard let downPoint else { return }
-        let delta = event.locationInWindow.x - downPoint.x
-        if !dragged, hypot(delta, event.locationInWindow.y - downPoint.y) >= 4 {
+        let dx = event.locationInWindow.x - downPoint.x
+        let dy = event.locationInWindow.y - downPoint.y
+        let delta = horizontal ? dy : dx
+        if !dragged, hypot(dx, dy) >= 4 {
             dragged = true; onResizeStart?()
         }
         if dragged { onResize?(delta) }
@@ -62,9 +65,15 @@ final class SidebarDividerView: NSView {
         let pointsLeft = leadingSide != collapsed
         let x = bounds.midX, y = bounds.midY
         let path = NSBezierPath(); path.lineWidth = 1.6; path.lineCapStyle = .round; path.lineJoinStyle = .round
-        path.move(to: NSPoint(x: x + (pointsLeft ? 2 : -2), y: y - 5))
-        path.line(to: NSPoint(x: x + (pointsLeft ? -2 : 2), y: y))
-        path.line(to: NSPoint(x: x + (pointsLeft ? 2 : -2), y: y + 5))
+        if horizontal {
+            path.move(to: NSPoint(x: x - 5, y: y + (pointsLeft ? 2 : -2)))
+            path.line(to: NSPoint(x: x, y: y + (pointsLeft ? -2 : 2)))
+            path.line(to: NSPoint(x: x + 5, y: y + (pointsLeft ? 2 : -2)))
+        } else {
+            path.move(to: NSPoint(x: x + (pointsLeft ? 2 : -2), y: y - 5))
+            path.line(to: NSPoint(x: x + (pointsLeft ? -2 : 2), y: y))
+            path.line(to: NSPoint(x: x + (pointsLeft ? 2 : -2), y: y + 5))
+        }
         (hovered ? NSColor.controlAccentColor : NSColor.secondaryLabelColor).setStroke(); path.stroke()
     }
 }

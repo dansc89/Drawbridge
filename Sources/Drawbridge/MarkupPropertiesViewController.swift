@@ -210,12 +210,12 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
             for control in [snapshotOverlay, snapshotFilter, snapshotOpacity] as [NSControl] { control.isEnabled = editable }
             snapshotColor.isEnabled = editable
         }
-        let enabled = session.canEdit() && selection?.isReadOnly != true && selection.map(session.layerIsLocked) != true && selection?.type != "Stamp" && (selection == nil || selection.map(RectangleMarkupRecord.owns) == true)
+        let enabled = session.canEdit() && selection?.isReadOnly != true && selection.map(session.layerIsLocked) != true && selection?.type != "Stamp" && (selection == nil || selection.map { RectangleMarkupRecord.owns($0) || session.canEditImportedAppearance($0) } == true)
         editingContext.stringValue = selection == nil ? "New markup defaults" : (selection.map(session.layerIsLocked) == true ? "Locked layer markup" : "Selected markup")
         stroke.color = selection.map(RectangleMarkupRecord.markupColor) ?? session.strokeColor
         weight.doubleValue = Double(selection?.border?.lineWidth ?? session.lineWidth)
         fontSize.doubleValue = Double(selection.map(RectangleMarkupRecord.textFontSize) ?? session.fontSize)
-        let color = selection.flatMap(RectangleMarkupRecord.polygonFill) ?? (selection == nil ? session.fillColor : nil)
+        let color = selection.flatMap { RectangleMarkupRecord.owns($0) ? RectangleMarkupRecord.polygonFill($0) : $0.interiorColor?.withAlphaComponent(MarkupStyle.fillOpacity($0)) } ?? (selection == nil ? session.fillColor : nil)
         filled.state = color == nil ? .off : .on
         if let color { fill.color = color; fillOpacity.doubleValue = Double(color.alphaComponent) * 100 }
         else { fillOpacity.doubleValue = 100 }
@@ -237,7 +237,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         hatchTransparent.state = appearance.background == nil ? .on : .off
         hatchBackground.isNoColor = appearance.background == nil
         hatchScale.doubleValue = appearance.scale * 100; hatchAngle.doubleValue = appearance.angle; hatchWeight.doubleValue = appearance.lineWidth
-        for control in [hatchPattern, hatchForeground, hatchBackground, hatchTransparent, hatchScale, hatchAngle, hatchWeight] as [NSControl] { control.isEnabled = enabled && closedShape }
+        for control in [hatchPattern, hatchForeground, hatchBackground, hatchTransparent, hatchScale, hatchAngle, hatchWeight] as [NSControl] { control.isEnabled = enabled && closedShape && (selection == nil || selection.map(RectangleMarkupRecord.owns) == true) }
         hatchBackground.isEnabled = enabled && closedShape
         fillRow.isHidden = !closedShape || patterned; fillOpacityRow.isHidden = !closedShape || patterned
         fill.isEnabled = enabled && closedShape

@@ -15,6 +15,7 @@ struct ImportedMarkupPlan: @unchecked Sendable {
         let name: String?
         var layerID: String? = nil
         var layerChanged: Bool = false
+        var edit: ImportedMarkupEdit? = nil
     }
     struct Order {
         enum Item { case original(Int); case owned(String) }
@@ -28,7 +29,7 @@ struct ImportedMarkupPlan: @unchecked Sendable {
     var source: URL? { stamp.recoverySourceURL }
     func rebased(to stamp: PDFMarkupSourceStamp) -> ImportedMarkupPlan {
         ImportedMarkupPlan(stamp: stamp, changes: changes.map {
-            Change(sourcePage: $0.page, page: $0.page, slot: $0.slot, deleted: $0.deleted, offset: $0.offset, originalBounds: $0.originalBounds, subtype: $0.subtype, name: $0.name, layerID: $0.layerID, layerChanged: $0.layerChanged)
+            Change(sourcePage: $0.page, page: $0.page, slot: $0.slot, deleted: $0.deleted, offset: $0.offset, originalBounds: $0.originalBounds, subtype: $0.subtype, name: $0.name, layerID: $0.layerID, layerChanged: $0.layerChanged, edit: $0.edit)
         }, orders: orders.map { Order(sourcePage: $0.page, page: $0.page, items: $0.items) })
     }
 }
@@ -36,14 +37,15 @@ struct ImportedMarkupPlan: @unchecked Sendable {
 @MainActor
 final class ImportedMarkupState: NSObject {
     struct Entry {
-        let annotation: PDFAnnotation
+        var annotation: PDFAnnotation
         let page: PDFPage
         let sourcePage: Int
         let slot: Int
         let bounds: CGRect
         var layerID: String? = nil
     }
-    let entries: [Entry]
+    var entries: [Entry]
+    private var editedFields: [Int: Set<String>] = [:]
     let openingStamp: PDFMarkupSourceStamp?
     var touched: Set<ObjectIdentifier> = []
     private var reorderedPages: [PDFPage] = []
@@ -76,10 +78,19 @@ final class ImportedMarkupState: NSObject {
         return ["Square", "Circle", "Line", "FreeText", "Ink", "Polygon", "PolyLine", "Highlight", "Underline", "StrikeOut", "Squiggly", "Text", "Stamp", "Caret"].contains(annotation.type ?? "")
             && !annotation.isReadOnly && annotation.shouldDisplay && flags & (1 | 2 | 32 | 64 | 128 | 512) == 0
     }
+    func originalOrigin(_ annotation:PDFAnnotation)->CGPoint? {entries.first{$0.annotation===annotation}?.bounds.origin}
     func touch(_ annotation: PDFAnnotation) { touched.insert(ObjectIdentifier(annotation)) }
+    func replace(_ old: PDFAnnotation, with replacement: PDFAnnotation, fields: Set<String>) -> Bool {
+        guard fields.isSubset(of: ImportedMarkupEdit.allowedFields), let index = entries.firstIndex(where: { $0.annotation === old }) else { return false }
+        entries[index].annotation = replacement
+        editedFields[index, default: []].formUnion(fields)
+        touched.insert(ObjectIdentifier(replacement))
+        originalSlots[ObjectIdentifier(replacement)] = originalSlots[ObjectIdentifier(old)]
+        return true
+    }
     func plan(document: PDFDocument, stamp: PDFMarkupSourceStamp?) -> ImportedMarkupPlan? {
         guard let stamp = openingStamp ?? stamp, (!touched.isEmpty || !reorderedPages.isEmpty) else { return nil }
-        let changes = entries.compactMap { entry -> ImportedMarkupPlan.Change? in
+        let changes = entries.enumerated().compactMap { entryIndex, entry -> ImportedMarkupPlan.Change? in
             guard touched.contains(ObjectIdentifier(entry.annotation)) else { return nil }
             let index = document.index(for: entry.page)
             guard index != NSNotFound else { return nil }
@@ -88,7 +99,8 @@ final class ImportedMarkupState: NSObject {
                          offset: CGPoint(x: entry.annotation.bounds.minX - entry.bounds.minX,
                                          y: entry.annotation.bounds.minY - entry.bounds.minY), originalBounds: entry.bounds,
                          subtype: entry.annotation.type ?? "",
-                         name: entry.annotation.value(forAnnotationKey: PDFAnnotationKey(rawValue: "/NM")) as? String, layerID: MarkupLayers.id(entry.annotation), layerChanged: MarkupLayers.id(entry.annotation) != entry.layerID)
+                         name: entry.annotation.value(forAnnotationKey: PDFAnnotationKey(rawValue: "/NM")) as? String, layerID: MarkupLayers.id(entry.annotation), layerChanged: MarkupLayers.id(entry.annotation) != entry.layerID,
+                         edit: editedFields[entryIndex].map { ImportedTextContent.freeze(entry.annotation, fields: $0) })
         }
         let orders = reorderedPages.compactMap { page -> ImportedMarkupPlan.Order? in
             let index = document.index(for: page)

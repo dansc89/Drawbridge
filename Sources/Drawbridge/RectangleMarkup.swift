@@ -367,7 +367,7 @@ final class RectangleMarkupController {
             }
             if tool != .select { selected = nil; onClickAway?() }; refresh(); (view as? MarkupPDFView)?.markupToolCursorChanged() }
     }
-    private var inlineText: (page:PDFPage, bounds:CGRect, annotation:PDFAnnotation?, editor:MarkupInlineTextView, wasDirty:Bool)?
+    private var inlineText: (page:PDFPage, bounds:CGRect, annotation:PDFAnnotation?, editor:MarkupInlineTextView, wasDirty:Bool, scale:CGFloat, insets:NSEdgeInsets, rotation:Int)?
     var isEditingText: Bool { inlineText != nil }
     var fontSize: CGFloat = 18
     var fillColor: NSColor? = .orange
@@ -596,7 +596,7 @@ final class RectangleMarkupController {
             } else if clickCount >= 2 { finishPolyline() } else { refresh() }
             return true
         }
-        if clickCount >= 2, let hit = page.annotations.reversed().first(where:{ RectangleMarkupRecord.owns($0) && $0.type == "FreeText" && !$0.isReadOnly && !layerIsLocked($0) && $0.bounds.contains(point) }) {
+        if clickCount >= 2, let hit = page.annotations.reversed().first(where:{ (RectangleMarkupRecord.owns($0) || canEditImportedAppearance($0)) && $0.type == "FreeText" && !$0.isReadOnly && !layerIsLocked($0) && $0.bounds.contains(point) }) {
             selected = hit; beginTextEditing(on:page,bounds:hit.bounds,annotation:hit); return true
         }
         if tool != .select {
@@ -1050,7 +1050,7 @@ final class RectangleMarkupController {
     func beginTextEditing(on page:PDFPage, bounds:CGRect, annotation:PDFAnnotation? = nil) {
         finishTextEditing()
         guard canEdit(), page.document === boundDocument, let view else { return }
-        if let annotation, !RectangleMarkupRecord.owns(annotation) || annotation.type != "FreeText" || annotation.isReadOnly || layerIsLocked(annotation) { return }
+        if let annotation, (!RectangleMarkupRecord.owns(annotation) && !canEditImportedAppearance(annotation)) || annotation.type != "FreeText" || annotation.isReadOnly || layerIsLocked(annotation) { return }
         let storage = NSTextStorage(), layout = NSLayoutManager()
         storage.addLayoutManager(layout)
         let container = NSTextContainer(containerSize:CGSize(width:500,height:500)); layout.addTextContainer(container)
@@ -1064,9 +1064,17 @@ final class RectangleMarkupController {
         editor.textColor = annotation.map(RectangleMarkupRecord.markupColor) ?? strokeColor
         editor.insertionPointColor = .controlAccentColor
         editor.string = annotation?.contents ?? ""
+        var importedInsets=NSEdgeInsets(),importedRotation=0
+        if let annotation, !RectangleMarkupRecord.owns(annotation) {
+            importedRotation=(annotation.value(forAnnotationKey:PDFAnnotationKey(rawValue:"/Rotate")) as? NSNumber)?.intValue ?? 0
+            editor.isRichText = true
+            let rich=ImportedTextContent.scaled(ImportedTextContent.read(annotation),factor:view.scaleFactor)
+            editor.textStorage?.setAttributedString(rich)
+            importedInsets=(annotation as? ImportedTextAnnotation)?.textInsets ?? ImportedTextContent.insets(annotation,rich:ImportedTextContent.read(annotation),rotation:importedRotation)
+        }
         editor.setAccessibilityLabel("Edit text on PDF page")
         editor.wantsLayer = true; editor.layer?.borderColor = NSColor.controlAccentColor.cgColor; editor.layer?.borderWidth = 1
-        inlineText = (page,bounds,annotation,editor,hasUnsavedChanges)
+        inlineText = (page,bounds,annotation,editor,hasUnsavedChanges,view.scaleFactor,importedInsets,importedRotation)
         onDraftBegan?()
         annotation?.shouldDisplay = false
         editor.onFinish = { [weak self] cancel in self?.finishTextEditing(cancel:cancel) }
@@ -1089,8 +1097,27 @@ final class RectangleMarkupController {
         editor.frameCenterRotation = 0
         editor.frame = CGRect(x:rect.midX-draft.bounds.width*scale/2,y:rect.midY-draft.bounds.height*scale/2,width:draft.bounds.width*scale,height:draft.bounds.height*scale)
         editor.frameCenterRotation = CGFloat(-draft.page.rotation)
-        editor.font = NSFont(name:"Helvetica",size:(draft.annotation?.font?.pointSize ?? fontSize)*scale)
-        editor.textColor = draft.annotation.map(RectangleMarkupRecord.markupColor) ?? strokeColor
+        if draft.annotation.map(RectangleMarkupRecord.owns) == false,scale != draft.scale {
+            editor.textStorage?.setAttributedString(ImportedTextContent.scaled(editor.attributedString(),factor:scale/max(0.01,draft.scale)))
+            editor.textContainerInset=CGSize(width:editor.textContainerInset.width*scale/max(0.01,draft.scale),height:editor.textContainerInset.height*scale/max(0.01,draft.scale))
+            inlineText?.scale=scale
+        }
+        if draft.annotation.map(RectangleMarkupRecord.owns) == false {
+            let logicalSize=abs(draft.rotation)%180==90 ? CGSize(width:draft.bounds.height,height:draft.bounds.width):draft.bounds.size
+            let content=CGRect(x:draft.insets.left,y:draft.insets.bottom,width:max(1,logicalSize.width-draft.insets.left-draft.insets.right),height:max(1,logicalSize.height-draft.insets.top-draft.insets.bottom))
+            let center=CGPoint(x:content.midX,y:content.midY).applying(ImportedTextContent.rotationTransform(draft.rotation,size:draft.bounds.size))
+            let screen=view.convert(CGPoint(x:draft.bounds.minX+center.x,y:draft.bounds.minY+center.y),from:draft.page)
+            editor.frameCenterRotation=0
+            editor.frame=CGRect(x:screen.x-content.width*scale/2,y:screen.y-content.height*scale/2,width:content.width*scale,height:content.height*scale)
+            let next=CGPoint(x:content.midX+1,y:content.midY).applying(ImportedTextContent.rotationTransform(draft.rotation,size:draft.bounds.size))
+            let direction=view.convert(CGPoint(x:draft.bounds.minX+next.x,y:draft.bounds.minY+next.y),from:draft.page)
+            editor.frameCenterRotation=atan2(direction.y-screen.y,direction.x-screen.x)*180 / .pi
+            editor.textContainerInset = .zero
+        }
+        if draft.annotation.map(RectangleMarkupRecord.owns) != false {
+            editor.font = NSFont(name:"Helvetica",size:(draft.annotation?.font?.pointSize ?? fontSize)*scale)
+            editor.textColor = draft.annotation.map(RectangleMarkupRecord.markupColor) ?? strokeColor
+        }
     }
     func finishTextEditing(cancel:Bool = false) {
         guard let draft = inlineText else { return }
@@ -1100,7 +1127,13 @@ final class RectangleMarkupController {
         draft.annotation?.shouldDisplay = true
         draft.editor.removeFromSuperview(); hasUnsavedChanges = draft.wasDirty
         if !cancel && !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && text.utf8.count <= 100000 {
-            if let annotation = draft.annotation { selected = annotation; editSelectedText(text,size:annotation.font?.pointSize ?? fontSize) }
+            if let annotation = draft.annotation {
+                selected = annotation
+                if !RectangleMarkupRecord.owns(annotation) {
+                    let rich=ImportedTextContent.scaled(draft.editor.attributedString(),factor:1/max(0.01,draft.scale))
+                    if text != annotation.contents { editImportedText(annotation, on: draft.page, text: text, size: annotation.font?.pointSize ?? fontSize, rich: rich) }
+                } else { editSelectedText(text,size:annotation.font?.pointSize ?? fontSize) }
+            }
             else { _ = create(on:draft.page,bounds:draft.bounds,kind:.text,text:text) }
         }
         if wasFirstResponder { view?.window?.makeFirstResponder(view) }
@@ -1215,6 +1248,12 @@ final class RectangleMarkupController {
         setFill(color,on:annotation,page:page)
     }
     private func setFill(_ color: NSColor?, on annotation: PDFAnnotation, page: PDFPage) {
+        if !RectangleMarkupRecord.owns(annotation) {
+            guard annotation.interiorColor != color else{return}
+            let copy = editedImportedCopy(annotation); copy.interiorColor = color
+            copy.setValue(color?.alphaComponent ?? 1,forAnnotationKey:MarkupStyle.fillOpacityKey)
+            _ = replaceImported(annotation, with: copy, on: page, fields: ["/IC", "/DrawbridgeFillOpacity"], action: "Fill"); return
+        }
         guard canEdit(), page.document === boundDocument, RectangleMarkupRecord.owns(annotation) else { return }
         let old = RectangleMarkupRecord.polygonFill(annotation)
         guard old != color else { return }
@@ -1234,11 +1273,22 @@ final class RectangleMarkupController {
     func setLineAppearance(pattern: MarkupLinePattern, opacity: Double) {
         guard canEdit(), opacity.isFinite, (0...1).contains(opacity) else { return }
         guard let annotation = selected else { linePattern = pattern; strokeOpacity = opacity; refresh(); return }
-        guard RectangleMarkupRecord.owns(annotation), !annotation.isReadOnly, !layerIsLocked(annotation), annotation.type != "Stamp", let page = annotation.page else { return }
+        guard (RectangleMarkupRecord.owns(annotation) || canEditImportedAppearance(annotation)), !annotation.isReadOnly, !layerIsLocked(annotation), annotation.type != "Stamp", let page = annotation.page else { return }
         setLineAppearance(pattern: pattern, opacity: opacity, annotation: annotation, page: page)
     }
     private func setLineAppearance(pattern: MarkupLinePattern, opacity: Double, annotation: PDFAnnotation, page: PDFPage) {
         guard page.document === boundDocument else { return }
+        if !RectangleMarkupRecord.owns(annotation) {
+            guard MarkupStyle.pattern(annotation) != pattern || MarkupStyle.strokeOpacity(annotation) != opacity else{return}
+            let copy = editedImportedCopy(annotation)
+            copy.color=copy.color.withAlphaComponent(opacity)
+            if copy.type == "FreeText" {copy.fontColor=copy.fontColor?.withAlphaComponent(opacity)}
+            if let border = copy.border { border.style = pattern == .solid ? .solid : .dashed; border.dashPattern = pattern.dash(width: border.lineWidth).map(NSNumber.init(value:)); copy.border = border }
+            copy.color=copy.color.withAlphaComponent(opacity)
+            copy.setValue(opacity,forAnnotationKey:PDFAnnotationKey(rawValue:"/CA"))
+            copy.setValue(opacity,forAnnotationKey:MarkupStyle.strokeOpacityKey)
+            _ = replaceImported(annotation, with: copy, on: page, fields: ["/CA", "/BS", "/Border", "/DrawbridgeStrokeOpacity"], action: "Markup Appearance"); return
+        }
         let oldPattern = MarkupStyle.pattern(annotation), oldOpacity = MarkupStyle.strokeOpacity(annotation)
         guard oldPattern != pattern || oldOpacity != opacity else { return }
         undo.registerUndo(withTarget: self) { target in target.setLineAppearance(pattern: oldPattern, opacity: oldOpacity, annotation: annotation, page: page) }
@@ -1256,6 +1306,21 @@ final class RectangleMarkupController {
     }
 
     private func setStyle(_ annotation: PDFAnnotation, page: PDFPage, color: NSColor, width: CGFloat) {
+        if !RectangleMarkupRecord.owns(annotation) {
+            let copy: PDFAnnotation
+            if annotation.type == "FreeText" {
+                let rich = NSMutableAttributedString(attributedString: ImportedTextContent.read(annotation))
+                rich.addAttribute(.foregroundColor, value: color, range: NSRange(location: 0, length: rich.length))
+                copy = ImportedTextAnnotation(source: annotation, richText: rich,geometryOrigin:importedState?.originalOrigin(annotation)); copy.fontColor = color
+                copy.setValue(ImportedTextContent.xhtml(rich), forAnnotationKey: PDFAnnotationKey(rawValue: "/RC"))
+            } else {
+                guard annotation.color.withAlphaComponent(1) != color || annotation.border?.lineWidth != width else{return}
+                copy = editedImportedCopy(annotation)
+                let border = copy.border ?? PDFBorder(); border.lineWidth = width; copy.border = border
+                copy.color = color.withAlphaComponent(MarkupStyle.strokeOpacity(annotation))
+            }
+            _ = replaceImported(annotation, with: copy, on: page, fields: annotation.type == "FreeText" ? ["/DA", "/DS", "/DR", "/RC"] : ["/C", "/BS", "/Border"], action: "Style Markup"); return
+        }
         guard canEdit(), page.document === boundDocument, RectangleMarkupRecord.owns(annotation) else { return }
         let oldColor = RectangleMarkupRecord.markupColor(annotation); let oldWidth = annotation.border?.lineWidth ?? 2
         guard oldColor != color || (annotation.type != "FreeText" && oldWidth != width) else { return }
@@ -1275,10 +1340,11 @@ final class RectangleMarkupController {
     }
 
     func editSelectedText(_ text: String, size: CGFloat) {
-        guard canEdit(), let annotation = selected, !annotation.isReadOnly, !layerIsLocked(annotation), annotation.type == "FreeText", RectangleMarkupRecord.owns(annotation), let page = annotation.page,
+        guard canEdit(), let annotation = selected, !annotation.isReadOnly, !layerIsLocked(annotation), annotation.type == "FreeText", (RectangleMarkupRecord.owns(annotation) || canEditImportedAppearance(annotation)), let page = annotation.page,
               !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty, text.utf8.count <= 100000, size.isFinite, (6...144).contains(size) else { return }
         let oldText = annotation.contents ?? "", oldSize = RectangleMarkupRecord.textFontSize(annotation)
         guard oldText != text || oldSize != size else { return }
+        if !RectangleMarkupRecord.owns(annotation) { editImportedText(annotation, on: page, text: text, size: size); return }
         undo.registerUndo(withTarget:self) { target in target.editSelectedTextAnnotation(annotation,page:page,text:oldText,size:oldSize) }
         undo.setActionName("Edit Text")
         annotation.contents = text; RectangleMarkupRecord.setTextFontSize(size,on:annotation); changed(page)
