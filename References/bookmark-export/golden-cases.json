@@ -1,0 +1,157 @@
+{
+  "titleCases": [
+    {
+      "input": "  A101\t FLOOR\n PLAN  ",
+      "expected": "A101 - FLOOR PLAN"
+    },
+    {
+      "input": "A-1.02 Details",
+      "expected": "A-1.02 - Details"
+    },
+    {
+      "input": "GENERAL NOTES",
+      "expected": "GENERAL - NOTES"
+    },
+    {
+      "input": "A101 - FLOOR PLAN",
+      "expected": "A101 - - FLOOR PLAN"
+    },
+    {
+      "input": "a101 floor plan",
+      "expected": "a101 floor plan"
+    },
+    {
+      "input": "A_101 Floor",
+      "expected": "A_101 Floor"
+    },
+    {
+      "input": "A101",
+      "expected": "A101"
+    },
+    {
+      "input": "\t\n ",
+      "expected": ""
+    },
+    {
+      "input": "﻿A101 Plan　",
+      "expected": "A101 - Plan"
+    },
+    {
+      "input": "A101Plan",
+      "expected": "A101Plan"
+    },
+    {
+      "input": "A101​Plan",
+      "expected": "A101​Plan"
+    },
+    {
+      "input": "É101 café",
+      "expected": "É101 café"
+    },
+    {
+      "input": "A101, Plan",
+      "expected": "A101, Plan"
+    },
+    {
+      "input": ". NOTES",
+      "expected": ". - NOTES"
+    },
+    {
+      "input": "- NOTES",
+      "expected": "- - NOTES"
+    }
+  ],
+  "files": [
+    {
+      "name": "Set, \"A\".pdf",
+      "outline": [
+        {
+          "title": "GENERAL NOTES",
+          "items": [
+            {
+              "title": "A101 Plan"
+            },
+            {
+              "title": "Group",
+              "items": [
+                {
+                  "title": "A102\tDetail, \"East\""
+                }
+              ]
+            },
+            {
+              "title": " ",
+              "items": [
+                {
+                  "title": "a103 café"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "A101 Plan"
+        },
+        [
+          {
+            "title": "B200 Schedule"
+          }
+        ]
+      ]
+    },
+    {
+      "name": "空.pdf",
+      "outline": null
+    },
+    {
+      "name": "Second.pdf",
+      "outline": [
+        {
+          "title": "No destination",
+          "dest": null
+        }
+      ]
+    }
+  ],
+  "expectedRows": [
+    [
+      "PDF",
+      "Title"
+    ],
+    [
+      "Set, \"A\".pdf",
+      "A101 - Plan"
+    ],
+    [
+      "Set, \"A\".pdf",
+      "A102 - Detail, \"East\""
+    ],
+    [
+      "Set, \"A\".pdf",
+      "Group"
+    ],
+    [
+      "Set, \"A\".pdf",
+      "a103 café"
+    ],
+    [
+      "Set, \"A\".pdf",
+      "GENERAL - NOTES"
+    ],
+    [
+      "Set, \"A\".pdf",
+      "A101 - Plan"
+    ],
+    [
+      "Set, \"A\".pdf",
+      "B200 - Schedule"
+    ],
+    [
+      "Second.pdf",
+      "No destination"
+    ]
+  ],
+  "expectedCSV": "PDF,Title\n\"Set, \"\"A\"\".pdf\",A101 - Plan\n\"Set, \"\"A\"\".pdf\",\"A102 - Detail, \"\"East\"\"\"\n\"Set, \"\"A\"\".pdf\",Group\n\"Set, \"\"A\"\".pdf\",a103 café\n\"Set, \"\"A\"\".pdf\",GENERAL - NOTES\n\"Set, \"\"A\"\".pdf\",A101 - Plan\n\"Set, \"\"A\"\".pdf\",B200 - Schedule\nSecond.pdf,No destination",
+  "expectedUTF8Hex": "5044462c5469746c650a225365742c2022224122222e706466222c41313031202d20506c616e0a225365742c2022224122222e706466222c2241313032202d2044657461696c2c202222456173742222220a225365742c2022224122222e706466222c47726f75700a225365742c2022224122222e706466222c6131303320636166c3a90a225365742c2022224122222e706466222c47454e4552414c202d204e4f5445530a225365742c2022224122222e706466222c41313031202d20506c616e0a225365742c2022224122222e706466222c42323030202d205363686564756c650a5365636f6e642e7064662c4e6f2064657374696e6174696f6e",
+  "headerOnlyCSV": "PDF,Title"
+}
