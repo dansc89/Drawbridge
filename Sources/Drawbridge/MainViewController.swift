@@ -603,6 +603,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let emptyStateOpenButton = NSButton(title: "Open PDF", target: nil, action: nil)
     private let emptyStateRecentButton = NSButton(title: "Open Recent", target: nil, action: nil)
     private let emptyStateMergeButton = NSButton(title: "Merge PDFs…", target: nil, action: #selector(PDFMergeWorkflow.showMerge(_:)))
+    private let emptyStateBookmarkIndexButton = NSButton(title: "Extract Bookmark Index…", target: nil, action: #selector(BookmarkIndexWorkflow.showExtract(_:)))
+
+    func configureWelcomeBookmarkIndex(workflow: BookmarkIndexWorkflow) {
+        emptyStateBookmarkIndexButton.target = workflow
+    }
 
     func configureWelcomeMerge(workflow: PDFMergeWorkflow) {
         emptyStateMergeButton.target = workflow
@@ -2446,6 +2451,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         emptyStateOpenButton.bezelStyle = .texturedRounded
         emptyStateRecentButton.bezelStyle = .texturedRounded
         emptyStateMergeButton.bezelStyle = .texturedRounded
+        emptyStateBookmarkIndexButton.bezelStyle = .texturedRounded
         emptyStateSampleButton.bezelStyle = .texturedRounded
         emptyStateBatchMobileButton.bezelStyle = .texturedRounded
 
@@ -2454,7 +2460,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         actions.spacing = 8
         actions.alignment = .centerY
 
-        let stack = NSStackView(views: [emptyStateTitle, actions])
+        let stack = NSStackView(views: [emptyStateTitle, actions, emptyStateBookmarkIndexButton])
         stack.orientation = .vertical
         stack.spacing = 10
         stack.alignment = .centerX
