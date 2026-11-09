@@ -944,6 +944,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var bookmarksWidthConstraint: NSLayoutConstraint?
     private var navigationWidthAtDragStart: CGFloat = 220
     private var navigationWidth: CGFloat = 220
+
     private let navigationWidthMin: CGFloat = 160
     private let navigationWidthMax: CGFloat = 420
     private var sidebarPreferredWidthConstraint: NSLayoutConstraint?
@@ -1403,6 +1404,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             guard let self, !self.isNavigationCollapsed else { return }
             self.navigationWidth = min(max(self.navigationWidthAtDragStart + delta, self.navigationWidthMin), self.navigationWidthMax)
             self.bookmarksWidthConstraint?.constant = self.navigationWidth
+
             self.view.layoutSubtreeIfNeeded()
         }
         propertiesResizeHandle.onResizeStart = { [weak self] in
@@ -1597,10 +1599,15 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         stack.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
         stack.translatesAutoresizingMaskIntoConstraints = false
         bookmarksContainer.addSubview(stack)
+        // Keep native controls at usable geometry while the hidden sidebar collapses.
+        // Compressing the segmented control can leave its labels clipped after reopening.
+        let stackTrailing = stack.trailingAnchor.constraint(equalTo: bookmarksContainer.trailingAnchor)
+        stackTrailing.priority = .defaultHigh
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: bookmarksContainer.topAnchor),
             stack.leadingAnchor.constraint(equalTo: bookmarksContainer.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: bookmarksContainer.trailingAnchor),
+            stack.widthAnchor.constraint(greaterThanOrEqualToConstant: navigationWidthMin),
+            stackTrailing,
             stack.bottomAnchor.constraint(equalTo: bookmarksContainer.bottomAnchor)
         ])
         changeNavigationMode()

@@ -41,6 +41,65 @@ import XCTest
         let left=try XCTUnwrap(controls.first{$0.identifier?.rawValue=="navigationSidebarDivider"}), right=try XCTUnwrap(controls.first{$0.identifier?.rawValue=="propertiesSidebarDivider"})
         try body(c,w,left,right,url);XCTAssertFalse(w.isVisible)
     }
+    func testNavigationLabelsRestoreImmediatelyWithoutFocusTransition() throws {
+        try fixture { c,w,left,_,url in
+            let control = try XCTUnwrap(descendants(c.view).compactMap { $0 as? NSSegmentedControl }
+                .first { $0.segmentCount == 2 && $0.label(forSegment: 0) == "Pages" })
+            let document = try XCTUnwrap(c.pdfView.document)
+            let original = try Data(contentsOf: url)
+            c.bookmarksOutlineView.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
+            c.pagesTableView.selectRowIndexes(IndexSet(integer: 2), byExtendingSelection: false)
+            w.makeFirstResponder(c.pdfView)
+            let responder = w.firstResponder
+            let page = c.pdfView.currentPage
+            @MainActor func raster() throws -> Data {
+                let rep = try XCTUnwrap(control.bitmapImageRepForCachingDisplay(in: control.bounds))
+                control.cacheDisplay(in: control.bounds, to: rep)
+                return try XCTUnwrap(rep.representation(using: .png, properties: [:]))
+            }
+            for (cycle, mode) in [1,0,1,0].enumerated() {
+                control.selectedSegment = mode
+                XCTAssertTrue(control.sendAction(try XCTUnwrap(control.action), to: control.target))
+                w.layoutIfNeeded()
+                try drag(left, delta: mode == 0 ? 20 : -10, window: w)
+                let width = left.frame.midX
+                let frame = control.convert(control.bounds, to: c.view)
+                let before = try raster()
+                try click(left, window: w)
+                // Exercise mode changes while hidden too, without changing the final selection.
+                control.selectedSegment = 1 - mode
+                XCTAssertTrue(control.sendAction(try XCTUnwrap(control.action), to: control.target))
+                control.selectedSegment = mode
+                XCTAssertTrue(control.sendAction(try XCTUnwrap(control.action), to: control.target))
+                w.setContentSize(NSSize(width: mode == 0 ? 1300 : 1600, height: 900))
+                w.layoutIfNeeded()
+                try click(left, window: w)
+
+                XCTAssertEqual(control.convert(control.bounds, to: c.view).minX, frame.minX, accuracy: 0.5)
+                XCTAssertEqual(control.bounds.width, frame.width, accuracy: 0.5)
+                // Native bezels may overhang the layout row (for example, by 2 pt on macOS 15).
+                XCTAssertGreaterThanOrEqual(control.alignmentRect(forFrame: control.frame).minX, 0, "Labels must remain inside their row's alignment rect")
+                let reopened = try raster()
+                if let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_SIDEBAR_EVIDENCE_DIR"] {
+                    let directory = URL(fileURLWithPath: path, isDirectory: true)
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    try before.write(to: directory.appendingPathComponent("cycle-\(cycle)-before.png"))
+                    try reopened.write(to: directory.appendingPathComponent("cycle-\(cycle)-reopened.png"))
+                }
+                XCTAssertEqual(reopened, before, "Native segmented labels must render identically immediately after reopening, without a focus transition")
+                XCTAssertEqual(left.frame.midX, width, accuracy: 0.5)
+                XCTAssertEqual(control.selectedSegment, mode)
+                XCTAssertTrue(w.firstResponder === responder)
+                XCTAssertTrue(c.pdfView.document === document)
+                XCTAssertTrue(c.pdfView.currentPage === page)
+                XCTAssertEqual(c.bookmarksOutlineView.selectedRowIndexes, IndexSet(integer: 1))
+                XCTAssertEqual(c.pagesTableView.selectedRowIndexes, IndexSet(integer: 2))
+                XCTAssertFalse(c.hasUnsavedChanges())
+            }
+            XCTAssertEqual(try Data(contentsOf: url), original)
+        }
+    }
+
     func testBothDividersClickCollapseAndReopenWithMoreCanvasAndSelectionIntact() throws {
         try fixture {c,w,left,right,url in
             let original=try Data(contentsOf:url)
