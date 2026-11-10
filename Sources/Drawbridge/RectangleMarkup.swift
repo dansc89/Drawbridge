@@ -88,6 +88,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
     var layerID: String? = nil
     var layerCatalog: String? = nil
     var copiedMarkup: CopiedMarkupPayload? = nil
+    var textBoxAppearance: TextBoxAppearance? = nil
     var snapshotStyle = SnapshotStyle()
     var snapshotData: Data? = nil
     var measurement: DrawingMeasurement? = nil
@@ -173,11 +174,11 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
     }
     static func setTextFontSize(_ size: CGFloat, on annotation: PDFAnnotation) {
         annotation.setValue(Double(size), forAnnotationKey: textFontSizeKey)
-        annotation.font = NSFont(name: "Helvetica", size: size)
+        annotation.font = TextBoxAppearance.read(annotation).font(size: size)
         guard let rgb = markupColor(annotation).usingColorSpace(.deviceRGB) else { return }
         // PDFKit's font setter truncates fractional sizes in /DA. Preserve the
         // exact size using the standard PDF default-appearance declaration.
-        annotation.setValue("/Helvetica \(size) Tf \(rgb.redComponent) \(rgb.greenComponent) \(rgb.blueComponent) rg", forAnnotationKey: .defaultAppearance)
+        annotation.setValue("/\(annotation.font?.fontName ?? "Helvetica") \(size) Tf \(rgb.redComponent) \(rgb.greenComponent) \(rgb.blueComponent) rg", forAnnotationKey: .defaultAppearance)
     }
 
     static func capture(_ document: PDFDocument) -> [Self] {
@@ -222,6 +223,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
                 record.author = author.hasPrefix(prefix) ? MarkupAuthorPreference.currentName : author
                 if annotation.type == "FreeText" {
                     record.kind = .text; record.text = annotation.contents ?? ""; record.fontSize = Double(textFontSize(annotation))
+                    if annotation.value(forAnnotationKey: TextBoxAppearance.key) != nil { record.textBoxAppearance = TextBoxAppearance.read(annotation) }
                     record.lineWidth = 2
                     record.textRotation = (((annotation.page?.rotation ?? 0) % 360) + 360) % 360
                 }
@@ -252,7 +254,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
         [bounds.minX, bounds.minY, bounds.width, bounds.height].allSatisfy { $0.isFinite } &&
         bounds.width >= 2 && bounds.height >= 2 &&
         [red, green, blue].allSatisfy { $0.isFinite && (0...1).contains($0) } &&
-        (kind != .text || (!text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && text.utf8.count <= 100000 && fontSize.isFinite && (6...144).contains(fontSize))) &&
+        (kind != .text || (!text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && text.utf8.count <= 100000 && fontSize.isFinite && (6...144).contains(fontSize) && textBoxAppearance?.valid != false)) &&
         (fill == nil || ([.rectangle, .ellipse, .polygon].contains(kind) && fill!.count == 3 && fill!.allSatisfy { $0.isFinite && (0...1).contains($0) })) &&
         (!(kind == .polyline || kind == .polygon) || (vertices.count >= (kind == .polygon ? 3 : 2) && vertices.count <= 10000 && vertices.allSatisfy { $0.x.isFinite && $0.y.isFinite && bounds.contains($0) })) &&
         lineWidth.isFinite && (0.25...72).contains(lineWidth) && strokeOpacity.isFinite && (0...1).contains(strokeOpacity) && fillOpacity.isFinite && (0...1).contains(fillOpacity) &&
@@ -275,6 +277,8 @@ final class RectangleMarkupController {
     init(defaults: UserDefaults = .standard) { defaultPreferences = defaults }
     weak var view: PDFView?
     private weak var boundDocument: PDFDocument?
+    var matchPropertiesActive = false
+    var textBoxPaint: TextBoxPaint?
     let layerStates = NSMapTable<PDFDocument, MarkupLayerState>(keyOptions: .weakMemory, valueOptions: .strongMemory)
     private let fallbackUndo = UndoManager()
     // Set when a split first hosts independent documents. Same-document panes
@@ -450,8 +454,32 @@ final class RectangleMarkupController {
                         continue
                     }
                     if original.type == "FreeText" {
-                        let size = RectangleMarkupRecord.textFontSize(original)
-                        if size != original.font?.pointSize { RectangleMarkupRecord.setTextFontSize(size, on: original) }
+                        // Reopened native boxes must use our independent box/text
+                        // renderer before an inspector edit invalidates their /AP.
+                        // Never adopt owned foreign copies or rich-text wrappers.
+                        if TextBoxAppearance.isNative(original), !(original is DrawbridgeTextBoxAnnotation) {
+                            let values = original.annotationKeyValues.reduce(into: [String: Any]()) {
+                                if let key = $1.key as? String, key != "/P" { $0[key] = $1.value }
+                            }
+                            let replacement = DrawbridgeTextBoxAnnotation(bounds: original.bounds, forType: .freeText, withProperties: values)
+                            replacement.contents = original.contents
+                            replacement.font = TextBoxAppearance.read(original).font(size: RectangleMarkupRecord.textFontSize(original))
+                            replacement.fontColor = original.fontColor
+                            replacement.color = original.color
+                            replacement.interiorColor = original.interiorColor
+                            replacement.border = original.border?.copy() as? PDFBorder
+                            replacement.alignment = original.alignment
+                            replacement.userName = original.userName
+                            replacement.modificationDate = original.modificationDate
+                            replacement.shouldDisplay = original.shouldDisplay
+                            replacement.shouldPrint = original.shouldPrint
+                            replacement.isReadOnly = original.isReadOnly
+                            replacement.removeAllAppearanceStreams()
+                            original.shouldDisplay = false
+                            page.removeAnnotation(original); page.addAnnotation(replacement)
+                            replacements[ObjectIdentifier(original)] = replacement
+                            replacedAppearance = true
+                        }
                         continue
                     }
                     let freehandHighlight = original.type == "Ink" && original.value(forAnnotationKey: RectangleMarkupRecord.inkToolKey) as? String == "highlight"
@@ -540,6 +568,7 @@ final class RectangleMarkupController {
     func acceptPersistedSource(at url: URL, stamp: PDFMarkupSourceStamp? = nil) { sourceStamp = stamp ?? PDFMarkupSourceStamp.capture(url) }
 
     func pointerDown(at location: CGPoint, clickCount: Int = 1, modifiers: NSEvent.ModifierFlags = []) -> Bool {
+        if matchPropertiesPointerDown(at: location) { return true }
         optionDrag = modifiers.contains(.option)
         guard !isCapturingSnapshot else { return true }
         finishTextEditing()
@@ -702,9 +731,14 @@ final class RectangleMarkupController {
         refresh(); return true
     }
     @discardableResult
-    func createPolyline(on page: PDFPage, points: [CGPoint], closed: Bool = false) -> PDFAnnotation? {
+    func createPolyline(on page: PDFPage, points: [CGPoint], closed: Bool = false, freehand: Bool = false) -> PDFAnnotation? {
+        // Freehand gesture acceptance is screen-space policy (pointerUp), not a
+        // minimum PDF-space length for each densely sampled segment.
         guard points.count >= (closed ? 3 : 2), points.count <= 10000, points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }),
-              zip(points,points.dropFirst()).contains(where: { hypot($0.0.x-$0.1.x,$0.0.y-$0.1.y) >= 2 }) else { return nil }
+              zip(points,points.dropFirst()).contains(where: {
+                  let distance = hypot($0.0.x-$0.1.x,$0.0.y-$0.1.y)
+                  return freehand ? distance > 0 : distance >= 2
+              }) else { return nil }
         let bounds = Self.polylineBounds(points,width:lineWidth)
         return create(on:page,bounds:bounds,kind:closed ? .polygon : .polyline,vertices:points)
     }
@@ -896,7 +930,14 @@ final class RectangleMarkupController {
             _ = pointerDragged(at: location, modifiers: modifiers)
             let points = polylinePoints
             polylinePage = nil; polylinePoints = []; polylineHover = nil; penConstraintAnchor = nil
-            _ = createPolyline(on: page, points: points)
+            // Ignore clicks/jitter in view points, independently of PDF zoom
+            // and event density. A returning/closed stroke still has excursion.
+            if let start = points.first,
+               points.dropFirst().contains(where: {
+                   hypot($0.x-start.x, $0.y-start.y) * (view?.scaleFactor ?? 1) >= 2
+               }) {
+                _ = createPolyline(on: page, points: points, freehand: true)
+            }
             selected = nil
             refresh()
             // Creation publishes a transient selection before stroke completion.
@@ -1057,7 +1098,7 @@ final class RectangleMarkupController {
         if type == .line {
             guard let (a,b) = endpoints, [a.x,a.y,b.x,b.y].allSatisfy({ $0.isFinite }), bounds.contains(a), bounds.contains(b), hypot(a.x-b.x,a.y-b.y) >= 2 else { return nil }
         }
-        let annotation: PDFAnnotation = kind == .polyline && measurement == nil && tool == .highlight ? DrawbridgeHighlighterAnnotation(bounds: bounds, forType: type, withProperties: nil) : kind == .polygon ? DrawbridgePolygonAnnotation(bounds:bounds,forType:type,withProperties:nil) : measurement != nil ? DrawbridgeMeasuredPathAnnotation(bounds: bounds, forType: type, withProperties: nil) : (kind == .rectangle || kind == .ellipse) ? DrawbridgeShapeAnnotation(bounds: bounds, forType: type, withProperties: nil) : PDFAnnotation(bounds: bounds, forType: type, withProperties: nil)
+        let annotation: PDFAnnotation = kind == .polyline && measurement == nil && tool == .highlight ? DrawbridgeHighlighterAnnotation(bounds: bounds, forType: type, withProperties: nil) : kind == .polygon ? DrawbridgePolygonAnnotation(bounds:bounds,forType:type,withProperties:nil) : measurement != nil ? DrawbridgeMeasuredPathAnnotation(bounds: bounds, forType: type, withProperties: nil) : (kind == .rectangle || kind == .ellipse) ? DrawbridgeShapeAnnotation(bounds: bounds, forType: type, withProperties: nil) : kind == .text ? DrawbridgeTextBoxAnnotation(bounds: bounds, forType: type, withProperties: nil) : PDFAnnotation(bounds: bounds, forType: type, withProperties: nil)
         if let (a,b) = endpoints {
             annotation.startPoint = CGPoint(x:a.x-bounds.minX,y:a.y-bounds.minY)
             annotation.endPoint = CGPoint(x:b.x-bounds.minX,y:b.y-bounds.minY)
@@ -1171,7 +1212,16 @@ final class RectangleMarkupController {
             editor.textContainerInset = .zero
         }
         if draft.annotation.map(RectangleMarkupRecord.owns) != false {
-            editor.font = NSFont(name:"Helvetica",size:(draft.annotation?.font?.pointSize ?? fontSize)*scale)
+            if let annotation = draft.annotation, TextBoxAppearance.isNative(annotation) {
+                let style = TextBoxAppearance.read(annotation)
+                let attributes = style.attributed(" ", size: RectangleMarkupRecord.textFontSize(annotation) * scale,
+                    color: RectangleMarkupRecord.markupColor(annotation), alignment: annotation.alignment).attributes(at: 0, effectiveRange: nil)
+                editor.font = style.font(size: RectangleMarkupRecord.textFontSize(annotation) * scale)
+                editor.textStorage?.addAttributes(attributes, range: NSRange(location: 0, length: editor.string.utf16.count))
+                editor.typingAttributes = attributes
+            } else {
+                editor.font = NSFont(name:"Helvetica",size:(draft.annotation?.font?.pointSize ?? fontSize)*scale)
+            }
             editor.textColor = draft.annotation.map(RectangleMarkupRecord.markupColor) ?? strokeColor
         }
     }
@@ -1395,7 +1445,9 @@ final class RectangleMarkupController {
         }
         if annotation.type == "FreeText" { RectangleMarkupRecord.setTextColor(color,on:annotation) } else { annotation.color = color }
         let pattern = MarkupStyle.pattern(annotation), opacity = MarkupStyle.strokeOpacity(annotation)
-        let border = PDFBorder(); border.lineWidth = annotation.type == "FreeText" ? 0 : width; annotation.border = border
+        if annotation.type != "FreeText" {
+            let border = PDFBorder(); border.lineWidth = width; annotation.border = border
+        }
         MarkupStyle.apply(pattern: pattern, opacity: opacity, to: annotation)
         changed(page)
     }
@@ -1678,7 +1730,7 @@ final class RectangleMarkupController {
         refresh(presentationChanged: false)
         return true
     }
-    func cancelGesture() { groupMove = nil; selectionWindow = nil; penConstraintAnchor = nil; pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
+    func cancelGesture() { matchPropertiesActive = false; textBoxPaint = nil; groupMove = nil; selectionWindow = nil; penConstraintAnchor = nil; pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
     func escape() { cancelSnapshotCapture(); cancelGesture(); selected = nil; onClickAway?(); tool = .select; refresh() }
     // Observes real overlay work, including presentation-silent viewport refreshes.
     var onOverlayRefresh: (() -> Void)?

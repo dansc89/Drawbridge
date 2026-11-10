@@ -106,18 +106,6 @@ final class StartupDropView: NSView {
     }
 
     private func droppedPDFURL(from draggingInfo: NSDraggingInfo) -> URL? {
-        let classes: [AnyClass] = [NSURL.self]
-        let options: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
-        guard let items = draggingInfo.draggingPasteboard.readObjects(forClasses: classes, options: options) as? [URL] else {
-            return nil
-        }
-        for url in items {
-            guard url.isFileURL else { continue }
-            if url.pathExtension.lowercased() == "pdf" { return url }
-            if let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .pdf) {
-                return url
-            }
-        }
-        return nil
+        ImageDocumentImport.droppedURL(from: draggingInfo.draggingPasteboard)
     }
 }

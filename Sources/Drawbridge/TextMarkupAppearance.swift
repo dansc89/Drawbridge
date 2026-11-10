@@ -4,6 +4,14 @@ import CoreText
 /// Text appearances use vector glyph outlines, including fallback fonts. This avoids
 /// font substitution in other viewers without rasterizing or touching the page.
 enum TextMarkupAppearance {
+    static func frame(_ text: NSAttributedString, size: CGSize) -> CTFrame {
+        let framesetter = CTFramesetterCreateWithAttributedString(text)
+        let textWidth = max(1, size.width - 6)
+        let suggested = CTFramesetterSuggestFrameSizeWithConstraints(framesetter, CFRange(location: 0, length: 0), nil, CGSize(width: textWidth, height: CGFloat.greatestFiniteMagnitude), nil)
+        let height = max(ceil(suggested.height) + 1, size.height - 6)
+        let area = CGRect(x: 3, y: size.height - 3 - height, width: textWidth, height: height)
+        return CTFramesetterCreateFrame(framesetter, CFRange(location: 0, length: 0), CGPath(rect: area, transform: nil), nil)
+    }
     static func drawing(_ record: RectangleMarkupRecord) -> String {
         // PDFKit displays free text upright on rotated sheets. Store the same
         // orientation in the vector appearance used by other PDF readers.
@@ -23,25 +31,29 @@ enum TextMarkupAppearance {
             }
             return "q \(matrix) cm\n" + drawing(upright) + "Q\n"
         }
-        let font = CTFontCreateWithName("Helvetica" as CFString, record.fontSize, nil)
-        let paragraph = NSMutableParagraphStyle(); paragraph.lineBreakMode = .byWordWrapping
-        let text = NSAttributedString(string: record.text, attributes: [.font:font, .paragraphStyle:paragraph])
-        let framesetter = CTFramesetterCreateWithAttributedString(text)
-        // CoreText emits no lines when the padded box is shorter than one line.
-        // Lay out at least one line, anchored to the top, then clip to the user's
-        // annotation bounds instead of saving a completely empty appearance.
-        let textWidth = max(1,record.bounds.width-6)
-        let suggested = CTFramesetterSuggestFrameSizeWithConstraints(framesetter,CFRange(location:0,length:0),nil,
-                                                                     CGSize(width:textWidth,height:CGFloat.greatestFiniteMagnitude),nil)
-        let layoutHeight = max(ceil(suggested.height)+1, record.bounds.height - 6)
-        let area = CGRect(x:3,y:record.bounds.height-3-layoutHeight,
-                          width:textWidth,height:layoutHeight)
-        let frame = CTFramesetterCreateFrame(framesetter,CFRange(location:0,length:0),CGPath(rect:area,transform:nil),nil)
+        let style = record.textBoxAppearance ?? TextBoxAppearance()
+        let text = style.attributed(record.text, size: record.fontSize, color: .black, alignment: .left)
+        let frame = frame(text, size: record.bounds.size)
+        let area = CTFrameGetPath(frame).boundingBox
         let lines = CTFrameGetLines(frame) as! [CTLine]
         var origins = [CGPoint](repeating:.zero,count:lines.count)
         CTFrameGetLineOrigins(frame,CFRange(location:0,length:0),&origins)
-        var commands = "q 0 0 \(record.bounds.width) \(record.bounds.height) re W n \(record.red) \(record.green) \(record.blue) rg\n"
+        var commands = "q 0 0 \(record.bounds.width) \(record.bounds.height) re W n\n"
+        if let fill = style.fill {
+            commands += "q /TextFillGS gs \(fill[0]) \(fill[1]) \(fill[2]) rg 0 0 \(record.bounds.width) \(record.bounds.height) re f Q\n"
+        }
+        if style.borderWidth > 0 {
+            let inset = style.borderWidth / 2
+            let dash = (MarkupLinePattern(rawValue: style.borderPattern) ?? .solid).dash(width: style.borderWidth).map { String($0) }.joined(separator: " ")
+            commands += "q /TextBorderGS gs \(style.borderColor[0]) \(style.borderColor[1]) \(style.borderColor[2]) RG \(style.borderWidth) w [\(dash)] 0 d \(inset) \(inset) \(record.bounds.width-style.borderWidth) \(record.bounds.height-style.borderWidth) re S Q\n"
+        }
+        commands += "/TextInkGS gs \(record.red) \(record.green) \(record.blue) rg\n"
         for (index,line) in lines.enumerated() {
+            if style.underline {
+                let font = style.font(size: record.fontSize) as CTFont
+                let width = CTLineGetTypographicBounds(line, nil, nil, nil)
+                commands += "\(area.minX+origins[index].x) \(area.minY+origins[index].y+CTFontGetUnderlinePosition(font)) \(width) \(max(0.5,CTFontGetUnderlineThickness(font))) re f\n"
+            }
             for run in CTLineGetGlyphRuns(line) as! [CTRun] {
                 let count = CTRunGetGlyphCount(run)
                 let runFont = (CTRunGetAttributes(run) as NSDictionary)[kCTFontAttributeName] as! CTFont

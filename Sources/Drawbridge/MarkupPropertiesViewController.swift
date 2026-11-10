@@ -9,6 +9,7 @@ private final class MarkupInspectorContentView: NSView {
 @MainActor
 final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegate {
     weak var session: RectangleMarkupController?
+    let textBoxControls = TextBoxAppearanceControls(frame: .zero)
     let layersView = MarkupLayersView()
     let membership = NSPopUpButton()
     private var propertiesContent = NSStackView()
@@ -142,7 +143,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         setAsDefault.target = self; setAsDefault.action = #selector(saveDefault(_:))
         setAsDefault.toolTip = "Remember this appearance for future markups made with this tool."
         defaultStatus.font = .systemFont(ofSize: 11); defaultStatus.textColor = .secondaryLabelColor
-        propertiesContent = NSStackView(views: [membership, editingContext, captureHint, snapshotRows, strokeRow, weightRow, patternRow, strokeOpacityRow, fontRow, hatchRows, fillRow, fillOpacityRow, note, setAsDefault, defaultStatus])
+        propertiesContent = NSStackView(views: [membership, editingContext, captureHint, snapshotRows, strokeRow, weightRow, patternRow, strokeOpacityRow, fontRow, textBoxControls, hatchRows, fillRow, fillOpacityRow, note, setAsDefault, defaultStatus])
         propertiesContent.orientation = .vertical; propertiesContent.alignment = .leading; propertiesContent.spacing = 10
         membership.target = self; membership.action = #selector(changeMembership(_:)); membership.setAccessibilityLabel("Assigned markup layer")
         let separator = NSBox(); separator.boxType = .separator
@@ -191,7 +192,10 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         if lastDefaultTool != session.defaultTool { defaultStatus.stringValue = ""; lastDefaultTool = session.defaultTool }
         setAsDefault.isEnabled = session.canEdit() && session.defaultTool != nil
         let selection = session.selected
+        textBoxControls.session = session; textBoxControls.refresh()
         let text = selection.map { $0.type == "FreeText" } ?? (session.tool == .text)
+        (strokeRow.views.first as? NSTextField)?.stringValue = text ? "Text color" : "Stroke color"
+        (strokeOpacityRow.views.first as? NSTextField)?.stringValue = text ? "Text opacity" : "Stroke opacity"
         let legacyHighlight = selection?.type == "Highlight"
         let highlight = selection.map { $0.type == "Highlight" || $0.value(forAnnotationKey: RectangleMarkupRecord.inkToolKey) as? String == "highlight" } ?? (session.tool == .highlight)
         let closedShape = selection.map { ["Square", "Circle", "Polygon"].contains($0.type ?? "") } ?? ([.rectangle, .ellipse, .polygon, .area].contains(session.tool))

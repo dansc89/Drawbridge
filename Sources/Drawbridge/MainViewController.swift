@@ -3346,7 +3346,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
 
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.pdf]
+        panel.allowedContentTypes = ImageDocumentImport.openContentTypes
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
 
@@ -5245,6 +5245,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     func openDocument(at url: URL) {
         guard !isSwitchingDocument else { return }
         guard !isPDFProcessingBusy else { NSSound.beep(); return }
+        if !ImageDocumentImport.isPDF(url) {
+            // Decode completely before any controller mutation; corrupt images leave the viewer intact.
+            guard let backing = try? ImageDocumentImport.pdfURL(for: url) else { NSSound.beep(); return }
+            if openDocumentURL.map(canonicalDocumentURL) != canonicalDocumentURL(backing) {
+                openDocument(at: backing)
+            }
+            return
+        }
         rememberReadingPositions()
         let target = canonicalDocumentURL(url)
         if focusVisibleSplitDocument(target) { return }

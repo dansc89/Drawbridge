@@ -697,7 +697,10 @@ enum PDFRectangleWriter {
                     annotation["/DA"] = "u:/Helv \(record.fontSize) Tf \(record.red) \(record.green) \(record.blue) rg"
                     annotation["/DS"] = "u:font: Helvetica \(record.fontSize)pt; color: rgb(\(Int(record.red*255)),\(Int(record.green*255)),\(Int(record.blue*255)))"
                     annotation["/DR"] = ["/Font":["/Helv":["/Type":"/Font","/Subtype":"/Type1","/BaseFont":"/Helvetica"]]]
-                    annotation["/BS"] = ["/W":0]; annotation["/Q"] = 0
+                    let textStyle = record.textBoxAppearance ?? TextBoxAppearance()
+                    if let style = record.textBoxAppearance { annotation["/DrawbridgeTextBoxAppearance"] = "u:" + style.json }
+                    annotation["/BS"] = ["/W": textStyle.borderWidth, "/S": textStyle.borderPattern == "solid" ? "/S" : "/D", "/D": (MarkupLinePattern(rawValue: textStyle.borderPattern) ?? .solid).dash(width: textStyle.borderWidth)]
+                    annotation["/Q"] = 0
                     annotation["/Rotate"] = record.textRotation
                 }
                 if let oldReference {
@@ -727,6 +730,15 @@ enum PDFRectangleWriter {
                 let drawing = appearanceDrawing(record)
                 let isDimension = record.measurement?.isDistance(points: record.vertices) == true
                 var resources: [String: Any] = ["/ExtGState": ["/MarkupGS": ["/Type": "/ExtGState", "/CA": record.strokeOpacity, "/ca": record.kind == .text || record.kind == .highlight || isDimension ? record.strokeOpacity : record.fillOpacity]]]
+                if record.kind == .text {
+                    let style = record.textBoxAppearance ?? TextBoxAppearance()
+                    var states = resources["/ExtGState"] as! [String: Any]
+                    states["/TextInkGS"] = ["/Type": "/ExtGState", "/CA": record.strokeOpacity, "/ca": record.strokeOpacity]
+                    states["/TextBorderGS"] = ["/Type": "/ExtGState", "/CA": style.borderOpacity, "/ca": style.borderOpacity]
+                    let fillAlpha: Double = style.fill?.last ?? 1.0
+                    states["/TextFillGS"] = ["/Type": "/ExtGState", "/CA": fillAlpha, "/ca": fillAlpha]
+                    resources["/ExtGState"] = states
+                }
                 if record.kind == .highlight || (record.kind == .polyline && record.inkTool == "highlight") {
                     // Match PDFKit's live highlighter: multiply preserves black
                     // artwork instead of washing it out with normal alpha-over.

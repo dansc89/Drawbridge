@@ -3375,10 +3375,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     }
 
     private func droppedPDFURL(from sender: NSDraggingInfo) -> URL? {
-        guard let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] else {
-            return nil
-        }
-        return urls.first(where: { $0.pathExtension.lowercased() == "pdf" || UTType(filenameExtension: $0.pathExtension)?.conforms(to: .pdf) == true })
+        ImageDocumentImport.droppedURL(from: sender.draggingPasteboard)
     }
 
 }

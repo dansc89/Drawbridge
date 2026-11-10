@@ -364,13 +364,7 @@ System Requirements:
     }
 
     private func handleOpenRequests(_ urls: [URL]) {
-        let candidates = urls.filter { url in
-            if url.pathExtension.lowercased() == "pdf" { return true }
-            if let type = UTType(filenameExtension: url.pathExtension), type.conforms(to: .pdf) {
-                return true
-            }
-            return false
-        }
+        let candidates = urls.filter(ImageDocumentImport.canOpen)
         guard !candidates.isEmpty else { return }
         if mainViewController == nil {
             pendingOpenURLs.append(contentsOf: candidates)
