@@ -32,6 +32,23 @@ struct PDFMarkupSourceStamp: Sendable, Equatable {
         guard read(url) == stamp else { return nil }
         return stamp
     }
+    /// Carry the verified candidate's recovery bytes forward after committing it.
+    func verifiedDestinationStamp(at url: URL) -> Self? {
+        guard let baseline else { return nil }
+        let bookmark = try? url.bookmarkData(options: .minimalBookmark)
+        // Providers can refresh file metadata while publishing the copy. Retry
+        // the identity check, but require stable metadata and exact bytes.
+        for _ in 0..<3 {
+            guard var destination = Self.read(url), destination.size == size,
+                  baseline.matches(url) else { return nil }
+            guard Self.read(url) == destination else { continue }
+            destination.baseline = baseline
+            destination.sourceBookmark = bookmark
+            return destination
+        }
+        return nil
+    }
+
     /// Follow a renamed file/folder only when it is still the verified source.
     /// Never substitute PDFKit's temporary backing URL for a missing original.
     func resolvedSourceURL(preferred url: URL) -> URL? {

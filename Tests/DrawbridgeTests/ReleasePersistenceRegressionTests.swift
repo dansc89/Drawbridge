@@ -108,6 +108,27 @@ final class ReleasePersistenceRegressionTests: XCTestCase {
         }
     }
 
+    func testDestinationVerificationRetainsVerifiedSnapshotAcrossFileReplacement() throws {
+        let dir = try directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let candidate = dir.appendingPathComponent("candidate.pdf")
+        let destination = dir.appendingPathComponent("saved.pdf")
+        try fixture(candidate)
+        try fixture(destination, color: .blue)
+        let verified = try XCTUnwrap(PDFMarkupSourceStamp.capture(candidate))
+        let recovery = try XCTUnwrap(verified.recoverySourceURL)
+
+        try MainViewController.commitStagedSave(from: candidate, to: destination)
+        let committed = try XCTUnwrap(verified.verifiedDestinationStamp(at: destination))
+        XCTAssertEqual(committed, PDFMarkupSourceStamp.read(destination))
+        XCTAssertEqual(committed.recoverySourceURL, recovery)
+        XCTAssertEqual(try Data(contentsOf: recovery), try Data(contentsOf: destination))
+
+        try fixture(destination, color: .red)
+        XCTAssertNil(verified.verifiedDestinationStamp(at: destination))
+        XCTAssertFalse(committed.matchesSource(destination))
+    }
+
     func testNavigationOnlyRejectsSamePageCountExternalReplacementWithoutTouchingFiles() throws {
         let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
         let source = dir.appendingPathComponent("source.pdf"), output = dir.appendingPathComponent("output.pdf")

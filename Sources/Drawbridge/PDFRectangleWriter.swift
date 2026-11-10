@@ -12,6 +12,7 @@ enum PDFRectangleWriter {
         let errorCode: Int?
         var isSourceConflict: Bool { stage.hasPrefix("source changed") || stage == "source snapshot" }
         var explanation: String {
+            if stage == "source changed after save" { return "Drawbridge could not verify the PDF at the destination after saving. Your edits remain open. Save a recovered copy to preserve the version you were editing." }
             if isSourceConflict { return "The original PDF is unavailable or changed outside Drawbridge. Your edits remain open. Save a recovered copy to preserve the version you were editing." }
             if stage == "source permissions" { return "This PDF is encrypted or digitally signed. Drawbridge cannot safely append markups to it. Your edits remain open." }
             if stage == "file replacement" { return "The verified PDF could not be committed to this location. Check that the folder is writable and available, or save a copy elsewhere. Your edits remain open." }
@@ -136,17 +137,18 @@ enum PDFRectangleWriter {
             try refreshImportedLayerReferences(&json, authorized: &importedObjects)
             if try changedObjects(baseline: inspected, updated: json).isEmpty {
                 guard try MarkupFileVersion.read(source) == sourceVersion else { return false }
-                let verifiedInput = PDFMarkupSourceStamp.capture(input)
+                stage = "candidate snapshot"
+                guard let verifiedInput = PDFMarkupSourceStamp.capture(input),
+                      verifiedInput.recoverySourceURL != nil else { return false }
                 if source.standardizedFileURL != destination.standardizedFileURL {
                     let unchanged = directory.appendingPathComponent("unchanged.pdf")
                     try original.write(to: unchanged)
+                    stage = "file replacement"
                     try MainViewController.commitStagedSave(from: unchanged, to: destination)
                 }
                 stage = "source changed after save"
                 let committedVersion = try MarkupFileVersion.read(destination)
-                guard let committedStamp = PDFMarkupSourceStamp.capture(destination),
-                      let frozen = committedStamp.recoverySourceURL,
-                      verifiedInput?.matchesSource(frozen) == true else { return false }
+                guard let committedStamp = verifiedInput.verifiedDestinationStamp(at: destination) else { return false }
                 try? inspectionCache.store(url: destination, graph: inspected, cost: inspectionCost, expectedVersion: committedVersion)
                 succeeded = true
                 onCommitted?(committedStamp)
@@ -186,14 +188,14 @@ enum PDFRectangleWriter {
                 return false
             }
             profile("candidate verification")
-            let verifiedCandidate = PDFMarkupSourceStamp.capture(candidate)
+            stage = "candidate snapshot"
+            guard let verifiedCandidate = PDFMarkupSourceStamp.capture(candidate),
+                  verifiedCandidate.recoverySourceURL != nil else { return false }
             stage = "file replacement"
             try MainViewController.commitStagedSave(from: candidate, to: destination)
             stage = "source changed after save"
             let committedVersion = try MarkupFileVersion.read(destination)
-            guard let committedStamp = PDFMarkupSourceStamp.capture(destination),
-                  let frozen = committedStamp.recoverySourceURL,
-                  verifiedCandidate?.matchesSource(frozen) == true else { return false }
+            guard let committedStamp = verifiedCandidate.verifiedDestinationStamp(at: destination) else { return false }
             // A cache failure must not report a verified, committed PDF as an
             // unsuccessful save. The next save can simply inspect it again.
             try? inspectionCache.store(url: destination, graph: written, cost: inspectionCost + (try verificationURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0), expectedVersion: committedVersion)
