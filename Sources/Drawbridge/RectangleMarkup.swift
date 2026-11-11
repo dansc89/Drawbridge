@@ -296,7 +296,11 @@ final class RectangleMarkupController {
     init(defaults: UserDefaults = .standard) { defaultPreferences = defaults }
     weak var view: PDFView?
     private weak var boundDocument: PDFDocument?
-    var matchPropertiesActive = false
+    var matchPropertiesActive = false {
+        didSet {
+            if oldValue != matchPropertiesActive { (view as? MarkupPDFView)?.markupToolCursorChanged() }
+        }
+    }
     var textBoxPaint: TextBoxPaint?
     let layerStates = NSMapTable<PDFDocument, MarkupLayerState>(keyOptions: .weakMemory, valueOptions: .strongMemory)
     private let fallbackUndo = UndoManager()

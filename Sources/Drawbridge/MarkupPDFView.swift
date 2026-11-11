@@ -825,7 +825,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             let localRect = target.convert(pageRect, from: self).intersection(target.bounds)
             guard !localRect.isEmpty, !localRect.isNull else { return }
             target.setNeedsDisplay(localRect)
-            target.layer?.setNeedsDisplay(localRect)
+            if let layer = target.layer { invalidateMarkupLayers(layer, in: localRect) }
             for child in target.subviews { invalidate(child) }
         }
         invalidate(self)
@@ -835,6 +835,19 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             // Plain needsDisplay and page rotation do not retire that surface.
             _ = zoom(by: 0.999)
             _ = zoom(by: 1 / 0.999)
+        }
+    }
+
+    // PDFPageLayer owns cached content in layer-only descendants. Invalidating
+    // its NSView/backing layer does not propagate to those caches. Convert the
+    // dirty page region at each layer boundary, including transformed tiles.
+    private func invalidateMarkupLayers(_ layer: CALayer, in rect: CGRect) {
+        let dirty = rect.intersection(layer.bounds)
+        if !dirty.isNull && !dirty.isEmpty { layer.setNeedsDisplay(dirty) }
+        // A non-clipping container may have empty bounds and visible children.
+        if layer.masksToBounds && (dirty.isNull || dirty.isEmpty) { return }
+        for child in layer.sublayers ?? [] {
+            invalidateMarkupLayers(child, in: child.convert(rect, from: layer))
         }
     }
 
@@ -1206,21 +1219,47 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return NSCursor(image: image, hotSpot: NSPoint(x: 3, y: 21))
     }()
 
+    // A brush silhouette, rather than the pen nib, distinguishes style transfer
+    // from drawing. White edging keeps it readable over light and dark artwork.
+    static let matchPropertiesCursor: NSCursor = {
+        let image = NSImage(size: NSSize(width: 24, height: 24), flipped: false) { _ in
+            let brush = NSBezierPath()
+            brush.move(to: NSPoint(x: 2, y: 2))
+            brush.curve(to: NSPoint(x: 11, y: 7), controlPoint1: NSPoint(x: 9, y: 1), controlPoint2: NSPoint(x: 11, y: 3))
+            brush.line(to: NSPoint(x: 8, y: 11))
+            brush.curve(to: NSPoint(x: 2, y: 2), controlPoint1: NSPoint(x: 3, y: 12), controlPoint2: NSPoint(x: 5, y: 5))
+            brush.close()
+            brush.move(to: NSPoint(x: 9, y: 12))
+            brush.line(to: NSPoint(x: 18, y: 22))
+            brush.curve(to: NSPoint(x: 22, y: 18), controlPoint1: NSPoint(x: 21, y: 24), controlPoint2: NSPoint(x: 24, y: 21))
+            brush.line(to: NSPoint(x: 12, y: 9)); brush.close()
+            NSColor.white.setStroke(); brush.lineWidth = 3; brush.stroke()
+            NSColor.black.setFill(); brush.fill()
+            return true
+        }
+        return NSCursor(image: image, hotSpot: NSPoint(x: 2, y: 22))
+    }()
+
     var usesPenCursor: Bool { (rectangleMarkup.tool == .pen || rectangleMarkup.tool == .highlight) && !isRegionCaptureModeEnabled }
+    var markupCursor: NSCursor? {
+        guard !isRegionCaptureModeEnabled else { return nil }
+        if rectangleMarkup.matchPropertiesActive { return Self.matchPropertiesCursor }
+        return usesPenCursor ? Self.penCursor : nil
+    }
 
     func markupToolCursorChanged() {
         window?.invalidateCursorRects(for: self)
         guard let window, bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil)) else { return }
-        if usesPenCursor { Self.penCursor.set() } else { NSCursor.arrow.set() }
+        (markupCursor ?? (isRegionCaptureModeEnabled ? NSCursor.crosshair : NSCursor.arrow)).set()
     }
 
     override func resetCursorRects() {
         super.resetCursorRects()
-        if usesPenCursor { addCursorRect(visibleRect, cursor: Self.penCursor) }
+        if let cursor = markupCursor { addCursorRect(visibleRect, cursor: cursor) }
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        if usesPenCursor { Self.penCursor.set() } else { super.cursorUpdate(with: event) }
+        if let cursor = markupCursor { cursor.set() } else { super.cursorUpdate(with: event) }
     }
 
     override func updateTrackingAreas() {
@@ -1251,7 +1290,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
         lastPointerInView = convert(event.locationInWindow, from: nil)
         super.mouseMoved(with: event)
-        if usesPenCursor { Self.penCursor.set() }
+        markupCursor?.set()
     }
 
     @objc private func bringSelectedMarkupToFront(_ sender: Any?) { rectangleMarkup.reorderSelected(toFront: true) }
