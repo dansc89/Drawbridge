@@ -483,6 +483,31 @@ enum PDFRectangleWriter {
             if entries.isEmpty { page.removeValue(forKey: "/Annots") } else { page["/Annots"] = entries }
             pageObject["value"] = page; objects[pageKey] = pageObject; arrays[pageIndex] = imported
         }
+        // Insertion collision remaps may concern read-only/non-selectable foreign
+        // annotations. Authorize only their two membership fields, never an edit.
+        for membership in plan.memberships {
+            guard originalPages.indices.contains(membership.sourcePage), currentPages.indices.contains(membership.page),
+                  UUID(uuidString: membership.originalID) != nil else { throw CocoaError(.fileReadCorruptFile) }
+            let entries = annotations(dictionary(originalPages[membership.sourcePage], objects: originalObjects)["/Annots"], objects: originalObjects)
+            let current = annotations(dictionary(currentPages[membership.page], objects: objects)["/Annots"], objects: objects)
+            guard entries.indices.contains(membership.slot), let ref = entries[membership.slot] as? String,
+                  current.contains(where: { ($0 as? String) == ref }), !owned(ref, objects: originalObjects),
+                  let originalObject = originalObjects["obj:" + ref] as? [String: Any], let original = originalObject["value"] as? [String: Any],
+                  var object = objects["obj:" + ref] as? [String: Any], var value = object["value"] as? [String: Any],
+                  original["/DrawbridgeLayerID"] as? String == "u:" + membership.originalID,
+                  let oldGroup = original["/OC"] as? String,
+                  dictionary(oldGroup, objects: originalObjects)["/DrawbridgeLayerID"] as? String == "u:" + membership.originalID else { throw CocoaError(.fileReadCorruptFile) }
+            var a = original, b = value
+            for field in ["/OC", "/DrawbridgeLayerID"] { a.removeValue(forKey: field); b.removeValue(forKey: field) }
+            guard NSDictionary(dictionary: a).isEqual(to: b) else { throw CocoaError(.fileReadCorruptFile) }
+            if let id = membership.layerID {
+                guard UUID(uuidString: id) != nil, let group = PDFMarkupLayersPatch.references(objects)[id] else { throw CocoaError(.fileReadCorruptFile) }
+                value["/OC"] = group; value["/DrawbridgeLayerID"] = "u:" + id
+            } else {
+                value.removeValue(forKey: "/OC"); value.removeValue(forKey: "/DrawbridgeLayerID")
+            }
+            object["value"] = value; objects["obj:" + ref] = object; authorized["obj:" + ref] = object
+        }
         // Reorder references only. Every imported object and appearance remains
         // immutable, and all current annotation references must be retained once.
         for order in plan.orders {

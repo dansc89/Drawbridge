@@ -211,6 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         controller.configureWelcomeMerge(workflow: mergePDFWorkflow)
         fileMenu.addItem(withTitle: "Merge PDFs…", action: #selector(PDFMergeWorkflow.showMerge(_:)), keyEquivalent: "").target = mergePDFWorkflow
         fileMenu.addItem(withTitle: "Extract Pages…", action: #selector(MainViewController.commandExtractPages(_:)), keyEquivalent: "").target = controller
+        fileMenu.addItem(withTitle: "Insert Pages…", action: #selector(MainViewController.commandInsertPages(_:)), keyEquivalent: "").target = controller
         controller.configureWelcomeBookmarkIndex(workflow: bookmarkIndexWorkflow)
         fileMenu.addItem(withTitle: "Extract Bookmark Index…", action: #selector(BookmarkIndexWorkflow.showExtract(_:)), keyEquivalent: "").target = bookmarkIndexWorkflow
         fileMenu.addItem(withTitle: "Close", action: #selector(MainViewController.commandCloseDocument(_:)), keyEquivalent: "w").target = controller

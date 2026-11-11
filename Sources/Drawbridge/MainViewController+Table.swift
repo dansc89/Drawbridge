@@ -1,6 +1,6 @@
 import AppKit
 
-extension MainViewController: NSTableViewDataSource, NSTableViewDelegate {
+extension MainViewController: @preconcurrency NSTableViewDataSource, NSTableViewDelegate {
     func numberOfRows(in tableView: NSTableView) -> Int {
         if tableView.identifier?.rawValue == "pagesTable" {
             return sidebarPageCount()

@@ -3,6 +3,21 @@ import PDFKit
 
 @MainActor
 final class PageThumbnailTableView: NSTableView {
+    static let pageDragType = NSPasteboard.PasteboardType("com.drawbridge.page-reorder")
+    weak var draggedDocument: PDFDocument?
+    var draggedPageIdentities: [ObjectIdentifier] = []
+    var draggedIndexes = IndexSet()
+    var dragToken: String?
+    var mouseDownSelection: IndexSet?
+
+    override func mouseDown(with event: NSEvent) {
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        mouseDownSelection = modifiers.isEmpty && selectedRowIndexes.contains(row) ? selectedRowIndexes : nil
+        defer { mouseDownSelection = nil }
+        super.mouseDown(with: event)
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         selectContextRow(in: self, event: event)
         return super.menu(for: event)

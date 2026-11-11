@@ -25,12 +25,20 @@ struct ImportedMarkupPlan: @unchecked Sendable {
     }
     let stamp: PDFMarkupSourceStamp
     let changes: [Change]
+    struct Membership {
+        let sourcePage: Int
+        let page: Int
+        let slot: Int
+        let originalID: String
+        let layerID: String?
+    }
+    var memberships: [Membership] = []
     var orders: [Order] = []
     var source: URL? { stamp.recoverySourceURL }
     func rebased(to stamp: PDFMarkupSourceStamp) -> ImportedMarkupPlan {
         ImportedMarkupPlan(stamp: stamp, changes: changes.map {
             Change(sourcePage: $0.page, page: $0.page, slot: $0.slot, deleted: $0.deleted, offset: $0.offset, originalBounds: $0.originalBounds, subtype: $0.subtype, name: $0.name, layerID: $0.layerID, layerChanged: $0.layerChanged, edit: $0.edit)
-        }, orders: orders.map { Order(sourcePage: $0.page, page: $0.page, items: $0.items) })
+        }, memberships: memberships.map { Membership(sourcePage: $0.page, page: $0.page, slot: $0.slot, originalID: $0.originalID, layerID: $0.layerID) }, orders: orders.map { Order(sourcePage: $0.page, page: $0.page, items: $0.items) })
     }
 }
 
@@ -46,6 +54,7 @@ final class ImportedMarkupState: NSObject {
         var layerID: String? = nil
     }
     var entries: [Entry]
+    private var insertedLayerEntries: [Entry] = []
     private var editedFields: [Int: Set<String>] = [:]
     let openingStamp: PDFMarkupSourceStamp?
     var touched: Set<ObjectIdentifier> = []
@@ -69,6 +78,24 @@ final class ImportedMarkupState: NSObject {
             }
         }
     }
+    /// Retain original annotation slots for imported sheets. The structure writer
+    /// rebases these slots onto its assembled, immutable page selection.
+    func register(pages: [PDFPage], indexes: [Int]) {
+        for (page, index) in zip(pages, indexes) {
+            originalPageIndices[ObjectIdentifier(page)] = index
+            for (slot, annotation) in page.annotations.enumerated() {
+                originalSlots[ObjectIdentifier(annotation)] = slot
+                if !RectangleMarkupRecord.owns(annotation), MarkupLayers.id(annotation) != nil {
+                    insertedLayerEntries.append(Entry(annotation: annotation, page: page, sourcePage: index, slot: slot,
+                        bounds: annotation.bounds, standardOpacity: nil, layerID: MarkupLayers.id(annotation)))
+                }
+                guard Self.selectable(annotation) && !RectangleMarkupRecord.owns(annotation) else { continue }
+                entries.append(Entry(annotation: annotation, page: page, sourcePage: index, slot: slot,
+                    bounds: annotation.bounds, standardOpacity: MatchMarkupAppearance.originalStandardOpacity(annotation), layerID: MarkupLayers.id(annotation)))
+            }
+        }
+    }
+
     func reordered(_ page: PDFPage) {
         if !reorderedPages.contains(where: { $0 === page }) { reorderedPages.append(page) }
     }
@@ -84,13 +111,14 @@ final class ImportedMarkupState: NSObject {
     func replace(_ old: PDFAnnotation, with replacement: PDFAnnotation, fields: Set<String>) -> Bool {
         guard fields.isSubset(of: ImportedMarkupEdit.allowedFields), let index = entries.firstIndex(where: { $0.annotation === old }) else { return false }
         entries[index].annotation = replacement
+        if let layerIndex = insertedLayerEntries.firstIndex(where: { $0.annotation === old }) { insertedLayerEntries[layerIndex].annotation = replacement }
         editedFields[index, default: []].formUnion(fields)
         touched.insert(ObjectIdentifier(replacement))
         originalSlots[ObjectIdentifier(replacement)] = originalSlots[ObjectIdentifier(old)]
         return true
     }
     func plan(document: PDFDocument, stamp: PDFMarkupSourceStamp?) -> ImportedMarkupPlan? {
-        guard let stamp = openingStamp ?? stamp, (!touched.isEmpty || !reorderedPages.isEmpty) else { return nil }
+        guard let stamp = openingStamp ?? stamp else { return nil }
         let changes = entries.enumerated().compactMap { entryIndex, entry -> ImportedMarkupPlan.Change? in
             guard touched.contains(ObjectIdentifier(entry.annotation)) else { return nil }
             let index = document.index(for: entry.page)
@@ -112,6 +140,13 @@ final class ImportedMarkupState: NSObject {
             }
             return .init(sourcePage: sourceIndex, page: index, items: items)
         }
-        return changes.isEmpty && orders.isEmpty ? nil : ImportedMarkupPlan(stamp: stamp, changes: changes, orders: orders)
+        let memberships = insertedLayerEntries.compactMap { entry -> ImportedMarkupPlan.Membership? in
+            let index = document.index(for: entry.page)
+            guard index != NSNotFound, entry.annotation.page === entry.page,
+                  let old = entry.layerID, old != MarkupLayers.id(entry.annotation),
+                  !changes.contains(where: { $0.page == index && $0.slot == entry.slot }) else { return nil }
+            return .init(sourcePage: entry.sourcePage, page: index, slot: entry.slot, originalID: old, layerID: MarkupLayers.id(entry.annotation))
+        }
+        return changes.isEmpty && orders.isEmpty && memberships.isEmpty ? nil : ImportedMarkupPlan(stamp: stamp, changes: changes, memberships: memberships, orders: orders)
     }
 }

@@ -703,6 +703,7 @@ extension MainViewController {
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         guard let action = menuItem.action else { return true }
+        if action == #selector(commandInsertPages(_:)) { return canManagePages }
         guard !isPDFProcessingBusy else { return false }
         let hasDocument = pdfView.document != nil
         switch action {

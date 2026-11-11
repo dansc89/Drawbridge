@@ -40,6 +40,83 @@ enum MarkupLayers {
         }
         return .init()
     }
+    /// Preflight only: no page/catalog/undo mutation until every membership resolves.
+    static func insertionPlan(source: PDFDocument, pages: [PDFPage], destination: MarkupLayerCatalog) throws -> (catalog: MarkupLayerCatalog, mapping: [String: String]) {
+        func invalid(_ reason: String) -> NSError {
+            NSError(domain: "Drawbridge", code: 1, userInfo: [NSLocalizedDescriptionKey: "Cannot insert layered pages: " + reason])
+        }
+        let annotations = pages.flatMap(\.annotations).filter { !isMetadata($0) }
+        var referenced = Set<String>()
+        for annotation in annotations where annotation.value(forAnnotationKey: membershipKey) != nil {
+            guard let id = id(annotation), UUID(uuidString: id) != nil else { throw invalid("invalid layer membership.") }
+            referenced.insert(id)
+        }
+        guard !referenced.isEmpty else { return (destination, [:]) }
+        var sourceCatalog: MarkupLayerCatalog?
+        for index in 0..<source.pageCount {
+            for annotation in source.page(at: index)?.annotations ?? [] where isMetadata(annotation) {
+                guard let text = annotation.value(forAnnotationKey: catalogKey) as? String,
+                      let data = text.data(using: .utf8), let catalog = try? JSONDecoder().decode(MarkupLayerCatalog.self, from: data), catalog.isValid else { throw invalid("invalid source layer catalog.") }
+                if let previous = sourceCatalog, previous != catalog { throw invalid("conflicting source layer catalogs.") }
+                sourceCatalog = catalog
+            }
+        }
+        guard destination.isValid, let sourceCatalog,
+              referenced.isSubset(of: Set(sourceCatalog.layers.map(\.id))) else { throw invalid("missing layer definition.") }
+        try validateInsertionMemberships(source: source, pages: pages)
+        var result = destination, mapping: [String: String] = [:]
+        for var layer in sourceCatalog.layers where referenced.contains(layer.id) {
+            let original = layer.id
+            if result.layers.contains(where: { $0.id == layer.id }) { layer.id = UUID().uuidString }
+            let base = layer.name
+            var suffix = 2
+            while result.layers.contains(where: { $0.name.caseInsensitiveCompare(layer.name) == .orderedSame }) {
+                let ending = " (\(suffix))"; suffix += 1
+                var stem = base
+                while stem.utf8.count + ending.utf8.count > 200 { stem.removeLast() }
+                layer.name = stem + ending
+            }
+            mapping[original] = layer.id; result.layers.append(layer)
+        }
+        guard result.isValid else { throw invalid("merged catalog exceeds the 1000-layer limit.") }
+        return (result, mapping)
+    }
+    /// Match the writer's immutable slot/OC ownership check before insertion mutates
+    /// anything. PDFKit's annotation values can flatten indirect dictionaries; read
+    /// the raw graph from the retained InsertionSource document's frozen URL instead.
+    private static func validateInsertionMemberships(source: PDFDocument, pages: [PDFPage]) throws {
+        let foreign = pages.flatMap { page in
+            page.annotations.enumerated().compactMap { slot, annotation -> (PDFPage, Int, String)? in
+                guard !isMetadata(annotation), !RectangleMarkupRecord.owns(annotation), let id = id(annotation) else { return nil }
+                return (page, slot, id)
+            }
+        }
+        guard !foreign.isEmpty else { return }
+        let error = NSError(domain: "Drawbridge", code: 1, userInfo: [NSLocalizedDescriptionKey:
+            "Cannot insert layered pages: unverifiable source layer membership or optional-content group."])
+        guard let url = source.documentURL, let executable = PDFTKBookmarkWriter.executableURL() else { throw error }
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent("Drawbridge-layer-preflight-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: output) }
+        guard PDFTKBookmarkWriter.run(executable, arguments: ["--json=2", "--json-stream-data=none", "--decode-level=none", url.path, output.path]),
+              let graph = try JSONSerialization.jsonObject(with: Data(contentsOf: output)) as? [String: Any],
+              let tables = graph["qpdf"] as? [[String: Any]], tables.count == 2,
+              let rawPages = graph["pages"] as? [[String: Any]], rawPages.count == source.pageCount else { throw error }
+        let objects = tables[1]
+        func dictionary(_ reference: Any?) -> [String: Any]? {
+            guard let reference = reference as? String else { return nil }
+            return (objects["obj:" + reference] as? [String: Any])?["value"] as? [String: Any]
+        }
+        for (page, slot, id) in foreign {
+            let index = source.index(for: page)
+            guard rawPages.indices.contains(index), let rawPage = dictionary(rawPages[index]["object"]) else { throw error }
+            let indirectEntries = (rawPage["/Annots"] as? String).flatMap { (objects["obj:" + $0] as? [String: Any])?["value"] as? [Any] }
+            let entries = (rawPage["/Annots"] as? [Any]) ?? indirectEntries
+            guard let entries, entries.count == page.annotations.count, entries.indices.contains(slot),
+                  let annotation = dictionary(entries[slot]), annotation["/DrawbridgeLayerID"] as? String == "u:" + id,
+                  let group = dictionary(annotation["/OC"]), group["/DrawbridgeLayerID"] as? String == "u:" + id else { throw error }
+        }
+    }
+
     static func isMetadata(_ annotation: PDFAnnotation) -> Bool { annotation.value(forAnnotationKey: catalogKey) != nil }
 }
 

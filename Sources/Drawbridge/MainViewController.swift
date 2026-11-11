@@ -831,7 +831,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private var sidebarCurrentPageIndex: Int = -1
     private var bookmarkLabelOverrides: [String: String] = [:]
     var pageLabelOverrides: [Int: String] = [:]
-    private var suppressedEmbeddedPageLabelIndexes: Set<Int> = []
+    var suppressedEmbeddedPageLabelIndexes: Set<Int> = []
     var hasPromptedForInitialMarkupSaveCopy = false
     var isPresentingInitialMarkupSaveCopyPrompt = false
     var isGridVisible = false
@@ -1508,6 +1508,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pagesTableView.selectionHighlightStyle = .regular
         pagesTableView.allowsEmptySelection = true
         pagesTableView.allowsMultipleSelection = true
+        pagesTableView.registerForDraggedTypes([PageThumbnailTableView.pageDragType])
+        pagesTableView.setDraggingSourceOperationMask(.move, forLocal: true)
+        pagesTableView.setDraggingSourceOperationMask([], forLocal: false)
         pagesTableView.backgroundColor = sidebarBackgroundColor
         pagesTableView.gridStyleMask = []
         pagesTableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
@@ -1517,6 +1520,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         pagesTableView.action = #selector(selectPageFromSidebar)
         pagesTableView.doubleAction = #selector(renamePageLabelFromSidebar)
         let pagesContextMenu = NSMenu(title: "Pages")
+        pagesContextMenu.addItem(withTitle: "Insert Pages…", action: #selector(commandInsertPages(_:)), keyEquivalent: "").target = self
         let renamePageItem = NSMenuItem(title: "Rename Page Label…", action: #selector(renamePageLabelFromSidebar), keyEquivalent: "")
         renamePageItem.target = self
         pagesContextMenu.addItem(renamePageItem)
@@ -1972,7 +1976,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         undo?.setActionName(removed.count == 1 ? "Delete Page" : "Delete Pages")
     }
 
-    private func refreshAfterPageStructureChange(document: PDFDocument, preferredIndex: Int) {
+    func refreshAfterPageStructureChange(document: PDFDocument, preferredIndex: Int) {
         refreshSplitPresentationAfterStructureChange(document: document)
         pdfView.rectangleMarkup.cancelGesture()
         pdfView.rectangleMarkup.ensureLayerCatalogMarker()
