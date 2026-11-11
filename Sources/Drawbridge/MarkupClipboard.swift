@@ -128,6 +128,7 @@ extension RectangleMarkupRecord {
             else if kind == .polygon { annotation = DrawbridgePolygonAnnotation(bounds: bounds, forType: type, withProperties: nil) }
             else if measurement != nil { annotation = DrawbridgeMeasuredPathAnnotation(bounds: bounds, forType: type, withProperties: nil) }
             else if kind == .rectangle || kind == .ellipse { annotation = DrawbridgeShapeAnnotation(bounds: bounds, forType: type, withProperties: nil) }
+            else if kind == .text { annotation = DrawbridgeTextBoxAnnotation(bounds: bounds, forType: type, withProperties: nil) }
             else { annotation = PDFAnnotation(bounds: bounds, forType: type, withProperties: nil) }
             let color = NSColor(deviceRed: red, green: green, blue: blue, alpha: 1)
             if kind == .text {
@@ -137,6 +138,7 @@ extension RectangleMarkupRecord {
             } else { annotation.color = color }
             let border = PDFBorder(); border.lineWidth = kind == .text ? 0 : lineWidth; annotation.border = border
             MarkupStyle.apply(pattern: linePattern, opacity: strokeOpacity, to: annotation)
+            if kind == .text { (textBoxAppearance ?? TextBoxAppearance()).install(on: annotation) }
             if kind == .highlight { HighlightGeometry.update(annotation) }
             if [.rectangle, .ellipse, .polygon].contains(kind) {
                 let color = fill.map { NSColor(deviceRed: $0[0], green: $0[1], blue: $0[2], alpha: fillOpacity) }

@@ -726,6 +726,11 @@ enum PDFRectangleWriter {
                     let fields = record.kind == .text ? CopiedMarkupPayload.textPersistenceFields : []
                     let edit = ImportedMarkupEdit(metadata: payload.metadata, appearance: payload.appearance, fields: fields)
                     try applyImportedEdit(edit, to: &annotation, objects: &objects, next: &next, allowedFields: CopiedMarkupPayload.textPersistenceFields)
+                    // Optional payload fields must not erase canonical owned-record
+                    // opacity (legacy/PDFKit metadata can omit default values).
+                    // Textbox border/fill RGBA remains independent in its style/AP.
+                    annotation["/DrawbridgeStrokeOpacity"] = record.strokeOpacity
+                    annotation["/DrawbridgeFillOpacity"] = record.fillOpacity
                     annotation["/DrawbridgeCopiedMarkup"] = "u:" + String(data: try JSONEncoder().encode(payload), encoding: .utf8)!
                     objects["obj:\(annotationRef)"] = ["value": annotation]; entries.append(annotationRef); continue
                 }

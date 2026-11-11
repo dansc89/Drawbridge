@@ -83,7 +83,9 @@ import XCTest
             // Toolbar action captures the selected source; subsequent clicks paint, not select.
             send(brush)
             c.undo.beginUndoGrouping(); c.selected = source; i.refresh(); try number("textbox.borderWidth", 9, i); c.undo.endUndoGrouping()
-            click(v, p, shape); XCTAssertEqual(shape.border?.lineWidth, 2)
+            // The brush now supports compatible shapes as well as text boxes.
+            c.undo.beginUndoGrouping(); click(v, p, shape); c.undo.endUndoGrouping()
+            XCTAssertEqual(shape.border?.lineWidth, 4.5, "Cross-markup brush uses the frozen source border")
             c.undo.beginUndoGrouping(); click(v, p, target); c.undo.endUndoGrouping()
             XCTAssertEqual(try appearance(target), expected, "Brush must freeze the source at activation")
             XCTAssertEqual(target.contents, "TARGET"); XCTAssertEqual(target.bounds, bounds); XCTAssertEqual(RectangleMarkupRecord.identity(target), id)

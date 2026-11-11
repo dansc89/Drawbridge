@@ -39,7 +39,10 @@ struct TextBoxAppearance: Codable, Equatable, Sendable {
         var style = Self(); style.fontName = a.font?.fontName ?? "Helvetica"
         let traits = a.font.map { NSFontManager.shared.traits(of: $0) } ?? []
         style.bold = traits.contains(.boldFontMask); style.italic = traits.contains(.italicFontMask)
-        if !RectangleMarkupRecord.owns(a) {
+        // A newly reconstructed native textbox may draw before its style key is
+        // installed. Never render it to discover an imported appearance: that
+        // would recurse through DrawbridgeTextBoxAnnotation.draw -> read.
+        if !isNative(a), !(a is DrawbridgeTextBoxAnnotation) {
             if let border = (a as? ImportedTextAnnotation)?.originalBorder ?? ImportedTextContent.appearance(a).flatMap(ImportedTextBorder.read) {
                 style.borderWidth = Double(border.width); style.borderColor = rgb(border.color)
                 style.borderPattern = border.dash.isEmpty ? "solid" : "dashed"
@@ -130,8 +133,8 @@ final class DrawbridgeTextBoxAnnotation: PDFAnnotation {
     }
     func beginMatchProperties() {
         guard canEdit() else { return }
-        finishTextEditing(); let captured = selected.flatMap(captureTextBoxPaint)
-        tool = .select; cancelGesture(); matchPropertiesActive = true; textBoxPaint = captured
+        finishTextEditing(); let captured = selected.flatMap(captureMatchAppearance)
+        tool = .select; cancelGesture(); matchPropertiesActive = true; matchAppearance = captured
         refresh()
     }
     /// Called before ordinary selection/drawing so clicks cannot drag a target.
@@ -139,9 +142,9 @@ final class DrawbridgeTextBoxAnnotation: PDFAnnotation {
         guard matchPropertiesActive else { return false }
         guard canEdit(), let view, let page = view.page(for: point, nearest: false), page.document === view.document else { return true }
         let p = view.convert(point, to: page)
-        guard let a = page.annotations.reversed().first(where: { $0.shouldDisplay && $0.bounds.contains(p) && $0.type == "FreeText" }) else { return true }
-        if let paint = textBoxPaint { setTextBoxAppearance(paint.appearance, on: a, paint: paint) }
-        else { textBoxPaint = captureTextBoxPaint(a); refresh() }
+        guard let a = page.annotations.reversed().first(where: { $0.shouldDisplay && $0.bounds.contains(p) && MatchMarkupAppearance.supports($0) }) else { return true }
+        if let paint = matchAppearance { applyMatchAppearance(paint, to: a) }
+        else { matchAppearance = captureMatchAppearance(a); refresh() }
         return true
     }
 }

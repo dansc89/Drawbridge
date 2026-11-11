@@ -33,7 +33,7 @@ import AppKit
         row("Font family", fontFamily)
         addArrangedSubview(NSStackView(views: [bold, italic, underline]))
         row("Border color", borderColor); row("Border weight (pt)", borderWidth); row("Border pattern", borderPattern); row("Border opacity (%)", borderOpacity); row("Box fill", fillColor)
-        let hint = NSTextField(wrappingLabelWithString: "Font and style apply to the whole text box. Border weight 0 removes the border. Paintbrush: select a source, click Match Properties, then click target text boxes. Escape cancels.")
+        let hint = NSTextField(wrappingLabelWithString: "Font and style apply to the whole text box. Border weight 0 removes the border. Paintbrush: select a source, click Match Properties, then click compatible target markups. Escape cancels.")
         hint.font = .systemFont(ofSize: 11); hint.textColor = .secondaryLabelColor; hint.widthAnchor.constraint(lessThanOrEqualToConstant: 265).isActive = true
         addArrangedSubview(hint)
     }

@@ -178,6 +178,10 @@ extension MainViewController {
         setOrthoSnapEnabled(enabled)
         (sender as? NSMenuItem)?.state = enabled ? .on : .off
     }
+    @objc func commandMatchProperties(_ sender: Any?) {
+        _ = performShortcutAction(.matchProperties)
+    }
+
     @objc func commandToggleHyperlinkHighlights(_ sender: Any?) {
         guard pdfView.document != nil, !isPDFProcessingBusy else { return }
         let enabled = !isHyperlinkHighlightsVisible
@@ -762,6 +766,8 @@ extension MainViewController {
             return pdfView.canNavigateForwardInHistory
         case #selector(selectNextSearchHit), #selector(selectPreviousSearchHit):
             return hasDocument && !searchHits.isEmpty
+        case #selector(commandMatchProperties(_:)):
+            return hasDocument && pdfView.rectangleMarkup.canEdit() && !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField)
         case #selector(commandToggleHyperlinkHighlights(_:)):
             menuItem.state = isHyperlinkHighlightsVisible ? .on : .off
             menuItem.title = isHyperlinkHighlightsVisible ? "Hide Hyperlinks" : "Show Hyperlinks"

@@ -11,6 +11,7 @@ struct SavedMarkupAppearance: Codable {
     var fontSize: Double
     var snapshot: SnapshotStyle = SnapshotStyle()
     var hatch: DraftingHatch? = nil
+    var textBox: TextBoxAppearance? = nil
 
     private static func validColor(_ color: [Double]) -> Bool {
         color.count == 4 && color.allSatisfy { $0.isFinite && (0...1).contains($0) }
@@ -19,7 +20,7 @@ struct SavedMarkupAppearance: Codable {
         Self.validColor(stroke) && (fill.map(Self.validColor) ?? true) &&
         width.isFinite && (0.25...72).contains(width) &&
         MarkupLinePattern(rawValue: pattern) != nil && opacity.isFinite && (0...1).contains(opacity) &&
-        fontSize.isFinite && (6...144).contains(fontSize) && snapshot.isValid && (hatch?.isValid ?? true)
+        fontSize.isFinite && (6...144).contains(fontSize) && snapshot.isValid && (hatch?.isValid ?? true) && (textBox?.valid ?? true)
     }
     static func components(_ color: NSColor) -> [Double] {
         let rgb = color.usingColorSpace(.deviceRGB) ?? .red
@@ -43,13 +44,14 @@ extension RectangleMarkupController {
     var currentAppearance: SavedMarkupAppearance {
         SavedMarkupAppearance(stroke: SavedMarkupAppearance.components(strokeColor), width: Double(lineWidth),
                               pattern: linePattern.rawValue, opacity: strokeOpacity,
-                              fill: fillColor.map(SavedMarkupAppearance.components), fontSize: Double(fontSize), hatch: hatchStyle)
+                              fill: fillColor.map(SavedMarkupAppearance.components), fontSize: Double(fontSize), hatch: hatchStyle, textBox: textBoxDefaults)
     }
     func applyDefaults(_ style: SavedMarkupAppearance) {
         strokeColor = SavedMarkupAppearance.color(style.stroke); lineWidth = CGFloat(style.width)
         linePattern = MarkupLinePattern(rawValue: style.pattern) ?? .solid; strokeOpacity = style.opacity
         fillColor = style.fill.map(SavedMarkupAppearance.color); fontSize = CGFloat(style.fontSize)
         hatchStyle = style.hatch
+        textBoxDefaults = style.textBox ?? TextBoxAppearance()
     }
     var defaultTool: Tool? {
         if let annotation = selected {
@@ -90,11 +92,15 @@ extension RectangleMarkupController {
                 style.opacity = MarkupStyle.strokeOpacity(annotation)
                 style.fill = RectangleMarkupRecord.polygonFill(annotation).map(SavedMarkupAppearance.components)
                 style.hatch = DraftingHatch.read(annotation)
-                if annotation.type == "FreeText" { style.fontSize = Double(RectangleMarkupRecord.textFontSize(annotation)) }
+                if annotation.type == "FreeText" {
+                    style.fontSize = Double(RectangleMarkupRecord.textFontSize(annotation))
+                    style.textBox = TextBoxAppearance.read(annotation)
+                }
             }
         } else if target == .snapshotBox || target == .snapshotPolygon {
             style.snapshot = SavedMarkupAppearance.load(target, from: defaultPreferences)?.snapshot ?? SnapshotStyle()
         }
+        if target == .text, selected == nil { style.textBox = textBoxDefaults }
         guard style.isValid, let data = try? JSONEncoder().encode(style) else { return false }
         defaultPreferences.set(data, forKey: SavedMarkupAppearance.key(target))
         return true

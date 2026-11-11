@@ -22,11 +22,12 @@ enum ShortcutAction: String, CaseIterable {
     case invert
     case hyperlinks
     case highlight
+    case matchProperties
 
     var toolMode: ToolMode? {
         switch self {
         case .selectTool: return .select
-        case .invert, .hyperlinks, .highlight: return nil
+        case .invert, .hyperlinks, .highlight, .matchProperties: return nil
         }
     }
 
@@ -34,6 +35,7 @@ enum ShortcutAction: String, CaseIterable {
         switch self {
         case .selectTool: return ShortcutBinding(key: "v", modifier: .plain)
         case .highlight: return ShortcutBinding(key: "h", modifier: .plain)
+        case .matchProperties: return ShortcutBinding(key: "c", modifier: .commandShift)
         case .invert: return ShortcutBinding(key: "3", modifier: .control)
         case .hyperlinks: return ShortcutBinding(key: "h", modifier: .commandOptionShift)
         }
@@ -43,6 +45,7 @@ enum ShortcutAction: String, CaseIterable {
         switch self {
         case .selectTool: return "Select Text"
         case .highlight: return "Highlight"
+        case .matchProperties: return "Match Properties"
         case .invert: return "Invert"
         case .hyperlinks: return "Show/Hide Hyperlinks"
         }
@@ -116,6 +119,11 @@ extension MainViewController {
             loaded[.highlight] = candidates.map { ShortcutBinding(key: "h", modifier: $0) }
                 .first { !occupied.contains($0) }
         }
+        let matchOccupied = ShortcutAction.allCases.filter { $0 != .matchProperties }.compactMap { loaded[$0] }
+        if let match = loaded[.matchProperties], matchOccupied.contains(match) {
+            loaded[.matchProperties] = [ShortcutModifier.commandShift, .shift, .control, .commandOptionShift, .plain]
+                .map { ShortcutBinding(key: "c", modifier: $0) }.first { !matchOccupied.contains($0) }
+        }
         shortcutBindings = loaded
     }
 
@@ -137,6 +145,7 @@ extension MainViewController {
         statusToolsHintLabel.stringValue = "Esc cancels current action. Shortcuts customizable in Drawbridge > Settings… > Keyboard Shortcuts"
         refreshToolbarShortcutTooltips()
         rectangleToolbar.highlightButton.toolTip = "Highlight (\(shortcutDisplayString(for: .highlight)))"
+        rectangleToolbar.matchPropertiesButton.toolTip = "Match Properties (\(shortcutDisplayString(for: .matchProperties))): select a source markup, then click compatible targets. Escape cancels."
         updateInvertMenuShortcut()
     }
 
@@ -150,6 +159,11 @@ extension MainViewController {
                 }
                 if item.action == #selector(commandToggleHyperlinkHighlights(_:)), item.target === self {
                     let binding = currentShortcutBinding(for: .hyperlinks)
+                    item.keyEquivalent = binding.key
+                    item.keyEquivalentModifierMask = binding.menuModifiers
+                }
+                if item.action == #selector(commandMatchProperties(_:)), item.target === self {
+                    let binding = currentShortcutBinding(for: .matchProperties)
                     item.keyEquivalent = binding.key
                     item.keyEquivalentModifierMask = binding.menuModifiers
                 }
@@ -216,6 +230,13 @@ extension MainViewController {
 
     @discardableResult
     func performShortcutAction(_ action: ShortcutAction) -> Bool {
+        if action == .matchProperties {
+            guard !(view.window?.firstResponder is NSTextView), !(view.window?.firstResponder is NSTextField),
+                  pdfView.document != nil, !isPDFProcessingBusy, pdfView.rectangleMarkup.canEdit() else { return false }
+            pdfView.rectangleMarkup.beginMatchProperties()
+            view.window?.makeFirstResponder(pdfView)
+            return true
+        }
         if action == .highlight {
             guard pdfView.document != nil, !isPDFProcessingBusy, pdfView.rectangleMarkup.canEdit() else { return false }
             pdfView.rectangleMarkup.tool = .highlight

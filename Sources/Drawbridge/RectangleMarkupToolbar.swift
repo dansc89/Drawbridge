@@ -63,7 +63,7 @@ final class RectangleMarkupToolbar: ThemedToolbarStackView {
         matchPropertiesButton.imagePosition = .imageOnly; matchPropertiesButton.bezelStyle = .texturedRounded
         matchPropertiesButton.setButtonType(.toggle); matchPropertiesButton.isBordered = false
         matchPropertiesButton.setAccessibilityLabel("Match Properties")
-        matchPropertiesButton.toolTip = "Match Properties: select a source text box, then click targets. With no source selected, click one first. Escape cancels."
+        matchPropertiesButton.toolTip = "Match Properties: select a source markup, then click compatible targets. With no source selected, click one first. Escape cancels."
         matchPropertiesButton.widthAnchor.constraint(equalToConstant: 30).isActive = true
         matchPropertiesButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
         matchPropertiesButton.target = self; matchPropertiesButton.action = #selector(matchProperties(_:))

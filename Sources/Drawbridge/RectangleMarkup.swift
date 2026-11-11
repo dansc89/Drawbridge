@@ -290,6 +290,8 @@ final class RectangleMarkupController {
         case edit(PDFPage, PDFAnnotation, CGRect, CGPoint, Corner?)
     }
     let defaultPreferences: UserDefaults
+    var textBoxDefaults = TextBoxAppearance()
+    var matchAppearance: MatchMarkupAppearance?
     private var appearanceBeforeSavedTool: SavedMarkupAppearance?
     init(defaults: UserDefaults = .standard) { defaultPreferences = defaults }
     weak var view: PDFView?
@@ -1130,6 +1132,7 @@ final class RectangleMarkupController {
         let border = PDFBorder(); border.lineWidth = kind == .text ? 0 : lineWidth; annotation.border = border
         MarkupStyle.apply(pattern: linePattern, opacity: strokeOpacity, to: annotation)
         if kind == .highlight { HighlightGeometry.update(annotation) }
+        if kind == .text { textBoxDefaults.install(on: annotation) }
         if kind == .polyline || kind == .polygon { RectangleMarkupRecord.setVertices(vertices,on:annotation) }
         if kind == .polygon || kind == .rectangle || kind == .ellipse { RectangleMarkupRecord.setPolygonFill(fillColor,on:annotation) }
         if kind == .polygon || kind == .rectangle || kind == .ellipse { DraftingHatch.apply(hatchStyle, to: annotation) }
@@ -1747,7 +1750,7 @@ final class RectangleMarkupController {
         refresh(presentationChanged: false)
         return true
     }
-    func cancelGesture() { matchPropertiesActive = false; textBoxPaint = nil; groupMove = nil; selectionWindow = nil; penConstraintAnchor = nil; pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
+    func cancelGesture() { matchPropertiesActive = false; matchAppearance = nil; textBoxPaint = nil; groupMove = nil; selectionWindow = nil; penConstraintAnchor = nil; pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
     func escape() { cancelSnapshotCapture(); cancelGesture(); selected = nil; onClickAway?(); tool = .select; refresh() }
     // Observes real overlay work, including presentation-silent viewport refreshes.
     var onOverlayRefresh: (() -> Void)?

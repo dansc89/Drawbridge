@@ -71,9 +71,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     private let autosaveIntervalSeconds: TimeInterval = 120
     let snapshotStore = ProjectSnapshotStore()
-    private let chromeBackgroundColor = AppAppearance.chrome
-    private let panelBackgroundColor = AppAppearance.panel
-    private let sidebarBackgroundColor = AppAppearance.sidebar
+    private var chromeBackgroundColor: NSColor { AppAppearance.chrome }
+    private var panelBackgroundColor: NSColor { AppAppearance.panel }
+    private var sidebarBackgroundColor: NSColor { AppAppearance.sidebar }
 
     static let defaultsAdaptiveIndexCapEnabledKey = "DrawbridgeAdaptiveIndexCapEnabled"
     static let defaultsIndexCapKey = "DrawbridgeIndexCap"
@@ -1291,6 +1291,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             bookmarksContainer.layer?.backgroundColor = sidebarBackgroundColor.cgColor
             pagesTableView.backgroundColor = sidebarBackgroundColor
             bookmarksOutlineView.backgroundColor = sidebarBackgroundColor
+            // A same-appearance palette change need not invalidate native tables.
+            // Refresh both retained tabs, including the detached hidden stack item.
+            for table in [pagesTableView, bookmarksOutlineView] {
+                table.needsDisplay = true
+            }
             statusBar.layer?.backgroundColor = panelBackgroundColor.cgColor
             busyOverlayView.layer?.backgroundColor = panelBackgroundColor.cgColor
             captureToastView.layer?.backgroundColor = panelBackgroundColor.cgColor

@@ -80,7 +80,7 @@ extension MainViewController {
             return nil
         }
 
-        if let action = shortcutAction(for: event), action == .invert || action == .hyperlinks || action == .highlight {
+        if let action = shortcutAction(for: event), action == .invert || action == .hyperlinks || action == .highlight || action == .matchProperties {
             guard !(view.window?.firstResponder is NSTextView),
                   !(view.window?.firstResponder is NSTextField),
                   pdfView.document != nil, !isPDFProcessingBusy else { return event }

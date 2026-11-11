@@ -8,7 +8,7 @@ struct ImportedMarkupEdit: Sendable {
     let metadata: Data
     let appearance: Data
     let fields: Set<String>
-    static let allowedFields: Set<String> = ["/Contents", "/RC", "/DS", "/DA", "/DR", "/C", "/IC", "/BS", "/Border", "/CA", "/DrawbridgeStrokeOpacity", "/DrawbridgeFillOpacity"]
+    static let allowedFields: Set<String> = ["/Contents", "/RC", "/DS", "/DA", "/DR", "/C", "/IC", "/BS", "/Border", "/CA", "/DrawbridgeStrokeOpacity", "/DrawbridgeFillOpacity", "/DrawbridgeTextBoxAppearance"]
 }
 
 /// Rich text recovered from the foreign appearance keeps mixed fonts (including
@@ -19,12 +19,13 @@ final class ImportedTextAnnotation: PDFAnnotation {
     let textInsets: NSEdgeInsets
     let textRotation: Int
     let calloutOrigin:CGPoint
-    init(source: PDFAnnotation, richText: NSAttributedString, sourceText: NSAttributedString? = nil, geometryOrigin:CGPoint? = nil) {
+    init(source: PDFAnnotation, richText: NSAttributedString, sourceText: NSAttributedString? = nil, geometryOrigin:CGPoint? = nil, borderOverride: ImportedTextBorder.Style? = nil) {
         self.richText = NSAttributedString(attributedString: richText)
         calloutOrigin=(source as? ImportedTextAnnotation)?.calloutOrigin ?? geometryOrigin ?? source.bounds.origin
         textRotation=((source.value(forAnnotationKey:PDFAnnotationKey(rawValue:"/Rotate")) as? NSNumber)?.intValue ?? 0) % 360
         textInsets=(source as? ImportedTextAnnotation)?.textInsets ?? ImportedTextContent.insets(source,rich:sourceText ?? richText,rotation:textRotation)
-        if let old=source as? ImportedTextAnnotation { originalBorder=old.originalBorder }
+        if let borderOverride { originalBorder = borderOverride }
+        else if let old=source as? ImportedTextAnnotation { originalBorder=old.originalBorder }
         else if let style=ImportedTextContent.appearance(source).flatMap(ImportedTextBorder.read) {
             // PDFKit can omit FreeText dash operators when drawing an imported
             // appearance. Retain its standard border dictionary as a fallback.
@@ -48,14 +49,21 @@ final class ImportedTextAnnotation: PDFAnnotation {
         // draw the edited runs using vector glyphs instead of flattening text.
         context.saveGState();defer{context.restoreGState()}
         let alpha=MarkupStyle.strokeOpacity(self)
-        context.setAlpha(alpha)
+        let independent = value(forAnnotationKey: TextBoxAppearance.key) == nil ? nil : TextBoxAppearance.read(self)
+        context.setAlpha(independent == nil ? alpha : 1)
         let background=PDFAnnotation(bounds:bounds,forType:.freeText,withProperties:annotationKeyValues.reduce(into:[String:Any]()){ if let key=$1.key as? String { $0[key]=$1.value } })
         background.contents="";background.bounds=ImportedTextContent.textBox(self)
         for key in ["/RC","/RD","/CL","/Rotate"] {background.removeValue(forAnnotationKey:PDFAnnotationKey(rawValue:key))}
         background.font=font;background.fontColor=fontColor;background.color=color.withAlphaComponent(1)
         let noBorder=PDFBorder();noBorder.lineWidth=0;background.border=noBorder
         background.interiorColor=interiorColor;background.removeAllAppearanceStreams()
-        background.draw(with:box,in:context)
+        if let independent {
+            if let fill = independent.fill {
+                context.setFillColor(TextBoxAppearance.color(fill).cgColor)
+                context.fill(ImportedTextContent.textBox(self))
+            }
+        } else { background.draw(with:box,in:context) }
+        context.setAlpha(independent?.borderOpacity ?? alpha)
         context.textMatrix = .identity
         if let style=originalBorder,style.width>0 {
             context.setStrokeColor(style.color.cgColor);context.setLineWidth(style.width)
@@ -86,6 +94,7 @@ final class ImportedTextAnnotation: PDFAnnotation {
                 }
             }
         }
+        context.setAlpha(alpha)
         context.clip(to:bounds)
         context.translateBy(x:bounds.minX,y:bounds.minY)
         let transform=ImportedTextContent.rotationTransform(textRotation,size:bounds.size)
@@ -245,7 +254,11 @@ final class ImportedTextAnnotation: PDFAnnotation {
             payload.install(on: replacement)
             undo.registerUndo(withTarget: self) { target in _ = target.replaceImported(replacement, with: old, on: page, fields: fields, action: action) }
             undo.setActionName(action)
-            page.removeAnnotation(old); page.addAnnotation(replacement); selected = replacement; changed(page)
+            let position = page.annotations.firstIndex { $0 === old } ?? page.annotations.count
+            page.removeAnnotation(old); page.addAnnotation(replacement)
+            let trailing = Array(page.annotations.dropFirst(position).filter { $0 !== replacement })
+            for a in trailing { page.removeAnnotation(a) }; for a in trailing { page.addAnnotation(a) }
+            selected = replacement; changed(page)
             return true
         }
         guard canEdit(),page.document===view?.document,old.page===page,!old.isReadOnly,!layerIsLocked(old),canEditImportedAppearance(old),let state=importedState,

@@ -128,10 +128,18 @@ struct ChromeSelectionColors {
 
 /// Semantic native controls, focus and selection remain AppKit-owned.
 enum AppAppearance {
-    static let chrome = adaptive("chrome", light: 0.91, dark: 0.08)
-    static let panel = adaptive("panel", light: 0.98, dark: 0.12)
-    static let sidebar = adaptive("sidebar", light: 0.94, dark: 0.14)
-    static let canvas = adaptive("canvas", light: 0.82, dark: 0.07)
+    // Custom palettes are values, not appearance providers: AppKit caches drawing
+    // for a dynamic NSColor until its NSAppearance changes. Two dark palettes have
+    // the same appearance, so reassigning that same color can skip invalidation.
+    // Only the macOS fallback is dynamic, and depends solely on NSAppearance.
+    static var chrome: NSColor { InterfaceTheme.current.color(for: "chrome") ?? nativeChrome }
+    static var panel: NSColor { InterfaceTheme.current.color(for: "panel") ?? nativePanel }
+    static var sidebar: NSColor { InterfaceTheme.current.color(for: "sidebar") ?? nativeSidebar }
+    static var canvas: NSColor { InterfaceTheme.current.color(for: "canvas") ?? nativeCanvas }
+    private static let nativeChrome = adaptive("chrome", light: 0.91, dark: 0.08)
+    private static let nativePanel = adaptive("panel", light: 0.98, dark: 0.12)
+    private static let nativeSidebar = adaptive("sidebar", light: 0.94, dark: 0.14)
+    private static let nativeCanvas = adaptive("canvas", light: 0.82, dark: 0.07)
 
     @MainActor static func applyInterface(to window: NSWindow?) {
         // Settings contains no PDF. Editor windows keep inherited appearance;
@@ -142,7 +150,6 @@ enum AppAppearance {
 
     private static func adaptive(_ name: String, light: CGFloat, dark: CGFloat) -> NSColor {
         NSColor(name: NSColor.Name("Drawbridge.\(name)")) { appearance in
-            if let custom = InterfaceTheme.current.color(for: name) { return custom }
             let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             return NSColor(calibratedWhite: isDark ? dark : light, alpha: 1)
         }

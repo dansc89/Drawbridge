@@ -10,11 +10,11 @@ struct CopiedMarkupPayload: Codable, Equatable, Sendable {
     let richText: Data?
     // Only native annotation styling/content is imported. Never actions, links,
     // page references, replies, ownership IDs, or arbitrary third-party keys.
-    static let fields: Set<String> = ["/Contents", "/T", "/Subj", "/DA", "/DS", "/RC", "/Q", "/C", "/IC", "/CA", "/BS", "/Border", "/BE", "/RD", "/Rotate", "/IT", "/LE"]
+    static let fields: Set<String> = ["/Contents", "/T", "/Subj", "/DA", "/DS", "/RC", "/Q", "/C", "/IC", "/CA", "/BS", "/Border", "/BE", "/RD", "/Rotate", "/IT", "/LE", "/DrawbridgeTextBoxAppearance", "/DrawbridgeStrokeOpacity", "/DrawbridgeFillOpacity"]
     // Copied FreeText is a new owned annotation, unlike a patch to an original.
     // Persist its inert editable layout as well as the frozen appearance. Keep
     // this explicit: neither actions nor source ownership/page links may cross.
-    static let textPersistenceFields: Set<String> = ["/Contents", "/RC", "/DS", "/DA", "/Q", "/Rotate", "/RD", "/C", "/IC", "/BS", "/Border", "/CA"]
+    static let textPersistenceFields: Set<String> = ["/Contents", "/RC", "/DS", "/DA", "/Q", "/Rotate", "/RD", "/C", "/IC", "/BS", "/Border", "/CA", "/DrawbridgeTextBoxAppearance", "/DrawbridgeStrokeOpacity", "/DrawbridgeFillOpacity"]
     var isValid: Bool {
         !metadata.isEmpty && metadata.count < 32 * 1024 * 1024 && !appearance.isEmpty && appearance.count < 32 * 1024 * 1024 && (richText?.count ?? 0) < 8 * 1024 * 1024
     }

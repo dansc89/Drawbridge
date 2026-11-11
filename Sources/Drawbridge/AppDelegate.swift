@@ -256,6 +256,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         redoItem.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: "Copy", action: #selector(MainViewController.commandCopy(_:)), keyEquivalent: "c").target = controller
+        let matchBinding = controller.currentShortcutBinding(for: .matchProperties)
+        let matchItem = editMenu.addItem(withTitle: "Match Properties", action: #selector(MainViewController.commandMatchProperties(_:)), keyEquivalent: matchBinding.key)
+        matchItem.keyEquivalentModifierMask = matchBinding.menuModifiers
+        matchItem.target = controller
         editMenu.addItem(withTitle: "Snapshot (G)", action: #selector(MainViewController.snapshotCapture(_:)), keyEquivalent: "").target = controller
         editMenu.addItem(withTitle: "Paste", action: #selector(MainViewController.commandPaste(_:)), keyEquivalent: "v").target = controller
         let pasteInPlace = editMenu.addItem(withTitle: "Paste in Place", action: #selector(MainViewController.commandPasteInPlace(_:)), keyEquivalent: "V")

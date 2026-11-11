@@ -42,6 +42,7 @@ final class ImportedMarkupState: NSObject {
         let sourcePage: Int
         let slot: Int
         let bounds: CGRect
+        let standardOpacity: Double?
         var layerID: String? = nil
     }
     var entries: [Entry]
@@ -57,7 +58,7 @@ final class ImportedMarkupState: NSObject {
             guard let page = document.page(at: index) else { return [] }
             return page.annotations.enumerated().compactMap { slot, annotation in
                 guard Self.selectable(annotation) && !RectangleMarkupRecord.owns(annotation) else { return nil }
-                return Entry(annotation: annotation, page: page, sourcePage: index, slot: slot, bounds: annotation.bounds, layerID: MarkupLayers.id(annotation))
+                return Entry(annotation: annotation, page: page, sourcePage: index, slot: slot, bounds: annotation.bounds, standardOpacity: MatchMarkupAppearance.originalStandardOpacity(annotation), layerID: MarkupLayers.id(annotation))
             }
         }
         for index in 0..<document.pageCount {
