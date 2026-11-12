@@ -308,6 +308,16 @@ final class SharedReviewIntegrationTests: XCTestCase {
 
         let otherFile = outboxDirectory.appendingPathComponent("Second review.pdf")
         try FileManager.default.copyItem(at: file, to: otherFile)
+        do {
+            _ = try await second.upload(otherFile, project: project, folderID: child.folder.id)
+            XCTFail("A renamed copy of the same PDF was accepted")
+        } catch let error as SharedReviewError {
+            XCTAssertEqual(error.localizedDescription, SharedReviewAPI.duplicateUploadMessage)
+        }
+        try XCTUnwrap(pdf.page(at: 0)).addAnnotation(
+            PDFAnnotation(bounds: CGRect(x: 10, y: 10, width: 20, height: 20), forType: .square, withProperties: nil)
+        )
+        XCTAssertTrue(pdf.write(to: otherFile))
         let other = try await first.upload(otherFile, project: project, folderID: child.folder.id)
         let firstTab = try XCTUnwrap(reopened.tabURL)
         let savedReviewSession = SettingsWindowController.activeReviewSession

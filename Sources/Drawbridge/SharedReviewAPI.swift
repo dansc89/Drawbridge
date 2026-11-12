@@ -133,6 +133,20 @@ struct SharedReviewAPI {
         return try Data(contentsOf: file, options: .mappedIfSafe)
     }
 
+    static let duplicateUploadMessage = "This PDF or a PDF with the same name is already in this folder. Open the existing PDF to continue the review."
+
+    private func rejectDuplicateUpload(name: String, digest: String, projectID: String,
+                                       folderID: String?) async throws {
+        let list: DocumentList = try await get("projects/\(projectID)/documents")
+        if list.documents.contains(where: {
+            $0.file_size != nil && $0.folder_id == folderID && ($0.file_sha256 == digest ||
+                $0.name.compare(name.trimmingCharacters(in: .whitespacesAndNewlines),
+                                options: [.caseInsensitive, .widthInsensitive]) == .orderedSame)
+        }) {
+            throw SharedReviewError(Self.duplicateUploadMessage, statusCode: 409)
+        }
+    }
+
     private static let uploadPartSize = 8 * 1024 * 1024
     private struct UploadStatus: Decodable { let parts: [Int]; let document: Document? }
     private struct UploadPart: Decodable { let index: Int }
@@ -146,6 +160,9 @@ struct SharedReviewAPI {
         }
         if size <= 95_000_000 {
             let bytes = try Data(contentsOf: file)
+            let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+            try await rejectDuplicateUpload(name: file.lastPathComponent, digest: digest,
+                                            projectID: project.id, folderID: folderID)
             let created: CreatedDocument = try await post("projects/\(project.id)/documents",
                 DocumentRequest(name: file.lastPathComponent, folderId: folderID))
             let result: CreatedDocument = try await uploadPart(bytes, to: "documents/\(created.document.id)/upload")
@@ -172,9 +189,13 @@ struct SharedReviewAPI {
                 documentID = savedID
             } catch let error as SharedReviewError where error.statusCode == 403 || error.statusCode == 404 {
                 defaults.removeObject(forKey: key)
+                try await rejectDuplicateUpload(name: file.lastPathComponent, digest: digest,
+                                                projectID: project.id, folderID: folderID)
                 documentID = try await createUpload(file, project: project, folderID: folderID, key: key)
             }
         } else {
+            try await rejectDuplicateUpload(name: file.lastPathComponent, digest: digest,
+                                            projectID: project.id, folderID: folderID)
             documentID = try await createUpload(file, project: project, folderID: folderID, key: key)
         }
         if let document = status.document {
