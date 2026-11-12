@@ -424,7 +424,7 @@ extension MainViewController {
     @objc func commandCloseDocument(_ sender: Any?) {
         if isActiveReview {
             pdfView.rectangleMarkup.finishTextEditing()
-            guard sharedReview?.hasPendingChanges != true else { NSSound.beep(); return }
+            guard activeReview?.hasPendingChanges != true else { NSSound.beep(); return }
         }
         if let url = openDocumentURL, closeRetainedSplitDocument(at: url) { return }
         guard confirmDiscardUnsavedChangesIfNeeded() else {
@@ -442,7 +442,7 @@ extension MainViewController {
         if restoreSplit { collapsePDFSplit() }
 
         while let fallback = sessionDocumentURLs.last {
-            guard fallback == sharedReview?.tabURL || FileManager.default.fileExists(atPath: fallback.path) else {
+            guard sharedReview?.review(for: fallback) != nil || FileManager.default.fileExists(atPath: fallback.path) else {
                 unregisterSessionDocument(fallback)
                 continue
             }

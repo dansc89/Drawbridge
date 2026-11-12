@@ -32,6 +32,11 @@ import Security
     private let serverStatus = NSTextField(labelWithString: "")
     private lazy var serverSignIn = button("Sign In", #selector(signInToServer))
     private lazy var serverSignOut = button("Sign Out", #selector(signOutOfServer))
+    private let serverLoginForm = NSStackView()
+    private var signingIn = false
+    static var activeReviewSession: (origin: URL, session: ServerSession)?
+    private static var attemptedSessionRestore = false
+    private static let skipSessionRestoreKey = "DrawbridgeSkipReviewSessionRestore"
     private static let serverKeychainService = "com.drawbridge.app.shared-session"
     private var keys: [ShortcutAction: NSTextField] = [:]
     private var modifiers: [ShortcutAction: NSPopUpButton] = [:]
@@ -54,6 +59,7 @@ import Security
         if window == nil { buildWindow() }
         for pane in content.arrangedSubviews { content.removeArrangedSubview(pane); pane.removeFromSuperview() }
         if let pane = panes[section] { content.addArrangedSubview(pane) }
+        if section == .general { refreshServerLogin() }
         for case let button as NSButton in navigation.arrangedSubviews {
             button.state = button.title == section.rawValue ? .on : .off
         }
@@ -126,21 +132,55 @@ import Security
         serverDomain.placeholderString = "https://review.example.com"
         serverStatus.lineBreakMode = .byTruncatingTail
         serverStatus.widthAnchor.constraint(equalToConstant: 480).isActive = true
-        serverSignOut.isEnabled = hasStoredServerSession
         let reviewName = NSTextField(labelWithString: "")
         reviewName.bind(.value, to: NSUserDefaultsController.shared, withKeyPath: "values.drawbridgeReviewUsername",
                         options: [.nullPlaceholder: "Choose when opening a review"])
+        serverLoginForm.orientation = .vertical
+        serverLoginForm.alignment = .leading
+        serverLoginForm.spacing = 8
+        serverLoginForm.detachesHiddenViews = true
+        for view in [
+            row("Server domain", field(serverDomain, id: "serverDomain", value: defaults.string(forKey: "sharedServerDomain") ?? "")),
+            row("Office login", field(serverUsername, id: "serverUsername", value: defaults.string(forKey: "sharedServerUsername") ?? "")),
+            row("Password", field(serverPassword, id: "serverPassword", value: "")),
+            serverSignIn
+        ] { serverLoginForm.addArrangedSubview(view) }
         pane(.general, [
             row("Markup author", field(author, id: "markupAuthor", value: MarkupAuthorPreference.currentName)),
             help("Used for new markups. Leave blank to use your macOS account name."),
             button("Save General", #selector(saveGeneral)),
-            row("Server domain", field(serverDomain, id: "serverDomain", value: defaults.string(forKey: "sharedServerDomain") ?? "")),
-            row("Office login", field(serverUsername, id: "serverUsername", value: defaults.string(forKey: "sharedServerUsername") ?? "")),
-            row("Password", field(serverPassword, id: "serverPassword", value: "")),
-            NSStackView(views: [serverSignIn, serverSignOut]),
-            serverStatus,
+            serverLoginForm, serverStatus, serverSignOut,
             row("Review username", reviewName)
         ])
+    }
+
+    func refreshServerLogin(message: String? = nil) {
+        let current = try? Self.sharedReviewCredentials()
+        if current != nil {
+            if let editor = serverPassword.currentEditor(), window?.firstResponder === editor {
+                window?.makeFirstResponder(nil)
+            }
+            serverPassword.stringValue = ""
+        }
+        serverLoginForm.isHidden = current != nil
+        serverSignOut.isHidden = current == nil
+        serverSignIn.isEnabled = !signingIn && current == nil
+        if let message { serverStatus.stringValue = message }
+        else if let (_, session) = current {
+            serverStatus.stringValue = session.displayName.map { "Signed in as " + $0 } ?? "Signed in to Review."
+        } else if !signingIn { serverStatus.stringValue = "" }
+    }
+
+    // Review credentials use the macOS file-based Keychain. Silence its UI only
+    // for the duration of each synchronous operation, including update and delete.
+    private static func withoutKeychainPrompts(_ action: () -> OSStatus) -> OSStatus {
+        var previous: DarwinBoolean = true
+        guard SecKeychainGetUserInteractionAllowed(&previous) == errSecSuccess,
+              SecKeychainSetUserInteractionAllowed(false) == errSecSuccess else {
+            return errSecInteractionNotAllowed
+        }
+        defer { SecKeychainSetUserInteractionAllowed(previous.boolValue) }
+        return action()
     }
 
     private static var serverKeychainQuery: [String: Any] {
@@ -148,23 +188,21 @@ import Security
          kSecAttrAccount as String: "session"]
     }
 
-    private var hasStoredServerSession: Bool {
-        SecItemCopyMatching(Self.serverKeychainQuery as CFDictionary, nil) == errSecSuccess
-    }
+    static let reviewSessionDidChange = Notification.Name("DrawbridgeReviewSessionDidChange")
 
     @objc private func signOutOfServer() {
-        let status = SecItemDelete(Self.serverKeychainQuery as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            serverStatus.stringValue = "Could not remove the session from Keychain."
-            return
-        }
-        serverSignOut.isEnabled = false
+        Self.activeReviewSession = nil
+        // If Keychain is locked, prevent the old entry from restoring next launch.
+        UserDefaults.standard.set(true, forKey: Self.skipSessionRestoreKey)
+        _ = Self.withoutKeychainPrompts { SecItemDelete(Self.serverKeychainQuery as CFDictionary) }
         UserDefaults.standard.removeObject(forKey: "drawbridgeReviewUsername")
         serverPassword.stringValue = ""
-        serverStatus.stringValue = "Signed out on this Mac."
+        refreshServerLogin(message: "Signed out on this Mac.")
+        NotificationCenter.default.post(name: Self.reviewSessionDidChange, object: nil)
     }
 
     @objc private func signInToServer() {
+        guard !signingIn, Self.activeReviewSession == nil else { return }
         window?.makeFirstResponder(nil)
         let domain = serverDomain.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let username = serverUsername.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -182,32 +220,31 @@ import Security
         let name = author.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let markupAuthor = name.isEmpty ? NSFullUserName() : name
         serverSignIn.isEnabled = false
-        serverSignOut.isEnabled = false
+        signingIn = true
         serverPassword.stringValue = ""
         serverStatus.stringValue = "Signing in…"
         Task {
-            defer {
-                serverSignIn.isEnabled = true
-                serverSignOut.isEnabled = hasStoredServerSession
-            }
+            defer { signingIn = false; serverSignIn.isEnabled = Self.activeReviewSession == nil }
             do {
                 let token = try await Self.authenticate(origin: origin, username: username, password: password, markupAuthor: markupAuthor,
                                                         deviceKey: Self.sharedReviewDeviceKey(origin: origin, username: username))
+                Self.activeReviewSession = (origin, token)
+                NotificationCenter.default.post(name: Self.reviewSessionDidChange, object: nil)
                 let session = try JSONEncoder().encode(token)
                 let query = Self.serverKeychainQuery
-                let updated = SecItemUpdate(query as CFDictionary, [kSecValueData as String: session] as CFDictionary)
-                let status = updated == errSecItemNotFound
-                    ? SecItemAdd(query.merging([kSecValueData as String: session]) { _, new in new } as CFDictionary, nil)
-                    : updated
-                guard status == errSecSuccess else {
-                    serverStatus.stringValue = "Could not store the session in Keychain."
-                    return
+                let status = Self.withoutKeychainPrompts {
+                    let updated = SecItemUpdate(query as CFDictionary, [kSecValueData as String: session] as CFDictionary)
+                    return updated == errSecItemNotFound
+                        ? SecItemAdd(query.merging([kSecValueData as String: session]) { _, new in new } as CFDictionary, nil)
+                        : updated
                 }
+                UserDefaults.standard.set(status != errSecSuccess, forKey: Self.skipSessionRestoreKey)
                 UserDefaults.standard.set(origin.absoluteString, forKey: "sharedServerDomain")
                 UserDefaults.standard.set(username, forKey: "sharedServerUsername")
                 UserDefaults.standard.set(name, forKey: MarkupAuthorPreference.defaultsKey)
                 serverDomain.stringValue = origin.absoluteString
-                serverStatus.stringValue = "Signed in as " + (token.displayName ?? markupAuthor)
+                let suffix = status == errSecSuccess ? "" : " for this launch"
+                refreshServerLogin(message: "Signed in as " + (token.displayName ?? markupAuthor) + suffix + ".")
             } catch {
                 serverStatus.stringValue = error.localizedDescription
             }
@@ -221,16 +258,22 @@ import Security
     }
 
     static func sharedReviewCredentials() throws -> (URL, ServerSession) {
-        var query = serverKeychainQuery
-        query[kSecReturnData as String] = true
-        var result: CFTypeRef?
-        guard let domain = UserDefaults.standard.string(forKey: "sharedServerDomain"),
-              let url = URL(string: domain), url.scheme == "https",
-              SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else {
-            throw SharedReviewError("Sign in under Drawbridge → Settings → General.")
+        if let activeReviewSession { return activeReviewSession }
+        defer { attemptedSessionRestore = true }
+        if !attemptedSessionRestore, !UserDefaults.standard.bool(forKey: skipSessionRestoreKey),
+           let domain = UserDefaults.standard.string(forKey: "sharedServerDomain"),
+           let url = URL(string: domain), url.scheme == "https" {
+            var query = serverKeychainQuery
+            query[kSecReturnData as String] = true
+            var result: CFTypeRef?
+            if withoutKeychainPrompts({ SecItemCopyMatching(query as CFDictionary, &result) }) == errSecSuccess,
+               let data = result as? Data,
+               let session = try? JSONDecoder().decode(ServerSession.self, from: data) {
+                activeReviewSession = (url, session)
+                return (url, session)
+            }
         }
-        return (url, try JSONDecoder().decode(ServerSession.self, from: data))
+        throw SharedReviewError("Sign in under Drawbridge → Settings → General.")
     }
 
     private static func sharedReviewDeviceKey(origin: URL, username: String) throws -> String {
@@ -239,15 +282,15 @@ import Security
         var lookup = query
         lookup[kSecReturnData as String] = true
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(lookup as CFDictionary, &result)
+        let status = withoutKeychainPrompts { SecItemCopyMatching(lookup as CFDictionary, &result) }
         if status == errSecSuccess, let data = result as? Data,
            let key = String(data: data, encoding: .utf8) { return key }
-        guard status == errSecItemNotFound else { throw SharedReviewError("Could not read your shared review identity from Keychain.") }
+        guard status == errSecItemNotFound else { throw SharedReviewError("Drawbridge can’t access your Review identity. Unlock the login keychain in Keychain Access and try again.") }
         let key = SymmetricKey(size: .bits256).withUnsafeBytes { bytes in
             bytes.map { String(format: "%02x", $0) }.joined()
         }
         query[kSecValueData as String] = Data(key.utf8)
-        guard SecItemAdd(query as CFDictionary, nil) == errSecSuccess else {
+        guard withoutKeychainPrompts({ SecItemAdd(query as CFDictionary, nil) }) == errSecSuccess else {
             throw SharedReviewError("Could not save your shared review identity in Keychain.")
         }
         return key

@@ -484,9 +484,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 guard let self, let pane else { return }
                 self.closePDFPane(pane)
             }
-            let reviewStatus = sharedReview.flatMap { review in
-                container.pdfView.document === review.reviewPDF && review.reviewPDF != nil ? review.syncStatus : nil
-            }
+            let reviewStatus = container.pdfView.document.flatMap { sharedReview?.review(for: $0)?.syncStatus }
             container.updateHeader(documentName: name,
                                    side: index == 0 ? "Left" : "Right",
                                    active: container.pdfView === pdfView,
@@ -603,6 +601,19 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     private let propertiesResizeHandle = SidebarDividerView(frame: .zero)
     private var propertiesWidthAtDragStart: CGFloat = 300
     private let emptyStateView = StartupDropView(frame: .zero)
+    private let welcomeReviewView = NSStackView()
+    private let welcomeReviewTitle = NSTextField(labelWithString: "Drawbridge Review")
+    private let welcomeReviewButton = NSButton(title: "Open Vault…", target: nil, action: #selector(SharedReviewWindowController.showReviews(_:)))
+
+    func configureWelcomeReview(_ review: SharedReviewWindowController) {
+        welcomeReviewButton.target = review
+        welcomeReviewButton.isEnabled = true
+    }
+
+    @objc private func refreshWelcomeReviewVisibility() {
+        welcomeReviewView.isHidden = pdfView.document != nil || (try? SettingsWindowController.sharedReviewCredentials()) == nil
+    }
+
     private let emptyStateTitle = NSTextField(labelWithString: "Open a drawing set to get started")
     private let emptyStateOpenButton = NSButton(title: "Open PDF", target: nil, action: nil)
     private let emptyStateRecentButton = NSButton(title: "Open Recent", target: nil, action: nil)
@@ -874,10 +885,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var layerTintColorWells: [String: NSButton] = [:]
     var activeLayerTintSelection: String?
     weak var sharedReview: SharedReviewWindowController?
-    var isActiveReview: Bool {
-        guard let reviewPDF = sharedReview?.reviewPDF else { return false }
-        return pdfView.document === reviewPDF
+    var activeReview: SharedReviewWindowController? {
+        pdfView.document.flatMap { sharedReview?.review(for: $0) }
     }
+    var isActiveReview: Bool { activeReview != nil }
 
     var onDocumentOpened: ((URL) -> Void)?
     private var sidebarContainerView: NSView?
@@ -977,6 +988,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshWelcomeReviewVisibility),
+            name: SettingsWindowController.reviewSessionDidChange, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(interfaceThemeChanged(_:)), name: InterfaceTheme.didChange, object: nil)
         for name in [NSWindow.didEnterFullScreenNotification, NSWindow.didExitFullScreenNotification] {
             NotificationCenter.default.addObserver(self, selector: #selector(fullscreenChromeChanged(_:)), name: name, object: nil)
@@ -1285,7 +1298,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         // Never set the editor window/root appearance: PDF content must retain its
         // inherited appearance and inversion state independently of chrome colors.
         for chrome in [bookmarksContainer, statusBar, busyOverlayView, captureToastView,
-                       emptyStateView, documentTabsBar,
+                       emptyStateView, welcomeReviewView, documentTabsBar,
                        markupsPanel, toolbarControlsStack, toolbarModeGroupsStack] {
             chrome.appearance = chromeAppearance
         }
@@ -1310,6 +1323,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             busyOverlayView.layer?.backgroundColor = panelBackgroundColor.cgColor
             captureToastView.layer?.backgroundColor = panelBackgroundColor.cgColor
             emptyStateView.layer?.backgroundColor = panelBackgroundColor.cgColor
+            welcomeReviewView.layer?.backgroundColor = panelBackgroundColor.cgColor
             documentTabsBar.layer?.backgroundColor = panelBackgroundColor.cgColor
             pdfView.refreshAppearanceColors()
             secondaryPDFView?.refreshAppearanceColors()
@@ -2493,7 +2507,23 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         stack.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
+        welcomeReviewTitle.font = .systemFont(ofSize: 17, weight: .semibold)
+        welcomeReviewButton.bezelStyle = .rounded
+        welcomeReviewButton.setAccessibilityLabel("Open Drawbridge Review Vault")
+        welcomeReviewButton.toolTip = "Browse shared PDFs in Drawbridge Review"
+        welcomeReviewView.orientation = .vertical
+        welcomeReviewView.alignment = .centerX
+        welcomeReviewView.spacing = 8
+        welcomeReviewView.edgeInsets = NSEdgeInsets(top: 14, left: 20, bottom: 14, right: 20)
+        welcomeReviewView.wantsLayer = true
+        welcomeReviewView.layer?.cornerRadius = 12
+        welcomeReviewView.layer?.backgroundColor = panelBackgroundColor.cgColor
+        welcomeReviewView.translatesAutoresizingMaskIntoConstraints = false
+        welcomeReviewView.addArrangedSubview(welcomeReviewTitle)
+        welcomeReviewView.addArrangedSubview(welcomeReviewButton)
+
         pdfCanvasContainer.addSubview(emptyStateView)
+        pdfCanvasContainer.addSubview(welcomeReviewView)
         emptyStateView.addSubview(stack)
 
         NSLayoutConstraint.activate([
@@ -2501,6 +2531,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             emptyStateView.centerXAnchor.constraint(equalTo: pdfPaneSplitView.centerXAnchor),
             emptyStateView.centerYAnchor.constraint(equalTo: pdfPaneSplitView.centerYAnchor),
             emptyStateView.widthAnchor.constraint(equalToConstant: 620),
+            welcomeReviewView.centerXAnchor.constraint(equalTo: emptyStateView.centerXAnchor),
+            welcomeReviewView.bottomAnchor.constraint(equalTo: emptyStateView.topAnchor, constant: -14),
+            welcomeReviewView.widthAnchor.constraint(equalToConstant: 330),
+
 
             stack.topAnchor.constraint(equalTo: emptyStateView.topAnchor),
             stack.leadingAnchor.constraint(equalTo: emptyStateView.leadingAnchor),
@@ -2938,7 +2972,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
 
         for url in ordered {
-            let isReview = url == sharedReview?.tabURL
+            let isReview = sharedReview?.review(for: url) != nil
             let title = isReview ? "Review · " + url.lastPathComponent : url.lastPathComponent
             let tab = DocumentChromeTabButton(title: title, target: self, action: #selector(selectDocumentTab(_:)))
             tab.bezelStyle = .regularSquare
@@ -2962,7 +2996,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     /// Returns true when retained-session closing handled (including Cancel).
     func closeRetainedSplitDocument(at url: URL) -> Bool {
-        guard retainsSplitDocumentSessions, canonicalDocumentURL(url) != sharedReview?.tabURL else { return false }
+        guard retainsSplitDocumentSessions, sharedReview?.review(for: canonicalDocumentURL(url)) == nil else { return false }
         guard !isPDFProcessingBusy else { NSSound.beep(); return true }
         let normalized = canonicalDocumentURL(url)
         let focused = openDocumentURL.map(canonicalDocumentURL) == normalized
@@ -3004,7 +3038,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     func closeDocumentTab(at url: URL) {
         let normalized = canonicalDocumentURL(url)
         guard sessionDocumentURLs.contains(normalized) else { return }
-        if normalized == sharedReview?.tabURL, sharedReview?.hasPendingChanges == true { NSSound.beep(); return }
+        if sharedReview?.review(for: normalized)?.hasPendingChanges == true { NSSound.beep(); return }
         if closeRetainedSplitDocument(at: normalized) { return }
         if openDocumentURL.map({ canonicalDocumentURL($0) }) == normalized {
             commandCloseDocument(nil)
@@ -3602,7 +3636,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func exportReviewPDF() {
-        guard let document = pdfView.document, let basePDF = sharedReview?.basePDF else { return }
+        guard let document = pdfView.document, let basePDF = activeReview?.basePDF else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.nameFieldStringValue = openDocumentURL?.lastPathComponent ?? "Review.pdf"
@@ -5312,7 +5346,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         rememberReadingPositions()
         let target = canonicalDocumentURL(url)
-        if target == sharedReview?.tabURL, secondaryPDFView != nil { collapsePDFSplit() }
+        if sharedReview?.review(for: target) != nil, secondaryPDFView != nil { collapsePDFSplit() }
         if focusVisibleSplitDocument(target) { return }
         if retainsSplitDocumentSessions, let retained = splitDocumentSessions[target],
            openDocumentURL.map(canonicalDocumentURL) != target {
@@ -5337,7 +5371,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             requestChromeRefresh()
         }
         let normalizedURL = canonicalDocumentURL(url)
-        let reviewPDF = normalizedURL == sharedReview?.tabURL ? sharedReview?.reviewPDF : nil
+        let reviewPDF = sharedReview?.review(for: normalizedURL)?.reviewPDF
         let cached = documentTabCache.take(normalizedURL)
         let loadsLocalFile = reviewPDF == nil && cached == nil
         if loadsLocalFile { beginBusyIndicator("Loading PDF…") }
@@ -5833,9 +5867,9 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             let index = document.index(for: page)
             let label = displayPageLabel(forPageIndex: index)
             statusPageSizeLabel.stringValue = "Size: \(formattedPageSize(for: page))"
-            if isActiveReview, let sharedReview {
-                statusPageLabel.stringValue = label + " · " + sharedReview.syncStatus
-                statusPageLabel.toolTip = label + " · " + sharedReview.syncStatus
+            if let activeReview {
+                statusPageLabel.stringValue = label + " · " + activeReview.syncStatus
+                statusPageLabel.toolTip = label + " · " + activeReview.syncStatus
             } else {
                 statusPageLabel.stringValue = label
                 statusPageLabel.toolTip = label
@@ -7763,6 +7797,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         let hasDocument = (pdfView.document != nil)
         emptyStateView.isHidden = hasDocument
+        refreshWelcomeReviewVisibility()
         emptyStateSampleButton.isEnabled = true
         pdfView.isHidden = !hasDocument
         pdfPaneSplitView.isHidden = !hasDocument
@@ -7834,6 +7869,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         // Do not close or replace the document while a background save owns it.
         // This also prevents a second, modal save from racing the active save.
         guard !isPDFProcessingBusy else { return false }
+        if isActiveReview {
+            pdfView.rectangleMarkup.finishTextEditing()
+            return true
+        }
         guard hasUnsavedChanges() else {
             return true
         }

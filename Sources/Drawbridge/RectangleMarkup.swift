@@ -550,6 +550,8 @@ final class RectangleMarkupController {
                     if RectangleMarkupRecord.isCloud(original) { polygon.setValue(true, forAnnotationKey: RectangleMarkupRecord.cloudKey) }
                     if measuredPath { MeasurementMetadata.updateLabel(polygon) }
                     RectangleMarkupRecord.setPolygonFill(RectangleMarkupRecord.polygonFill(original),on:polygon)
+                    polygon.setValue(MarkupStyle.fillOpacity(original), forAnnotationKey: MarkupStyle.fillOpacityKey)
+                    DraftingHatch.apply(DraftingHatch.read(original), to: polygon)
                     original.shouldDisplay = false
                     page.removeAnnotation(original); page.addAnnotation(polygon)
                     replacements[ObjectIdentifier(original)] = polygon

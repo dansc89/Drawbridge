@@ -54,6 +54,26 @@ import AppKit
         }
     }
 
+    func testReviewVaultHasItsOwnWelcomeSectionAndUsesFileMenuAction() throws {
+        for viewFirst in [false, true] {
+            try withWelcome(viewFirst: viewFirst) { _, controller, _ in
+                let views = descendants(controller.view)
+                let vault = try XCTUnwrap(views.compactMap { $0 as? NSButton }.first { $0.title == "Open Vault…" })
+                let section = try XCTUnwrap(vault.superview as? NSStackView)
+                XCTAssertTrue(section.arrangedSubviews.contains { ($0 as? NSTextField)?.stringValue == "Drawbridge Review" })
+                XCTAssertFalse(descendants(section).contains(try button(controller)))
+                XCTAssertTrue(vault.isEnabled)
+                let signedIn = (try? SettingsWindowController.sharedReviewCredentials()) != nil
+                XCTAssertEqual(vault.isHiddenOrHasHiddenAncestor, !signedIn)
+                let file = try XCTUnwrap(NSApp.mainMenu?.items.first { $0.title == "File" }?.submenu)
+                let reviewItem = try XCTUnwrap(file.items.first { $0.title == "Drawbridge Review…" })
+                XCTAssertNotNil(vault.target)
+                XCTAssertTrue(vault.target === reviewItem.target)
+                XCTAssertEqual(vault.action, reviewItem.action)
+            }
+        }
+    }
+
     func testPerformClickChoosesFolderWithoutDocumentAndCancelAllowsMenuAndButtonReopen() throws {
         try withWelcome { _, controller, _ in
             let button = try button(controller), item = try menuItem()

@@ -3,6 +3,20 @@ import PDFKit
 import UniformTypeIdentifiers
 
 @MainActor
+private final class ReviewBrowserWindow: NSWindow {
+    var navigate: ((Bool) -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if modifiers == .command, let navigate, [125, 126].contains(event.keyCode) {
+            navigate(event.keyCode == 125)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+@MainActor
 final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     weak var editor: MainViewController?
     private(set) var tabURL: URL?
@@ -13,19 +27,21 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     var hasPendingChanges: Bool { !invalidPages.isEmpty || outboxNeedsSave }
     private let outboxDirectory: URL?
     private let cacheDirectory: URL?
+    private var additionalReviews: [URL: SharedReviewWindowController] = [:]
     private var outbox: SharedReviewOutbox?
     private var outboxNeedsSave = false
     private var invalidPages = Set<Int>()
     private var retiredIDs = Set<String>()
     private let documentsTable = NSTableView()
-    private let workspaceLabel = NSTextField(labelWithString: "Server Documents")
+    private let folderPath = NSPathControl()
+    private var pathFolderIDs: [String?] = []
     private lazy var openButton = button("Open", #selector(openSelected))
-    private lazy var uploadButton = button("Upload PDF…", #selector(uploadPDF))
+    private lazy var uploadButton = button("Upload PDFs…", #selector(uploadPDF))
     private lazy var refreshButton = button("Refresh", #selector(refreshDocuments(_:)))
     private let status = NSTextField(labelWithString: "Choose a shared PDF.")
     private lazy var backButton = button("Back", #selector(goBack))
     private lazy var newFolderButton = button("New Folder…", #selector(createFolder))
-    private lazy var deleteButton = button("Delete…", #selector(deleteSelectedItem))
+    private lazy var deleteButton = button("Delete…", #selector(deleteSelectedItems))
     private static let reviewDocumentDrag = NSPasteboard.PasteboardType("com.drawbridge.review.document-id")
     private var organizationActions = false
     private var deleteConfirmationUsername: String?
@@ -69,13 +85,16 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     private func buildWindow() {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 390),
+        let window = ReviewBrowserWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 390),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "Drawbridge Review — Server Documents"
         window.minSize = NSSize(width: 400, height: 240)
         window.delegate = self
         window.isReleasedWhenClosed = false
         self.window = window
+        window.navigate = { [weak self] down in
+            if down { self?.openSelected() } else { self?.goBack() }
+        }
 
         let nameColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
         nameColumn.title = "Name"
@@ -83,6 +102,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         documentsTable.addTableColumn(nameColumn)
         documentsTable.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
         documentsTable.usesAlternatingRowBackgroundColors = true
+        documentsTable.allowsMultipleSelection = true
         documentsTable.delegate = self
         documentsTable.dataSource = self
         documentsTable.target = self
@@ -98,13 +118,25 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         list.documentView = documentsTable
         list.translatesAutoresizingMaskIntoConstraints = false
 
-        workspaceLabel.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
-        workspaceLabel.lineBreakMode = .byTruncatingMiddle
+        backButton.image = NSImage(systemSymbolName: "chevron.backward", accessibilityDescription: nil)
+        backButton.imagePosition = .imageLeading
+        backButton.keyEquivalent = "["
+        backButton.keyEquivalentModifierMask = .command
+        backButton.toolTip = "Go to the parent folder (⌘↑)"
+        folderPath.pathStyle = .standard
+        folderPath.target = self
+        folderPath.action = #selector(openPathFolder)
+        folderPath.setAccessibilityLabel("Current Review folder")
+        folderPath.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        updateFolderPath()
+        let navigation = NSStackView(views: [backButton, folderPath])
+        navigation.spacing = 10
+        navigation.alignment = .centerY
         status.maximumNumberOfLines = 2
         openButton.keyEquivalent = "\r"
-        let controls = NSStackView(views: [backButton, newFolderButton, uploadButton, refreshButton, deleteButton, NSView(), openButton])
+        let controls = NSStackView(views: [newFolderButton, uploadButton, refreshButton, deleteButton, NSView(), openButton])
         controls.spacing = 8
-        let stack = NSStackView(views: [workspaceLabel, list, status, controls])
+        let stack = NSStackView(views: [navigation, list, status, controls])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -118,6 +150,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 stack.topAnchor.constraint(equalTo: content.topAnchor),
                 stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
                 list.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
+                navigation.widthAnchor.constraint(equalTo: list.widthAnchor),
                 controls.widthAnchor.constraint(equalTo: list.widthAnchor)
             ])
         }
@@ -129,27 +162,37 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let entries = visibleFolders
-        let name = entries.indices.contains(row)
-            ? "▸  " + entries[row].name : visibleDocuments[row - entries.count].name
+        let isFolder = entries.indices.contains(row)
+        let name = isFolder ? entries[row].name : visibleDocuments[row - entries.count].name
+        let icon = NSImageView(image: NSImage(systemSymbolName: isFolder ? "folder.fill" : "doc", accessibilityDescription: nil) ?? NSImage())
+        icon.imageScaling = .scaleProportionallyDown
+        icon.contentTintColor = isFolder ? .controlAccentColor : .secondaryLabelColor
+        icon.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        icon.heightAnchor.constraint(equalToConstant: 18).isActive = true
         let field = NSTextField(labelWithString: name)
         field.lineBreakMode = .byTruncatingMiddle
-        return field
+        let cell = NSStackView(views: [icon, field])
+        cell.alignment = .centerY
+        cell.spacing = 6
+        cell.setAccessibilityLabel(isFolder ? "Folder, " + name : name)
+        return cell
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) { updateBrowserControls() }
 
     private func updateBrowserControls() {
-        openButton.isEnabled = !busy && (0..<rowCount).contains(documentsTable.selectedRow)
+        openButton.isEnabled = !busy && !documentsTable.selectedRowIndexes.isEmpty
         uploadButton.isEnabled = !busy && project != nil
         refreshButton.isEnabled = !busy
         newFolderButton.isEnabled = !busy && folders != nil
         backButton.isEnabled = !busy && folderID != nil
-        deleteButton.isEnabled = !busy && organizationActions && (0..<rowCount).contains(documentsTable.selectedRow)
+        folderPath.isEnabled = !busy
+        deleteButton.isEnabled = !busy && organizationActions && documentsTable.numberOfSelectedRows > 0
     }
 
     @objc private func openClickedDocument() {
         guard (0..<rowCount).contains(documentsTable.clickedRow) else { return }
-        openSelected()
+        openRows(IndexSet(integer: documentsTable.clickedRow))
     }
 
     private func button(_ title: String, _ action: Selector) -> NSButton {
@@ -160,7 +203,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         perform { try await self.loadDocuments() }
     }
 
-    private func loadDocuments() async throws {
+    func loadDocuments() async throws {
         let (origin, credentials) = try SettingsWindowController.sharedReviewCredentials()
         let api = SharedReviewAPI(origin: origin, token: credentials.token, displayName: credentials.displayName, instanceID: credentials.instanceId)
         let projects: SharedReviewAPI.ProjectList = try await api.get("projects")
@@ -185,19 +228,40 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
 
     private func showFolder() {
         if let workspaceKey { UserDefaults.standard.set(folderID, forKey: workspaceKey) }
-        var names: [String] = []
-        var cursor = folderID
-        var visited = Set<String>()
-        while let id = cursor, visited.insert(id).inserted,
-              let folder = folders?.first(where: { $0.id == id }) {
-            names.append(folder.name)
-            cursor = folder.parent_id
-        }
-        workspaceLabel.stringValue = ([project?.name ?? "Server Documents"] + names.reversed()).joined(separator: "  /  ")
+        updateFolderPath()
         documentsTable.reloadData()
         documentsTable.deselectAll(nil)
         status.stringValue = rowCount == 0 ? "This folder is empty." : "\(rowCount) items"
         updateBrowserControls()
+    }
+
+    private func updateFolderPath() {
+        var entries: [(name: String, id: String?)] = []
+        var cursor = folderID
+        var visited = Set<String>()
+        while let id = cursor, visited.insert(id).inserted,
+              let folder = folders?.first(where: { $0.id == id }) {
+            entries.append((folder.name, folder.id))
+            cursor = folder.parent_id
+        }
+        entries.append((project?.name ?? "Server Documents", nil))
+        entries.reverse()
+        pathFolderIDs = entries.map(\.id)
+        folderPath.pathItems = entries.map { entry in
+            let item = NSPathControlItem()
+            item.title = entry.name
+            return item
+        }
+        folderPath.toolTip = entries.map(\.name).joined(separator: " › ")
+        window?.title = "Drawbridge Review — " + (entries.last?.name ?? "Server Documents")
+    }
+
+    @objc private func openPathFolder() {
+        guard !busy, let clicked = folderPath.clickedPathItem,
+              let index = folderPath.pathItems.firstIndex(of: clicked),
+              pathFolderIDs.indices.contains(index), pathFolderIDs[index] != folderID else { return }
+        folderID = pathFolderIDs[index]
+        showFolder()
     }
 
     @objc private func goBack() {
@@ -223,24 +287,36 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             guard !title.isEmpty else { return }
             self.perform {
                 _ = try await self.requireReviewUsername(using: api, saveToSettings: true)
-                let _: SharedReviewAPI.CreatedFolder = try await api.post("projects/\(project.id)/folders",
-                    SharedReviewAPI.FolderRequest(name: title, parentId: parent))
+                _ = try await api.createFolder(name: title, parentID: parent, projectID: project.id)
                 try await self.loadDocuments()
             }
         }
     }
 
     @objc private func openSelected() {
-        let index = documentsTable.selectedRow
-        guard !busy, (0..<rowCount).contains(index) else { return }
+        openRows(documentsTable.selectedRowIndexes)
+    }
+
+    private func openRows(_ rows: IndexSet) {
+        guard !busy, !rows.isEmpty else { return }
         let entries = visibleFolders
-        if entries.indices.contains(index) {
+        if rows.count == 1, let index = rows.first, entries.indices.contains(index) {
             folderID = entries[index].id
             showFolder()
             return
         }
-        let document = visibleDocuments[index - entries.count]
-        perform { try await self.open(document) }
+        let available = visibleDocuments
+        let selected = rows.map { $0 - entries.count }
+        guard selected.allSatisfy(available.indices.contains) else {
+            status.stringValue = "Select one folder or one or more PDFs."
+            return
+        }
+        perform {
+            for index in selected {
+                guard try await self.open(available[index], focusEditor: false) else { return }
+            }
+            if let editor = self.editor { self.showEditor(editor) }
+        }
     }
 
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
@@ -289,22 +365,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             let files = droppedPDFs(info.draggingPasteboard)
             guard !files.isEmpty else { return false }
             let destination = folder?.id ?? folderID
-            perform {
-                for file in files { try self.validateUpload(file) }
-                _ = try await self.requireReviewUsername(using: api, saveToSettings: true)
-                var uploaded = 0
-                do {
-                    for file in files {
-                        _ = try await api.upload(file, project: project, folderID: destination)
-                        uploaded += 1
-                    }
-                } catch {
-                    if uploaded > 0 { try? await self.loadDocuments() }
-                    throw SharedReviewError("Uploaded \(uploaded) of \(files.count) PDFs. \(error.localizedDescription)")
-                }
-                try await self.loadDocuments()
-                self.status.stringValue = "Uploaded \(uploaded) \(uploaded == 1 ? "PDF" : "PDFs")."
-            }
+            uploadPDFs(files, to: destination, project: project, using: api)
         }
         return true
     }
@@ -315,26 +376,39 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
     }
 
-    @objc private func deleteSelectedItem() {
-        let row = documentsTable.selectedRow
-        guard !busy, organizationActions, let api, let project, let window,
-              (0..<rowCount).contains(row) else { return }
-        let entries = visibleFolders
-        let folder = entries.indices.contains(row) ? entries[row] : nil
-        let document = folder == nil ? visibleDocuments[row - entries.count] : nil
-        guard let id = folder?.id ?? document?.id, let name = folder?.name ?? document?.name else { return }
-        if documentID == id && !pending.isEmpty {
-            status.stringValue = "Wait for this PDF’s pending edits to sync before deleting it."
+    @objc private func deleteSelectedItems() {
+        guard !busy, organizationActions, let api, let project, let window else { return }
+        let folders = visibleFolders
+        let documents = visibleDocuments
+        let selected = documentsTable.selectedRowIndexes
+        guard !selected.isEmpty, selected.allSatisfy({ $0 < folders.count + documents.count }) else { return }
+        let items = selected.map { row -> (id: String, name: String, kind: String) in
+            if row < folders.count {
+                let folder = folders[row]
+                return (folder.id, folder.name, "folder")
+            }
+            let document = documents[row - folders.count]
+            return (document.id, document.name, "document")
+        }
+        let ids = Set(items.filter { $0.kind == "document" }.map(\.id))
+        let affectedReviews = ([self] + Array(additionalReviews.values)).filter { review in
+            review.reviewAPI?.origin == api.origin && review.documentID.map(ids.contains) == true
+        }
+        if affectedReviews.contains(where: { $0.hasPendingChanges || !$0.pending.isEmpty }) {
+            status.stringValue = "Wait for the selected PDFs’ pending edits to sync before deleting them."
             return
         }
         perform {
             let username = try await self.requireReviewUsername(using: api, saveToSettings: true)
             let warning = NSAlert()
             warning.alertStyle = .warning
-            warning.messageText = "Delete “\(name)”?"
-            warning.informativeText = folder == nil
-                ? "This PDF will be removed from the workspace for everyone. Recovery requires a server administrator."
-                : "Only empty folders can be deleted. Move or delete its contents first."
+            warning.messageText = items.count == 1 ? "Delete “\(items[0].name)”?" : "Delete \(items.count) selected items?"
+            warning.informativeText = items.contains { $0.kind == "document" }
+                ? "Selected PDFs will be removed from the workspace for everyone. Recovery requires a server administrator."
+                : "Only empty folders can be deleted. Move or delete their contents first."
+            if items.contains(where: { $0.kind == "folder" }) && items.contains(where: { $0.kind == "document" }) {
+                warning.informativeText += " Only empty folders can be deleted."
+            }
             warning.addButton(withTitle: "Continue")
             warning.addButton(withTitle: "Cancel")
             let response = await withCheckedContinuation { continuation in
@@ -363,18 +437,28 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 self.showFolder()
                 return
             }
-            do {
-                let _: SharedReviewAPI.OrganizationReceipt = try await api.post("projects/\(project.id)/remove-item",
-                    SharedReviewAPI.RemoveRequest(kind: folder == nil ? "document" : "folder", id: id, confirmation: username))
-            } catch let error as SharedReviewError where error.statusCode == 409 && folder != nil {
-                throw SharedReviewError("Move or delete the folder’s contents first.")
-            }
-            if self.documentID == id {
-                self.ready = false
-                self.updateReviewStatus("Removed from workspace")
+            for (index, item) in items.enumerated() {
+                let reviews = affectedReviews.filter { $0.documentID == item.id }
+                do {
+                    guard !reviews.contains(where: { $0.hasPendingChanges || !$0.pending.isEmpty }) else {
+                        throw SharedReviewError("Wait for pending edits to sync.")
+                    }
+                    let _: SharedReviewAPI.OrganizationReceipt = try await api.post("projects/\(project.id)/remove-item",
+                        SharedReviewAPI.RemoveRequest(kind: item.kind, id: item.id, confirmation: username))
+                } catch {
+                    if index > 0 { try? await self.loadDocuments() }
+                    let reason = item.kind == "folder" && (error as? SharedReviewError)?.statusCode == 409
+                        ? "Move or delete the folder’s contents first." : error.localizedDescription
+                    throw SharedReviewError("Deleted \(index) of \(items.count) selected items. Couldn’t delete “\(item.name)”. \(reason)")
+                }
+                for review in reviews {
+                    review.ready = false
+                    review.updateReviewStatus("Removed from workspace")
+                }
                 self.editor?.refreshRectangleToolbar()
             }
             try await self.loadDocuments()
+            self.status.stringValue = items.count == 1 ? "Deleted 1 item." : "Deleted \(items.count) items."
         }
     }
 
@@ -387,21 +471,47 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         guard !busy, let window, let project, let api else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.pdf]
+        panel.allowsMultipleSelection = true
         panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let file = panel.url, let self else { return }
-            self.perform {
-                try self.validateUpload(file)
-                _ = try await self.requireReviewUsername(using: api, saveToSettings: true)
-                let document = try await api.upload(file, project: project, folderID: self.folderID)
-                try await self.loadDocuments()
-                try await self.open(document)
+            guard response == .OK, !panel.urls.isEmpty, let self else { return }
+            self.uploadPDFs(panel.urls, to: self.folderID, project: project, using: api)
+        }
+    }
+
+    private func uploadPDFs(_ files: [URL], to destination: String?,
+                            project: SharedReviewAPI.Project, using api: SharedReviewAPI) {
+        perform {
+            for file in files {
+                do { try self.validateUpload(file) }
+                catch { throw SharedReviewError("Can’t upload \(file.lastPathComponent). \(error.localizedDescription)") }
             }
+            _ = try await self.requireReviewUsername(using: api, saveToSettings: true)
+            for (index, file) in files.enumerated() {
+                let prefix = files.count > 1 ? "PDF \(index + 1) of \(files.count) · " : ""
+                do {
+                    self.status.stringValue = prefix + "Preparing \(file.lastPathComponent)…"
+                    _ = try await api.upload(file, project: project, folderID: destination) { sent, size in
+                        if sent == size {
+                            self.status.stringValue = prefix + "Verifying \(file.lastPathComponent)…"
+                        } else {
+                            let sentMB = ByteCountFormatter.string(fromByteCount: Int64(sent), countStyle: .file)
+                            let totalMB = ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
+                            self.status.stringValue = prefix + "Uploading \(sentMB) of \(totalMB)…"
+                        }
+                    }
+                } catch {
+                    if index > 0 { try? await self.loadDocuments() }
+                    throw SharedReviewError("Uploaded \(index) of \(files.count) PDFs. \(file.lastPathComponent) failed. \(error.localizedDescription)")
+                }
+            }
+            try await self.loadDocuments()
+            self.status.stringValue = "Uploaded \(files.count) \(files.count == 1 ? "PDF" : "PDFs")."
         }
     }
 
     private func perform(_ work: @escaping @MainActor () async throws -> Void) {
-        guard !busy, !hasPendingChanges else {
-            status.stringValue = "Wait for pending markup revisions to sync."
+        guard !busy else {
+            status.stringValue = "Wait for the current server operation to finish."
             return
         }
         busy = true
@@ -417,15 +527,19 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
     }
 
-    func open(_ document: SharedReviewAPI.Document, using connection: SharedReviewAPI? = nil) async throws {
-        guard let api = connection ?? api, let editor else { return }
+    @discardableResult
+    func open(_ document: SharedReviewAPI.Document, using connection: SharedReviewAPI? = nil,
+              focusEditor: Bool = true) async throws -> Bool {
+        guard let api = connection ?? api, let editor else { return false }
         if window == nil { buildWindow() }
-        guard !hasPendingChanges else { throw SharedReviewError("Wait for the current review to sync before opening another.") }
-        if documentID == document.id, let tabURL, reviewAPI?.origin == api.origin, reviewAPI?.instanceID == api.instanceID {
-            guard editor.confirmDiscardUnsavedChangesIfNeeded() else { return }
-            editor.openDocument(at: tabURL)
-            showEditor(editor)
-            return
+        let existing = ([self] + Array(additionalReviews.values)).first {
+            $0.documentID == document.id && $0.reviewAPI?.origin == api.origin && $0.reviewAPI?.instanceID == api.instanceID
+        }
+        if let url = existing?.tabURL {
+            guard editor.confirmDiscardUnsavedChangesIfNeeded() else { return false }
+            editor.openDocument(at: url)
+            if focusEditor { showEditor(editor) }
+            return true
         }
         let username = try await requireReviewUsername(using: api, saveToSettings: connection == nil)
         // Recheck access before serving locally retained drawing bytes.
@@ -446,20 +560,20 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         let outbox = try SharedReviewOutbox(origin: api.origin, instanceID: api.instanceID,
                                             documentID: document.id, basePDF: bytes, directory: outboxDirectory)
         let recoveredEdits = try outbox.load()
-        guard editor.confirmDiscardUnsavedChangesIfNeeded(), !hasPendingChanges, !editor.isPDFProcessingBusy else { return }
+        guard editor.confirmDiscardUnsavedChangesIfNeeded(), !editor.isPDFProcessingBusy else { return false }
         if editor.secondaryPDFView != nil { editor.collapsePDFSplit() }
-        if let tabURL { editor.unregisterSessionDocument(tabURL) }
-        stopSync()
-        self.outbox = outbox
-        pending = recoveredEdits
-        reviewAPI = api
-        reviewUsername = username
-        documentID = document.id
-        sessionID = response.session.id
-        revision = 0
-        records.removeAll()
-        invalidPages.removeAll()
-        retiredIDs.removeAll()
+        let review = tabURL == nil ? self : SharedReviewWindowController()
+        review.editor = editor
+        review.outbox = outbox
+        review.pending = recoveredEdits
+        review.reviewAPI = api
+        review.reviewUsername = username
+        review.documentID = document.id
+        review.sessionID = response.session.id
+        review.revision = 0
+        review.records.removeAll()
+        review.invalidPages.removeAll()
+        review.retiredIDs.removeAll()
         for index in 0..<pdf.pageCount {
             for annotation in pdf.page(at: index)?.annotations ?? [] where annotation.type != "Link" {
                 annotation.isReadOnly = true
@@ -468,13 +582,25 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         let filename = URL(fileURLWithPath: document.name).lastPathComponent
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent(filename.lowercased().hasSuffix(".pdf") ? filename : filename + ".pdf")
-        tabURL = editor.canonicalDocumentURL(url)
-        reviewPDF = pdf
-        basePDF = bytes
-        syncStatus = "Connecting…"
+        let tab = editor.canonicalDocumentURL(url)
+        review.tabURL = tab
+        review.reviewPDF = pdf
+        review.basePDF = bytes
+        review.syncStatus = "Connecting…"
+        if review !== self { additionalReviews[tab] = review }
         editor.openDocument(at: url)
-        showEditor(editor)
-        startSync(api: api, document: document.id, session: response.session.id)
+        if focusEditor { showEditor(editor) }
+        review.startSync(api: api, document: document.id, session: response.session.id)
+        return true
+    }
+
+    func review(for url: URL) -> SharedReviewWindowController? {
+        url == tabURL ? self : additionalReviews[url]
+    }
+
+    func review(for document: PDFDocument) -> SharedReviewWindowController? {
+        if reviewPDF === document { return self }
+        return additionalReviews.values.first { $0.reviewPDF === document }
     }
 
     private func showEditor(_ editor: MainViewController) {
@@ -483,6 +609,10 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     func closeTab(at url: URL) {
+        if let review = additionalReviews.removeValue(forKey: url) {
+            review.closeTab(at: url)
+            return
+        }
         guard url == tabURL else { return }
         stopSync()
         documentID = nil
@@ -668,7 +798,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             let wasReady = ready
             ready = true
             if invalidPages.isEmpty { updateReviewStatus("Synced · Revision \(revision)") }
-            if !wasReady, editor?.isActiveReview == true { editor?.refreshRectangleToolbar() }
+            if !wasReady, editor?.pdfView.document === reviewPDF { editor?.refreshRectangleToolbar() }
         } catch {
             guard sessionID == session else { return }
             if outboxNeedsSave {
@@ -688,7 +818,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private func updateReviewStatus(_ message: String) {
         guard syncStatus != message else { return }
         syncStatus = message
-        if editor?.isActiveReview == true { editor?.updateStatusBar() }
+        if editor?.pdfView.document === reviewPDF { editor?.updateStatusBar() }
     }
 
     private func apply(_ markup: SharedReviewAPI.Markup, owned: Bool) throws {
@@ -728,7 +858,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     func canQuit() -> Bool {
-        guard !hasPendingChanges, !busy else {
+        guard !hasPendingChanges, !busy, additionalReviews.values.allSatisfy({ !$0.hasPendingChanges }) else {
             NSSound.beep()
             return false
         }

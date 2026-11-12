@@ -195,6 +195,32 @@ final class DocumentChromeTabButton: NSButton {
         needsDisplay = true
     }
 
+    private static let reviewCloudPath: NSBezierPath = {
+        let path = NSBezierPath()
+        path.lineWidth = 1.35
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+
+        // Leave a gap in the bottom edge for the transfer arrows.
+        path.move(to: NSPoint(x: 16, y: 21))
+        path.curve(to: NSPoint(x: 15, y: 14), controlPoint1: NSPoint(x: 11, y: 21), controlPoint2: NSPoint(x: 11, y: 15))
+        path.curve(to: NSPoint(x: 20, y: 11), controlPoint1: NSPoint(x: 15, y: 11), controlPoint2: NSPoint(x: 18, y: 10))
+        path.curve(to: NSPoint(x: 26, y: 14), controlPoint1: NSPoint(x: 23, y: 7), controlPoint2: NSPoint(x: 27, y: 10))
+        path.curve(to: NSPoint(x: 25, y: 21), controlPoint1: NSPoint(x: 31, y: 14), controlPoint2: NSPoint(x: 30, y: 21))
+
+        path.move(to: NSPoint(x: 19, y: 19))
+        path.line(to: NSPoint(x: 19, y: 25))
+        path.move(to: NSPoint(x: 17.3, y: 23.3))
+        path.line(to: NSPoint(x: 19, y: 25))
+        path.line(to: NSPoint(x: 20.7, y: 23.3))
+        path.move(to: NSPoint(x: 22.5, y: 22))
+        path.line(to: NSPoint(x: 22.5, y: 16))
+        path.move(to: NSPoint(x: 20.8, y: 17.7))
+        path.line(to: NSPoint(x: 22.5, y: 16))
+        path.line(to: NSPoint(x: 24.2, y: 17.7))
+        return path
+    }()
+
     override func draw(_ dirtyRect: NSRect) {
         let colors = ChromeSelectionColors(active: state == .on, appearance: effectiveAppearance)
         if state == .on {
@@ -204,9 +230,14 @@ final class DocumentChromeTabButton: NSButton {
             colors.foreground.withAlphaComponent(0.2).setFill()
             NSRect(x: bounds.width - 1, y: 8, width: 1, height: bounds.height - 16).fill()
         }
-        let icon = NSImage(systemSymbolName: isReview ? "icloud" : "doc.richtext", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(paletteColors: [isReview ? .systemPurple : colors.foreground]))
-        icon?.draw(in: NSRect(x: 11, y: 9, width: 14, height: 14), from: .zero, operation: .sourceOver, fraction: 1)
+        if isReview {
+            NSColor.systemPurple.setStroke()
+            Self.reviewCloudPath.stroke()
+        } else {
+            let icon = NSImage(systemSymbolName: "doc.richtext", accessibilityDescription: nil)?
+                .withSymbolConfiguration(.init(paletteColors: [colors.foreground]))
+            icon?.draw(in: NSRect(x: 11, y: 9, width: 14, height: 14), from: .zero, operation: .sourceOver, fraction: 1)
+        }
         attributedTitle.draw(in: NSRect(x: 33, y: 8, width: bounds.width - 69, height: 17))
         if window?.firstResponder === self {
             NSColor.keyboardFocusIndicatorColor.setStroke()

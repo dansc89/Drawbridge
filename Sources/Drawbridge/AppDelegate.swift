@@ -220,6 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         fileMenu.addItem(withTitle: "Insert Pages…", action: #selector(MainViewController.commandInsertPages(_:)), keyEquivalent: "").target = controller
         controller.configureWelcomeBookmarkIndex(workflow: bookmarkIndexWorkflow)
         fileMenu.addItem(withTitle: "Extract Bookmark Index…", action: #selector(BookmarkIndexWorkflow.showExtract(_:)), keyEquivalent: "").target = bookmarkIndexWorkflow
+        controller.configureWelcomeReview(sharedReview)
         fileMenu.addItem(withTitle: "Drawbridge Review…", action: #selector(SharedReviewWindowController.showReviews(_:)), keyEquivalent: "").target = sharedReview
         fileMenu.addItem(withTitle: "Close", action: #selector(MainViewController.commandCloseDocument(_:)), keyEquivalent: "w").target = controller
         let openRecentRoot = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")

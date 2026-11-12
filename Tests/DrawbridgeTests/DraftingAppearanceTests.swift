@@ -59,6 +59,36 @@ import XCTest
         XCTAssertEqual(saved.annotations.first.flatMap(DraftingHatch.read), DraftingHatch.read(a))
         try assertHatch(bitmap { saved.draw(with: .mediaBox, to: $0) })
     }
+    func testReviewExportKeepsCrosshatchedEllipseWhenOpenedInEditor() throws {
+        let base = PDFDocument()
+        let page = PDFPage()
+        let bounds = CGRect(x: 0, y: 0, width: 100, height: 100)
+        page.setBounds(bounds, for: .mediaBox)
+        base.insert(page, at: 0)
+        let bytes = try XCTUnwrap(base.dataRepresentation())
+        let ellipse = DrawbridgeShapeAnnotation(bounds: bounds, forType: .circle, withProperties: nil)
+        ellipse.setValue(RectangleMarkupRecord.prefix + UUID().uuidString, forAnnotationKey: RectangleMarkupRecord.identityKey)
+        ellipse.color = .red
+        let border = PDFBorder()
+        border.lineWidth = 2
+        ellipse.border = border
+        RectangleMarkupRecord.setPolygonFill(.green, on: ellipse)
+        ellipse.setValue(try hatch("crosshatch"), forAnnotationKey: key)
+        page.addAnnotation(ellipse)
+
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pdf")
+        defer { try? FileManager.default.removeItem(at: destination) }
+        try SharedReviewPDFExport.write(basePDF: bytes, records: RectangleMarkupRecord.capture(base), to: destination)
+        let exported = try XCTUnwrap(PDFDocument(url: destination))
+        let exportedPage = try XCTUnwrap(exported.page(at: 0))
+        try assertHatch(bitmap { exportedPage.draw(with: .mediaBox, to: $0) })
+        let view = MarkupPDFView()
+        view.setMarkupDocument(exported)
+        let restored = try XCTUnwrap(exportedPage.annotations.first as? DrawbridgeShapeAnnotation)
+        XCTAssertEqual(DraftingHatch.read(restored), DraftingHatch.read(ellipse))
+        try assertHatch(bitmap { restored.draw(with: .mediaBox, in: $0) })
+    }
+
     func testHatchCornerPixelsInLiveAndSavedPDFAtRotatedAngles() throws {
         let box = CGRect(x: 0, y: 0, width: 600, height: 600)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

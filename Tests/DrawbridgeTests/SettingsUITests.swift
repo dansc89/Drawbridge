@@ -64,6 +64,36 @@ import PDFKit
         XCTAssertEqual(field.stringValue, dummy)
     }
 
+    func testSignedInReviewHidesPasswordAndReusesActiveSession() throws {
+        _ = NSApplication.shared
+        let previous = SettingsWindowController.activeReviewSession
+        defer { SettingsWindowController.activeReviewSession = previous }
+        let editor = MainViewController()
+        let settings = SettingsWindowController(editor: editor)
+        let origin = try XCTUnwrap(URL(string: "https://review.example.com"))
+        let session = SettingsWindowController.ServerSession(token: "test-token", instanceId: "test-device", displayName: "Test Reviewer")
+        SettingsWindowController.activeReviewSession = (origin, session)
+        settings.prepare()
+        let window = try XCTUnwrap(settings.window)
+        defer { window.close() }
+
+        func visibleViews() -> [NSView] {
+            descendants(window.contentView!).filter { !$0.isHiddenOrHasHiddenAncestor }
+        }
+        XCTAssertFalse(visibleViews().contains { $0 is NSSecureTextField })
+        XCTAssertFalse(visibleViews().contains { ($0 as? NSButton)?.title == "Sign In" })
+        XCTAssertTrue(visibleViews().contains { ($0 as? NSButton)?.title == "Sign Out" })
+        XCTAssertTrue(visibleViews().contains { ($0 as? NSTextField)?.stringValue == "Signed in as Test Reviewer" })
+        for _ in 0..<2 {
+            let (server, credentials) = try SettingsWindowController.sharedReviewCredentials()
+            XCTAssertEqual(server, origin)
+            XCTAssertEqual(credentials.token, session.token)
+        }
+        settings.prepare(section: .shortcuts)
+        settings.prepare(section: .general)
+        XCTAssertFalse(visibleViews().contains { $0 is NSSecureTextField })
+    }
+
     private func descendants(_ view: NSView) -> [NSView] {
         [view] + view.subviews.flatMap(descendants)
     }

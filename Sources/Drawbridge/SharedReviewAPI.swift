@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct SharedReviewError: LocalizedError {
@@ -75,6 +76,15 @@ struct SharedReviewAPI {
     func claimUsername(_ username: String) async throws -> Identity {
         try await post("auth/review-username", ["username": username])
     }
+    func createFolder(name: String, parentID: String?, projectID: String) async throws -> CreatedFolder {
+        do {
+            return try await post("projects/\(projectID)/folders", FolderRequest(name: name, parentId: parentID))
+        } catch let error as SharedReviewError where error.statusCode == 409 {
+            throw SharedReviewError("A folder with this name already exists here. Choose a unique folder name.",
+                                    statusCode: 409)
+        }
+    }
+
     private static let session = URLSession(configuration: .ephemeral, delegate: NoRedirect(), delegateQueue: nil)
 
     private final class NoRedirect: NSObject, URLSessionTaskDelegate {
@@ -123,22 +133,114 @@ struct SharedReviewAPI {
         return try Data(contentsOf: file, options: .mappedIfSafe)
     }
 
-    func upload(_ file: URL, project: Project, folderID: String? = nil) async throws -> Document {
-        let bytes = try Data(contentsOf: file)
-        guard bytes.count <= 95_000_000 else {
-            throw SharedReviewError("The pilot supports PDFs up to 95 MB through the public URL.")
+    private static let uploadPartSize = 8 * 1024 * 1024
+    private struct UploadStatus: Decodable { let parts: [Int]; let document: Document? }
+    private struct UploadPart: Decodable { let index: Int }
+    private struct CompleteUpload: Encodable { let size: Int; let sha256: String }
+
+    func upload(_ file: URL, project: Project, folderID: String? = nil,
+                progress: (@MainActor (Int, Int) -> Void)? = nil) async throws -> Document {
+        let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard (5...(1024 * 1024 * 1024)).contains(size) else {
+            throw SharedReviewError("Choose a PDF up to 1 GiB.")
         }
-        let created: CreatedDocument = try await post("projects/\(project.id)/documents", DocumentRequest(name: file.lastPathComponent, folderId: folderID))
+        if size <= 95_000_000 {
+            let bytes = try Data(contentsOf: file)
+            let created: CreatedDocument = try await post("projects/\(project.id)/documents",
+                DocumentRequest(name: file.lastPathComponent, folderId: folderID))
+            let result: CreatedDocument = try await uploadPart(bytes, to: "documents/\(created.document.id)/upload")
+            await progress?(size, size)
+            return result.document
+        }
+
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        var hash = SHA256()
+        while let bytes = try handle.read(upToCount: Self.uploadPartSize), !bytes.isEmpty {
+            try Task.checkCancellation()
+            hash.update(data: bytes)
+        }
+        let digest = hash.finalize().map { String(format: "%02x", $0) }.joined()
+        let key = "ReviewUpload|\(origin.absoluteString)|\(instanceID)|\(project.id)|\(folderID ?? "")|\(file.lastPathComponent)|\(digest)"
+        let defaults = UserDefaults.standard
+        let savedID = defaults.string(forKey: key)
+        var documentID: String
+        var status = UploadStatus(parts: [], document: nil)
+        if let savedID {
+            do {
+                status = try await get("documents/\(savedID)/upload-parts")
+                documentID = savedID
+            } catch let error as SharedReviewError where error.statusCode == 403 || error.statusCode == 404 {
+                defaults.removeObject(forKey: key)
+                documentID = try await createUpload(file, project: project, folderID: folderID, key: key)
+            }
+        } else {
+            documentID = try await createUpload(file, project: project, folderID: folderID, key: key)
+        }
+        if let document = status.document {
+            defaults.removeObject(forKey: key)
+            await progress?(size, size)
+            return document
+        }
+        let path = "documents/\(documentID)"
+        let uploadedParts = Set(status.parts)
+        let partCount = (size + Self.uploadPartSize - 1) / Self.uploadPartSize
+        var uploadedBytes = 0
+        for index in 0..<partCount {
+            let offset = index * Self.uploadPartSize
+            let length = min(Self.uploadPartSize, size - offset)
+            if uploadedParts.contains(index) {
+                uploadedBytes += length
+                continue
+            }
+            try handle.seek(toOffset: UInt64(offset))
+            guard let bytes = try handle.read(upToCount: length), bytes.count == length else {
+                throw SharedReviewError("The PDF changed during upload. Select it again to retry.")
+            }
+            try await sendUploadPart(bytes, path: path, index: index)
+            uploadedBytes += length
+            await progress?(uploadedBytes, size)
+        }
+        await progress?(size, size)
+        let result: CreatedDocument = try await post(path + "/complete-upload", CompleteUpload(size: size, sha256: digest))
+        defaults.removeObject(forKey: key)
+        return result.document
+    }
+
+    private func createUpload(_ file: URL, project: Project, folderID: String?, key: String) async throws -> String {
+        let created: CreatedDocument = try await post("projects/\(project.id)/documents",
+            DocumentRequest(name: file.lastPathComponent, folderId: folderID))
+        UserDefaults.standard.set(created.document.id, forKey: key)
+        return created.document.id
+    }
+
+    private func sendUploadPart(_ bytes: Data, path: String, index: Int) async throws {
+        for attempt in 0..<3 {
+            try Task.checkCancellation()
+            do {
+                let receipt: UploadPart = try await uploadPart(bytes, to: path + "/upload-parts/\(index)")
+                guard receipt.index == index else { throw SharedReviewError("The server confirmed the wrong upload part.") }
+                return
+            } catch let error as URLError where error.code != .cancelled && attempt < 2 {
+                try await Task.sleep(for: .milliseconds(250 * (attempt + 1)))
+            } catch let error as SharedReviewError where (500..<600).contains(error.statusCode ?? 0) && attempt < 2 {
+                try await Task.sleep(for: .milliseconds(250 * (attempt + 1)))
+            }
+        }
+    }
+
+    private func uploadPart<Value: Decodable>(_ bytes: Data, to path: String) async throws -> Value {
         let boundary = UUID().uuidString
         var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"review.pdf\"\r\nContent-Type: application/pdf\r\n\r\n".utf8)
         body.append(bytes)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
-        var request = request("documents/\(created.document.id)/upload")
+        var request = request(path)
         request.httpMethod = "POST"
+        request.timeoutInterval = 180
         request.setValue("multipart/form-data; boundary=" + boundary, forHTTPHeaderField: "Content-Type")
         let (data, response) = try await Self.session.upload(for: request, from: body)
         try validate(response)
-        return try JSONDecoder().decode(CreatedDocument.self, from: data).document
+        return try JSONDecoder().decode(Value.self, from: data)
     }
 
     func socket() -> URLSessionWebSocketTask {

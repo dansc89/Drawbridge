@@ -115,12 +115,12 @@ extension MainViewController {
         session.canEdit = { [weak self] in
             guard let self, let doc = self.pdfView.document else { return false }
             return self.openDocumentURL != nil && !self.isPDFProcessingBusy && !doc.isLocked && doc.allowsCommenting
-                && (!self.isActiveReview || self.sharedReview?.canEdit == true)
+                && (!self.isActiveReview || self.activeReview?.canEdit == true)
         }
         session.onMutation = { [weak self] page in
             guard let self else { return }
             self.markPageMarkupCacheDirty(page)
-            if self.isActiveReview { self.sharedReview?.recordChanges(on: page) }
+            if let review = page.document.flatMap({ self.sharedReview?.review(for: $0) }) { review.recordChanges(on: page) }
             else { self.markMarkupChanged() }
             self.updateStatusBar()
             self.scheduleMarkupsRefresh(selecting: self.pdfView.rectangleMarkup.selected)

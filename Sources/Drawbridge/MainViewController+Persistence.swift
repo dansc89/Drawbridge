@@ -123,7 +123,7 @@ extension MainViewController {
             completion?(false)
             return
         }
-        guard document !== sharedReview?.reviewPDF else { completion?(false); return }
+        guard sharedReview?.review(for: document) == nil else { completion?(false); return }
         // Reject retained-session collisions before source recovery, model mutation,
         // save admission or any background write. Filesystem replacement consent
         // does not authorize discarding another document's edits and undo history.

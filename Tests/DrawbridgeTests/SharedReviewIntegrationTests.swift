@@ -4,6 +4,38 @@ import XCTest
 @testable import Drawbridge
 
 final class SharedReviewIntegrationTests: XCTestCase {
+    func testLargePDFUsesVerifiedParts() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let base = environment["DRAWBRIDGE_TEST_SYNC_ORIGIN"],
+              let origin = URL(string: base),
+              let passwordFile = environment["DRAWBRIDGE_TEST_SYNC_PASSWORD_FILE"] else {
+            throw XCTSkip("Requires an isolated sync backend and a pilot test password.")
+        }
+        let password = try String(contentsOfFile: passwordFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let login = try await SettingsWindowController.authenticate(
+            origin: origin, username: "aerocollective", password: password,
+            markupAuthor: "Large upload QA", deviceKey: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+                + String(repeating: "a", count: 32))
+        let api = SharedReviewAPI(origin: origin, token: login.token, displayName: login.displayName, instanceID: login.instanceId)
+        _ = try await api.claimUsername("Large-QA-" + UUID().uuidString.prefix(8))
+        let projects: SharedReviewAPI.ProjectList = try await api.get("projects")
+        let project = try XCTUnwrap(projects.projects.first { $0.name == "AERO Collective" })
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("Large-QA-\(UUID()).pdf")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try Data("%PDF-1.4\n".utf8).write(to: file)
+        let handle = try FileHandle(forWritingTo: file)
+        let size = 100 * 1024 * 1024 + 13
+        try handle.truncate(atOffset: UInt64(size))
+        try handle.close()
+
+        let document = try await api.upload(file, project: project)
+        XCTAssertEqual(document.file_size, size)
+        XCTAssertEqual(document.file_sha256?.count, 64)
+        let downloaded = try await api.download(document)
+        XCTAssertEqual(downloaded, try Data(contentsOf: file, options: .mappedIfSafe))
+    }
+
     @MainActor
     func testTwoEditorsAndAReopenedReviewReplayRevisions() async throws {
         let environment = ProcessInfo.processInfo.environment
@@ -60,11 +92,12 @@ final class SharedReviewIntegrationTests: XCTestCase {
             SharedReviewAPI.FolderRequest(name: "Mechanical", parentId: root.folder.id))
         XCTAssertEqual(child.folder.parent_id, root.folder.id)
         do {
-            let _: SharedReviewAPI.CreatedFolder = try await second.post(folderPath,
-                SharedReviewAPI.FolderRequest(name: "mechanical", parentId: root.folder.id))
+            _ = try await second.createFolder(name: "mechanical", parentID: root.folder.id, projectID: project.id)
             XCTFail("Duplicate sibling folder was accepted")
         } catch let error as SharedReviewError {
             XCTAssertEqual(error.statusCode, 409)
+            XCTAssertEqual(error.localizedDescription,
+                           "A folder with this name already exists here. Choose a unique folder name.")
         }
         let document = try await first.upload(file, project: project, folderID: child.folder.id)
         let listing: SharedReviewAPI.DocumentList = try await second.get("projects/\(project.id)/documents")
@@ -86,6 +119,47 @@ final class SharedReviewIntegrationTests: XCTestCase {
         defer {
             if let url = a.tabURL { editorA.unregisterSessionDocument(url) }
             if let url = b.tabURL { editorB.unregisterSessionDocument(url) }
+        }
+        // Reopening the browser restores the current folder and exposes the parent
+        // navigation in the native header.
+        let previousSession = SettingsWindowController.activeReviewSession
+        let folderPreference = "DrawbridgeReviewFolder|\(origin.absoluteString)|\(first.instanceID)|\(project.id)"
+        let previousFolder = UserDefaults.standard.object(forKey: folderPreference)
+        do {
+            defer {
+                SettingsWindowController.activeReviewSession = previousSession
+                UserDefaults.standard.set(previousFolder, forKey: folderPreference)
+            }
+            SettingsWindowController.activeReviewSession = (origin, .init(token: first.token, instanceId: first.instanceID, displayName: first.displayName))
+            UserDefaults.standard.set(child.folder.id, forKey: folderPreference)
+            try await a.loadDocuments()
+            let browser = try XCTUnwrap(a.window)
+            let content = try XCTUnwrap(browser.contentView)
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            let path = try XCTUnwrap(descendants(content).compactMap { $0 as? NSPathControl }.first)
+            let back = try XCTUnwrap(descendants(content).compactMap { $0 as? NSButton }.first { $0.title == "Back" })
+            XCTAssertTrue(back.superview === path.superview)
+            XCTAssertEqual(path.pathItems.map(\.title), [project.name, root.folder.name, child.folder.name])
+            XCTAssertTrue(browser.title.hasSuffix(child.folder.name))
+            func commandArrow(_ keyCode: UInt16, _ arrow: String) throws {
+                let event = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+                    modifierFlags: .command, timestamp: 0, windowNumber: browser.windowNumber,
+                    context: nil, characters: arrow, charactersIgnoringModifiers: arrow,
+                    isARepeat: false, keyCode: keyCode))
+                XCTAssertTrue(browser.performKeyEquivalent(with: event))
+            }
+            try commandArrow(126, "\u{F700}")
+            XCTAssertEqual(path.pathItems.map(\.title), [project.name, root.folder.name])
+            let table = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }.first)
+            let folderRow = try XCTUnwrap(a.tableView(table, viewFor: nil, row: 0))
+            XCTAssertTrue(descendants(folderRow).contains { $0 is NSImageView })
+            table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            try commandArrow(125, "\u{F701}")
+            XCTAssertEqual(path.pathItems.map(\.title), [project.name, root.folder.name, child.folder.name])
+            back.performClick(nil)
+            back.performClick(nil)
+            XCTAssertEqual(path.pathItems.map(\.title), [project.name])
+            XCTAssertFalse(back.isEnabled)
         }
         let cache = try XCTUnwrap(SharedReviewPDFCache(origin: origin, instanceID: first.instanceID,
                                                         document: document, directory: cacheDirectory))
@@ -231,6 +305,53 @@ final class SharedReviewIntegrationTests: XCTestCase {
         XCTAssertTrue(exportedRecords.contains { $0.id == queuedRecord.id && $0.text == "Recovered after restart" })
         XCTAssertEqual(exportedRecords.compactMap(\.measurement).count, 2)
         XCTAssertEqual(exportedRecords.first { $0.revisionCloud == true }?.vertices, points)
+
+        let otherFile = outboxDirectory.appendingPathComponent("Second review.pdf")
+        try FileManager.default.copyItem(at: file, to: otherFile)
+        let other = try await first.upload(otherFile, project: project, folderID: child.folder.id)
+        let firstTab = try XCTUnwrap(reopened.tabURL)
+        let savedReviewSession = SettingsWindowController.activeReviewSession
+        let savedFolder = UserDefaults.standard.object(forKey: folderPreference)
+        let savedUsername = UserDefaults.standard.object(forKey: "drawbridgeReviewUsername")
+        do {
+            defer {
+                SettingsWindowController.activeReviewSession = savedReviewSession
+                UserDefaults.standard.set(savedFolder, forKey: folderPreference)
+                UserDefaults.standard.set(savedUsername, forKey: "drawbridgeReviewUsername")
+            }
+            SettingsWindowController.activeReviewSession = (origin, .init(token: first.token, instanceId: first.instanceID, displayName: first.displayName))
+            UserDefaults.standard.set(child.folder.id, forKey: folderPreference)
+            try await reopened.loadDocuments()
+            let content = try XCTUnwrap(reopened.window?.contentView)
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            let table = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }.first)
+            XCTAssertEqual(table.numberOfRows, 2)
+            table.selectRowIndexes(IndexSet(integersIn: 0..<2), byExtendingSelection: false)
+            let open = try XCTUnwrap(descendants(content).compactMap { $0 as? NSButton }.first { $0.title == "Open" })
+            XCTAssertTrue(open.isEnabled)
+            open.performClick(nil)
+            try await eventually { editorReopened.sessionDocumentURLs.count == 2 }
+        }
+        let secondTab = try XCTUnwrap(editorReopened.sessionDocumentURLs.first { $0 != firstTab })
+        editorReopened.openDocument(at: secondTab)
+        XCTAssertNotEqual(firstTab, secondTab)
+        XCTAssertEqual(Set(editorReopened.sessionDocumentURLs), Set([firstTab, secondTab]))
+        let otherReview = try XCTUnwrap(reopened.review(for: secondTab))
+        XCTAssertTrue(editorReopened.activeReview === otherReview)
+        try await eventually { otherReview.canEdit }
+        let otherPage = try XCTUnwrap(editorReopened.pdfView.document?.page(at: 0))
+        _ = try XCTUnwrap(editorReopened.pdfView.rectangleMarkup.create(on: otherPage, bounds: CGRect(x: 20, y: 20, width: 60, height: 50)))
+        editorReopened.openDocument(at: firstTab)
+        XCTAssertTrue(editorReopened.activeReview === reopened)
+        try await eventually { otherReview.revision == 1 }
+        XCTAssertEqual(reopened.revision, 5 + added.count)
+        try await reopened.open(other, using: first)
+        XCTAssertEqual(editorReopened.sessionDocumentURLs.count, 2)
+        editorReopened.commandCloseDocument(nil)
+        XCTAssertTrue(editorReopened.activeReview === reopened)
+        XCTAssertNil(reopened.review(for: secondTab))
+        let _: SharedReviewAPI.OrganizationReceipt = try await first.post("projects/\(project.id)/remove-item",
+            SharedReviewAPI.RemoveRequest(kind: "document", id: other.id, confirmation: username))
 
         let movePath = "projects/\(project.id)/move-documents"
         let removePath = "projects/\(project.id)/remove-item"
