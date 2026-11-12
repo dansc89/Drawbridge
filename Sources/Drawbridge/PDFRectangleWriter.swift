@@ -706,6 +706,11 @@ enum PDFRectangleWriter {
                     annotation["/L"] = [a.x,a.y,z.x,z.y]
                     annotation["/LE"] = ["/None",record.kind == .arrow ? "/OpenArrow" : "/None"]
                 }
+                if record.revisionCloud == true {
+                    annotation["/DrawbridgeRevisionCloud"] = true
+                    annotation["/BE"] = ["/S": "/C", "/I": 1]
+                    annotation["/Subj"] = "u:Cloud"
+                }
                 if record.kind == .polygon {
                     annotation["/Vertices"] = record.vertices.flatMap { [Double($0.x),Double($0.y)] }
                     annotation["/DrawbridgePolylineVertices"] = record.vertices.flatMap { [Double($0.x),Double($0.y)] }
@@ -842,7 +847,10 @@ enum PDFRectangleWriter {
                 path += " \(left.x) \(left.y) m \(b.x) \(b.y) l \(right.x) \(right.y) l"
             }
         }
-        if r.kind == .polygon { path += " h" }
+        if r.revisionCloud == true {
+            let points = r.vertices.map { CGPoint(x: $0.x-r.bounds.minX, y: $0.y-r.bounds.minY) }
+            path = RevisionCloud.pdfPath(points)
+        } else if r.kind == .polygon { path += " h" }
         if [.rectangle, .ellipse, .polygon].contains(r.kind) {
             if let hatch = r.hatch, hatch.preset != .solid {
                 return hatch.pdf(path: path, size: r.bounds.size) + "q \(style) \(r.red) \(r.green) \(r.blue) RG \(r.lineWidth) w 1 j \(path) S Q\n" + MeasurementAppearance.pdf(r)
@@ -876,6 +884,7 @@ enum PDFRectangleWriter {
                         comparisonGraph([value["/DrawbridgeStrokeOpacity"] ?? NSNull(), value["/DrawbridgeFillOpacity"] ?? NSNull()]),
                         comparisonGraph([expected.strokeOpacity, expected.fillOpacity])) else { return false }
                 if value["/DrawbridgeLayerID"] as? String != expected.layerID.map({ "u:" + $0 }) || value["/DrawbridgeLayerCatalog"] as? String != expected.layerCatalog.map({ "u:" + $0 }) { return false }
+                if (value["/DrawbridgeRevisionCloud"] as? Bool == true) != (expected.revisionCloud == true) { return false }
                 if value["/DrawbridgeHatchStyle"] as? String != expected.hatch.map({ "u:" + $0.json }) { return false }
                 if let payload = expected.copiedMarkup {
                     guard let encoded = value["/DrawbridgeCopiedMarkup"] as? String,

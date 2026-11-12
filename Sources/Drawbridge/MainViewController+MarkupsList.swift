@@ -14,6 +14,7 @@ enum MarkupListPresentation {
         return name.hasPrefix(RectangleMarkupRecord.prefix) ? MarkupAuthorPreference.currentName : name.isEmpty ? "Unknown" : name
     }
     static func typeName(_ annotation: PDFAnnotation) -> String {
+        if RectangleMarkupRecord.isCloud(annotation) { return "Cloud" }
         if let measurement = MeasurementMetadata.measurement(annotation) { return measurement.kind == .area ? "Area" : measurement.closed ? "Perimeter" : "Length" }
         switch annotation.type {
         case "Square": return "Rectangle"

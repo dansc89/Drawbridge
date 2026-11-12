@@ -198,7 +198,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         (strokeOpacityRow.views.first as? NSTextField)?.stringValue = text ? "Text opacity" : "Stroke opacity"
         let legacyHighlight = selection?.type == "Highlight"
         let highlight = selection.map { $0.type == "Highlight" || $0.value(forAnnotationKey: RectangleMarkupRecord.inkToolKey) as? String == "highlight" } ?? (session.tool == .highlight)
-        let closedShape = selection.map { ["Square", "Circle", "Polygon"].contains($0.type ?? "") } ?? ([.rectangle, .ellipse, .polygon, .area].contains(session.tool))
+        let closedShape = selection.map { ["Square", "Circle", "Polygon"].contains($0.type ?? "") } ?? ([.rectangle, .ellipse, .polygon, .cloud, .area].contains(session.tool))
         let snapshot = selection.map(SnapshotPayload.isSnapshot) == true
         let capturing = selection == nil && (session.tool == .snapshotBox || session.tool == .snapshotPolygon)
         captureHint.isHidden = !capturing

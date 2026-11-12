@@ -1,4 +1,6 @@
+import CryptoKit
 import AppKit
+import Security
 
 /// Resolve dynamic colors again when macOS changes appearance while Settings is open.
 @MainActor private final class SettingsSidebarStack: NSStackView {
@@ -24,6 +26,13 @@ import AppKit
     private let navigation = SettingsSidebarStack()
     private var panes: [Section: NSView] = [:]
     private var author = NSTextField()
+    private let serverDomain = NSTextField()
+    private let serverUsername = NSTextField()
+    private let serverPassword = NSSecureTextField()
+    private let serverStatus = NSTextField(labelWithString: "")
+    private lazy var serverSignIn = button("Sign In", #selector(signInToServer))
+    private lazy var serverSignOut = button("Sign Out", #selector(signOutOfServer))
+    private static let serverKeychainService = "com.drawbridge.app.shared-session"
     private var keys: [ShortcutAction: NSTextField] = [:]
     private var modifiers: [ShortcutAction: NSPopUpButton] = [:]
     private let validation = NSTextField(labelWithString: "")
@@ -113,8 +122,153 @@ import AppKit
         return NSStackView(views: [label, control])
     }
     private func buildGeneral() {
-        pane(.general, [row("Markup author", field(author, id: "markupAuthor", value: MarkupAuthorPreference.currentName)), help("Used for new markups. Existing author names are preserved. Leave blank to use your macOS account name."), button("Save General", #selector(saveGeneral))])
+        let defaults = UserDefaults.standard
+        serverDomain.placeholderString = "https://review.example.com"
+        serverStatus.lineBreakMode = .byTruncatingTail
+        serverStatus.widthAnchor.constraint(equalToConstant: 480).isActive = true
+        serverSignOut.isEnabled = hasStoredServerSession
+        let reviewName = NSTextField(labelWithString: "")
+        reviewName.bind(.value, to: NSUserDefaultsController.shared, withKeyPath: "values.drawbridgeReviewUsername",
+                        options: [.nullPlaceholder: "Choose when opening a review"])
+        pane(.general, [
+            row("Markup author", field(author, id: "markupAuthor", value: MarkupAuthorPreference.currentName)),
+            help("Used for new markups. Leave blank to use your macOS account name."),
+            button("Save General", #selector(saveGeneral)),
+            row("Server domain", field(serverDomain, id: "serverDomain", value: defaults.string(forKey: "sharedServerDomain") ?? "")),
+            row("Office login", field(serverUsername, id: "serverUsername", value: defaults.string(forKey: "sharedServerUsername") ?? "")),
+            row("Password", field(serverPassword, id: "serverPassword", value: "")),
+            NSStackView(views: [serverSignIn, serverSignOut]),
+            serverStatus,
+            row("Review username", reviewName)
+        ])
     }
+
+    private static var serverKeychainQuery: [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: serverKeychainService,
+         kSecAttrAccount as String: "session"]
+    }
+
+    private var hasStoredServerSession: Bool {
+        SecItemCopyMatching(Self.serverKeychainQuery as CFDictionary, nil) == errSecSuccess
+    }
+
+    @objc private func signOutOfServer() {
+        let status = SecItemDelete(Self.serverKeychainQuery as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            serverStatus.stringValue = "Could not remove the session from Keychain."
+            return
+        }
+        serverSignOut.isEnabled = false
+        UserDefaults.standard.removeObject(forKey: "drawbridgeReviewUsername")
+        serverPassword.stringValue = ""
+        serverStatus.stringValue = "Signed out on this Mac."
+    }
+
+    @objc private func signInToServer() {
+        window?.makeFirstResponder(nil)
+        let domain = serverDomain.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let username = serverUsername.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let password = serverPassword.stringValue
+        guard var components = URLComponents(string: domain.contains("://") ? domain : "https://" + domain),
+              components.scheme?.lowercased() == "https", let host = components.host, !host.isEmpty,
+              components.user == nil, components.password == nil, components.query == nil,
+              components.fragment == nil, ["", "/"].contains(components.path),
+              !username.isEmpty, !password.isEmpty else {
+            serverStatus.stringValue = "Enter an HTTPS server domain, username, and password."
+            return
+        }
+        components.path = ""
+        guard let origin = components.url else { return }
+        let name = author.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let markupAuthor = name.isEmpty ? NSFullUserName() : name
+        serverSignIn.isEnabled = false
+        serverSignOut.isEnabled = false
+        serverPassword.stringValue = ""
+        serverStatus.stringValue = "Signing in…"
+        Task {
+            defer {
+                serverSignIn.isEnabled = true
+                serverSignOut.isEnabled = hasStoredServerSession
+            }
+            do {
+                let token = try await Self.authenticate(origin: origin, username: username, password: password, markupAuthor: markupAuthor,
+                                                        deviceKey: Self.sharedReviewDeviceKey(origin: origin, username: username))
+                let session = try JSONEncoder().encode(token)
+                let query = Self.serverKeychainQuery
+                let updated = SecItemUpdate(query as CFDictionary, [kSecValueData as String: session] as CFDictionary)
+                let status = updated == errSecItemNotFound
+                    ? SecItemAdd(query.merging([kSecValueData as String: session]) { _, new in new } as CFDictionary, nil)
+                    : updated
+                guard status == errSecSuccess else {
+                    serverStatus.stringValue = "Could not store the session in Keychain."
+                    return
+                }
+                UserDefaults.standard.set(origin.absoluteString, forKey: "sharedServerDomain")
+                UserDefaults.standard.set(username, forKey: "sharedServerUsername")
+                UserDefaults.standard.set(name, forKey: MarkupAuthorPreference.defaultsKey)
+                serverDomain.stringValue = origin.absoluteString
+                serverStatus.stringValue = "Signed in as " + (token.displayName ?? markupAuthor)
+            } catch {
+                serverStatus.stringValue = error.localizedDescription
+            }
+        }
+    }
+
+    struct ServerSession: Codable {
+        let token: String
+        let instanceId: String
+        let displayName: String?
+    }
+
+    static func sharedReviewCredentials() throws -> (URL, ServerSession) {
+        var query = serverKeychainQuery
+        query[kSecReturnData as String] = true
+        var result: CFTypeRef?
+        guard let domain = UserDefaults.standard.string(forKey: "sharedServerDomain"),
+              let url = URL(string: domain), url.scheme == "https",
+              SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else {
+            throw SharedReviewError("Sign in under Drawbridge → Settings → General.")
+        }
+        return (url, try JSONDecoder().decode(ServerSession.self, from: data))
+    }
+
+    private static func sharedReviewDeviceKey(origin: URL, username: String) throws -> String {
+        var query = serverKeychainQuery
+        query[kSecAttrAccount as String] = "review-device:" + origin.absoluteString + ":" + username.lowercased()
+        var lookup = query
+        lookup[kSecReturnData as String] = true
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(lookup as CFDictionary, &result)
+        if status == errSecSuccess, let data = result as? Data,
+           let key = String(data: data, encoding: .utf8) { return key }
+        guard status == errSecItemNotFound else { throw SharedReviewError("Could not read your shared review identity from Keychain.") }
+        let key = SymmetricKey(size: .bits256).withUnsafeBytes { bytes in
+            bytes.map { String(format: "%02x", $0) }.joined()
+        }
+        query[kSecValueData as String] = Data(key.utf8)
+        guard SecItemAdd(query as CFDictionary, nil) == errSecSuccess else {
+            throw SharedReviewError("Could not save your shared review identity in Keychain.")
+        }
+        return key
+    }
+
+    static func authenticate(origin: URL, username: String, password: String, markupAuthor: String, deviceKey: String) async throws -> ServerSession {
+        var request = URLRequest(url: origin.appendingPathComponent("v1/auth/login"), timeoutInterval: 15)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["username": username, "password": password, "markupAuthor": markupAuthor, "deviceKey": deviceKey])
+        let session = URLSession(configuration: .ephemeral, delegate: ServerLoginRedirectPolicy(), delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            let message = (response as? HTTPURLResponse)?.statusCode == 401
+                ? "The server rejected the username or password." : "The server could not complete sign-in."
+            throw NSError(domain: "DrawbridgeServerLogin", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+        return try JSONDecoder().decode(ServerSession.self, from: data)
+    }
+
     @objc private func saveGeneral() {
         window?.makeFirstResponder(nil)
         UserDefaults.standard.set(author.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: MarkupAuthorPreference.defaultsKey)
@@ -206,5 +360,12 @@ import AppKit
         for case let button as NSButton in navigation.arrangedSubviews {
             button.bezelColor = theme.color(for: "accent")
         }
+    }
+}
+
+private final class ServerLoginRedirectPolicy: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest) async -> URLRequest? {
+        nil
     }
 }

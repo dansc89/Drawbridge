@@ -20,6 +20,7 @@ extension MainViewController {
     }
 
     @objc func commandPurgeLayers(_ sender: Any?) {
+        guard !isActiveReview else { beep(); return }
         guard let source = openDocumentURL, pdfView.document != nil, !isPDFProcessingBusy, !isPDFFileProcessingOperation else { beep(); return }
         let response = runAlert(title: "Purge Layers", informativeText: "All layers will be removed from the PDF you have open, and current edits will be saved. Your artwork and annotations will be retained. Previously hidden content will become visible. Annotations remain editable.", style: .warning, buttons: ["Purge and Save", "Cancel"])
         guard response == .alertFirstButtonReturn else { return }
@@ -202,6 +203,7 @@ extension MainViewController {
     func unflattenPDF() { processFlattening(unflattening: true) }
 
     private func processFlattening(unflattening: Bool) {
+        guard !isActiveReview else { beep(); return }
         guard let document = pdfView.document, let source = openDocumentURL,
               !isPDFProcessingBusy, !isPDFFileProcessingOperation else { beep(); return }
         if hasUnsavedChanges() {
@@ -259,6 +261,7 @@ extension MainViewController {
     }
 
     func reduceFileSize() {
+        guard !isActiveReview else { beep(); return }
         guard pdfView.document != nil, openDocumentURL != nil, !isPDFProcessingBusy, !isPDFFileProcessingOperation else { beep(); return }
         guard let level = PDFCompressionPicker().choose() else { return }
         if level == .low { reduceFileSizeLosslessly(); return }

@@ -5,7 +5,7 @@ import PDFKit
 @MainActor
 extension MainViewController {
     var canManagePages: Bool {
-        guard let document = pdfView.document else { return false }
+        guard !isActiveReview, let document = pdfView.document else { return false }
         return document.pageCount > 0 && document.allowsDocumentChanges && !document.isLocked
             && !isPDFProcessingBusy && !isPDFFileProcessingOperation
             && !persistenceCoordinator.isManualSaveInFlight && pdfView.rectangleMarkup.canEdit()

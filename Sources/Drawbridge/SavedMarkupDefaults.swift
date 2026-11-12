@@ -64,7 +64,7 @@ extension RectangleMarkupController {
             case "Circle": return .ellipse
             case "Line": return annotation.endLineStyle == .openArrow ? .arrow : .line
             case "FreeText": return .text
-            case "Polygon": return .polygon
+            case "Polygon": return RectangleMarkupRecord.isCloud(annotation) ? .cloud : .polygon
             case "Ink":
                 switch annotation.value(forAnnotationKey: RectangleMarkupRecord.inkToolKey) as? String {
                 case "highlight": return .highlight

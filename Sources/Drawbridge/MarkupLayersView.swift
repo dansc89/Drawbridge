@@ -55,7 +55,7 @@ import PDFKit
         let catalog = session?.layerCatalog ?? .init()
         active.selectItem(at: catalog.activeID.flatMap { id in catalog.layers.firstIndex { $0.id == id }.map { $0 + 1 } } ?? 0)
         for (index, layer) in catalog.layers.enumerated() { active.item(at: index + 1)?.isEnabled = !layer.locked }
-        active.isEnabled = session?.canEdit() == true
+        active.isEnabled = session?.canManageLayers() == true && session?.canEdit() == true
         counts = [:]
         if let document = session?.view?.document {
             for index in 0..<document.pageCount {
@@ -64,7 +64,7 @@ import PDFKit
                 }
             }
         }
-        newLayerButton.isEnabled = session?.canEdit() == true && session?.view?.document != nil
+        newLayerButton.isEnabled = session?.canManageLayers() == true && session?.canEdit() == true && session?.view?.document != nil
         embeddedLayers = EmbeddedPDFLayers.read(session?.view?.document)
         embeddedNote.isHidden = embeddedLayers.isEmpty
         table.reloadData()
@@ -75,12 +75,12 @@ import PDFKit
     private func updateButtons() {
         let layers = session?.layerCatalog.layers ?? []
         let isMarkup = layers.indices.contains(table.selectedRow)
-        rename.isEnabled = isMarkup && session?.canEdit() == true
+        rename.isEnabled = isMarkup && session?.canManageLayers() == true && session?.canEdit() == true
         remove.isEnabled = rename.isEnabled && !layers[table.selectedRow].locked
         let native = table.selectedRow - layers.count
         if embeddedLayers.indices.contains(native) {
             remove.title = "Delete Content…"
-            remove.isEnabled = onEmbeddedDelete != nil && session?.canEdit() == true && presentedDocument === session?.view?.document
+            remove.isEnabled = onEmbeddedDelete != nil && session?.canManageLayers() == true && session?.canEdit() == true && presentedDocument === session?.view?.document
         } else { remove.title = "Remove" }
     }
     func numberOfRows(in tableView: NSTableView) -> Int { (session?.layerCatalog.layers.count ?? 0) + embeddedLayers.count }
@@ -97,7 +97,7 @@ import PDFKit
                 check.generation = presentationGeneration; check.document = presentedDocument; check.embeddedLayer = layer
                 check.allowsMixedState = true
                 check.state = layer.visible.map { $0 ? NSControl.StateValue.on : .off } ?? .mixed
-                check.isEnabled = layer.visible != nil && onEmbeddedVisibility != nil && session.canEdit()
+                check.isEnabled = layer.visible != nil && onEmbeddedVisibility != nil && session.canManageLayers() && session.canEdit()
                 check.toolTip = layer.visible == nil ? "Visibility depends on an unsupported PDF configuration." : explanation
                 check.setAccessibilityLabel("Show PDF drawing layer " + layer.name)
                 return check
@@ -118,11 +118,11 @@ import PDFKit
         switch column?.identifier.rawValue {
         case "visible":
             let check = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleVisibility(_:)))
-            check.state = layer.visible ? .on : .off; check.tag = row; check.setAccessibilityLabel("Show layer " + layer.name); check.isEnabled = session.canEdit(); return check
+            check.state = layer.visible ? .on : .off; check.tag = row; check.setAccessibilityLabel("Show layer " + layer.name); check.isEnabled = session.canManageLayers() && session.canEdit(); return check
         case "locked":
             let check = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleLock(_:)))
             check.state = layer.locked ? .on : .off; check.tag = row
-            check.setAccessibilityLabel("Lock layer " + layer.name); check.isEnabled = session.canEdit(); return check
+            check.setAccessibilityLabel("Lock layer " + layer.name); check.isEnabled = session.canManageLayers() && session.canEdit(); return check
         case "count":
             return NSTextField(labelWithString: String(counts[layer.id, default: 0]))
         default: return NSTextField(labelWithString: layer.name)
@@ -131,7 +131,7 @@ import PDFKit
     @objc private func toggleEmbeddedVisibility(_ sender: NativeLayerButton) {
         guard sender.generation == presentationGeneration, let document = sender.document,
               document === presentedDocument, document === session?.view?.document,
-              session?.canEdit() == true, let layer = sender.embeddedLayer,
+              session?.canManageLayers() == true && session?.canEdit() == true, let layer = sender.embeddedLayer,
               embeddedLayers.contains(layer) else { return }
         onEmbeddedVisibility?(layer, sender.state == .on)
         // Dispatch isn't successful adoption: saved state remains authoritative.
@@ -168,7 +168,7 @@ import PDFKit
         let nativeIndex = table.selectedRow - (session?.layerCatalog.layers.count ?? 0)
         if embeddedLayers.indices.contains(nativeIndex) {
             guard let document = presentedDocument, document === session?.view?.document,
-                  session?.canEdit() == true, let callback = onEmbeddedDelete else { return }
+                  session?.canManageLayers() == true && session?.canEdit() == true, let callback = onEmbeddedDelete else { return }
             let layer = embeddedLayers[nativeIndex], generation = presentationGeneration
             let alert = NSAlert(); alert.messageText = "Delete drawing content from \(layer.name)?"
             alert.informativeText = "Supported drawing paint is deleted, not hidden. Markups and other layers are preserved. The empty PDF group remains. This is undoable and is not saved until you save the document. Unsupported drawings are rejected unchanged."

@@ -10,6 +10,7 @@ final class PDFPaneContainerView: NSView {
     let modeLabel = NSTextField(labelWithString: "")
     private var headerHeight: NSLayoutConstraint!
     private var isActive = false
+    private var isReview = false
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
@@ -21,7 +22,10 @@ final class PDFPaneContainerView: NSView {
         titleLabel.textColor = colors.foreground
         modeLabel.textColor = colors.foreground
         closeButton.contentTintColor = colors.foreground
-        header.layer?.backgroundColor = colors.background.cgColor
+        let background = isReview
+            ? colors.background.blended(withFraction: 0.25, of: .systemPurple) ?? colors.background
+            : colors.background
+        header.layer?.backgroundColor = background.cgColor
     }
 
     init(pdfView: MarkupPDFView) {
@@ -75,20 +79,30 @@ final class PDFPaneContainerView: NSView {
 
     @objc private func closePane() { onClose?() }
 
-    func updateHeader(documentName: String, side: String, active: Bool, split: Bool) {
-        header.isHidden = !split
-        headerHeight.constant = split ? 30 : 0
+    func updateHeader(documentName: String, side: String, active: Bool, split: Bool, reviewStatus: String? = nil) {
+        isReview = reviewStatus != nil
+        header.isHidden = !split && !isReview
+        headerHeight.constant = header.isHidden ? 0 : 30
+        closeButton.isHidden = !split
         closeButton.toolTip = "Close \(side.lowercased()) view; keep the other view open"
         closeButton.setAccessibilityLabel("Close \(side.lowercased()) split view")
         titleLabel.stringValue = documentName
         titleLabel.toolTip = documentName
         modeLabel.stringValue = "Split view · \(side)\(active ? " · Active" : "")"
+        if let reviewStatus {
+            titleLabel.stringValue = "Drawbridge Review · " + documentName
+            modeLabel.stringValue = reviewStatus
+        }
         isActive = active
         // Scope the override to the header: never propagate it into PDFKit.
         header.appearance = InterfaceTheme.current.nativeAppearance
         refreshHeaderColors()
         header.toolTip = "Split view: two views of the same PDF or different PDFs. Click a pane to work in it. Drag the divider to resize, or close either view to keep the other."
         header.setAccessibilityLabel("\(side) split view, \(documentName)\(active ? ", active" : "")")
+        if let reviewStatus {
+            header.toolTip = "Shared server document · " + reviewStatus
+            header.setAccessibilityLabel("Drawbridge Review, \(documentName), \(reviewStatus)")
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -122,6 +136,7 @@ final class DocumentChromeTabButton: NSButton {
     override func frame(forAlignmentRect alignmentRect: NSRect) -> NSRect { alignmentRect }
     let closeButton = NSButton()
     var onClose: (() -> Void)?
+    var isReview = false
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -189,8 +204,8 @@ final class DocumentChromeTabButton: NSButton {
             colors.foreground.withAlphaComponent(0.2).setFill()
             NSRect(x: bounds.width - 1, y: 8, width: 1, height: bounds.height - 16).fill()
         }
-        let icon = NSImage(systemSymbolName: "doc.richtext", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(paletteColors: [colors.foreground]))
+        let icon = NSImage(systemSymbolName: isReview ? "icloud" : "doc.richtext", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(paletteColors: [isReview ? .systemPurple : colors.foreground]))
         icon?.draw(in: NSRect(x: 11, y: 9, width: 14, height: 14), from: .zero, operation: .sourceOver, fraction: 1)
         attributedTitle.draw(in: NSRect(x: 33, y: 8, width: bounds.width - 69, height: 17))
         if window?.firstResponder === self {

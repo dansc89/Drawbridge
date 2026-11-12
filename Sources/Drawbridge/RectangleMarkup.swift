@@ -97,6 +97,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
     static let prefix = "DrawbridgeRectangleV1:"
     enum Kind: String, Codable, Sendable { case rectangle, ellipse, line, arrow, text, polyline, polygon, snapshot, highlight }
     static let inkToolKey = PDFAnnotationKey(rawValue: "DrawbridgeInkTool")
+    var revisionCloud: Bool? = nil
     var inkTool: String? = nil
     var linePattern: MarkupLinePattern = .solid
     var strokeOpacity: Double = 1
@@ -136,6 +137,11 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
     }
     static func owns(_ annotation: PDFAnnotation) -> Bool {
         ["Square", "Circle", "Line", "FreeText", "Ink", "Polygon", "Stamp", "Highlight"].contains(annotation.type ?? "") && identity(annotation) != nil
+    }
+
+    static let cloudKey = PDFAnnotationKey(rawValue: "DrawbridgeRevisionCloud")
+    static func isCloud(_ annotation: PDFAnnotation) -> Bool {
+        annotation.value(forAnnotationKey: cloudKey) as? Bool == true
     }
 
     static let fillKey = PDFAnnotationKey(rawValue:"DrawbridgePolygonFill")
@@ -223,6 +229,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
                 record.layerID = MarkupLayers.id(annotation)
                 record.layerCatalog = annotation.value(forAnnotationKey: MarkupLayers.catalogKey) as? String
                 record.inkTool = annotation.type == "Ink" ? annotation.value(forAnnotationKey: inkToolKey) as? String : nil
+                if isCloud(annotation) { record.revisionCloud = true }
                 record.linePattern = MarkupStyle.pattern(annotation)
                 record.strokeOpacity = MarkupStyle.strokeOpacity(annotation)
                 record.fillOpacity = MarkupStyle.fillOpacity(annotation)
@@ -262,6 +269,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
     var isValid: Bool {
         if let copiedMarkup, !copiedMarkup.isValid { return false }
         return id.hasPrefix(Self.prefix) && pageIndex >= 0 &&
+        (revisionCloud != true || (kind == .polygon && measurement == nil && vertices.count <= 512)) &&
         (hatch == nil || (hatch!.isValid && [.rectangle, .ellipse, .polygon].contains(kind))) &&
         (inkTool == nil || (kind == .polyline && ["pen", "polyline", "highlight"].contains(inkTool!))) &&
         (kind != .snapshot || (snapshotStyle.isValid && snapshotData != nil && SnapshotPayload(data: snapshotData!).page != nil)) &&
@@ -282,7 +290,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
 /// New annotation interaction state; deliberately independent of legacy ToolMode.
 @MainActor
 final class RectangleMarkupController {
-    enum Tool: String { case select, pen, rectangle, ellipse, line, arrow, text, polyline, polygon, area, perimeter, calibrate, snapshotBox, snapshotPolygon, highlight }
+    enum Tool: String { case select, pen, rectangle, ellipse, line, arrow, text, polyline, polygon, cloud, area, perimeter, calibrate, snapshotBox, snapshotPolygon, highlight }
     enum Corner: CaseIterable { case lowerLeft, lowerRight, upperLeft, upperRight }
     private enum Gesture {
         case create(PDFPage, CGPoint)
@@ -387,11 +395,12 @@ final class RectangleMarkupController {
     private var snapshotCaptureID: UUID?
     var onInvalidMeasurement: (() -> Void)?
     var canEdit: () -> Bool = { true }
+    var canManageLayers: () -> Bool = { true }
     var tool: Tool = .select {
         didSet {
             finishTextEditing(); cancelGesture()
             if oldValue != tool {
-                if let original = appearanceBeforeSavedTool, oldValue == .highlight || SavedMarkupAppearance.load(oldValue, from: defaultPreferences) != nil { applyDefaults(original) }
+                if let original = appearanceBeforeSavedTool, [.highlight, .cloud].contains(oldValue) || SavedMarkupAppearance.load(oldValue, from: defaultPreferences) != nil { applyDefaults(original) }
                 appearanceBeforeSavedTool = nil
                 if tool != .select && tool != .calibrate { appearanceBeforeSavedTool = currentAppearance }
                 if let saved = SavedMarkupAppearance.load(tool, from: defaultPreferences), tool != .select {
@@ -399,6 +408,8 @@ final class RectangleMarkupController {
                 } else if tool == .highlight {
                     strokeColor = NSColor(deviceRed: 1, green: 1, blue: 0.25, alpha: 1)
                     lineWidth = 20; strokeOpacity = 0.20; linePattern = .solid
+                    fillColor = nil; hatchStyle = nil
+                } else if tool == .cloud {
                     fillColor = nil; hatchStyle = nil
                 }
             }
@@ -425,6 +436,7 @@ final class RectangleMarkupController {
         case ("a", []): return .arrow
         case ("t", []): return .text
         case ("e", []): return .ellipse
+        case ("c", []): return .cloud
         case ("r", []): return .rectangle
         case ("l", []): return .line
         case ("n", [.shift]): return .polyline
@@ -436,7 +448,9 @@ final class RectangleMarkupController {
     }
     func handleToolShortcut(_ event: NSEvent) -> Bool {
         guard canEdit(), let tool = Self.shortcutTool(for:event) else { return false }
-        self.tool = tool
+        if tool == .cloud, self.tool == .cloud, polylinePage != nil {
+            _ = finishPolyline()
+        } else { self.tool = tool }
         return true
     }
 
@@ -533,6 +547,7 @@ final class RectangleMarkupController {
                     if let id = MarkupLayers.id(original) { polygon.setValue(id, forAnnotationKey: MarkupLayers.membershipKey) }
                     polygon.shouldDisplay = original.shouldDisplay; polygon.shouldPrint = original.shouldPrint; polygon.isReadOnly = original.isReadOnly
                     RectangleMarkupRecord.setVertices(RectangleMarkupRecord.vertices(original),on:polygon)
+                    if RectangleMarkupRecord.isCloud(original) { polygon.setValue(true, forAnnotationKey: RectangleMarkupRecord.cloudKey) }
                     if measuredPath { MeasurementMetadata.updateLabel(polygon) }
                     RectangleMarkupRecord.setPolygonFill(RectangleMarkupRecord.polygonFill(original),on:polygon)
                     original.shouldDisplay = false
@@ -638,7 +653,7 @@ final class RectangleMarkupController {
             }
             refresh(); return true
         }
-        if tool == .polyline || tool == .polygon || tool == .area || tool == .perimeter || tool == .snapshotPolygon || (tool == .snapshotBox && polylinePage != nil) {
+        if (tool == .cloud && polylinePage != nil) || tool == .polyline || tool == .polygon || tool == .area || tool == .perimeter || tool == .snapshotPolygon || (tool == .snapshotBox && polylinePage != nil) {
             guard polylinePage == nil || polylinePage === page else { return true }
             view.setCurrentSelection(nil, animate:false)
             if tool == .area || tool == .perimeter || tool == .snapshotPolygon || tool == .snapshotBox {
@@ -647,6 +662,13 @@ final class RectangleMarkupController {
                     _ = finishPolyline(closed: true); return true
                 }
                 guard polylinePoints.count < 512 else { onInvalidMeasurement?(); return true }
+            }
+            if tool == .cloud {
+                if polylinePoints.count >= 3, let first = polylinePoints.first,
+                   hypot(first.x-point.x, first.y-point.y) <= 8 / max(view.scaleFactor, 0.01) {
+                    _ = finishPolyline(); return true
+                }
+                guard polylinePoints.count < 512 else { return true }
             }
             polylinePage = page
             let candidate = modifiers.contains(.shift) && !polylinePoints.isEmpty ? MeasurementGeometry.constrained(point, from: polylinePoints.last!) : point
@@ -742,14 +764,17 @@ final class RectangleMarkupController {
     func finishPolyline(closed: Bool? = nil) -> Bool {
         guard let page = polylinePage else { return false }
         let points = polylinePoints
-        let isClosed = closed ?? (tool == .polygon || tool == .area)
+        let isClosed = closed ?? (tool == .polygon || tool == .cloud || tool == .area)
         if tool == .snapshotPolygon || tool == .snapshotBox {
             guard points.count >= 3 else { return false }
             captureSnapshot(page: page, points: points)
         } else if tool == .area || tool == .perimeter {
             guard let scale = MeasurementMetadata.scale(on: page),
                   createMeasurement(on: page, points: points, kind: tool == .area ? .area : .perimeter, closed: isClosed, scale: scale) != nil else { onInvalidMeasurement?(); return false }
-        } else { _ = createPolyline(on: page, points: points, closed: isClosed) }
+        } else {
+            if tool == .cloud, points.count < 3 { return false }
+            _ = createPolyline(on: page, points: points, closed: isClosed)
+        }
         polylinePage = nil; polylinePoints = []; polylineHover = nil
         refresh(); return true
     }
@@ -872,7 +897,7 @@ final class RectangleMarkupController {
         case .create(let page, let start):
             var end = Self.clamped(view.convert(location, to: page), to: page.bounds(for: view.displayBox))
             if modifiers.contains(.shift) {
-                if tool == .rectangle || tool == .ellipse {
+                if tool == .rectangle || tool == .ellipse || tool == .cloud {
                     let crop = page.bounds(for: view.displayBox)
                     let dx = end.x-start.x, dy = end.y-start.y
                     let roomX = dx >= 0 ? crop.maxX-start.x : start.x-crop.minX
@@ -969,14 +994,14 @@ final class RectangleMarkupController {
             return true
         }
         if pendingLine != nil { return true }
-        if tool == .polyline || tool == .polygon || tool == .area || tool == .perimeter || tool == .snapshotPolygon || (tool == .snapshotBox && polylinePage != nil) { return true }
+        if (tool == .cloud && polylinePage != nil) || tool == .polyline || tool == .polygon || tool == .area || tool == .perimeter || tool == .snapshotPolygon || (tool == .snapshotBox && polylinePage != nil) { return true }
         guard let gesture else { return false }
         _ = pointerDragged(at: location, modifiers: modifiers)
         let candidate = preview?.1
         let endpoints = previewEndpoints
         let vertices = previewVertices
         self.gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil
-        if tool == .snapshotBox, case .create(let page, let start) = gesture,
+        if (tool == .snapshotBox || tool == .cloud), case .create(let page, let start) = gesture,
            let candidate, max(candidate.width, candidate.height) * (view?.scaleFactor ?? 1) < 4 {
             selected = nil
             polylinePage = page; polylinePoints = [start]; polylineHover = start
@@ -989,6 +1014,10 @@ final class RectangleMarkupController {
         case .create(let page, _):
             if tool == .snapshotBox {
                 captureSnapshot(page: page, points: [CGPoint(x:candidate.minX,y:candidate.minY),CGPoint(x:candidate.maxX,y:candidate.minY),CGPoint(x:candidate.maxX,y:candidate.maxY),CGPoint(x:candidate.minX,y:candidate.maxY)])
+                refresh(); return true
+            }
+            if tool == .cloud {
+                _ = createPolyline(on: page, points: RevisionCloud.corners(candidate), closed: true)
                 refresh(); return true
             }
             let kind: RectangleMarkupRecord.Kind
@@ -1129,7 +1158,8 @@ final class RectangleMarkupController {
         }
         annotation.setValue(RectangleMarkupRecord.prefix + UUID().uuidString, forAnnotationKey: RectangleMarkupRecord.identityKey)
         annotation.setValue(MarkupAuthorPreference.currentName, forAnnotationKey: PDFAnnotationKey(rawValue: "/T"))
-        annotation.contents = kind == .text ? text : kind.rawValue.capitalized
+        let markupName = kind == .polygon && tool == .cloud ? "Cloud" : kind.rawValue.capitalized
+        annotation.contents = kind == .text ? text : markupName
         if kind == .polyline && measurement == nil { annotation.setValue(tool == .highlight ? "highlight" : tool == .pen ? "pen" : "polyline", forAnnotationKey: RectangleMarkupRecord.inkToolKey) }
         if kind == .text { annotation.font = NSFont(name:"Helvetica",size:fontSize); annotation.fontColor = strokeColor; annotation.alignment = .left }
         if kind == .text { RectangleMarkupRecord.setTextColor(strokeColor,on:annotation); RectangleMarkupRecord.setTextFontSize(fontSize,on:annotation) } else { annotation.color = strokeColor }
@@ -1137,6 +1167,7 @@ final class RectangleMarkupController {
         MarkupStyle.apply(pattern: linePattern, opacity: strokeOpacity, to: annotation)
         if kind == .highlight { HighlightGeometry.update(annotation) }
         if kind == .text { textBoxDefaults.install(on: annotation) }
+        if kind == .polygon && tool == .cloud { annotation.setValue(true, forAnnotationKey: RectangleMarkupRecord.cloudKey) }
         if kind == .polyline || kind == .polygon { RectangleMarkupRecord.setVertices(vertices,on:annotation) }
         if kind == .polygon || kind == .rectangle || kind == .ellipse { RectangleMarkupRecord.setPolygonFill(fillColor,on:annotation) }
         if kind == .polygon || kind == .rectangle || kind == .ellipse { DraftingHatch.apply(hatchStyle, to: annotation) }
@@ -1146,7 +1177,7 @@ final class RectangleMarkupController {
         // Only a successfully validated placement finishes the drawing tool.
         // Pen stays active for repeated strokes; drafts and undo/redo do not enter here.
         if tool != .pen && tool != .highlight { tool = .select }
-        setPresence(true, annotation: annotation, page: page, action: "Add " + kind.rawValue.capitalized)
+        setPresence(true, annotation: annotation, page: page, action: "Add " + markupName)
         return annotation
     }
 
@@ -1287,6 +1318,7 @@ final class RectangleMarkupController {
     }
 
     func reorderSelected(_ action: MainViewController.AnnotationReorderAction) {
+        guard canManageLayers() else { return }
         guard canEdit() else { return }
         let selection = selectedItems
         let items = selection.filter { $0.page?.document === boundDocument && !$0.isReadOnly && !layerIsLocked($0) }
@@ -1658,6 +1690,12 @@ final class RectangleMarkupController {
     static func hitTest(_ annotation: PDFAnnotation, at point: CGPoint, tolerance: CGFloat) -> Bool {
         let points = RectangleMarkupRecord.vertices(annotation)
         let radius = max(tolerance,(annotation.border?.lineWidth ?? 2)/2)
+        if RectangleMarkupRecord.isCloud(annotation) {
+            guard annotation.bounds.insetBy(dx: -radius, dy: -radius).contains(point) else { return false }
+            let outline = RevisionCloud.path(points)
+            if RectangleMarkupRecord.polygonFill(annotation) != nil, outline.contains(point) { return true }
+            return outline.copy(strokingWithWidth: radius * 2, lineCap: .round, lineJoin: .round, miterLimit: 10).contains(point)
+        }
         if annotation.type == "Line" {
             let origin = annotation.bounds.origin
             let a = CGPoint(x:origin.x+annotation.startPoint.x,y:origin.y+annotation.startPoint.y)
@@ -1748,7 +1786,7 @@ final class RectangleMarkupController {
 
     @discardableResult
     func removeLastDraftPoint() -> Bool {
-        guard tool == .area || tool == .perimeter || tool == .polygon || tool == .polyline, !polylinePoints.isEmpty else { return false }
+        guard [.area, .perimeter, .polygon, .polyline, .cloud].contains(tool), !polylinePoints.isEmpty else { return false }
         polylinePoints.removeLast(); polylineHover = nil
         if polylinePoints.isEmpty { polylinePage = nil }
         refresh(presentationChanged: false)
@@ -1785,6 +1823,8 @@ final class RectangleMarkupController {
                 }
             } else if let (a,b) = previewEndpoints {
                 path.move(to:view.convert(a,from:page)); path.addLine(to:view.convert(b,from:page))
+            } else if preview != nil && tool == .cloud, bounds.width > 0, bounds.height > 0 {
+                path.addPath(RevisionCloud.path(RevisionCloud.corners(bounds)).mappedCloud { view.convert($0, from: page) })
             } else if preview != nil && tool == .ellipse { path.addEllipse(in:rect) }
             else { path.addRect(rect) }
             if preview == nil && vertices.isEmpty && selected.map(RectangleMarkupRecord.owns) != false {
@@ -1797,10 +1837,15 @@ final class RectangleMarkupController {
             }
         }
         if let view, let page = polylinePage {
-            for (i,p) in (polylinePoints + (polylineHover.map { [$0] } ?? [])).enumerated() {
+            let points = polylinePoints + (polylineHover.map { [$0] } ?? [])
+            if tool == .cloud, points.count >= 3 {
+                path.addPath(RevisionCloud.path(points).mappedCloud { view.convert($0, from: page) })
+            } else {
+            for (i,p) in points.enumerated() {
                 if i == 0 { path.move(to:view.convert(p,from:page)) } else { path.addLine(to:view.convert(p,from:page)) }
             }
             if tool == .polygon || tool == .area || tool == .snapshotPolygon || tool == .snapshotBox { path.closeSubpath() }
+            }
         }
         if let view {
             for annotation in additionalSelection where annotation.page === view.currentPage {
@@ -1907,9 +1952,14 @@ final class DrawbridgePolygonAnnotation: PDFAnnotation {
         let points = RectangleMarkupRecord.vertices(self).map { CGPoint(x:$0.x-origin.x,y:$0.y-origin.y) }
         guard points.count >= 3 else { return }
         context.saveGState(); defer { context.restoreGState() }
-        context.beginPath(); context.move(to:points[0])
-        for point in points.dropFirst() { context.addLine(to:point) }
-        context.closePath(); context.setStrokeColor(color.cgColor)
+        context.beginPath()
+        if RectangleMarkupRecord.isCloud(self) { context.addPath(RevisionCloud.path(points)) }
+        else {
+            context.move(to: points[0])
+            for point in points.dropFirst() { context.addLine(to: point) }
+            context.closePath()
+        }
+        context.setStrokeColor(color.cgColor)
         context.setLineWidth(border?.lineWidth ?? 2); context.setLineJoin(.round)
         context.setLineDash(phase: 0, lengths: MarkupStyle.pattern(self).dash(width: border?.lineWidth ?? 2).map { CGFloat($0) })
         if let hatch = DraftingHatch.read(self), hatch.preset != .solid, let path = context.path {

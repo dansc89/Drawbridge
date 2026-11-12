@@ -159,7 +159,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func retainActiveSplitSession() {
-        guard let url = openDocumentURL, let document = pdfView.document else { return }
+        guard !isActiveReview, let url = openDocumentURL, let document = pdfView.document else { return }
         pdfView.rectangleMarkup.finishTextEditing()
         let markup = pdfView.rectangleMarkup
         if markup.documentUndoManager == nil { markup.documentUndoManager = markup.undo }
@@ -345,7 +345,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc func commandToggleSplitView(_ sender: Any?) {
-        guard !isPDFProcessingBusy, let document = pdfView.document else { return }
+        guard !isPDFProcessingBusy, !isActiveReview, let document = pdfView.document else { return }
         if secondaryPDFView != nil { collapsePDFSplit(); return }
         let state = pdfView.captureTabViewState()
         let pane = MarkupPDFView(frame: pdfView.frame)
@@ -484,10 +484,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 guard let self, let pane else { return }
                 self.closePDFPane(pane)
             }
+            let reviewStatus = sharedReview.flatMap { review in
+                container.pdfView.document === review.reviewPDF && review.reviewPDF != nil ? review.syncStatus : nil
+            }
             container.updateHeader(documentName: name,
                                    side: index == 0 ? "Left" : "Right",
                                    active: container.pdfView === pdfView,
-                                   split: secondaryPDFView != nil)
+                                   split: secondaryPDFView != nil,
+                                   reviewStatus: reviewStatus)
         }
     }
 
@@ -869,6 +873,12 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     var layerVisibilityButtons: [String: NSButton] = [:]
     var layerTintColorWells: [String: NSButton] = [:]
     var activeLayerTintSelection: String?
+    weak var sharedReview: SharedReviewWindowController?
+    var isActiveReview: Bool {
+        guard let reviewPDF = sharedReview?.reviewPDF else { return false }
+        return pdfView.document === reviewPDF
+    }
+
     var onDocumentOpened: ((URL) -> Void)?
     private var sidebarContainerView: NSView?
     private var lastSidebarExpandedWidth: CGFloat = 240
@@ -1904,7 +1914,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc func deletePagesFromSidebar() {
-        guard !isPDFProcessingBusy, let document = pdfView.document else { return }
+        guard !isActiveReview, !isPDFProcessingBusy, let document = pdfView.document else { return }
         let indexes = pagesTableView.selectedRowIndexes
         guard !indexes.isEmpty else { return }
         guard indexes.count < document.pageCount else {
@@ -1924,7 +1934,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     /// The original page objects remain available to Undo, even after saving.
     func deletePages(at indexes: IndexSet) throws {
-        guard !isPDFProcessingBusy, let document = pdfView.document,
+        guard !isActiveReview, !isPDFProcessingBusy, let document = pdfView.document,
               !indexes.isEmpty, indexes.count < document.pageCount,
               indexes.allSatisfy({ $0 < document.pageCount && $0 >= 0 }) else { return }
         if pageStructureState?.document !== document {
@@ -2928,11 +2938,14 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
 
         for url in ordered {
-            let tab = DocumentChromeTabButton(title: url.lastPathComponent, target: self, action: #selector(selectDocumentTab(_:)))
+            let isReview = url == sharedReview?.tabURL
+            let title = isReview ? "Review · " + url.lastPathComponent : url.lastPathComponent
+            let tab = DocumentChromeTabButton(title: title, target: self, action: #selector(selectDocumentTab(_:)))
             tab.bezelStyle = .regularSquare
             tab.state = (url == current) ? .on : .off
             tab.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-            tab.toolTip = url.path
+            tab.isReview = isReview
+            tab.toolTip = isReview ? "Shared server document · " + url.lastPathComponent : url.path
             tab.identifier = NSUserInterfaceItemIdentifier(url.path)
             tab.onClose = { [weak self] in self?.closeDocumentTab(at: url) }
             documentTabsStack.addArrangedSubview(tab)
@@ -2949,7 +2962,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     /// Returns true when retained-session closing handled (including Cancel).
     func closeRetainedSplitDocument(at url: URL) -> Bool {
-        guard retainsSplitDocumentSessions else { return false }
+        guard retainsSplitDocumentSessions, canonicalDocumentURL(url) != sharedReview?.tabURL else { return false }
         guard !isPDFProcessingBusy else { NSSound.beep(); return true }
         let normalized = canonicalDocumentURL(url)
         let focused = openDocumentURL.map(canonicalDocumentURL) == normalized
@@ -2991,6 +3004,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     func closeDocumentTab(at url: URL) {
         let normalized = canonicalDocumentURL(url)
         guard sessionDocumentURLs.contains(normalized) else { return }
+        if normalized == sharedReview?.tabURL, sharedReview?.hasPendingChanges == true { NSSound.beep(); return }
         if closeRetainedSplitDocument(at: normalized) { return }
         if openDocumentURL.map({ canonicalDocumentURL($0) }) == normalized {
             commandCloseDocument(nil)
@@ -3562,6 +3576,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     @objc func saveDocument() {
         guard let document = pdfView.document else { beep(); return }
+        if isActiveReview { pdfView.rectangleMarkup.finishTextEditing(); return }
         if let url = openDocumentURL {
             pdfView.rectangleMarkup.finishTextEditing()
             guard hasUnsavedChanges() || pdfView.rectangleMarkup.hasUnsavedChanges else { return }
@@ -3579,7 +3594,39 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     private func saveDocumentAsCopy() {
-        saveDocumentAs(adoptAsPrimaryDocument: true)
+        if isActiveReview {
+            exportReviewPDF()
+        } else {
+            saveDocumentAs(adoptAsPrimaryDocument: true)
+        }
+    }
+
+    private func exportReviewPDF() {
+        guard let document = pdfView.document, let basePDF = sharedReview?.basePDF else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.pdf]
+        panel.nameFieldStringValue = openDocumentURL?.lastPathComponent ?? "Review.pdf"
+        guard panel.runModal() == .OK, let url = panel.url, pdfView.document === document else { return }
+        guard !savedDocumentDestinationIsOwnedByAnotherDocument(url, document: document) else {
+            _ = runAlert(title: "Choose a Different Filename",
+                         informativeText: "Another open PDF is using that destination.",
+                         style: .warning, buttons: ["OK"])
+            return
+        }
+        pdfView.rectangleMarkup.finishTextEditing()
+        let records = RectangleMarkupRecord.capture(document)
+        Task { [weak self] in
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try SharedReviewPDFExport.write(basePDF: basePDF, records: records, to: url)
+                }.value
+            } catch {
+                guard let self else { return }
+                _ = self.runAlert(title: "Could Not Export Review PDF",
+                                  informativeText: error.localizedDescription,
+                                  style: .warning, buttons: ["OK"])
+            }
+        }
     }
 
     func saveDocumentAsProject(document: PDFDocument) {
@@ -4246,6 +4293,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func markMarkupChanged() {
+        guard !isActiveReview else { return }
         promptInitialMarkupSaveCopyIfNeeded()
         markupChangeVersion += 1
         lastMarkupEditAt = Date()
@@ -5264,6 +5312,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         }
         rememberReadingPositions()
         let target = canonicalDocumentURL(url)
+        if target == sharedReview?.tabURL, secondaryPDFView != nil { collapsePDFSplit() }
         if focusVisibleSplitDocument(target) { return }
         if retainsSplitDocumentSessions, let retained = splitDocumentSessions[target],
            openDocumentURL.map(canonicalDocumentURL) != target {
@@ -5288,14 +5337,16 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             requestChromeRefresh()
         }
         let normalizedURL = canonicalDocumentURL(url)
+        let reviewPDF = normalizedURL == sharedReview?.tabURL ? sharedReview?.reviewPDF : nil
         let cached = documentTabCache.take(normalizedURL)
-        if cached == nil { beginBusyIndicator("Loading PDF…") }
-        defer { if cached == nil { endBusyIndicator() } }
-        let openingStamp = cached == nil ? PDFMarkupSourceStamp.capture(url) : nil
+        let loadsLocalFile = reviewPDF == nil && cached == nil
+        if loadsLocalFile { beginBusyIndicator("Loading PDF…") }
+        defer { if loadsLocalFile { endBusyIndicator() } }
+        let openingStamp = loadsLocalFile ? PDFMarkupSourceStamp.capture(url) : nil
         // A provider/editor can replace the original while PDFKit is lazily
         // reading it. View the exact frozen source used for safe markup saves.
         let readerURL = openingStamp?.recoverySourceURL ?? url
-        guard let document = cached?.document ?? PDFDocument(url: readerURL) else {
+        guard let document = reviewPDF ?? cached?.document ?? PDFDocument(url: readerURL) else {
             PerformanceMetrics.end(openSpan, extra: ["result": "invalid_pdf"])
             runAlert(
                 title: "Unable to open PDF",
@@ -5354,13 +5405,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             pageLabelOverrides = cached.labels
             suppressedEmbeddedPageLabelIndexes = cached.suppressedLabels
             pageScaleLocks = cached.scaleLocks
-        } else { loadSidecarSnapshotIfAvailable(for: url, document: document) }
+        } else if reviewPDF == nil { loadSidecarSnapshotIfAvailable(for: url, document: document) }
         openDocumentURL = url
         if let openingStamp {
             pdfView.rectangleMarkup.retainReaderSnapshot(openingStamp, for: document)
             pdfView.rectangleMarkup.acceptPersistedSource(at: url, stamp: openingStamp)
         }
-        if cached == nil {
+        if loadsLocalFile {
             DispatchQueue.global(qos: .utility).async {
                 PDFRectangleWriter.prepareInspection(source: url)
             }
@@ -5374,11 +5425,11 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             pdfView.navigateToPageFittingWholePageWithHistory(firstPage, recordHistory: false)
         }
         registerSessionDocument(url)
-        configureAutosaveURL(for: url)
+        configureAutosaveURL(for: reviewPDF == nil ? url : nil)
         resetSearchState(clearQuery: false)
         toolbarSearchField.stringValue = tabSearchQueries[normalizedURL] ?? ""
         refreshSearchIfNeeded()
-        if let snapshot = loadMarkupIndexSnapshot(for: url), snapshot.pageCount == document.pageCount {
+        if reviewPDF == nil, let snapshot = loadMarkupIndexSnapshot(for: url), snapshot.pageCount == document.pageCount {
             markupsCountLabel.stringValue = "Indexed \(snapshot.totalAnnotations) (refreshing…)"
         }
         view.window?.title = "Drawbridge - \(url.lastPathComponent)"
@@ -5387,7 +5438,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         scheduleMarkupsRefresh(selecting: currentSelectedAnnotation())
         updateEmptyStateVisibility()
         requestChromeRefresh()
-        onDocumentOpened?(url)
+        if reviewPDF == nil { onDocumentOpened?(url) }
         PerformanceMetrics.end(
             openSpan,
             extra: [
@@ -5430,6 +5481,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     func unregisterSessionDocument(_ url: URL) {
         rememberReadingPositions()
         let normalized = canonicalDocumentURL(url)
+        sharedReview?.closeTab(at: normalized)
         sessionDocumentURLs.removeAll { canonicalDocumentURL($0) == normalized }
         documentTabCache.remove(normalized)
         splitDocumentSessions.removeValue(forKey: normalized)
@@ -5781,8 +5833,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             let index = document.index(for: page)
             let label = displayPageLabel(forPageIndex: index)
             statusPageSizeLabel.stringValue = "Size: \(formattedPageSize(for: page))"
-            statusPageLabel.stringValue = label
-            statusPageLabel.toolTip = label
+            if isActiveReview, let sharedReview {
+                statusPageLabel.stringValue = label + " · " + sharedReview.syncStatus
+                statusPageLabel.toolTip = label + " · " + sharedReview.syncStatus
+            } else {
+                statusPageLabel.stringValue = label
+                statusPageLabel.toolTip = label
+            }
             statusPageTotalLabel.stringValue = "of \(document.pageCount)"
             statusPageTotalLabel.toolTip = statusPageTotalLabel.stringValue
             if !isEditingFooterPageNumber && statusPageNumberField.currentEditor() == nil {
@@ -6028,6 +6085,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func startAutoGenerateSheetNamesFlow() {
+        guard !isActiveReview else { NSSound.beep(); return }
         guard let document = pdfView.document,
               let currentPage = pdfView.currentPage else {
             beep()
@@ -6318,6 +6376,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     func startAutoLinkSheetNumbersFlow() {
+        guard !isActiveReview else { NSSound.beep(); return }
         guard let document = pdfView.document,
               let currentPage = pdfView.currentPage else {
             beep()
@@ -7812,7 +7871,7 @@ extension MainViewController {
            let state = peer.captureTabViewState() {
             readingPositionStore.save(state, for: session.url, document: document)
         }
-        if let url = openDocumentURL, let document = pdfView.document, let state = pdfView.captureTabViewState() {
+        if !isActiveReview, let url = openDocumentURL, let document = pdfView.document, let state = pdfView.captureTabViewState() {
             readingPositionStore.save(state, for: url, document: document)
         }
     }

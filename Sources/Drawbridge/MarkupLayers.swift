@@ -152,7 +152,7 @@ enum MarkupLayers {
         layerCatalog.layers.first { $0.id == layerCatalog.activeID }?.locked ?? false
     }
     func canAssignLayer(_ annotation: PDFAnnotation) -> Bool {
-        guard !annotation.isReadOnly, !layerIsLocked(annotation), !MarkupLayers.isMetadata(annotation), !MeasurementMetadata.isPageScaleMetadata(annotation) else { return false }
+        guard canManageLayers(), !annotation.isReadOnly, !layerIsLocked(annotation), !MarkupLayers.isMetadata(annotation), !MeasurementMetadata.isPageScaleMetadata(annotation) else { return false }
         // Preserve foreign OCG/OCMD relationships instead of flattening them.
         guard annotation.value(forAnnotationKey: PDFAnnotationKey(rawValue: "/OC")) == nil || MarkupLayers.id(annotation) != nil else { return false }
         return RectangleMarkupRecord.owns(annotation) || ImportedMarkupState.selectable(annotation) ||
@@ -160,7 +160,7 @@ enum MarkupLayers {
     }
     @discardableResult func addLayer(named raw: String) -> String? {
         let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard canEdit(), !name.isEmpty, name.utf8.count <= 200, layerCatalog.layers.count < 1000,
+        guard canManageLayers(), canEdit(), !name.isEmpty, name.utf8.count <= 200, layerCatalog.layers.count < 1000,
               !layerCatalog.layers.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else { return nil }
         var catalog = layerCatalog; let layer = MarkupLayer(name: name); catalog.layers.append(layer)
         setLayerCatalog(catalog, action: "New Layer"); return layer.id
@@ -193,7 +193,7 @@ enum MarkupLayers {
     func removeLayer(_ id: String) {
         guard let document = view?.document else { return }
         let annotations = (0..<document.pageCount).flatMap { document.page(at: $0)?.annotations ?? [] }.filter { MarkupLayers.id($0) == id }
-        guard canEdit(), !layerCatalog.layers.contains(where: { $0.id == id && $0.locked }), annotations.allSatisfy(canAssignLayer) else { NSSound.beep(); return }
+        guard canManageLayers(), canEdit(), !layerCatalog.layers.contains(where: { $0.id == id && $0.locked }), annotations.allSatisfy(canAssignLayer) else { NSSound.beep(); return }
         undo.beginUndoGrouping()
         assignLayer(nil, to: annotations)
         var catalog = layerCatalog; catalog.layers.removeAll { $0.id == id }; if catalog.activeID == id { catalog.activeID = nil }
@@ -201,7 +201,7 @@ enum MarkupLayers {
         undo.endUndoGrouping(); undo.setActionName("Remove Layer")
     }
     func setLayerCatalog(_ catalog: MarkupLayerCatalog, action: String) {
-        guard canEdit(), catalog.isValid, let state = layerState, catalog != state.catalog,
+        guard canManageLayers(), canEdit(), catalog.isValid, let state = layerState, catalog != state.catalog,
               let page = view?.document?.page(at: 0) else { return }
         let before = state.catalog
         undo.registerUndo(withTarget: self) { $0.setLayerCatalog(before, action: action) }; undo.setActionName(action)

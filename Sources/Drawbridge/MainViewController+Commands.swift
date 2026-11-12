@@ -422,6 +422,10 @@ extension MainViewController {
         cycleDocument(step: -1)
     }
     @objc func commandCloseDocument(_ sender: Any?) {
+        if isActiveReview {
+            pdfView.rectangleMarkup.finishTextEditing()
+            guard sharedReview?.hasPendingChanges != true else { NSSound.beep(); return }
+        }
         if let url = openDocumentURL, closeRetainedSplitDocument(at: url) { return }
         guard confirmDiscardUnsavedChangesIfNeeded() else {
             return
@@ -438,7 +442,7 @@ extension MainViewController {
         if restoreSplit { collapsePDFSplit() }
 
         while let fallback = sessionDocumentURLs.last {
-            guard FileManager.default.fileExists(atPath: fallback.path) else {
+            guard fallback == sharedReview?.tabURL || FileManager.default.fileExists(atPath: fallback.path) else {
                 unregisterSessionDocument(fallback)
                 continue
             }
@@ -481,12 +485,21 @@ extension MainViewController {
         if MarkupClipboard.copy(pdfView.rectangleMarkup.selectedItems) { return }
         pdfView.copy(sender)
     }
+    private func pasteTextResponder(in window: NSWindow?) -> NSResponder? {
+        let responder = window?.firstResponder
+        guard responder is NSTextView || responder is NSTextField else { return nil }
+        return responder
+    }
+
     @objc func commandPaste(_ sender: Any?) {
-        if let firstResponder = view.window?.firstResponder,
-           firstResponder is NSTextView || firstResponder is NSTextField {
-            NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: sender)
+        paste(in: NSApp.keyWindow ?? view.window, sender: sender)
+    }
+    func paste(in window: NSWindow?, sender: Any?) {
+        if let textEditor = pasteTextResponder(in: window) {
+            NSApp.sendAction(#selector(NSText.paste(_:)), to: textEditor, from: sender)
             return
         }
+        guard window === view.window else { return }
         guard let page = pdfView.currentPage else { return }
         let session = pdfView.rectangleMarkup
         session.bind(to: pdfView.document)
@@ -712,7 +725,7 @@ extension MainViewController {
             return hasDocument && (secondaryPDFView?.document?.pageCount ?? 0) > 0
         case #selector(commandToggleSplitView(_:)):
             menuItem.state = secondaryPDFView == nil ? .off : .on
-            return hasDocument && !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField)
+            return !isActiveReview && hasDocument && !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField)
         case #selector(commandSettings(_:)), #selector(commandOpen(_:)), #selector(commandKeyboardShortcuts(_:)),
              #selector(commandPerformanceSettings(_:)), #selector(commandMarkupAuthor(_:)), #selector(commandToggleMarkupsList(_:)), #selector(commandQuickStart(_:)):
             return true
@@ -725,13 +738,13 @@ extension MainViewController {
         case #selector(commandExtractPages(_:)):
             return (pdfView.document?.pageCount ?? 0) > 0 && !isPDFFileProcessingOperation && !persistenceCoordinator.isManualSaveInFlight
         case #selector(commandReduceFileSize(_:)):
-            return hasDocument && openDocumentURL != nil && !isPDFProcessingBusy
+            return !isActiveReview && hasDocument && openDocumentURL != nil && !isPDFProcessingBusy
         case #selector(commandFlattenPDF(_:)):
             menuItem.title = "Flatten PDF…"
-            return hasDocument && openDocumentURL != nil && !isPDFFileProcessingOperation && !canUnflattenCurrentDocument()
+            return !isActiveReview && hasDocument && openDocumentURL != nil && !isPDFFileProcessingOperation && !canUnflattenCurrentDocument()
         case #selector(commandUnflattenPDF(_:)):
             menuItem.title = "Unflatten PDF…"
-            return hasDocument && openDocumentURL != nil && !isPDFFileProcessingOperation
+            return !isActiveReview && hasDocument && openDocumentURL != nil && !isPDFFileProcessingOperation
         case #selector(renamePageLabelFromSidebar):
             return hasDocument && pagesTableView.selectedRowIndexes.count == 1
         case #selector(renameBookmarkFromSidebar):
@@ -746,9 +759,13 @@ extension MainViewController {
             }
         case #selector(commandPasteInPlace(_:)):
             return !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField) && hasDocument && pdfView.rectangleMarkup.canEdit() && !pdfView.rectangleMarkup.activeLayerIsLocked && (MarkupClipboard.canPaste() || SnapshotPayload.clipboard()?.placement != nil)
-        case #selector(commandCopy(_:)), #selector(commandPaste(_:)), #selector(commandSelectAll(_:)):
+        case #selector(commandPaste(_:)):
+            if pasteTextResponder(in: NSApp.keyWindow ?? view.window) != nil { return true }
+            guard NSApp.keyWindow == nil || NSApp.keyWindow === view.window else { return false }
+            return hasDocument && pdfView.rectangleMarkup.canEdit() && !pdfView.rectangleMarkup.activeLayerIsLocked
+                && (MarkupClipboard.canPaste() || SnapshotPayload.clipboard() != nil)
+        case #selector(commandCopy(_:)), #selector(commandSelectAll(_:)):
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField { return true }
-            if action == #selector(commandPaste(_:)) { return hasDocument && pdfView.rectangleMarkup.canEdit() && !pdfView.rectangleMarkup.activeLayerIsLocked && (MarkupClipboard.canPaste() || SnapshotPayload.clipboard() != nil) }
             if action == #selector(commandCopy(_:)) { return pdfView.currentSelection != nil || !pdfView.rectangleMarkup.selectedItems.isEmpty }
             return hasDocument
         case #selector(commandSave(_:)), #selector(commandSaveCopy(_:)),

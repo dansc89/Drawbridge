@@ -151,6 +151,7 @@ extension RectangleMarkupRecord {
                 annotation.endPoint = CGPoint(x: end.x - bounds.minX, y: end.y - bounds.minY)
                 annotation.endLineStyle = kind == .arrow ? .openArrow : .none
             }
+            if revisionCloud == true { annotation.setValue(true, forAnnotationKey: Self.cloudKey) }
             if !vertices.isEmpty { Self.setVertices(vertices, on: annotation) }
             if let inkTool { annotation.setValue(inkTool, forAnnotationKey: Self.inkToolKey) }
         }

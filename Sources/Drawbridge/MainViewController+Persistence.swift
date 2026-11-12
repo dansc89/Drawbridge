@@ -123,6 +123,7 @@ extension MainViewController {
             completion?(false)
             return
         }
+        guard document !== sharedReview?.reviewPDF else { completion?(false); return }
         // Reject retained-session collisions before source recovery, model mutation,
         // save admission or any background write. Filesystem replacement consent
         // does not authorize discarding another document's edits and undo history.
@@ -755,6 +756,7 @@ extension MainViewController {
     }
 
     func scheduleAutosave() {
+        guard !isActiveReview else { return }
         // A sidecar is not a saved PDF. New markup stays dirty until the verified PDF commit.
         guard !pdfView.rectangleMarkup.hasUnsavedChanges else { return }
         // Retain PDF dirty state without repeatedly writing the same sidecar.
@@ -770,6 +772,7 @@ extension MainViewController {
     }
 
     func performAutosaveNow() {
+        guard !isActiveReview else { return }
         guard !pdfView.rectangleMarkup.hasUnsavedChanges else { return }
         guard let document = pdfView.document,
               let targetURL = autosaveURL ?? openDocumentURL,

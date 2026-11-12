@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    private let sharedReview = SharedReviewWindowController()
     private var window: NSWindow?
     private var mainViewController: MainViewController?
     private let mergePDFWorkflow = PDFMergeWorkflow()
@@ -46,6 +47,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.delegate = self
         window.isMovableByWindowBackground = false
         let mainViewController = MainViewController()
+        sharedReview.editor = mainViewController
+        mainViewController.sharedReview = sharedReview
         loadRecentFiles()
         mainViewController.onDocumentOpened = { [weak self] url in
             guard let self else { return }
@@ -78,6 +81,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if mainViewController?.isActiveReview == true { mainViewController?.pdfView.rectangleMarkup.finishTextEditing() }
+        guard sharedReview.canQuit() else { return .terminateCancel }
         guard let controller = mainViewController else { return .terminateNow }
         guard controller.confirmAllDocumentsForClose() else { return .terminateCancel }
         guard controller.hasPendingPDFWriteForTermination() else { return .terminateNow }
@@ -119,7 +124,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard let controller = (sender.contentViewController as? MainViewController) ?? mainViewController else { return true }
-        return controller.confirmAllDocumentsForClose()
+        if controller.isActiveReview { controller.pdfView.rectangleMarkup.finishTextEditing() }
+        return sharedReview.canQuit() && controller.confirmAllDocumentsForClose()
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -206,6 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         fileItem.title = "File"
         mainMenu.addItem(fileItem)
         let fileMenu = NSMenu(title: "File")
+        fileMenu.addItem(withTitle: "Drawbridge Review…", action: #selector(SharedReviewWindowController.showReviews(_:)), keyEquivalent: "").target = sharedReview
         fileMenu.addItem(withTitle: "Open PDF...", action: #selector(MainViewController.commandOpen(_:)), keyEquivalent: "o").target = controller
         mergePDFWorkflow.controller = controller
         controller.configureWelcomeMerge(workflow: mergePDFWorkflow)
