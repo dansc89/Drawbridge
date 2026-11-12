@@ -212,7 +212,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         fileItem.title = "File"
         mainMenu.addItem(fileItem)
         let fileMenu = NSMenu(title: "File")
-        fileMenu.addItem(withTitle: "Drawbridge Review…", action: #selector(SharedReviewWindowController.showReviews(_:)), keyEquivalent: "").target = sharedReview
         fileMenu.addItem(withTitle: "Open PDF...", action: #selector(MainViewController.commandOpen(_:)), keyEquivalent: "o").target = controller
         mergePDFWorkflow.controller = controller
         controller.configureWelcomeMerge(workflow: mergePDFWorkflow)
@@ -221,6 +220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         fileMenu.addItem(withTitle: "Insert Pages…", action: #selector(MainViewController.commandInsertPages(_:)), keyEquivalent: "").target = controller
         controller.configureWelcomeBookmarkIndex(workflow: bookmarkIndexWorkflow)
         fileMenu.addItem(withTitle: "Extract Bookmark Index…", action: #selector(BookmarkIndexWorkflow.showExtract(_:)), keyEquivalent: "").target = bookmarkIndexWorkflow
+        fileMenu.addItem(withTitle: "Drawbridge Review…", action: #selector(SharedReviewWindowController.showReviews(_:)), keyEquivalent: "").target = sharedReview
         fileMenu.addItem(withTitle: "Close", action: #selector(MainViewController.commandCloseDocument(_:)), keyEquivalent: "w").target = controller
         let openRecentRoot = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
         let openRecentMenu = NSMenu(title: "Open Recent")
