@@ -424,6 +424,7 @@ extension MainViewController {
     @objc func commandCloseDocument(_ sender: Any?) {
         if isActiveReview {
             pdfView.rectangleMarkup.finishTextEditing()
+            activeReview?.retryPendingEditsSave()
             guard activeReview?.hasPendingChanges != true else { NSSound.beep(); return }
         }
         if let url = openDocumentURL, closeRetainedSplitDocument(at: url) { return }

@@ -19,7 +19,10 @@ struct SharedReviewOutbox {
          directory: URL? = nil) throws {
         let root = try directory ?? FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true
-        ).appendingPathComponent("Drawbridge/Review Outbox", isDirectory: true)
+        ).appendingPathComponent(
+            Bundle.main.bundleIdentifier == "com.drawbridge.app.review-private-test" ? "Drawbridge Review Test" : "Drawbridge",
+            isDirectory: true
+        ).appendingPathComponent("Review Outbox", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         let scope = try JSONEncoder().encode([origin.absoluteString, instanceID, documentID])

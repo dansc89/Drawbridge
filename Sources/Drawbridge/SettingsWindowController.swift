@@ -31,13 +31,110 @@ import Security
     private let serverPassword = NSSecureTextField()
     private let serverStatus = NSTextField(labelWithString: "")
     private lazy var serverSignIn = button("Sign In", #selector(signInToServer))
+    private lazy var serverGoogleSignIn = button("Sign in with Google", #selector(signInWithGoogle))
     private lazy var serverSignOut = button("Sign Out", #selector(signOutOfServer))
     private let serverLoginForm = NSStackView()
     private var signingIn = false
+    // Injectable boundaries keep offline auth tests away from browser and user Keychain.
+    var reviewAuthTransport: ReviewGoogleSignIn.Transport = ReviewGoogleSignIn.liveTransport
+    var reviewGoogleIdentityToken: ((String) async throws -> String)?
+    var reviewDeviceKey: ((URL, String) throws -> String)?
+    private static var reviewAuthGeneration = UUID()
+    private static func checkReviewAuthGeneration(_ generation: UUID) throws {
+        try Task.checkCancellation()
+        guard generation == reviewAuthGeneration else { throw CancellationError() }
+    }
+
+    func reviewSignIn(origin: URL, useGoogle: Bool, username: String, password: String,
+                      markupAuthor: String) async throws -> ServerSession {
+        let generation = Self.reviewAuthGeneration
+        let flow = ReviewGoogleSignIn(transport: reviewAuthTransport)
+        let config = try await flow.configuration(origin: origin)
+        try Self.checkReviewAuthGeneration(generation)
+        if useGoogle {
+            let clientID = try config.googleClientID()
+            let idToken: String
+            if let provider = reviewGoogleIdentityToken {
+                idToken = try await provider(clientID)
+            } else {
+                let attempt = try ReviewGoogleSignIn.Attempt()
+                let listener = try ReviewOAuthLoopback()
+                defer { listener.cancel() }
+                let url = try attempt.authorizationURL(clientID: clientID, redirect: listener.redirect)
+                guard NSWorkspace.shared.open(url) else { throw SharedReviewError("Could not open the browser for Google sign-in.") }
+                let callback = try await listener.callback()
+                try Self.checkReviewAuthGeneration(generation)
+                let code = try attempt.code(from: callback, redirect: listener.redirect)
+                idToken = try await flow.idToken(code: code, clientID: clientID, redirect: listener.redirect, attempt: attempt)
+                try attempt.validateNonce(in: idToken)
+            }
+            try Self.checkReviewAuthGeneration(generation)
+            let key = try reviewDeviceKey?(origin, "google-sso") ?? Self.sharedReviewDeviceKey(origin: origin, username: "google-sso")
+            let session = try await flow.exchange(origin: origin, idToken: idToken, deviceKey: key)
+            try Self.checkReviewAuthGeneration(generation)
+            return session
+        }
+        guard config.allowsPassword else { throw SharedReviewError("Password sign-in is not enabled on this server. Use Google or contact your administrator.") }
+        guard !username.isEmpty, !password.isEmpty else { throw SharedReviewError("Enter your office login and password.") }
+        let key = try reviewDeviceKey?(origin, username) ?? Self.sharedReviewDeviceKey(origin: origin, username: username)
+        var request = URLRequest(url: origin.appendingPathComponent("v1/auth/login"), timeoutInterval: 15)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["username": username, "password": password, "markupAuthor": markupAuthor, "deviceKey": key])
+        let data = try await reviewAuthTransport(request)
+        try Self.checkReviewAuthGeneration(generation)
+        return try JSONDecoder().decode(ServerSession.self, from: data)
+    }
     static var activeReviewSession: (origin: URL, session: ServerSession)?
-    private static var attemptedSessionRestore = false
+    static var attemptedSessionRestore = false
+    static var reviewSessionDefaults = UserDefaults.standard
+    // Session-only injection: offline tests never touch the user's Keychain.
+    static var reviewSessionRead: @MainActor () throws -> Data? = readSessionData
+    static var reviewSessionWrite: @MainActor (Data) -> Bool = writeSessionData
+    static var reviewSessionDelete: @MainActor () -> Void = deleteSessionData
+
+    private static func readSessionData() throws -> Data? {
+        var query = serverKeychainQuery
+        query[kSecReturnData as String] = true
+        var result: CFTypeRef?
+        let status = withoutKeychainPrompts { SecItemCopyMatching(query as CFDictionary, &result) }
+        guard status == errSecSuccess else { throw SharedReviewError("Review session is unavailable.") }
+        return result as? Data
+    }
+    private static func writeSessionData(_ data: Data) -> Bool {
+        let query = serverKeychainQuery
+        return withoutKeychainPrompts {
+            let updated = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+            return updated == errSecItemNotFound
+                ? SecItemAdd(query.merging([kSecValueData as String: data]) { _, new in new } as CFDictionary, nil)
+                : updated
+        } == errSecSuccess
+    }
+    private static func deleteSessionData() {
+        _ = withoutKeychainPrompts { SecItemDelete(serverKeychainQuery as CFDictionary) }
+    }
+    @discardableResult
+    static func persistReviewSession(origin: URL, session: ServerSession) throws -> Bool {
+        let origin = try ReviewGoogleSignIn.origin(origin.absoluteString)
+        guard validReviewSession(session) else { throw SharedReviewError("Invalid Review session. Sign in again.") }
+        let saved = reviewSessionWrite(try JSONEncoder().encode(StoredReviewSession(version: 1, origin: origin.absoluteString, session: session)))
+        reviewSessionDefaults.set(!saved, forKey: skipSessionRestoreKey)
+        reviewSessionDefaults.set(origin.absoluteString, forKey: "sharedServerDomain")
+        return saved
+    }
     private static let skipSessionRestoreKey = "DrawbridgeSkipReviewSessionRestore"
-    private static let serverKeychainService = "com.drawbridge.app.shared-session"
+    private struct StoredReviewSession: Codable {
+        let version: Int
+        let origin: String
+        let session: ServerSession
+    }
+    private static func validReviewSession(_ session: ServerSession) -> Bool {
+        [session.token, session.instanceId, session.displayName ?? ""].allSatisfy {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            $0.rangeOfCharacter(from: .controlCharacters) == nil
+        }
+    }
+    private static let serverKeychainService = (Bundle.main.bundleIdentifier ?? "com.drawbridge.app") + ".shared-session"
     private var keys: [ShortcutAction: NSTextField] = [:]
     private var modifiers: [ShortcutAction: NSPopUpButton] = [:]
     private let validation = NSTextField(labelWithString: "")
@@ -143,7 +240,7 @@ import Security
             row("Server domain", field(serverDomain, id: "serverDomain", value: defaults.string(forKey: "sharedServerDomain") ?? "")),
             row("Office login", field(serverUsername, id: "serverUsername", value: defaults.string(forKey: "sharedServerUsername") ?? "")),
             row("Password", field(serverPassword, id: "serverPassword", value: "")),
-            serverSignIn
+            NSStackView(views: [serverGoogleSignIn, serverSignIn])
         ] { serverLoginForm.addArrangedSubview(view) }
         pane(.general, [
             row("Markup author", field(author, id: "markupAuthor", value: MarkupAuthorPreference.currentName)),
@@ -165,6 +262,7 @@ import Security
         serverLoginForm.isHidden = current != nil
         serverSignOut.isHidden = current == nil
         serverSignIn.isEnabled = !signingIn && current == nil
+        serverGoogleSignIn.isEnabled = !signingIn && current == nil
         if let message { serverStatus.stringValue = message }
         else if let (_, session) = current {
             serverStatus.stringValue = session.displayName.map { "Signed in as " + $0 } ?? "Signed in to Review."
@@ -190,60 +288,77 @@ import Security
 
     static let reviewSessionDidChange = Notification.Name("DrawbridgeReviewSessionDidChange")
 
-    @objc private func signOutOfServer() {
+    @objc func signOutOfServer() {
+        Self.reviewAuthGeneration = UUID()
+        let previousSession = Self.activeReviewSession
         Self.activeReviewSession = nil
         // If Keychain is locked, prevent the old entry from restoring next launch.
-        UserDefaults.standard.set(true, forKey: Self.skipSessionRestoreKey)
-        _ = Self.withoutKeychainPrompts { SecItemDelete(Self.serverKeychainQuery as CFDictionary) }
-        UserDefaults.standard.removeObject(forKey: "drawbridgeReviewUsername")
+        Self.reviewSessionDefaults.set(true, forKey: Self.skipSessionRestoreKey)
+        Self.reviewSessionDelete()
+        Self.reviewSessionDefaults.removeObject(forKey: "drawbridgeReviewUsername")
         serverPassword.stringValue = ""
         refreshServerLogin(message: "Signed out on this Mac.")
         NotificationCenter.default.post(name: Self.reviewSessionDidChange, object: nil)
+        if let (origin, session) = previousSession, session.workspaceIdentity == true {
+            let transport = reviewAuthTransport
+            let generation = Self.reviewAuthGeneration
+            Task {
+                var request = URLRequest(url: origin.appendingPathComponent("v1/auth/logout"), timeoutInterval: 15)
+                request.httpMethod = "POST"
+                request.setValue("Bearer " + session.token, forHTTPHeaderField: "Authorization")
+                do {
+                    _ = try await transport(request)
+                } catch {
+                    guard generation == Self.reviewAuthGeneration, Self.activeReviewSession == nil else { return }
+                    refreshServerLogin(message: "Signed out on this Mac. The server could not confirm sign-out.")
+                }
+            }
+        }
     }
 
     @objc private func signInToServer() {
+        beginServerSignIn(useGoogle: false)
+    }
+
+    @objc private func signInWithGoogle() {
+        beginServerSignIn(useGoogle: true)
+    }
+
+    private func beginServerSignIn(useGoogle: Bool) {
         guard !signingIn, Self.activeReviewSession == nil else { return }
         window?.makeFirstResponder(nil)
         let domain = serverDomain.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let username = serverUsername.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let password = serverPassword.stringValue
-        guard var components = URLComponents(string: domain.contains("://") ? domain : "https://" + domain),
-              components.scheme?.lowercased() == "https", let host = components.host, !host.isEmpty,
-              components.user == nil, components.password == nil, components.query == nil,
-              components.fragment == nil, ["", "/"].contains(components.path),
-              !username.isEmpty, !password.isEmpty else {
-            serverStatus.stringValue = "Enter an HTTPS server domain, username, and password."
+        guard let origin = try? ReviewGoogleSignIn.origin(domain) else {
+            serverStatus.stringValue = "Enter an HTTPS Review server origin with no path, query, or credentials."
             return
         }
-        components.path = ""
-        guard let origin = components.url else { return }
         let name = author.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let markupAuthor = name.isEmpty ? NSFullUserName() : name
         serverSignIn.isEnabled = false
+        serverGoogleSignIn.isEnabled = false
         signingIn = true
         serverPassword.stringValue = ""
         serverStatus.stringValue = "Signing in…"
+        let generation = Self.reviewAuthGeneration
         Task {
-            defer { signingIn = false; serverSignIn.isEnabled = Self.activeReviewSession == nil }
+            defer {
+                signingIn = false
+                serverSignIn.isEnabled = Self.activeReviewSession == nil
+                serverGoogleSignIn.isEnabled = Self.activeReviewSession == nil
+            }
             do {
-                let token = try await Self.authenticate(origin: origin, username: username, password: password, markupAuthor: markupAuthor,
-                                                        deviceKey: Self.sharedReviewDeviceKey(origin: origin, username: username))
+                let token = try await reviewSignIn(origin: origin, useGoogle: useGoogle, username: username,
+                                                   password: password, markupAuthor: markupAuthor)
+                try Self.checkReviewAuthGeneration(generation)
+                let saved = try Self.persistReviewSession(origin: origin, session: token)
                 Self.activeReviewSession = (origin, token)
                 NotificationCenter.default.post(name: Self.reviewSessionDidChange, object: nil)
-                let session = try JSONEncoder().encode(token)
-                let query = Self.serverKeychainQuery
-                let status = Self.withoutKeychainPrompts {
-                    let updated = SecItemUpdate(query as CFDictionary, [kSecValueData as String: session] as CFDictionary)
-                    return updated == errSecItemNotFound
-                        ? SecItemAdd(query.merging([kSecValueData as String: session]) { _, new in new } as CFDictionary, nil)
-                        : updated
-                }
-                UserDefaults.standard.set(status != errSecSuccess, forKey: Self.skipSessionRestoreKey)
-                UserDefaults.standard.set(origin.absoluteString, forKey: "sharedServerDomain")
                 UserDefaults.standard.set(username, forKey: "sharedServerUsername")
                 UserDefaults.standard.set(name, forKey: MarkupAuthorPreference.defaultsKey)
                 serverDomain.stringValue = origin.absoluteString
-                let suffix = status == errSecSuccess ? "" : " for this launch"
+                let suffix = saved ? "" : " for this launch"
                 refreshServerLogin(message: "Signed in as " + (token.displayName ?? markupAuthor) + suffix + ".")
             } catch {
                 serverStatus.stringValue = error.localizedDescription
@@ -255,22 +370,23 @@ import Security
         let token: String
         let instanceId: String
         let displayName: String?
+        var workspaceIdentity: Bool? = nil
     }
 
     static func sharedReviewCredentials() throws -> (URL, ServerSession) {
         if let activeReviewSession { return activeReviewSession }
         defer { attemptedSessionRestore = true }
-        if !attemptedSessionRestore, !UserDefaults.standard.bool(forKey: skipSessionRestoreKey),
-           let domain = UserDefaults.standard.string(forKey: "sharedServerDomain"),
-           let url = URL(string: domain), url.scheme == "https" {
-            var query = serverKeychainQuery
-            query[kSecReturnData as String] = true
-            var result: CFTypeRef?
-            if withoutKeychainPrompts({ SecItemCopyMatching(query as CFDictionary, &result) }) == errSecSuccess,
-               let data = result as? Data,
-               let session = try? JSONDecoder().decode(ServerSession.self, from: data) {
-                activeReviewSession = (url, session)
-                return (url, session)
+        if !attemptedSessionRestore, !reviewSessionDefaults.bool(forKey: skipSessionRestoreKey),
+           let domain = reviewSessionDefaults.string(forKey: "sharedServerDomain"),
+           let url = try? ReviewGoogleSignIn.origin(domain) {
+            if let data = try? reviewSessionRead(),
+               let stored = try? JSONDecoder().decode(StoredReviewSession.self, from: data),
+               stored.version == 1,
+               let boundOrigin = try? ReviewGoogleSignIn.origin(stored.origin),
+               stored.origin == boundOrigin.absoluteString,
+               boundOrigin == url, validReviewSession(stored.session) {
+                activeReviewSession = (boundOrigin, stored.session)
+                return (boundOrigin, stored.session)
             }
         }
         throw SharedReviewError("Sign in under Drawbridge → Settings → General.")

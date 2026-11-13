@@ -44,6 +44,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private lazy var deleteButton = button("Delete…", #selector(deleteSelectedItems))
     private static let reviewDocumentDrag = NSPasteboard.PasteboardType("com.drawbridge.review.document-id")
     private var organizationActions = false
+    private weak var reviewAlertSheet: NSWindow?
     private var deleteConfirmationUsername: String?
     private weak var confirmDeleteButton: NSButton?
     private var folderID: String?
@@ -69,13 +70,83 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private var syncing = false
     private var ready = false
     private var syncRequested = false
+    private var lifecycle = UUID()
+    private var sessionInvalidated = false
+    private var capturedAPIs: [SharedReviewAPI] = []
+    private var operationTask: Task<Void, Never>?
+    private var editSyncTask: Task<Void, Never>?
 
     init(outboxDirectory: URL? = nil, cacheDirectory: URL? = nil) {
         self.outboxDirectory = outboxDirectory
         self.cacheDirectory = cacheDirectory
         super.init(window: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(reviewSessionChanged),
+            name: SettingsWindowController.reviewSessionDidChange, object: nil)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    deinit { NotificationCenter.default.removeObserver(self) }
+
+    @objc private func reviewSessionChanged() {
+        lifecycle = UUID()
+        sessionInvalidated = true
+        // Pending edits (including failed local saves) and PDF/cache bytes are
+        // retained, never replayed by this invalidated review. Reopening requires
+        // fresh server authorization and the existing origin/device outbox scope.
+        stopSync()
+        operationTask?.cancel()
+        operationTask = nil
+        capturedAPIs.forEach { $0.invalidate() }
+        capturedAPIs.removeAll()
+        api?.invalidate()
+        reviewAPI?.invalidate()
+        api = nil
+        reviewAPI = nil
+        reviewUsername = nil
+        documentID = nil
+        project = nil
+        workspaceKey = nil
+        folderID = nil
+        folders = nil
+        documents.removeAll()
+        organizationActions = false
+        deleteConfirmationUsername = nil
+        confirmDeleteButton?.isEnabled = false
+        confirmDeleteButton = nil
+        if let sheet = reviewAlertSheet {
+            reviewAlertSheet = nil
+            sheet.sheetParent?.endSheet(sheet, returnCode: .cancel)
+        }
+        busy = false
+        if !retryPendingEditsSave() {
+            updateReviewStatus("Signed out · Pending edits are only in memory")
+            status.stringValue = "Pending edits could not be saved locally. Keep this tab open to retain them."
+        } else {
+            updateReviewStatus("Signed out · Local pending edits retained")
+            status.stringValue = "Sign in and reopen Review to continue. Local edits and cached PDFs are retained."
+        }
+        documentsTable.reloadData()
+        updateBrowserControls()
+        editor?.refreshRectangleToolbar()
+    }
+
+    private func checkLifecycle(_ generation: UUID, api: SharedReviewAPI) throws {
+        try api.checkActive()
+        guard lifecycle == generation, !sessionInvalidated else { throw CancellationError() }
+    }
+
+    private func presentReviewAlert(_ alert: NSAlert, in window: NSWindow,
+                                    generation: UUID, api: SharedReviewAPI) async throws -> NSApplication.ModalResponse {
+        try checkLifecycle(generation, api: api)
+        let sheet = alert.window
+        reviewAlertSheet = sheet
+        let response = await withCheckedContinuation { continuation in
+            alert.beginSheetModal(for: window) { continuation.resume(returning: $0) }
+        }
+        try checkLifecycle(generation, api: api)
+        reviewAlertSheet = nil
+        return response
+    }
 
     @objc func showReviews(_ sender: Any?) {
         if window == nil { buildWindow() }
@@ -84,7 +155,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         refreshDocuments(nil)
     }
 
-    private func buildWindow() {
+    func buildWindow() {
         let window = ReviewBrowserWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 390),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         window.title = "Drawbridge Review — Server Documents"
@@ -136,7 +207,10 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         openButton.keyEquivalent = "\r"
         let controls = NSStackView(views: [newFolderButton, uploadButton, refreshButton, deleteButton, NSView(), openButton])
         controls.spacing = 8
-        let stack = NSStackView(views: [navigation, list, status, controls])
+        // Presence has no supported workspace transport yet. Keep this explicitly
+        // unavailable rather than treating document sessions or author names as people.
+        let participants = ReviewParticipantsView(frame: .zero)
+        let stack = NSStackView(views: [navigation, list, status, controls, participants])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
@@ -151,6 +225,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
                 list.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
                 navigation.widthAnchor.constraint(equalTo: list.widthAnchor),
+                participants.widthAnchor.constraint(equalTo: list.widthAnchor),
                 controls.widthAnchor.constraint(equalTo: list.widthAnchor)
             ])
         }
@@ -200,17 +275,31 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     @objc private func refreshDocuments(_ sender: Any?) {
+        if sessionInvalidated, SettingsWindowController.activeReviewSession != nil {
+            sessionInvalidated = false
+        }
         perform { try await self.loadDocuments() }
     }
 
+    var makeReviewAPI: (URL, SettingsWindowController.ServerSession) -> SharedReviewAPI = { origin, credentials in
+        SharedReviewAPI(origin: origin, token: credentials.token, displayName: credentials.displayName, instanceID: credentials.instanceId)
+    }
+
     func loadDocuments() async throws {
+        // Cleanup reloads may outlive logout; only explicit browser refresh can reauthorize.
+        try Task.checkCancellation()
+        guard !sessionInvalidated else { throw CancellationError() }
         let (origin, credentials) = try SettingsWindowController.sharedReviewCredentials()
-        let api = SharedReviewAPI(origin: origin, token: credentials.token, displayName: credentials.displayName, instanceID: credentials.instanceId)
+        let generation = lifecycle
+        let api = makeReviewAPI(origin, credentials)
+        capturedAPIs.append(api)
         let projects: SharedReviewAPI.ProjectList = try await api.get("projects")
+        try checkLifecycle(generation, api: api)
         guard let project = projects.projects.first(where: { $0.name == "AERO Collective" }) ?? projects.projects.first else {
             throw SharedReviewError("Your account has no shared projects.")
         }
         let list: SharedReviewAPI.DocumentList = try await api.get("projects/\(project.id)/documents")
+        try checkLifecycle(generation, api: api)
         let key = "DrawbridgeReviewFolder|\(origin.absoluteString)|\(api.instanceID)|\(project.id)"
         if workspaceKey != key {
             workspaceKey = key
@@ -281,8 +370,10 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         alert.accessoryView = name
         alert.window.initialFirstResponder = name
         let parent = folderID
+        let generation = lifecycle
         alert.beginSheetModal(for: window) { [weak self] response in
-            guard response == .alertFirstButtonReturn, let self else { return }
+            guard response == .alertFirstButtonReturn, let self,
+                  (try? self.checkLifecycle(generation, api: api)) != nil else { return }
             let title = name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !title.isEmpty else { return }
             self.perform {
@@ -398,6 +489,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             status.stringValue = "Wait for the selected PDFs’ pending edits to sync before deleting them."
             return
         }
+        let generation = lifecycle
         perform {
             let username = try await self.requireReviewUsername(using: api, saveToSettings: true)
             let warning = NSAlert()
@@ -411,9 +503,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             }
             warning.addButton(withTitle: "Continue")
             warning.addButton(withTitle: "Cancel")
-            let response = await withCheckedContinuation { continuation in
-                warning.beginSheetModal(for: window) { continuation.resume(returning: $0) }
-            }
+            let response = try await self.presentReviewAlert(warning, in: window, generation: generation, api: api)
             guard response == .alertFirstButtonReturn else { self.showFolder(); return }
 
             let confirm = NSAlert()
@@ -428,9 +518,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             confirm.window.initialFirstResponder = field
             self.deleteConfirmationUsername = username
             self.confirmDeleteButton = submit
-            let finalResponse = await withCheckedContinuation { continuation in
-                confirm.beginSheetModal(for: window) { continuation.resume(returning: $0) }
-            }
+            let finalResponse = try await self.presentReviewAlert(confirm, in: window, generation: generation, api: api)
             self.deleteConfirmationUsername = nil
             self.confirmDeleteButton = nil
             guard finalResponse == .alertFirstButtonReturn, field.stringValue == username else {
@@ -446,11 +534,14 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                     let _: SharedReviewAPI.OrganizationReceipt = try await api.post("projects/\(project.id)/remove-item",
                         SharedReviewAPI.RemoveRequest(kind: item.kind, id: item.id, confirmation: username))
                 } catch {
+                    try self.checkLifecycle(generation, api: api)
                     if index > 0 { try? await self.loadDocuments() }
+                    try self.checkLifecycle(generation, api: api)
                     let reason = item.kind == "folder" && (error as? SharedReviewError)?.statusCode == 409
                         ? "Move or delete the folder’s contents first." : error.localizedDescription
                     throw SharedReviewError("Deleted \(index) of \(items.count) selected items. Couldn’t delete “\(item.name)”. \(reason)")
                 }
+                try self.checkLifecycle(generation, api: api)
                 for review in reviews {
                     review.ready = false
                     review.updateReviewStatus("Removed from workspace")
@@ -458,6 +549,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 self.editor?.refreshRectangleToolbar()
             }
             try await self.loadDocuments()
+            try self.checkLifecycle(generation, api: api)
             self.status.stringValue = items.count == 1 ? "Deleted 1 item." : "Deleted \(items.count) items."
         }
     }
@@ -472,14 +564,18 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.pdf]
         panel.allowsMultipleSelection = true
+        let generation = lifecycle
+        let destination = folderID
         panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, !panel.urls.isEmpty, let self else { return }
-            self.uploadPDFs(panel.urls, to: self.folderID, project: project, using: api)
+            guard response == .OK, !panel.urls.isEmpty, let self,
+                  (try? self.checkLifecycle(generation, api: api)) != nil else { return }
+            self.uploadPDFs(panel.urls, to: destination, project: project, using: api)
         }
     }
 
     private func uploadPDFs(_ files: [URL], to destination: String?,
                             project: SharedReviewAPI.Project, using api: SharedReviewAPI) {
+        let generation = lifecycle
         perform {
             for file in files {
                 do { try self.validateUpload(file) }
@@ -491,6 +587,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 do {
                     self.status.stringValue = prefix + "Preparing \(file.lastPathComponent)…"
                     _ = try await api.upload(file, project: project, folderID: destination) { sent, size in
+                        guard (try? self.checkLifecycle(generation, api: api)) != nil else { return }
                         if sent == size {
                             self.status.stringValue = prefix + "Verifying \(file.lastPathComponent)…"
                         } else {
@@ -499,17 +596,22 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                             self.status.stringValue = prefix + "Uploading \(sentMB) of \(totalMB)…"
                         }
                     }
+                    try self.checkLifecycle(generation, api: api)
                 } catch {
+                    try self.checkLifecycle(generation, api: api)
                     if index > 0 { try? await self.loadDocuments() }
+                    try self.checkLifecycle(generation, api: api)
                     throw SharedReviewError("Uploaded \(index) of \(files.count) PDFs. \(file.lastPathComponent) failed. \(error.localizedDescription)")
                 }
             }
             try await self.loadDocuments()
+            try self.checkLifecycle(generation, api: api)
             self.status.stringValue = "Uploaded \(files.count) \(files.count == 1 ? "PDF" : "PDFs")."
         }
     }
 
     private func perform(_ work: @escaping @MainActor () async throws -> Void) {
+        guard !sessionInvalidated else { return }
         guard !busy else {
             status.stringValue = "Wait for the current server operation to finish."
             return
@@ -517,20 +619,28 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         busy = true
         updateBrowserControls()
         status.stringValue = "Contacting server…"
-        Task {
+        let generation = lifecycle
+        operationTask = Task {
             defer {
-                busy = false
-                updateBrowserControls()
+                if lifecycle == generation {
+                    busy = false
+                    operationTask = nil
+                    updateBrowserControls()
+                }
             }
-            do { try await work() }
-            catch { status.stringValue = error.localizedDescription }
+            do { try Task.checkCancellation(); try await work() }
+            catch { if lifecycle == generation { status.stringValue = error.localizedDescription } }
         }
     }
 
     @discardableResult
     func open(_ document: SharedReviewAPI.Document, using connection: SharedReviewAPI? = nil,
               focusEditor: Bool = true) async throws -> Bool {
+        guard !sessionInvalidated else { throw CancellationError() }
+        let generation = lifecycle
         guard let api = connection ?? api, let editor else { return false }
+        try checkLifecycle(generation, api: api)
+        capturedAPIs.append(api)
         if window == nil { buildWindow() }
         let existing = ([self] + Array(additionalReviews.values)).first {
             $0.documentID == document.id && $0.reviewAPI?.origin == api.origin && $0.reviewAPI?.instanceID == api.instanceID
@@ -542,8 +652,10 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             return true
         }
         let username = try await requireReviewUsername(using: api, saveToSettings: connection == nil)
+        try checkLifecycle(generation, api: api)
         // Recheck access before serving locally retained drawing bytes.
         let response: SharedReviewAPI.CreatedSession = try await api.post("documents/\(document.id)/sessions", ["name": "Drawbridge Review"])
+        try checkLifecycle(generation, api: api)
         let cache = try SharedReviewPDFCache(origin: api.origin, instanceID: api.instanceID,
                                              document: document, directory: cacheDirectory)
         let bytes: Data
@@ -553,6 +665,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         } else {
             bytes = try await api.download(document)
         }
+        try checkLifecycle(generation, api: api)
         guard let pdf = PDFDocument(data: bytes), pdf.pageCount > 0, !pdf.isLocked else {
             throw SharedReviewError("The shared PDF could not be opened.")
         }
@@ -562,7 +675,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         let recoveredEdits = try outbox.load()
         guard editor.confirmDiscardUnsavedChangesIfNeeded(), !editor.isPDFProcessingBusy else { return false }
         if editor.secondaryPDFView != nil { editor.collapsePDFSplit() }
-        let review = tabURL == nil ? self : SharedReviewWindowController()
+        let review = tabURL == nil ? self : SharedReviewWindowController(outboxDirectory: outboxDirectory, cacheDirectory: cacheDirectory)
         review.editor = editor
         review.outbox = outbox
         review.pending = recoveredEdits
@@ -625,7 +738,10 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     private func requireReviewUsername(using api: SharedReviewAPI, saveToSettings: Bool) async throws -> String {
+        let generation = lifecycle
+        try checkLifecycle(generation, api: api)
         let capabilities: SharedReviewAPI.Capabilities = try await api.get("auth/me")
+        try checkLifecycle(generation, api: api)
         guard capabilities.reviewUsernames == true else {
             throw SharedReviewError("This server needs the Drawbridge Review username update.")
         }
@@ -638,11 +754,13 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         } else {
             username = try await chooseReviewUsername(using: api)
         }
+        try checkLifecycle(generation, api: api)
         if saveToSettings { UserDefaults.standard.set(username, forKey: "drawbridgeReviewUsername") }
         return username
     }
 
     private func chooseReviewUsername(using api: SharedReviewAPI) async throws -> String {
+        let generation = lifecycle
         guard let window else { throw SharedReviewError("Open Drawbridge Review to choose a username.") }
         let field = NSTextField(string: (api.displayName ?? "").replacingOccurrences(
             of: "[^A-Za-z0-9._-]+", with: "-", options: .regularExpression
@@ -657,10 +775,9 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             alert.window.initialFirstResponder = field
             alert.addButton(withTitle: "Continue")
             alert.addButton(withTitle: "Cancel")
-            let response = await withCheckedContinuation { continuation in
-                alert.beginSheetModal(for: window) { continuation.resume(returning: $0) }
-            }
+            let response = try await presentReviewAlert(alert, in: window, generation: generation, api: api)
             alert.accessoryView = nil
+            try checkLifecycle(generation, api: api)
             guard response == .alertFirstButtonReturn else { throw SharedReviewError("Review canceled.") }
             do {
                 return try await api.claimUsername(field.stringValue).username
@@ -673,7 +790,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     private func startSync(api: SharedReviewAPI, document: String, session: String) {
-        let socket = api.socket()
+        guard !sessionInvalidated, let socket = try? api.socket() else { return }
         self.socket = socket
         socket.resume()
         listenTask = Task { [weak self] in
@@ -699,6 +816,8 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
 
     private func stopSync() {
         ready = false
+        editSyncTask?.cancel()
+        editSyncTask = nil
         syncTask?.cancel()
         listenTask?.cancel()
         socket?.cancel(with: .goingAway, reason: nil)
@@ -710,7 +829,8 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     func recordChanges(on page: PDFPage) {
-        guard let sessionID, let outbox, let pdf = reviewPDF, page.document === pdf else { return }
+        guard !sessionInvalidated else { return }
+        guard let sessionID, outbox != nil, let pdf = reviewPDF, page.document === pdf else { return }
         let index = pdf.index(for: page)
         let previous = records[index] ?? [:]
         let current = page.annotations.reduce(into: [String: RectangleMarkupRecord]()) { result, annotation in
@@ -743,23 +863,34 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
         invalidPages.remove(index)
         records[index] = current
-        if outboxNeedsSave {
-            do {
-                try outbox.save(pending)
-                outboxNeedsSave = false
-            } catch {
-                updateReviewStatus("Review · Edits could not be saved on this Mac")
-                return
+        guard retryPendingEditsSave() else { return }
+        if !pending.isEmpty { updateReviewStatus("Saving… · \(pending.count) pending") }
+        if let api = reviewAPI, let documentID, editSyncTask == nil {
+            let generation = lifecycle
+            editSyncTask = Task {
+                defer { if lifecycle == generation { editSyncTask = nil } }
+                await sync(api: api, document: documentID, session: sessionID)
             }
         }
-        if !pending.isEmpty { updateReviewStatus("Saving… · \(pending.count) pending") }
-        if let api = reviewAPI, let documentID {
-            Task { await sync(api: api, document: documentID, session: sessionID) }
+    }
+
+    @discardableResult
+    func retryPendingEditsSave() -> Bool {
+        guard outboxNeedsSave else { return true }
+        guard let outbox else { return false }
+        do {
+            try outbox.save(pending)
+            outboxNeedsSave = false
+            return true
+        } catch {
+            updateReviewStatus("Review · Edits could not be saved on this Mac")
+            return false
         }
     }
 
     private func sync(api: SharedReviewAPI, document: String, session: String) async {
-        guard sessionID == session, let outbox, !syncing else { return }
+        let generation = lifecycle
+        guard !sessionInvalidated, sessionID == session, let outbox, !syncing else { return }
         syncing = true
         defer { syncing = false }
         do {
@@ -773,6 +904,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                     let append = SharedReviewAPI.Append(sessionId: session, clientOpId: next.clientOpId,
                                                          payload: next.payload)
                     let receipt: SharedReviewAPI.Receipt = try await api.post("documents/\(document)/ops", append)
+                    try checkLifecycle(generation, api: api)
                     guard sessionID == session else { return }
                     guard receipt.op.payload?.id == next.payload.id, receipt.op.payload?.page == next.payload.page else {
                         throw SharedReviewError("The server returned an unexpected revision receipt.")
@@ -785,6 +917,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 let response: SharedReviewAPI.Operations = try await api.get("documents/\(document)/ops", query: [
                     URLQueryItem(name: "afterSeq", value: String(revision))
                 ])
+                try checkLifecycle(generation, api: api)
                 guard sessionID == session else { return }
                 for operation in response.ops {
                     if operation.op_type == "drawbridge.markup.v1", let markup = operation.payload,
@@ -800,7 +933,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             if invalidPages.isEmpty { updateReviewStatus("Synced · Revision \(revision)") }
             if !wasReady, editor?.pdfView.document === reviewPDF { editor?.refreshRectangleToolbar() }
         } catch {
-            guard sessionID == session else { return }
+            guard lifecycle == generation, !sessionInvalidated, sessionID == session else { return }
             if outboxNeedsSave {
                 updateReviewStatus("Review · Edits could not be saved on this Mac")
             } else if (error as? SharedReviewError)?.statusCode == 403 {
@@ -858,7 +991,10 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     func canQuit() -> Bool {
-        guard !hasPendingChanges, !busy, additionalReviews.values.allSatisfy({ !$0.hasPendingChanges }) else {
+        guard !busy else { return false }
+        let reviews = [self] + Array(additionalReviews.values)
+        for review in reviews { review.retryPendingEditsSave() }
+        guard reviews.allSatisfy({ !$0.hasPendingChanges }) else {
             NSSound.beep()
             return false
         }

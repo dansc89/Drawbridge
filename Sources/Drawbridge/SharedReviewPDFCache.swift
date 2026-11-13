@@ -13,7 +13,10 @@ struct SharedReviewPDFCache {
         expectedSize = document.file_size
         let root = try directory ?? FileManager.default.url(
             for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true
-        ).appendingPathComponent("Drawbridge/Review PDFs", isDirectory: true)
+        ).appendingPathComponent(
+            Bundle.main.bundleIdentifier == "com.drawbridge.app.review-private-test" ? "Drawbridge Review Test" : "Drawbridge",
+            isDirectory: true
+        ).appendingPathComponent("Review PDFs", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         let scope = try JSONEncoder().encode([origin.absoluteString, instanceID, document.id])

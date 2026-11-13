@@ -3038,7 +3038,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     func closeDocumentTab(at url: URL) {
         let normalized = canonicalDocumentURL(url)
         guard sessionDocumentURLs.contains(normalized) else { return }
-        if sharedReview?.review(for: normalized)?.hasPendingChanges == true { NSSound.beep(); return }
+        if let review = sharedReview?.review(for: normalized) {
+            review.retryPendingEditsSave()
+            if review.hasPendingChanges { NSSound.beep(); return }
+        }
         if closeRetainedSplitDocument(at: normalized) { return }
         if openDocumentURL.map({ canonicalDocumentURL($0) }) == normalized {
             commandCloseDocument(nil)
