@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 APP_NAME="Drawbridge"
-BUNDLE_ID="com.drawbridge.app.review-private-test"
+BUNDLE_ID="com.drawbridge.app"
 BUILD_DIR=".build/arm64-apple-macosx/release"
 BIN_PATH="$BUILD_DIR/$APP_NAME"
 DIST_DIR="${DRAWBRIDGE_DIST_DIR:-dist}"
