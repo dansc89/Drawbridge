@@ -30,11 +30,9 @@ import Security
     private let serverStatus = NSTextField(labelWithString: "")
     private lazy var serverSignOut = button("Sign Out", #selector(signOutOfServer))
     private let serverLoginForm = NSStackView()
-    private let reviewEmail = NSTextField()
-    private let reviewCode = NSTextField()
-    private lazy var sendReviewCode = button("Send Code", #selector(requestReviewCode))
-    private lazy var verifyReviewCode = button("Sign In", #selector(redeemReviewCode))
-    private var emailChallenge: (origin: URL, email: String, id: String)?
+    private lazy var browserSignIn = button("Sign in to Review", #selector(startBrowserSignIn))
+    private lazy var cancelBrowserSignIn = button("Cancel", #selector(cancelReviewSignIn))
+    private var browserSignInTask: Task<Void, Never>?
     private var signingIn = false
     // Injectable boundaries keep offline auth tests away from browser and user Keychain.
     var reviewAuthTransport: ReviewGoogleSignIn.Transport = ReviewGoogleSignIn.liveTransport
@@ -239,9 +237,7 @@ import Security
         serverLoginForm.detachesHiddenViews = true
         for view in [
             row("Server domain", field(serverDomain, id: "serverDomain", value: defaults.string(forKey: "sharedServerDomain") ?? "")),
-            row("Work email", field(reviewEmail, id: "reviewEmail", value: "")),
-            row("Verification code", field(reviewCode, id: "reviewCode", value: "")),
-            NSStackView(views: [sendReviewCode, verifyReviewCode])
+            NSStackView(views: [browserSignIn, cancelBrowserSignIn])
         ] { serverLoginForm.addArrangedSubview(view) }
         pane(.general, [
             row("Markup author", field(author, id: "markupAuthor", value: MarkupAuthorPreference.currentName)),
@@ -256,8 +252,8 @@ import Security
         let current = try? Self.sharedReviewCredentials()
         serverLoginForm.isHidden = current != nil
         serverSignOut.isHidden = current == nil
-        sendReviewCode.isEnabled = !signingIn && current == nil
-        verifyReviewCode.isEnabled = !signingIn && current == nil && emailChallenge != nil
+        browserSignIn.isEnabled = !signingIn && current == nil
+        cancelBrowserSignIn.isHidden = !signingIn
         if let message { serverStatus.stringValue = message }
         else if let (_, session) = current {
             serverStatus.stringValue = session.displayName.map { "Signed in as " + $0 } ?? "Signed in to Review."
@@ -291,8 +287,7 @@ import Security
         Self.reviewSessionDefaults.set(true, forKey: Self.skipSessionRestoreKey)
         Self.reviewSessionDelete()
         Self.reviewSessionDefaults.removeObject(forKey: "drawbridgeReviewUsername")
-        emailChallenge = nil
-        reviewCode.stringValue = ""
+        browserSignInTask?.cancel()
         refreshServerLogin(message: "Signed out on this Mac.")
         NotificationCenter.default.post(name: Self.reviewSessionDidChange, object: nil)
         if let (origin, session) = previousSession, session.workspaceIdentity == true {
@@ -312,79 +307,73 @@ import Security
         }
     }
 
-    private func emailRequest(origin: URL, endpoint: String, values: [String: String]) async throws -> Data {
-        var request = URLRequest(url: origin.appendingPathComponent("v1/auth/email/" + endpoint), timeoutInterval: 20)
+    private func accessRequest(origin: URL, endpoint: String, values: [String: String]) async throws -> Data {
+        var request = URLRequest(url: origin.appendingPathComponent("v1/auth/access/" + endpoint), timeoutInterval: 15)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(values)
         return try await reviewAuthTransport(request)
     }
 
-    @objc private func requestReviewCode() {
-        runEmailSignIn(message: "Sending code…") {
-            struct Challenge: Decodable { let challengeId: String }
-            self.emailChallenge = nil
-            self.reviewCode.stringValue = ""
-            let origin = try ReviewGoogleSignIn.origin(self.serverDomain.stringValue)
-            let email = self.reviewEmail.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let data = try await self.emailRequest(origin: origin, endpoint: "request", values: ["email": email])
-            let challenge = try JSONDecoder().decode(Challenge.self, from: data)
-            self.emailChallenge = (origin, email, challenge.challengeId)
-            self.serverStatus.stringValue = "Check your work inbox for the six-digit code."
-            self.window?.makeFirstResponder(self.reviewCode)
-        }
+    @objc private func cancelReviewSignIn() {
+        browserSignInTask?.cancel()
     }
 
-    @objc private func redeemReviewCode() {
-        guard let challenge = emailChallenge else { return }
-        runEmailSignIn(message: "Verifying code…") {
-            let generation = Self.reviewAuthGeneration
-            let origin = try ReviewGoogleSignIn.origin(self.serverDomain.stringValue)
-            let email = self.reviewEmail.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard origin == challenge.origin, email == challenge.email else {
-                throw SharedReviewError("Request a new code for this server and work email.")
-            }
-            let code = self.reviewCode.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            let data = try await self.emailRequest(origin: origin, endpoint: "verify",
-                                                   values: ["challengeId": challenge.id, "code": code])
-            try Self.checkReviewAuthGeneration(generation)
-            let session = try JSONDecoder().decode(ServerSession.self, from: data)
-            guard session.workspaceIdentity == true, !session.token.isEmpty, !session.instanceId.isEmpty else {
-                throw SharedReviewError("The server did not return a verified Review identity.")
-            }
-            let saved = try Self.persistReviewSession(origin: origin, session: session)
-            Self.activeReviewSession = (origin, session)
-            self.emailChallenge = nil
-            self.reviewCode.stringValue = ""
-            NotificationCenter.default.post(name: Self.reviewSessionDidChange, object: nil)
-            let suffix = saved ? "" : " for this launch"
-            self.refreshServerLogin(message: "Signed in as " + (session.displayName ?? "Review user") + suffix + ".")
-        }
-    }
-
-    private func runEmailSignIn(message: String, action: @escaping @MainActor () async throws -> Void) {
+    @objc private func startBrowserSignIn() {
         guard !signingIn, Self.activeReviewSession == nil else { return }
         window?.makeFirstResponder(nil)
+        guard let origin = try? ReviewGoogleSignIn.origin(serverDomain.stringValue) else {
+            refreshServerLogin(message: "Enter the HTTPS address for your Review server.")
+            return
+        }
         signingIn = true
-        sendReviewCode.isEnabled = false
-        verifyReviewCode.isEnabled = false
-        serverStatus.stringValue = message
-        Task {
+        refreshServerLogin(message: "Opening browser sign-in…")
+        let generation = Self.reviewAuthGeneration
+        browserSignInTask = Task {
             defer {
                 signingIn = false
-                sendReviewCode.isEnabled = Self.activeReviewSession == nil
-                verifyReviewCode.isEnabled = Self.activeReviewSession == nil && emailChallenge != nil
+                browserSignInTask = nil
+                refreshServerLogin(message: serverStatus.stringValue)
             }
-            do { try await action() }
-            catch let error as SharedReviewError {
-                switch error.statusCode {
-                case 400: serverStatus.stringValue = "Enter a valid work email or six-digit code."
-                case 401: serverStatus.stringValue = "That code is invalid or expired. Try again or request a new code."
-                case 429: serverStatus.stringValue = "Too many code requests. Wait before requesting another code."
-                case 503: serverStatus.stringValue = "Email delivery is unavailable. Try again later."
-                default: serverStatus.stringValue = error.localizedDescription
+            do {
+                struct Exchange: Decodable { let session: ServerSession? }
+                func randomHex() -> String {
+                    var generator = SystemRandomNumberGenerator()
+                    return (0..<32).map { _ in String(format: "%02x", UInt8.random(in: .min ... .max, using: &generator)) }.joined()
                 }
-            } catch { serverStatus.stringValue = error.localizedDescription }
+                let id = randomHex()
+                let secret = randomHex()
+                let proof = SHA256.hash(data: Data(secret.utf8)).map { String(format: "%02x", $0) }.joined()
+                _ = try await accessRequest(origin: origin, endpoint: "start", values: ["id": id, "proof": proof])
+                try Self.checkReviewAuthGeneration(generation)
+                var browserURL = URLComponents(url: origin.appendingPathComponent("review-access/complete"), resolvingAgainstBaseURL: false)!
+                browserURL.queryItems = [URLQueryItem(name: "id", value: id)]
+                guard let url = browserURL.url, NSWorkspace.shared.open(url) else {
+                    throw SharedReviewError("Could not open your browser. Try signing in again.")
+                }
+                serverStatus.stringValue = "Waiting for sign-in in your browser…"
+                let deadline = ContinuousClock.now + .seconds(600)
+                while ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .seconds(2))
+                    let data = try await accessRequest(origin: origin, endpoint: "exchange", values: ["id": id, "secret": secret])
+                    try Self.checkReviewAuthGeneration(generation)
+                    guard let session = try JSONDecoder().decode(Exchange.self, from: data).session else { continue }
+                    guard session.workspaceIdentity == true, !session.token.isEmpty, !session.instanceId.isEmpty else {
+                        throw SharedReviewError("The server did not return a verified Review identity.")
+                    }
+                    let saved = try Self.persistReviewSession(origin: origin, session: session)
+                    Self.activeReviewSession = (origin, session)
+                    NotificationCenter.default.post(name: Self.reviewSessionDidChange, object: nil)
+                    let suffix = saved ? "" : " for this launch"
+                    serverStatus.stringValue = "Signed in as " + (session.displayName ?? "Review user") + suffix + "."
+                    NSApp.activate(ignoringOtherApps: true)
+                    window?.makeKeyAndOrderFront(nil)
+                    return
+                }
+                serverStatus.stringValue = "Sign-in expired. Click Sign in to Review to try again."
+            } catch {
+                serverStatus.stringValue = Task.isCancelled ? "Sign-in canceled." : "Could not finish sign-in. Check your connection and try again."
+            }
         }
     }
 

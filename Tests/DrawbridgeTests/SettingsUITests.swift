@@ -33,7 +33,7 @@ import PDFKit
         }
     }
 
-    func testPasteRoutesToTheSecureSettingsFieldWithoutAnOpenPDF() throws {
+    func testPasteRoutesToTheServerAddressFieldWithoutAnOpenPDF() throws {
         _ = NSApplication.shared
         let editor = MainViewController()
         let settings = SettingsWindowController(editor: editor)
@@ -41,8 +41,8 @@ import PDFKit
         let window = try XCTUnwrap(settings.window)
         defer { window.close() }
         let field = try XCTUnwrap(descendants(window.contentView!).first {
-            $0.identifier?.rawValue == "serverPassword"
-        } as? NSSecureTextField)
+            $0.identifier?.rawValue == "serverDomain"
+        } as? NSTextField)
         XCTAssertTrue(window.makeFirstResponder(field))
         let board = NSPasteboard.general
         let previousItems = (board.pasteboardItems ?? []).map { item in
@@ -56,7 +56,7 @@ import PDFKit
             board.clearContents()
             if !previousItems.isEmpty { board.writeObjects(previousItems) }
         }
-        let dummy = "Drawbridge-test-7!#"
+        let dummy = "https://review.example.com"
         board.clearContents()
         XCTAssertTrue(board.setString(dummy, forType: .string))
         editor.paste(in: window, sender: nil)
