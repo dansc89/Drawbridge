@@ -226,13 +226,13 @@ enum MarkupLayers {
         for duplicate in markers.dropFirst() { duplicate.page?.removeAnnotation(duplicate) }
     }
     func assignLayer(_ id: String?, to annotations: [PDFAnnotation]) {
-        guard canEdit(), id == nil || layerCatalog.layers.contains(where: { $0.id == id && !$0.locked }) else { return }
+        guard canManageLayers(), canEdit(), id == nil || layerCatalog.layers.contains(where: { $0.id == id && !$0.locked }) else { return }
         undo.beginUndoGrouping()
         for annotation in annotations where canAssignLayer(annotation) { setLayerMembership(id, on: annotation) }
         undo.endUndoGrouping(); undo.setActionName("Assign to Layer")
     }
     private func setLayerMembership(_ id: String?, on annotation: PDFAnnotation) {
-        guard let page = annotation.page, page.document === view?.document, MarkupLayers.id(annotation) != id else { return }
+        guard canManageLayers(), let page = annotation.page, page.document === view?.document, MarkupLayers.id(annotation) != id else { return }
         let before = MarkupLayers.id(annotation)
         undo.registerUndo(withTarget: self) { $0.setLayerMembership(before, on: annotation) }
         if !RectangleMarkupRecord.owns(annotation) { importedState?.touch(annotation) }
@@ -241,7 +241,7 @@ enum MarkupLayers {
         applyLayerVisibility(); changed(page, importedAppearanceChanged: true)
     }
     func assignNewMarkupLayer(_ annotation: PDFAnnotation) {
-        guard let id = layerCatalog.activeID else { return }
+        guard canManageLayers(), let id = layerCatalog.activeID else { return }
         if layerCatalog.layers.first(where: { $0.id == id })?.visible == false { setLayerVisible(id, true) }
         annotation.setValue(id, forAnnotationKey: MarkupLayers.membershipKey)
     }
@@ -270,6 +270,7 @@ enum MarkupLayers {
     }
     func layerAssignmentMenu(for annotations: [PDFAnnotation]) -> NSMenu {
         let menu = NSMenu(title: "Assign to Layer")
+        guard canManageLayers(), canEdit() else { return menu }
         for (title, id) in [("Unassigned", Optional<String>.none)] + layerCatalog.layers.map({ ($0.name, Optional($0.id)) }) {
             let item = NSMenuItem(title: title, action: #selector(assignLayerMenu(_:)), keyEquivalent: "")
             item.target = self; item.representedObject = LayerMenuAssignment(id: id, annotations: annotations)
@@ -286,6 +287,7 @@ enum MarkupLayers {
         assignLayer(selection.id, to: selection.annotations)
     }
     @objc private func newLayerMenu(_ sender: NSMenuItem) {
+        guard canManageLayers(), canEdit() else { return }
         let annotations = (sender.representedObject as? LayerMenuAssignment)?.annotations ?? []
         let alert = NSAlert(); alert.messageText = "New Layer"; alert.informativeText = "Enter a unique layer name."
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24)); alert.accessoryView = field

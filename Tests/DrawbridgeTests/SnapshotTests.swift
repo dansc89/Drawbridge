@@ -29,6 +29,52 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
 }
 
 @MainActor final class SnapshotTests: XCTestCase {
+    func testClipboardScreenshotResizesAndExportsWithReviewBudget() throws {
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 800, pixelsHigh: 400,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+            bytesPerRow: 0, bitsPerPixel: 0))
+        let pixels = try XCTUnwrap(bitmap.bitmapData)
+        for index in 0..<(bitmap.bytesPerRow * bitmap.pixelsHigh) { pixels[index] = 255 }
+        board.setData(try XCTUnwrap(bitmap.representation(using: .png, properties: [:])), forType: .png)
+        XCTAssertTrue(SnapshotPayload.hasClipboardImage(board))
+        let pageSize = CGSize(width: 612, height: 792)
+        for review in [false, true] {
+            let payload = try XCTUnwrap(SnapshotPayload.clipboardImage(board, pageSize: pageSize, forReview: review))
+            let document = PDFDocument()
+            let page = try XCTUnwrap(PDFPage(image: NSImage(size: pageSize, flipped: false) { rect in
+                NSColor.white.setFill()
+                rect.fill()
+                return true
+            }))
+            document.insert(page, at: 0)
+            let base = try XCTUnwrap(document.dataRepresentation())
+            let session = RectangleMarkupController()
+            session.bind(to: document)
+            session.undo.groupsByEvent = false
+            session.undo.beginUndoGrouping()
+            let image = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: CGPoint(x: 300, y: 300)))
+            session.undo.endUndoGrouping()
+            let original = image.bounds
+            let enlarged = CGRect(origin: original.origin, size: CGSize(width: original.width * 1.5, height: original.height * 1.5))
+            session.undo.beginUndoGrouping()
+            session.setBounds(enlarged, of: image, on: page, action: "Resize Screenshot")
+            session.undo.endUndoGrouping()
+            XCTAssertEqual(image.bounds, enlarged)
+            let record = try XCTUnwrap(RectangleMarkupRecord.capture(annotation: image, pageIndex: 0))
+            XCTAssertTrue(record.isValid)
+            if review { XCTAssertLessThan(try JSONEncoder().encode(record).count, 1_500_000) }
+            let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pdf")
+            defer { try? FileManager.default.removeItem(at: destination) }
+            try SharedReviewPDFExport.write(basePDF: base, records: [record], to: destination)
+            let reopened = try XCTUnwrap(PDFDocument(url: destination))
+            XCTAssertEqual(reopened.page(at: 0)?.annotations.first?.bounds.width ?? 0, enlarged.width, accuracy: 0.01)
+            session.undo.undo()
+            XCTAssertEqual(image.bounds, original)
+        }
+    }
+
     func waitForCapture(_ session: RectangleMarkupController, file: StaticString = #filePath, line: UInt = #line) {
         let deadline = Date().addingTimeInterval(10)
         while session.isCapturingSnapshot && Date() < deadline {
@@ -388,7 +434,7 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
         window.close()
     }
 
-    func testBoxPolygonCaptureCancelAndFixedSizeThroughController() throws {
+    func testBoxPolygonCaptureCancelAndResizeThroughController() throws {
         _ = NSApplication.shared
         let window = NSWindow(contentRect:CGRect(x:0,y:0,width:1000,height:900),styleMask:[.titled],backing:.buffered,defer:false)
         let view = MarkupPDFView(frame:window.contentView!.bounds); window.contentView!.addSubview(view)
@@ -415,8 +461,9 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
             session.cancelGesture(); XCTAssertEqual(SnapshotPayload.clipboard()?.data,triangle.data)
             let stamp = try XCTUnwrap(session.pasteSnapshot(triangle,on:page,center:CGPoint(x:250,y:250)))
             let original = stamp.bounds
-            session.setBounds(original.insetBy(dx:-10,dy:-10),of:stamp,on:page,action:"Resize")
-            XCTAssertEqual(stamp.bounds,original)
+            let enlarged = CGRect(origin: original.origin, size: CGSize(width: original.width * 1.25, height: original.height * 1.25))
+            session.setBounds(enlarged,of:stamp,on:page,action:"Resize")
+            XCTAssertEqual(stamp.bounds,enlarged)
             let originalColor = stamp.color
             session.styleSelected(color:.red,width:6)
             XCTAssertEqual(stamp.color,originalColor)

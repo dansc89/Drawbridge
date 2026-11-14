@@ -717,7 +717,7 @@ final class RectangleMarkupController {
                 gesture = .vertex(page,selected,index); previewVertices = vertices
                 preview = (page,selected.bounds); refresh(); return true
             }
-            let corners: [Corner] = optionDrag || !vertices.isEmpty || selected.type == "Stamp" ? [] : selected.type == "Line" ? [.lowerLeft, .upperRight] : Corner.allCases
+            let corners: [Corner] = optionDrag || !vertices.isEmpty || (selected.type == "Stamp" && !SnapshotPayload.isSnapshot(selected)) ? [] : selected.type == "Line" ? [.lowerLeft, .upperRight] : Corner.allCases
             let corner = corners.first { corner in
                 let p = view.convert(handlePoint(corner, annotation: selected), from: page)
                 return hypot(location.x - p.x, location.y - p.y) <= 8
@@ -933,7 +933,15 @@ final class RectangleMarkupController {
                 case .upperLeft: opposite = .lowerRight
                 case .upperRight: opposite = .lowerLeft
                 }
-                preview = (page, Self.rect(Self.cornerPoint(opposite, in: original), Self.clamped(end, to: crop)))
+                let anchor = Self.cornerPoint(opposite, in: original)
+                var target = Self.clamped(end, to: crop)
+                if SnapshotPayload.isSnapshot(annotation) {
+                    let handle = Self.cornerPoint(corner, in: original)
+                    let dx = handle.x - anchor.x, dy = handle.y - anchor.y
+                    let scale = max(0, min((target.x - anchor.x) / dx, (target.y - anchor.y) / dy))
+                    target = CGPoint(x: anchor.x + dx * scale, y: anchor.y + dy * scale)
+                }
+                preview = (page, Self.rect(anchor, target))
             } else {
                 let dx = min(max(end.x - start.x, crop.minX - original.minX), crop.maxX - original.maxX)
                 let dy = min(max(end.y - start.y, crop.minY - original.minY), crop.maxY - original.maxY)
@@ -1381,9 +1389,15 @@ final class RectangleMarkupController {
         changed(page)
     }
 
+    func canDeleteMarkup(_ annotation: PDFAnnotation) -> Bool {
+        canEdit() && boundDocument != nil && annotation.page?.document === boundDocument
+            && !annotation.isReadOnly && !layerIsLocked(annotation)
+            && (RectangleMarkupRecord.owns(annotation) || ImportedMarkupState.selectable(annotation) || canAssignLayer(annotation))
+    }
+
     func deleteSelected() {
         guard canEdit() else { return }
-        let items = selectedItems.filter { (RectangleMarkupRecord.owns($0) || ImportedMarkupState.selectable($0) || canAssignLayer($0)) && !$0.isReadOnly && !layerIsLocked($0) }
+        let items = selectedItems.filter(canDeleteMarkup)
         guard !items.isEmpty else { return }
         cancelGesture()
         undo.beginUndoGrouping()
@@ -1534,7 +1548,7 @@ final class RectangleMarkupController {
             guard [a.x,a.y,b.x,b.y].allSatisfy({ $0.isFinite }), bounds.contains(a), bounds.contains(b), hypot(a.x-b.x,a.y-b.y) >= 2 else { return }
         }
         let previous = annotation.bounds
-        if annotation.type == "Stamp", RectangleMarkupRecord.owns(annotation), bounds.size != previous.size { return }
+        if annotation.type == "Stamp", !SnapshotPayload.isSnapshot(annotation), bounds.size != previous.size { return }
         if !RectangleMarkupRecord.owns(annotation) {
             guard bounds.size == previous.size, endpoints == nil else { return }
             undo.registerUndo(withTarget: self) { target in target.setGeometry(previous, endpoints: nil, of: annotation, on: page, action: action) }
@@ -1830,7 +1844,7 @@ final class RectangleMarkupController {
             } else if preview != nil && tool == .ellipse { path.addEllipse(in:rect) }
             else { path.addRect(rect) }
             if preview == nil && vertices.isEmpty && selected.map(RectangleMarkupRecord.owns) != false {
-                let corners: [Corner] = selected?.type == "Stamp" ? [] : selected?.type == "Line" ? [.lowerLeft,.upperRight] : Corner.allCases
+                let corners: [Corner] = selected.map { $0.type == "Stamp" && !SnapshotPayload.isSnapshot($0) } == true ? [] : selected?.type == "Line" ? [.lowerLeft,.upperRight] : Corner.allCases
                 for corner in corners {
                     let point = selected.map { handlePoint(corner,annotation:$0) } ?? Self.cornerPoint(corner,in:bounds)
                     let p = view.convert(point, from: page)

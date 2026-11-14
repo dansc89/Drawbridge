@@ -186,7 +186,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         membership.removeAllItems(); membership.addItems(withTitles: ["Unassigned"] + session.layerCatalog.layers.map(\.name))
         let currentID = session.selected.flatMap(MarkupLayers.id) ?? (session.selected == nil ? session.layerCatalog.activeID : nil)
         membership.selectItem(at: currentID.flatMap { id in session.layerCatalog.layers.firstIndex { $0.id == id }.map { $0 + 1 } } ?? 0)
-        membership.isEnabled = session.canEdit() && (session.selected.map(session.canAssignLayer) ?? true)
+        membership.isEnabled = session.canManageLayers() && session.canEdit() && (session.selected.map(session.canAssignLayer) ?? true)
         for (index, layer) in session.layerCatalog.layers.enumerated() { membership.item(at: index + 1)?.isEnabled = !layer.locked }
         membership.toolTip = session.selected == nil ? "Layer for new markups" : "Selected markup's layer"
         if lastDefaultTool != session.defaultTool { defaultStatus.stringValue = ""; lastDefaultTool = session.defaultTool }

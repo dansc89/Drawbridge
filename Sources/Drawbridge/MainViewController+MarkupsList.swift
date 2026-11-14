@@ -140,6 +140,7 @@ extension MainViewController {
               let item = currentSelectedMarkupItem(), let page = item.annotation.page,
               page.document === pdfView.document else { return }
         if !pdfView.rectangleMarkup.layerIsVisible(item.annotation), let id = MarkupLayers.id(item.annotation) {
+            guard pdfView.rectangleMarkup.canManageLayers(), pdfView.rectangleMarkup.canEdit() else { return }
             let alert = NSAlert(); alert.messageText = "This markup is on a hidden layer"; alert.informativeText = "Show the layer to navigate to this markup."
             alert.addButton(withTitle: "Show Layer and Go"); alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -153,11 +154,11 @@ extension MainViewController {
         pdfView.revealMarkup(item.annotation)
     }
     @objc func deleteListedMarkups(_ sender: Any?) {
-        guard !isPDFProcessingBusy else { return }
+        guard pdfView.rectangleMarkup.canEdit(), !isPDFProcessingBusy else { return }
         let items = markupsTable.selectedRowIndexes.compactMap { row -> MarkupItem? in
             markupItems.indices.contains(row) ? markupItems[row] : nil
         }
-        let eligible = items.filter { !$0.annotation.isReadOnly && !pdfView.rectangleMarkup.layerIsLocked($0.annotation) && (RectangleMarkupRecord.owns($0.annotation) || ImportedMarkupState.selectable($0.annotation) || pdfView.rectangleMarkup.canAssignLayer($0.annotation)) }
+        let eligible = items.filter { pdfView.rectangleMarkup.canDeleteMarkup($0.annotation) }
         guard !eligible.isEmpty else { return }
         let session = pdfView.rectangleMarkup
         session.undo.beginUndoGrouping()
@@ -171,6 +172,7 @@ extension MainViewController {
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard menu === markupsTable.menu else { return }
         while menu.items.count > 1 { menu.removeItem(at: 1) }
+        guard pdfView.rectangleMarkup.canManageLayers() else { return }
         let annotations = markupsTable.selectedRowIndexes.compactMap { row in markupItems.indices.contains(row) ? markupItems[row].annotation : nil }
         let item = NSMenuItem(title: "Assign to Layer", action: nil, keyEquivalent: "")
         item.submenu = pdfView.rectangleMarkup.layerAssignmentMenu(for: annotations); menu.addItem(item)

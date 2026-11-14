@@ -1317,8 +1317,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                     node.toolTip = "Insert a node on this segment, then drag its square handle to reshape the path."
                     menu.addItem(.separator())
                 }
-                let item = NSMenuItem(title: "Assign to Layer", action: nil, keyEquivalent: "")
-                item.submenu = rectangleMarkup.layerAssignmentMenu(for: rectangleMarkup.selectedItems); menu.addItem(item)
+                let layers = rectangleMarkup.layerAssignmentMenu(for: rectangleMarkup.selectedItems)
+                if !layers.items.isEmpty {
+                    let item = NSMenuItem(title: "Assign to Layer", action: nil, keyEquivalent: "")
+                    item.submenu = layers; menu.addItem(item)
+                }
                 let front = menu.addItem(withTitle: "Bring to Front", action: #selector(bringSelectedMarkupToFront(_:)), keyEquivalent: "")
                 front.target = self; front.isEnabled = !rectangleMarkup.layerIsLocked(annotation) && !annotation.isReadOnly
                 let back = menu.addItem(withTitle: "Send to Back", action: #selector(sendSelectedMarkupToBack(_:)), keyEquivalent: "")

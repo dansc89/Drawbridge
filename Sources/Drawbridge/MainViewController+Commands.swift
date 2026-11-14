@@ -514,6 +514,15 @@ extension MainViewController {
         } else { center = CGPoint(x: visible.midX, y: visible.midY) }
         if let items = MarkupClipboard.read() { _ = session.pasteMarkups(items, on: page, center: center) }
         else if let payload = SnapshotPayload.clipboard() { _ = session.pasteSnapshot(payload, on: page, center: center) }
+        else if session.canEdit(), !session.activeLayerIsLocked, SnapshotPayload.hasClipboardImage() {
+            let pageSize = page.bounds(for: pdfView.displayBox).size
+            let displaySize = page.rotation % 180 == 0 ? pageSize : CGSize(width: pageSize.height, height: pageSize.width)
+            if let payload = SnapshotPayload.clipboardImage(pageSize: displaySize, forReview: isActiveReview) {
+                _ = session.pasteSnapshot(payload, on: page, center: center)
+            } else {
+                runAlert(title: "Could Not Paste Image", informativeText: "Copy the screenshot again or try a smaller image.", style: .warning)
+            }
+        }
         view.window?.makeFirstResponder(pdfView)
     }
     @objc func commandPasteInPlace(_ sender: Any?) {
@@ -747,16 +756,16 @@ extension MainViewController {
             menuItem.title = "Unflatten PDF…"
             return !isActiveReview && hasDocument && openDocumentURL != nil && !isPDFFileProcessingOperation
         case #selector(renamePageLabelFromSidebar):
-            return hasDocument && pagesTableView.selectedRowIndexes.count == 1
+            return !isActiveReview && hasDocument && pagesTableView.selectedRowIndexes.count == 1
         case #selector(renameBookmarkFromSidebar):
-            return hasDocument && bookmarksOutlineView.selectedRowIndexes.count == 1
+            return !isActiveReview && hasDocument && bookmarksOutlineView.selectedRowIndexes.count == 1
         case #selector(deletePagesFromSidebar):
-            return hasDocument && !pagesTableView.selectedRowIndexes.isEmpty
+            return !isActiveReview && hasDocument && !pagesTableView.selectedRowIndexes.isEmpty
         case #selector(deleteBookmarkFromSidebar):
-            return hasDocument && !bookmarksOutlineView.selectedRowIndexes.isEmpty
+            return !isActiveReview && hasDocument && !bookmarksOutlineView.selectedRowIndexes.isEmpty
         case #selector(deleteListedMarkups(_:)):
             return hasDocument && pdfView.rectangleMarkup.canEdit() && currentSelectedMarkupItems().contains {
-                !$0.annotation.isReadOnly && !pdfView.rectangleMarkup.layerIsLocked($0.annotation) && (RectangleMarkupRecord.owns($0.annotation) || ImportedMarkupState.selectable($0.annotation) || pdfView.rectangleMarkup.canAssignLayer($0.annotation))
+                pdfView.rectangleMarkup.canDeleteMarkup($0.annotation)
             }
         case #selector(commandPasteInPlace(_:)):
             return !(view.window?.firstResponder is NSTextView) && !(view.window?.firstResponder is NSTextField) && hasDocument && pdfView.rectangleMarkup.canEdit() && !pdfView.rectangleMarkup.activeLayerIsLocked && (MarkupClipboard.canPaste() || SnapshotPayload.clipboard()?.placement != nil)
@@ -764,19 +773,22 @@ extension MainViewController {
             if pasteTextResponder(in: NSApp.keyWindow ?? view.window) != nil { return true }
             guard NSApp.keyWindow == nil || NSApp.keyWindow === view.window else { return false }
             return hasDocument && pdfView.rectangleMarkup.canEdit() && !pdfView.rectangleMarkup.activeLayerIsLocked
-                && (MarkupClipboard.canPaste() || SnapshotPayload.clipboard() != nil)
+                && (MarkupClipboard.canPaste() || SnapshotPayload.clipboard() != nil || SnapshotPayload.hasClipboardImage())
         case #selector(commandCopy(_:)), #selector(commandSelectAll(_:)):
             if view.window?.firstResponder is NSTextView || view.window?.firstResponder is NSTextField { return true }
             if action == #selector(commandCopy(_:)) { return pdfView.currentSelection != nil || !pdfView.rectangleMarkup.selectedItems.isEmpty }
             return hasDocument
+        case #selector(commandAutoGenerateSheetNames(_:)), #selector(commandBatchLinkSheetNumbers(_:)):
+            return !isActiveReview && hasDocument
         case #selector(commandSave(_:)), #selector(commandSaveCopy(_:)),
-             #selector(commandAutoGenerateSheetNames(_:)), #selector(commandBatchLinkSheetNumbers(_:)),
+
              #selector(commandFocusSearch(_:)), #selector(commandZoomIn(_:)), #selector(commandZoomOut(_:)),
              #selector(commandPreviousPage(_:)), #selector(commandNextPage(_:)),
              #selector(commandActualSize(_:)), #selector(commandFitWidth(_:)), #selector(commandFitPage(_:)), #selector(commandGoToSheet(_:)), #selector(selectSelectionTool(_:)):
             return hasDocument
+        case #selector(commandSetPageDrawingScale(_:)), #selector(commandCalibrateDrawingScale(_:)):
+            return !isActiveReview && hasDocument && pdfView.currentPage != nil && pdfView.rectangleMarkup.canEdit()
         case #selector(snapshotCapture(_:)), #selector(polygonSnapshotCapture(_:)),
-             #selector(commandSetPageDrawingScale(_:)), #selector(commandCalibrateDrawingScale(_:)),
              #selector(areaMeasure(_:)), #selector(perimeterMeasure(_:)):
             return hasDocument && pdfView.currentPage != nil && pdfView.rectangleMarkup.canEdit()
         case #selector(commandNavigateBack(_:)):

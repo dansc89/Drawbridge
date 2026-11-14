@@ -37,7 +37,7 @@ import PDFKit
         _ = NSApplication.shared
         let editor = MainViewController()
         let settings = SettingsWindowController(editor: editor)
-        settings.prepare()
+        settings.prepare(section: .review)
         let window = try XCTUnwrap(settings.window)
         defer { window.close() }
         let field = try XCTUnwrap(descendants(window.contentView!).first {
@@ -73,7 +73,7 @@ import PDFKit
         let origin = try XCTUnwrap(URL(string: "https://review.example.com"))
         let session = SettingsWindowController.ServerSession(token: "test-token", instanceId: "test-device", displayName: "Test Reviewer")
         SettingsWindowController.activeReviewSession = (origin, session)
-        settings.prepare()
+        settings.prepare(section: .review)
         let window = try XCTUnwrap(settings.window)
         defer { window.close() }
 
@@ -89,9 +89,25 @@ import PDFKit
             XCTAssertEqual(server, origin)
             XCTAssertEqual(credentials.token, session.token)
         }
-        settings.prepare(section: .shortcuts)
         settings.prepare(section: .general)
-        XCTAssertFalse(visibleViews().contains { $0 is NSSecureTextField })
+        XCTAssertFalse(visibleViews().contains { ($0 as? NSButton)?.title == "Sign Out" })
+        XCTAssertFalse(visibleViews().contains { $0.identifier?.rawValue == "serverDomain" })
+        settings.prepare(section: .review)
+        XCTAssertTrue(visibleViews().contains { ($0 as? NSButton)?.title == "Sign Out" })
+
+        let content = try XCTUnwrap(window.contentView)
+        for height in [460.0, 500.0, 650.0] {
+            window.setContentSize(NSSize(width: 820, height: height))
+            content.layoutSubtreeIfNeeded()
+            for section in SettingsWindowController.Section.allCases {
+                let button = try XCTUnwrap(visibleViews().compactMap { $0 as? NSButton }
+                    .first { $0.title == section.rawValue })
+                let navigation = try XCTUnwrap(button.superview)
+                let sidebar = try XCTUnwrap(navigation.superview)
+                XCTAssertEqual(sidebar.bounds.height, content.bounds.height, accuracy: 1)
+                XCTAssertTrue(sidebar.bounds.contains(button.convert(button.bounds, to: sidebar)))
+            }
+        }
     }
 
     private func descendants(_ view: NSView) -> [NSView] {

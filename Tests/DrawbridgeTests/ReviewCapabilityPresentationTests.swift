@@ -55,7 +55,7 @@ import XCTest
                                                  organizationActions: list.organizationActions == true, selectionCount: 1)
         XCTAssertNil(state.newFolderReason)
         XCTAssertNil(state.deleteReason)
-        XCTAssertTrue(state.deleteToolTip.contains("exact Review username"))
+        XCTAssertTrue(state.deleteToolTip.contains("after confirming"))
     }
 
     func testDecodedDocumentDeletionCapabilityIsRetainedSeparately() throws {

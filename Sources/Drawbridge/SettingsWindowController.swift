@@ -3,7 +3,7 @@ import AppKit
 import Security
 
 /// Resolve dynamic colors again when macOS changes appearance while Settings is open.
-@MainActor private final class SettingsSidebarStack: NSStackView {
+@MainActor private final class SettingsSidebarView: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         refreshBackground()
@@ -20,10 +20,12 @@ import Security
 @MainActor final class SettingsWindowController: NSWindowController {
     enum Section: String, CaseIterable {
         case general = "General", shortcuts = "Keyboard Shortcuts", performance = "Performance", interface = "Interface"
+        case review = "Drawbridge Review"
     }
     private weak var editor: MainViewController?
     private let content = NSStackView()
-    private let navigation = SettingsSidebarStack()
+    private let sidebar = SettingsSidebarView()
+    private let navigation = NSStackView()
     private var panes: [Section: NSView] = [:]
     private var author = NSTextField()
     private let serverDomain = NSTextField()
@@ -155,7 +157,7 @@ import Security
         if window == nil { buildWindow() }
         for pane in content.arrangedSubviews { content.removeArrangedSubview(pane); pane.removeFromSuperview() }
         if let pane = panes[section] { content.addArrangedSubview(pane) }
-        if section == .general { refreshServerLogin() }
+        if section == .review { refreshServerLogin() }
         for case let button as NSButton in navigation.arrangedSubviews {
             button.state = button.title == section.rawValue ? .on : .off
         }
@@ -182,19 +184,28 @@ import Security
         content.orientation = .vertical
         content.alignment = .leading
         content.edgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 24, right: 28)
-        let root = NSStackView(views: [navigation, NSBox(), content])
+        let divider = NSBox()
+        divider.boxType = .separator
+        let root = NSStackView(views: [sidebar, divider, content])
         root.orientation = .horizontal
         root.alignment = .top
         root.spacing = 0
-        if let divider = root.arrangedSubviews[1] as? NSBox { divider.boxType = .separator }
+        navigation.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(navigation)
+        navigation.setHuggingPriority(.required, for: .vertical)
         root.translatesAutoresizingMaskIntoConstraints = false
         window.contentView!.addSubview(root)
         NSLayoutConstraint.activate([
             root.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor), root.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor),
             root.topAnchor.constraint(equalTo: window.contentView!.topAnchor), root.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor),
-            navigation.widthAnchor.constraint(equalToConstant: 200), content.widthAnchor.constraint(greaterThanOrEqualToConstant: 540)
+            sidebar.widthAnchor.constraint(equalToConstant: 200),
+            sidebar.heightAnchor.constraint(equalTo: root.heightAnchor),
+            navigation.topAnchor.constraint(equalTo: sidebar.topAnchor),
+            navigation.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
+            navigation.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            content.widthAnchor.constraint(greaterThanOrEqualToConstant: 540)
         ])
-        buildGeneral(); buildShortcuts(); buildPerformance(); buildInterface()
+        buildGeneral(); buildShortcuts(); buildPerformance(); buildInterface(); buildReview()
     }
 
     private func pane(_ section: Section, _ views: [NSView]) {
@@ -224,6 +235,14 @@ import Security
         return NSStackView(views: [label, control])
     }
     private func buildGeneral() {
+        pane(.general, [
+            row("Markup author", field(author, id: "markupAuthor", value: MarkupAuthorPreference.currentName)),
+            help("Used for new markups. Leave blank to use your macOS account name."),
+            button("Save General", #selector(saveGeneral))
+        ])
+    }
+
+    private func buildReview() {
         let defaults = UserDefaults.standard
         serverDomain.placeholderString = "https://review.example.com"
         serverStatus.lineBreakMode = .byTruncatingTail
@@ -239,10 +258,7 @@ import Security
             row("Server domain", field(serverDomain, id: "serverDomain", value: defaults.string(forKey: "sharedServerDomain") ?? "")),
             NSStackView(views: [browserSignIn, cancelBrowserSignIn])
         ] { serverLoginForm.addArrangedSubview(view) }
-        pane(.general, [
-            row("Markup author", field(author, id: "markupAuthor", value: MarkupAuthorPreference.currentName)),
-            help("Used for new markups. Leave blank to use your macOS account name."),
-            button("Save General", #selector(saveGeneral)),
+        pane(.review, [
             serverLoginForm, serverStatus, serverSignOut,
             row("Review username", reviewName)
         ])
@@ -366,8 +382,7 @@ import Security
                     NotificationCenter.default.post(name: Self.reviewSessionDidChange, object: nil)
                     let suffix = saved ? "" : " for this launch"
                     serverStatus.stringValue = "Signed in as " + (session.displayName ?? "Review user") + suffix + "."
-                    NSApp.activate(ignoringOtherApps: true)
-                    window?.makeKeyAndOrderFront(nil)
+                    openVaultAfterSignIn()
                     return
                 }
                 serverStatus.stringValue = "Sign-in expired. Click Sign in to Review to try again."
@@ -375,6 +390,16 @@ import Security
                 serverStatus.stringValue = Task.isCancelled ? "Sign-in canceled." : "Could not finish sign-in. Check your connection and try again."
             }
         }
+    }
+
+    private func openVaultAfterSignIn() {
+        window?.orderOut(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        if let editorWindow = editor?.view.window {
+            if editorWindow.isMiniaturized { editorWindow.deminiaturize(nil) }
+            editorWindow.makeKeyAndOrderFront(nil)
+        }
+        editor?.sharedReview?.showReviews(nil)
     }
 
     struct ServerSession: Codable {
@@ -400,7 +425,7 @@ import Security
                 return (boundOrigin, stored.session)
             }
         }
-        throw SharedReviewError("Sign in under Drawbridge → Settings → General.")
+        throw SharedReviewError("Sign in under Drawbridge → Settings → Drawbridge Review.")
     }
 
     private static func sharedReviewDeviceKey(origin: URL, username: String) throws -> String {
@@ -525,7 +550,7 @@ import Security
     private func applyTheme() {
         let theme = InterfaceTheme.current
         AppAppearance.applyInterface(to: window)
-        navigation.refreshBackground()
+        sidebar.refreshBackground()
         for label in primaryLabels { label.textColor = theme.color(for: "foreground") ?? .labelColor }
         for case let button as NSButton in navigation.arrangedSubviews {
             button.bezelColor = theme.color(for: "accent")

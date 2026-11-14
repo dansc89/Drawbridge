@@ -1,6 +1,7 @@
 import AppKit
 import PDFKit
 import CryptoKit
+import ImageIO
 
 enum SnapshotError: LocalizedError {
     case unsupportedPageUnits
@@ -49,6 +50,41 @@ struct SnapshotPayload: Sendable {
         if let data = NSPasteboard.general.data(forType: styleType), data.count < 2048, let style = try? JSONDecoder().decode(SnapshotStyle.self, from: data), style.isValid { payload.style = style }
         return payload.page == nil ? nil : payload
     }
+    private static let imageTypes: [NSPasteboard.PasteboardType] = [.png, .tiff, .init("public.jpeg")]
+
+    @MainActor static func hasClipboardImage(_ board: NSPasteboard = .general) -> Bool {
+        board.availableType(from: imageTypes) != nil
+    }
+
+    @MainActor static func clipboardImage(_ board: NSPasteboard = .general, pageSize: CGSize,
+                                          forReview: Bool) -> Self? {
+        for type in imageTypes {
+            guard let bytes = board.data(forType: type), bytes.count <= 128 * 1024 * 1024,
+                  let source = CGImageSourceCreateWithData(bytes as CFData, nil) else { continue }
+            let limit = forReview ? 1_000_000 : 16 * 1024 * 1024
+            for dimension in (forReview ? [2048, 1280, 800, 480] : [4096, 2048, 1024]) {
+                let options: [CFString: Any] = [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: dimension
+                ]
+                guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { break }
+                let width = CGFloat(image.width), height = CGFloat(image.height)
+                let scale = min(1, pageSize.width * 0.65 / width, pageSize.height * 0.65 / height)
+                var bounds = CGRect(x: 0, y: 0, width: max(2, width * scale), height: max(2, height * scale))
+                let data = NSMutableData()
+                guard let consumer = CGDataConsumer(data: data),
+                      let context = CGContext(consumer: consumer, mediaBox: &bounds, nil) else { return nil }
+                context.beginPDFPage(nil)
+                context.draw(image, in: bounds)
+                context.endPDFPage()
+                context.closePDF()
+                if data.length <= limit { return Self(data: data as Data) }
+            }
+        }
+        return nil
+    }
+
     @MainActor func copy() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setData(data, forType: Self.clipboardType)

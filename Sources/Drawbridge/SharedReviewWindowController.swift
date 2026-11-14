@@ -11,7 +11,7 @@ struct ReviewCapabilityPresentation {
     let newFolderReason: String?
     let deleteReason: String?
     var newFolderToolTip: String { newFolderReason ?? "Create a folder" }
-    var deleteToolTip: String { deleteReason ?? "Delete selected items after confirming your exact Review username." }
+    var deleteToolTip: String { deleteReason ?? "Delete selected items after confirming." }
     var explanation: String {
         [newFolderReason.map { "New Folder unavailable: " + $0 },
          deleteReason.map { "Delete unavailable: " + $0 }].compactMap { $0 }.joined(separator: "\n")
@@ -74,7 +74,7 @@ private final class ReviewBrowserWindow: NSWindow {
 }
 
 @MainActor
-final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSToolbarDelegate {
+final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
     weak var editor: MainViewController?
     private(set) var tabURL: URL?
     private(set) var reviewPDF: PDFDocument?
@@ -113,8 +113,6 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private var organizationActions = false
     private var documentDeletion = false
     private weak var reviewAlertSheet: NSWindow?
-    private var deleteConfirmationUsername: String?
-    private weak var confirmDeleteButton: NSButton?
     private var folderID: String?
     private var workspaceKey: String?
     private var folders: [SharedReviewAPI.Folder]?
@@ -181,9 +179,6 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         documents.removeAll()
         organizationActions = false
         documentDeletion = false
-        deleteConfirmationUsername = nil
-        confirmDeleteButton?.isEnabled = false
-        confirmDeleteButton = nil
         if let sheet = reviewAlertSheet {
             reviewAlertSheet = nil
             sheet.sheetParent?.endSheet(sheet, returnCode: .cancel)
@@ -221,6 +216,11 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     @objc func showReviews(_ sender: Any?) {
+        if (try? SettingsWindowController.sharedReviewCredentials()) == nil, let editor {
+            editor.settingsWindowController.prepare(section: .review)
+            editor.settingsWindowController.showWindow(sender)
+            return
+        }
         if window == nil { buildWindow() }
         showWindow(sender)
         window?.makeKeyAndOrderFront(sender)
@@ -348,7 +348,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
 
     private var toolbarDefinitions: [(String, String, String, Selector, String)] {
         [("back", "Back", "chevron.backward", #selector(goBack), "Go to the parent folder (⌘↑)"),
-         ("upload", "Upload PDFs…", "square.and.arrow.up", #selector(uploadPDF), "Upload PDFs to this folder"),
+         ("upload", "Upload PDFs…", "arrow.up.to.line", #selector(uploadPDF), "Upload PDFs to this folder"),
          ("newFolder", "New Folder…", "folder.badge.plus", #selector(createFolder), "Create a folder"),
          ("refresh", "Refresh", "arrow.clockwise", #selector(refreshDocuments(_:)), "Refresh server documents"),
          ("delete", "Delete…", "trash", #selector(deleteSelectedItems), "Delete the selected items…")]
@@ -368,6 +368,14 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         item.label = definition.1
         item.paletteLabel = definition.1
         item.image = NSImage(systemSymbolName: definition.2, accessibilityDescription: definition.1)
+        if definition.0 == "upload" {
+            let upload = NSButton(title: definition.1, target: self, action: definition.3)
+            upload.image = item.image
+            upload.imagePosition = .imageLeading
+            upload.bezelStyle = .rounded
+            upload.toolTip = definition.4
+            item.view = upload
+        }
         item.target = self
         item.action = definition.3
         item.toolTip = definition.4
@@ -478,6 +486,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         for (key, button) in [("back", backButton), ("upload", uploadButton), ("newFolder", newFolderButton),
                               ("refresh", refreshButton), ("delete", deleteButton)] {
             toolbarItems[key]?.isEnabled = button.isEnabled
+            (toolbarItems[key]?.view as? NSButton)?.isEnabled = button.isEnabled
             if key == "newFolder" || key == "delete" { toolbarItems[key]?.toolTip = button.toolTip }
         }
     }
@@ -701,7 +710,8 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             let document = documents[row - folders.count]
             return (document.id, document.name, "document")
         }
-        let ids = Set(items.filter { $0.kind == "document" }.map(\.id))
+        let selectedPDFs = selected.compactMap { row in row >= folders.count ? documents[row - folders.count] : nil }
+        let ids = Set(selectedPDFs.map(\.id))
         let affectedReviews = ([self] + Array(additionalReviews.values)).filter { review in
             review.reviewAPI?.origin == api.origin && review.documentID.map(ids.contains) == true
         }
@@ -711,7 +721,6 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
         let generation = lifecycle
         perform {
-            let username = try await self.requireReviewUsername(using: api, saveToSettings: true)
             let warning = NSAlert()
             warning.alertStyle = .warning
             warning.messageText = items.count == 1 ? "Delete “\(items[0].name)”?" : "Delete \(items.count) selected items?"
@@ -721,30 +730,51 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             if items.contains(where: { $0.kind == "folder" }) && items.contains(where: { $0.kind == "document" }) {
                 warning.informativeText += " Only empty folders can be deleted."
             }
-            warning.addButton(withTitle: "Continue")
+            let delete = warning.addButton(withTitle: "Delete")
+            delete.keyEquivalent = ""
             warning.addButton(withTitle: "Cancel")
             let response = try await self.presentReviewAlert(warning, in: window, generation: generation, api: api)
             guard response == .alertFirstButtonReturn else { self.showFolder(); return }
 
-            let confirm = NSAlert()
-            confirm.messageText = "Confirm deletion"
-            confirm.informativeText = "Enter your Review username exactly as shown: \(username)"
-            let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 270, height: 24))
-            field.delegate = self
-            confirm.accessoryView = field
-            let submit = confirm.addButton(withTitle: "Delete")
-            confirm.addButton(withTitle: "Cancel")
-            submit.isEnabled = false
-            confirm.window.initialFirstResponder = field
-            self.deleteConfirmationUsername = username
-            self.confirmDeleteButton = submit
-            let finalResponse = try await self.presentReviewAlert(confirm, in: window, generation: generation, api: api)
-            self.deleteConfirmationUsername = nil
-            self.confirmDeleteButton = nil
-            guard finalResponse == .alertFirstButtonReturn, field.stringValue == username else {
-                self.showFolder()
-                return
+            if !selectedPDFs.isEmpty {
+                let backup = NSAlert()
+                backup.messageText = selectedPDFs.count == 1 ? "Save a local copy before deleting?" : "Save local copies before deleting?"
+                backup.informativeText = "Local copies include the synced Review markups."
+                backup.addButton(withTitle: selectedPDFs.count == 1 ? "Save Copy…" : "Save Copies…")
+                backup.addButton(withTitle: "Delete Without Saving").keyEquivalent = ""
+                backup.addButton(withTitle: "Cancel")
+                let choice = try await self.presentReviewAlert(backup, in: window, generation: generation, api: api)
+                switch choice {
+                case .alertFirstButtonReturn:
+                    var destinations = Set<URL>()
+                    for document in selectedPDFs {
+                        let panel = NSSavePanel()
+                        panel.allowedContentTypes = [.pdf]
+                        panel.nameFieldStringValue = URL(fileURLWithPath: document.name).lastPathComponent
+                        self.reviewAlertSheet = panel
+                        let result = await withCheckedContinuation { continuation in
+                            panel.beginSheetModal(for: window) { continuation.resume(returning: $0) }
+                        }
+                        try self.checkLifecycle(generation, api: api)
+                        self.reviewAlertSheet = nil
+                        guard result == .OK, let destination = panel.url else { self.showFolder(); return }
+                        let canonicalDestination = destination.standardizedFileURL.resolvingSymlinksInPath()
+                        guard destinations.insert(canonicalDestination).inserted else {
+                            throw SharedReviewError("Choose a different filename for each copy. Nothing was deleted.")
+                        }
+                        if let editor = self.editor, editor.sessionDocumentURLs.contains(where: {
+                            editor.canonicalDocumentURL($0) == editor.canonicalDocumentURL(destination)
+                        }) {
+                            throw SharedReviewError("Choose a destination that isn’t open in Drawbridge. Nothing was deleted.")
+                        }
+                        self.status.stringValue = "Saving a local copy…"
+                        try await self.saveDeletionCopy(document, to: destination, api: api, generation: generation)
+                    }
+                case .alertSecondButtonReturn: break
+                default: self.showFolder(); return
+                }
             }
+            let username = try await self.requireReviewUsername(using: api, saveToSettings: true)
             for (index, item) in items.enumerated() {
                 let reviews = affectedReviews.filter { $0.documentID == item.id }
                 do {
@@ -774,9 +804,29 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
     }
 
-    func controlTextDidChange(_ notification: Notification) {
-        guard let field = notification.object as? NSTextField else { return }
-        confirmDeleteButton?.isEnabled = field.stringValue == deleteConfirmationUsername
+    private func saveDeletionCopy(_ document: SharedReviewAPI.Document, to destination: URL,
+                                  api: SharedReviewAPI, generation: UUID) async throws {
+        let base = try await api.download(document)
+        try checkLifecycle(generation, api: api)
+        var revision = 0
+        var records: [String: RectangleMarkupRecord] = [:]
+        while true {
+            let response: SharedReviewAPI.Operations = try await api.get("documents/\(document.id)/ops", query: [
+                URLQueryItem(name: "afterSeq", value: String(revision))
+            ])
+            try checkLifecycle(generation, api: api)
+            for operation in response.ops {
+                guard operation.seq > revision else { throw SharedReviewError("The server returned revisions out of order.") }
+                if let markup = operation.payload { records[markup.id] = markup.record }
+                revision = operation.seq
+            }
+            if response.ops.count < 500 { break }
+        }
+        let markups = records.values.sorted { $0.id < $1.id }
+        try await Task.detached(priority: .userInitiated) {
+            try SharedReviewPDFExport.write(basePDF: base, records: markups, to: destination)
+        }.value
+        try checkLifecycle(generation, api: api)
     }
 
     @objc private func uploadPDF() {
@@ -963,7 +1013,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             throw SharedReviewError("This server needs the Drawbridge Review username update.")
         }
         guard capabilities.creatorOnlyMarkups == true else {
-            throw SharedReviewError("Sign in again in General settings to use Drawbridge Review.")
+            throw SharedReviewError("Sign in again under Settings → Drawbridge Review to use Drawbridge Review.")
         }
         let username: String
         if let existing = capabilities.reviewUsername {

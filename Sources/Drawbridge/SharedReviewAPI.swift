@@ -215,7 +215,7 @@ struct SharedReviewAPI: Sendable {
     private func validate(_ response: URLResponse) throws {
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else {
-            if code == 401 { throw SharedReviewError("Session expired. Sign in again in General settings.") }
+            if code == 401 { throw SharedReviewError("Session expired. Sign in again under Settings → Drawbridge Review.") }
             if code == 413 { throw SharedReviewError("The server rejected this PDF because it exceeds the upload limit.") }
             throw SharedReviewError("Drawbridge Review request failed (HTTP \(code)).", statusCode: code)
         }

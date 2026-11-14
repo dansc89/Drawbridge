@@ -180,7 +180,7 @@ extension MainViewController {
         rectangleToolbar.highlightButton.needsDisplay = true
         rectangleToolbar.highlightButton.toolTip = "Highlight (\(shortcutDisplayString(for: .highlight)))"
         let importedSelected = s.selected.map(RectangleMarkupRecord.owns) == false
-        let styleEnabled = enabled && !importedSelected && s.selected?.type != "Stamp"
+        let styleEnabled = enabled && s.selected?.isReadOnly != true && !importedSelected && s.selected?.type != "Stamp"
         rectangleToolbar.editTextButton.toolTip = importedSelected
             ? "Imported text editing is not yet supported"
             : "Edit Text"
@@ -204,7 +204,7 @@ extension MainViewController {
         rectangleToolbar.fontPopup.isEnabled = styleEnabled
         rectangleToolbar.widthPopup.isHidden = textSelected || s.tool == .text
         rectangleToolbar.colorPopup.isEnabled = styleEnabled; rectangleToolbar.widthPopup.isEnabled = styleEnabled
-        rectangleToolbar.deleteButton.isEnabled = enabled && s.selected != nil
+        rectangleToolbar.deleteButton.isEnabled = enabled && s.selectedItems.contains(where: s.canDeleteMarkup)
         rectangleToolbar.undoButton.isEnabled = enabled && s.undo.canUndo
         rectangleToolbar.redoButton.isEnabled = enabled && s.undo.canRedo
         // Custom values must never display an unrelated preset. The inspector

@@ -139,7 +139,7 @@ import XCTest
         var networkFailure = false
     }
 
-    private func withReview(_ body: (SharedReviewWindowController, MainViewController, Fixture) async throws -> Void) async throws {
+    private func withReview(_ body: @MainActor (SharedReviewWindowController, MainViewController, Fixture) async throws -> Void) async throws {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

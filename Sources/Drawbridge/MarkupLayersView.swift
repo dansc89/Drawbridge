@@ -156,11 +156,13 @@ import PDFKit
         return alert.runModal() == .alertFirstButtonReturn ? field.stringValue : nil
     }
     @objc private func newLayer(_ sender: Any?) {
-        guard let name = prompt(title: "New Layer"), let session else { return }
+        guard let session, session.canManageLayers(), session.canEdit(),
+              let name = prompt(title: "New Layer") else { return }
         if session.addLayer(named: name) == nil { NSSound.beep() }
     }
     @objc private func renameLayer(_ sender: Any?) {
-        guard let session, session.layerCatalog.layers.indices.contains(table.selectedRow) else { return }
+        guard let session, session.canManageLayers(), session.canEdit(),
+              session.layerCatalog.layers.indices.contains(table.selectedRow) else { return }
         let layer = session.layerCatalog.layers[table.selectedRow]
         if let name = prompt(title: "Rename Layer", initial: layer.name) { session.renameLayer(layer.id, to: name) }
     }
@@ -177,7 +179,8 @@ import PDFKit
                   generation == presentationGeneration, document === session?.view?.document else { return }
             callback(layer); return
         }
-        guard let session, session.layerCatalog.layers.indices.contains(table.selectedRow) else { return }
+        guard let session, session.canManageLayers(), session.canEdit(),
+              session.layerCatalog.layers.indices.contains(table.selectedRow) else { return }
         session.removeLayer(session.layerCatalog.layers[table.selectedRow].id)
     }
 }

@@ -46,7 +46,7 @@ final class ReviewNativeBrowserTests: XCTestCase {
                 api.transport = { request in
                     if request.url!.path == "/v1/auth/me" {
                         await requests.recordAuth()
-                        // Stop before native sheets: this exercises actual action admission, not confirmation UI.
+                        // Stop before contacting the deletion endpoint.
                         throw SharedReviewError("Fixture stops before confirmation")
                     }
                     let json = request.url!.path == "/v1/projects"
@@ -63,9 +63,29 @@ final class ReviewNativeBrowserTests: XCTestCase {
             XCTAssertFalse(controller.canEdit)
             table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
             XCTAssertEqual(delete.isEnabled, allowed, capabilities)
-            if allowed { XCTAssertTrue(delete.toolTip?.contains("exact Review username") == true) }
+            if allowed { XCTAssertTrue(delete.toolTip?.contains("after confirming") == true) }
             XCTAssertEqual(controller.tableView(table, pasteboardWriterForRow: 1) != nil, writer)
             controller.perform(NSSelectorFromString("deleteSelectedItems"))
+            if allowed {
+                for _ in 0..<100 where window.attachedSheet == nil {
+                    try await Task.sleep(for: .milliseconds(2))
+                }
+                let sheet = try XCTUnwrap(window.attachedSheet)
+                let confirm = try XCTUnwrap(descendants(try XCTUnwrap(sheet.contentView))
+                    .compactMap { $0 as? NSButton }.first { $0.title == "Delete" })
+                let countBeforeConfirmation = await requests.authCount
+                XCTAssertEqual(countBeforeConfirmation, 0)
+                confirm.performClick(nil)
+                for _ in 0..<200 {
+                    if let backup = window.attachedSheet, backup !== sheet,
+                       let skip = descendants(try XCTUnwrap(backup.contentView)).compactMap({ $0 as? NSButton })
+                           .first(where: { $0.title == "Delete Without Saving" }) {
+                        skip.performClick(nil)
+                        break
+                    }
+                    try await Task.sleep(for: .milliseconds(5))
+                }
+            }
             // Let the real operation finish (or prove the denied action stayed idle).
             for _ in 0..<100 {
                 try await Task.sleep(for: .milliseconds(2))

@@ -268,6 +268,34 @@ import XCTest
         grouped(c) { c.setLayerLocked(id, false) }; XCTAssertTrue(controller.validateMenuItem(menu))
         annotation.isReadOnly = true; XCTAssertFalse(controller.validateMenuItem(menu))
     }
+    func testLayerRestrictionsRemoveListMenuAndRejectAssignment() throws {
+        let source = try fixture()
+        defer { try? FileManager.default.removeItem(at: source) }
+        let controller = MainViewController()
+        _ = controller.view
+        controller.openDocument(at: source)
+        let session = controller.pdfView.rectangleMarkup
+        session.undo.groupsByEvent = false
+        let page = try XCTUnwrap(controller.pdfView.document?.page(at: 0))
+        let layer = try XCTUnwrap(grouped(session) { session.addLayer(named: "Fixture") })
+        let markup = try XCTUnwrap(grouped(session) {
+            session.create(on: page, bounds: CGRect(x: 100, y: 100, width: 40, height: 30))
+        })
+        let menu = try XCTUnwrap(controller.markupsTable.menu)
+        controller.menuNeedsUpdate(menu)
+        XCTAssertTrue(menu.items.contains { $0.title == "Assign to Layer" })
+
+        session.canManageLayers = { false }
+        controller.menuNeedsUpdate(menu)
+        XCTAssertFalse(menu.items.contains { $0.title == "Assign to Layer" })
+        XCTAssertTrue(session.layerAssignmentMenu(for: [markup]).items.isEmpty)
+        grouped(session) { session.assignLayer(layer, to: [markup]) }
+        XCTAssertNil(MarkupLayers.id(markup))
+        XCTAssertTrue(session.canDeleteMarkup(markup))
+        markup.isReadOnly = true
+        XCTAssertFalse(session.canDeleteMarkup(markup))
+    }
+
     func testDetachedLayerRefreshDoesNotQueuePageRotation() throws {
         let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
         let document = try XCTUnwrap(PDFDocument(url: source)), page = try XCTUnwrap(document.page(at: 0))

@@ -1794,6 +1794,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc func renameBookmarkFromSidebar() {
+        guard !isActiveReview, !isPDFProcessingBusy else { return }
         let row = bookmarksOutlineView.clickedRow >= 0 ? bookmarksOutlineView.clickedRow : bookmarksOutlineView.selectedRow
         guard row >= 0,
               let outline = bookmarksOutlineView.item(atRow: row) as? PDFOutline else { return }
@@ -1838,7 +1839,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     @objc func deleteBookmarkFromSidebar() { deleteSelectedBookmarks() }
 
     func deleteSelectedBookmarks(confirm: Bool = true) {
-        guard !isPDFProcessingBusy else { return }
+        guard !isActiveReview, !isPDFProcessingBusy else { return }
         let selectedOutlines = bookmarksOutlineView.selectedRowIndexes.compactMap {
             bookmarksOutlineView.item(atRow: $0) as? PDFOutline
         }
@@ -2018,6 +2019,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
     }
 
     @objc func renamePageLabelFromSidebar() {
+        guard !isActiveReview, !isPDFProcessingBusy else { return }
         let row = pagesTableView.clickedRow >= 0 ? pagesTableView.clickedRow : pagesTableView.selectedRow
         guard row >= 0, row < sidebarPageCount() else { return }
         let existing = displayPageLabel(forPageIndex: row)
@@ -5837,10 +5839,10 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         refreshRectangleToolbar(refreshProperties: false)
         goToSheetButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
         fitPageButton.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
-        reduceFileSizeButton.isEnabled = pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy
-        purgeLayersButton.isEnabled = pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy && !isPDFFileProcessingOperation
-        let recoverable = canUnflattenCurrentDocument()
-        let ready = pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy && !isPDFFileProcessingOperation
+        reduceFileSizeButton.isEnabled = !isActiveReview && pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy
+        purgeLayersButton.isEnabled = !isActiveReview && pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy && !isPDFFileProcessingOperation
+        let recoverable = !isActiveReview && canUnflattenCurrentDocument()
+        let ready = !isActiveReview && pdfView.document != nil && openDocumentURL != nil && !isPDFProcessingBusy && !isPDFFileProcessingOperation
         flattenPDFButton.isEnabled = ready && !recoverable
         flattenPDFButton.toolTip = recoverable ? "Flatten PDF — unflatten the existing recovery data before flattening again" : "Flatten PDF — make visible markups permanent and save this PDF"
         // Let the explicit command inspect the saved file even if PDFKit's live
@@ -5892,8 +5894,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 }
             }
             pageJumpField.isEnabled = false
-            autoNameSheetsButton.isEnabled = !isPDFProcessingBusy
-            batchLinkSheetsButton.isEnabled = !isPDFProcessingBusy
+            autoNameSheetsButton.isEnabled = !isActiveReview && !isPDFProcessingBusy
+            batchLinkSheetsButton.isEnabled = !isActiveReview && !isPDFProcessingBusy
         } else {
             statusPageSizeLabel.stringValue = "Size: -"
             statusPageLabel.stringValue = "-"
