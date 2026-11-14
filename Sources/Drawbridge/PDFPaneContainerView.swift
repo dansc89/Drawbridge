@@ -8,6 +8,11 @@ final class PDFPaneContainerView: NSView {
     var onClose: (() -> Void)?
     let titleLabel = NSTextField(labelWithString: "")
     let modeLabel = NSTextField(labelWithString: "")
+    let connectionIcon = NSImageView()
+    let connectionLabel = NSTextField(labelWithString: "Offline")
+    let connectionStatus = NSStackView()
+    private var closeTrailingToHeader: NSLayoutConstraint!
+    private var closeTrailingToConnection: NSLayoutConstraint!
     private var headerHeight: NSLayoutConstraint!
     private var isActive = false
     private var isReview = false
@@ -21,6 +26,8 @@ final class PDFPaneContainerView: NSView {
         let colors = ChromeSelectionColors(active: isActive, appearance: header.effectiveAppearance)
         titleLabel.textColor = colors.foreground
         modeLabel.textColor = colors.foreground
+        connectionLabel.textColor = colors.foreground
+        connectionIcon.contentTintColor = colors.foreground
         closeButton.contentTintColor = colors.foreground
         let background = isReview
             ? colors.background.blended(withFraction: 0.25, of: .systemPurple) ?? colors.background
@@ -45,7 +52,20 @@ final class PDFPaneContainerView: NSView {
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         header.addSubview(closeButton)
         modeLabel.font = .systemFont(ofSize: 10, weight: .semibold)
-        modeLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        modeLabel.lineBreakMode = .byTruncatingTail
+        modeLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        connectionIcon.translatesAutoresizingMaskIntoConstraints = false
+        connectionIcon.imageScaling = .scaleProportionallyDown
+        connectionLabel.font = .systemFont(ofSize: 10, weight: .semibold)
+        connectionLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        connectionStatus.orientation = .horizontal
+        connectionStatus.alignment = .centerY
+        connectionStatus.spacing = 4
+        connectionStatus.addArrangedSubview(connectionIcon)
+        connectionStatus.addArrangedSubview(connectionLabel)
+        connectionStatus.translatesAutoresizingMaskIntoConstraints = false
+        connectionStatus.isHidden = true
+        header.addSubview(connectionStatus)
         for label in [titleLabel, modeLabel] {
             label.translatesAutoresizingMaskIntoConstraints = false
             header.addSubview(label)
@@ -54,6 +74,9 @@ final class PDFPaneContainerView: NSView {
         pdfView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(pdfView)
         headerHeight = header.heightAnchor.constraint(equalToConstant: 0)
+        closeTrailingToHeader = closeButton.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -4)
+        closeTrailingToConnection = closeButton.trailingAnchor.constraint(equalTo: connectionStatus.leadingAnchor, constant: -6)
+        closeTrailingToHeader.isActive = true
         NSLayoutConstraint.activate([
             header.topAnchor.constraint(equalTo: topAnchor),
             header.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -62,7 +85,10 @@ final class PDFPaneContainerView: NSView {
             titleLabel.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: modeLabel.leadingAnchor, constant: -8),
             modeLabel.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -6),
-            closeButton.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -4),
+            connectionStatus.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -10),
+            connectionStatus.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            connectionIcon.widthAnchor.constraint(equalToConstant: 12),
+            connectionIcon.heightAnchor.constraint(equalToConstant: 12),
             closeButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
             closeButton.widthAnchor.constraint(equalToConstant: 24),
             closeButton.heightAnchor.constraint(equalToConstant: 24),
@@ -79,8 +105,18 @@ final class PDFPaneContainerView: NSView {
 
     @objc private func closePane() { onClose?() }
 
-    func updateHeader(documentName: String, side: String, active: Bool, split: Bool, reviewStatus: String? = nil) {
+    func updateHeader(documentName: String, side: String, active: Bool, split: Bool,
+                      reviewStatus: String? = nil, reviewOnline: Bool = false) {
         isReview = reviewStatus != nil
+        connectionStatus.isHidden = !isReview
+        closeTrailingToHeader.isActive = !isReview
+        closeTrailingToConnection.isActive = isReview
+        connectionLabel.stringValue = reviewOnline ? "Online" : "Offline"
+        connectionIcon.image = NSImage(systemSymbolName: reviewOnline ? "checkmark.circle.fill" : "wifi.slash",
+                                       accessibilityDescription: connectionLabel.stringValue)
+        connectionStatus.toolTip = reviewOnline
+            ? "Authenticated sync response received within 5 seconds. Online does not confirm durable server storage; check Saving/Synced and pending edits separately."
+            : "No fresh authenticated sync response. Pending edits may not have reached the server; check Saving/Synced separately."
         header.isHidden = !split && !isReview
         headerHeight.constant = header.isHidden ? 0 : 30
         closeButton.isHidden = !split
@@ -101,7 +137,7 @@ final class PDFPaneContainerView: NSView {
         header.setAccessibilityLabel("\(side) split view, \(documentName)\(active ? ", active" : "")")
         if let reviewStatus {
             header.toolTip = "Shared server document · " + reviewStatus
-            header.setAccessibilityLabel("Drawbridge Review, \(documentName), \(reviewStatus)")
+            header.setAccessibilityLabel("Drawbridge Review, \(documentName), \(reviewStatus), \(connectionLabel.stringValue)")
         }
     }
 

@@ -484,12 +484,13 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
                 guard let self, let pane else { return }
                 self.closePDFPane(pane)
             }
-            let reviewStatus = container.pdfView.document.flatMap { sharedReview?.review(for: $0)?.syncStatus }
+            let review = container.pdfView.document.flatMap { sharedReview?.review(for: $0) }
             container.updateHeader(documentName: name,
                                    side: index == 0 ? "Left" : "Right",
                                    active: container.pdfView === pdfView,
                                    split: secondaryPDFView != nil,
-                                   reviewStatus: reviewStatus)
+                                   reviewStatus: review?.syncStatus,
+                                   reviewOnline: review?.reviewIsOnline ?? false)
         }
     }
 

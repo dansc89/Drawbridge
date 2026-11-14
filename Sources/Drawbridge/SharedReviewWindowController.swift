@@ -2,6 +2,63 @@ import AppKit
 import PDFKit
 import UniformTypeIdentifiers
 
+/// Presentation only; server capabilities and mutation authorization remain authoritative.
+struct ReviewCapabilityPresentation {
+    static let browserTitle = "Drawbridge Review — Server Documents"
+    static func subtitle(workspace: String?) -> String {
+        workspace.map { "Workspace: " + $0 } ?? ""
+    }
+    let newFolderReason: String?
+    let deleteReason: String?
+    var newFolderToolTip: String { newFolderReason ?? "Create a folder" }
+    var deleteToolTip: String { deleteReason ?? "Delete selected items after confirming your exact Review username." }
+    var explanation: String {
+        [newFolderReason.map { "New Folder unavailable: " + $0 },
+         deleteReason.map { "Delete unavailable: " + $0 }].compactMap { $0 }.joined(separator: "\n")
+    }
+
+    init(busy: Bool, foldersAvailable: Bool, organizationActions: Bool, selectionCount: Int,
+         documentDeletion: Bool = false, selectionContainsFolders: Bool = false) {
+        let wait = "Wait for the current operation to finish."
+        var folderReasons: [String] = []
+        var deleteReasons: [String] = []
+        if !foldersAvailable {
+            folderReasons.append("This server response has not advertised folder support. Refresh; if this persists, ask the server administrator to check service capabilities.")
+        }
+        if foldersAvailable && !organizationActions {
+            folderReasons.append("This server response has not advertised folder creation support for your account.")
+        }
+        let canDelete = organizationActions || documentDeletion
+        if !canDelete {
+            deleteReasons.append("This server response has not advertised deletion support. Refresh; if this persists, ask the server administrator to check service capabilities.")
+        }
+        if selectionContainsFolders && !organizationActions {
+            deleteReasons.append("Folder deletion is not available for your account. Select only PDFs.")
+        }
+        if busy { folderReasons.append(wait); deleteReasons.append(wait) }
+        if canDelete && selectionCount == 0 {
+            deleteReasons.append("Select one or more folders or PDFs first.")
+        }
+        newFolderReason = folderReasons.isEmpty ? nil : folderReasons.joined(separator: " ")
+        deleteReason = deleteReasons.isEmpty ? nil : deleteReasons.joined(separator: " ")
+    }
+}
+
+/// Transport evidence only: neither a local outbox save nor a socket is a server acknowledgement.
+/// Use monotonic time so wall-clock changes cannot prolong an Online indication.
+struct ReviewSyncConnection {
+    static let freshness: TimeInterval = 5
+    private var lastResponse: TimeInterval?
+
+    mutating func receivedResponse(at time: TimeInterval) { lastResponse = time }
+    mutating func disconnect() { lastResponse = nil }
+    func isOnline(at time: TimeInterval) -> Bool {
+        guard let lastResponse else { return false }
+        let age = time - lastResponse
+        return age >= 0 && age < Self.freshness
+    }
+}
+
 @MainActor
 private final class ReviewBrowserWindow: NSWindow {
     var navigate: ((Bool) -> Void)?
@@ -17,12 +74,17 @@ private final class ReviewBrowserWindow: NSWindow {
 }
 
 @MainActor
-final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSToolbarDelegate {
     weak var editor: MainViewController?
     private(set) var tabURL: URL?
     private(set) var reviewPDF: PDFDocument?
     private(set) var basePDF: Data?
     private(set) var syncStatus = ""
+    private var reviewConnection = ReviewSyncConnection()
+    private var connectionExpiryTask: Task<Void, Never>?
+    var reviewIsOnline: Bool {
+        !sessionInvalidated && sessionID != nil && reviewConnection.isOnline(at: ProcessInfo.processInfo.systemUptime)
+    }
     var canEdit: Bool { ready }
     var hasPendingChanges: Bool { !invalidPages.isEmpty || outboxNeedsSave }
     private let outboxDirectory: URL?
@@ -39,11 +101,17 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private lazy var uploadButton = button("Upload PDFs…", #selector(uploadPDF))
     private lazy var refreshButton = button("Refresh", #selector(refreshDocuments(_:)))
     private let status = NSTextField(labelWithString: "Choose a shared PDF.")
+    private let capabilityExplanation = NSTextField(wrappingLabelWithString: "")
+    private let uploadProgress = NSProgressIndicator()
+    private let uploadDetail = NSTextField(labelWithString: "")
+    private let uploadPresentation = NSStackView()
+    private var toolbarItems: [String: NSToolbarItem] = [:]
     private lazy var backButton = button("Back", #selector(goBack))
     private lazy var newFolderButton = button("New Folder…", #selector(createFolder))
     private lazy var deleteButton = button("Delete…", #selector(deleteSelectedItems))
     private static let reviewDocumentDrag = NSPasteboard.PasteboardType("com.drawbridge.review.document-id")
     private var organizationActions = false
+    private var documentDeletion = false
     private weak var reviewAlertSheet: NSWindow?
     private var deleteConfirmationUsername: String?
     private weak var confirmDeleteButton: NSButton?
@@ -82,6 +150,8 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         super.init(window: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(reviewSessionChanged),
             name: SettingsWindowController.reviewSessionDidChange, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(refreshBrowserTheme),
+            name: InterfaceTheme.didChange, object: nil)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -110,6 +180,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         folders = nil
         documents.removeAll()
         organizationActions = false
+        documentDeletion = false
         deleteConfirmationUsername = nil
         confirmDeleteButton?.isEnabled = false
         confirmDeleteButton = nil
@@ -118,6 +189,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             sheet.sheetParent?.endSheet(sheet, returnCode: .cancel)
         }
         busy = false
+        resetUploadProgress()
         if !retryPendingEditsSave() {
             updateReviewStatus("Signed out · Pending edits are only in memory")
             status.stringValue = "Pending edits could not be saved locally. Keep this tab open to retain them."
@@ -156,10 +228,11 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     func buildWindow() {
-        let window = ReviewBrowserWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 390),
-                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.title = "Drawbridge Review — Server Documents"
-        window.minSize = NSSize(width: 400, height: 240)
+        let window = ReviewBrowserWindow(contentRect: NSRect(x: 0, y: 0, width: 740, height: 480),
+                              styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+        window.title = ReviewCapabilityPresentation.browserTitle
+        window.minSize = NSSize(width: 480, height: 320)
+        window.toolbarStyle = .unified
         window.delegate = self
         window.isReleasedWhenClosed = false
         self.window = window
@@ -172,7 +245,9 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         nameColumn.resizingMask = .autoresizingMask
         documentsTable.addTableColumn(nameColumn)
         documentsTable.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
-        documentsTable.usesAlternatingRowBackgroundColors = true
+        documentsTable.style = .inset
+        documentsTable.headerView = nil
+        documentsTable.usesAlternatingRowBackgroundColors = false
         documentsTable.allowsMultipleSelection = true
         documentsTable.delegate = self
         documentsTable.dataSource = self
@@ -181,11 +256,12 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         documentsTable.registerForDraggedTypes([Self.reviewDocumentDrag, .fileURL])
         documentsTable.setDraggingSourceOperationMask(.move, forLocal: true)
         documentsTable.setAccessibilityLabel("Server Documents")
-        documentsTable.rowHeight = 24
+        documentsTable.rowHeight = 34
+        documentsTable.intercellSpacing = NSSize(width: 8, height: 2)
 
         let list = NSScrollView()
         list.hasVerticalScroller = true
-        list.borderType = .bezelBorder
+        list.borderType = .noBorder
         list.documentView = documentsTable
         list.translatesAutoresizingMaskIntoConstraints = false
 
@@ -203,18 +279,44 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         let navigation = NSStackView(views: [backButton, folderPath])
         navigation.spacing = 10
         navigation.alignment = .centerY
+        // The toolbar owns navigation; retain the key-equivalent button in the
+        // responder hierarchy for existing keyboard and path-control behavior.
+        backButton.isHidden = true
         status.maximumNumberOfLines = 2
+        status.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         openButton.keyEquivalent = "\r"
-        let controls = NSStackView(views: [newFolderButton, uploadButton, refreshButton, deleteButton, NSView(), openButton])
-        controls.spacing = 8
-        // Presence has no supported workspace transport yet. Keep this explicitly
-        // unavailable rather than treating document sessions or author names as people.
+        openButton.bezelStyle = .rounded
+        openButton.toolTip = "Open the selected folder or PDF (Return)"
+        let footer = NSStackView(views: [status, NSView(), openButton])
+        footer.spacing = 12
+        footer.alignment = .centerY
+        uploadProgress.style = .bar
+        uploadProgress.minValue = 0
+        uploadProgress.maxValue = 100
+        uploadProgress.isDisplayedWhenStopped = true
+        uploadProgress.setAccessibilityLabel("PDF upload progress")
+        uploadDetail.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        uploadDetail.lineBreakMode = .byTruncatingMiddle
+        uploadDetail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        uploadPresentation.orientation = .vertical
+        uploadPresentation.alignment = .leading
+        uploadPresentation.spacing = 5
+        uploadPresentation.addArrangedSubview(uploadDetail)
+        uploadPresentation.addArrangedSubview(uploadProgress)
+        resetUploadProgress()
+        // No supported workspace-presence transport: preserve honest unavailable
+        // state and disclosure, compact by default at the bottom-left.
         let participants = ReviewParticipantsView(frame: .zero)
-        let stack = NSStackView(views: [navigation, list, status, controls, participants])
+        participants.disclosureButton.performClick(nil)
+        capabilityExplanation.identifier = NSUserInterfaceItemIdentifier("review.capabilityExplanation")
+        capabilityExplanation.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        capabilityExplanation.setContentCompressionResistancePriority(.required, for: .vertical)
+        let stack = NSStackView(views: [navigation, list, uploadPresentation, footer, capabilityExplanation, participants])
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: 0, bottom: 10, right: 0)
         stack.translatesAutoresizingMaskIntoConstraints = false
         if let content = window.contentView {
             content.addSubview(stack)
@@ -223,14 +325,110 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
                 stack.topAnchor.constraint(equalTo: content.topAnchor),
                 stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-                list.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
-                navigation.widthAnchor.constraint(equalTo: list.widthAnchor),
-                participants.widthAnchor.constraint(equalTo: list.widthAnchor),
-                controls.widthAnchor.constraint(equalTo: list.widthAnchor)
+                list.widthAnchor.constraint(equalTo: stack.widthAnchor),
+                list.heightAnchor.constraint(greaterThanOrEqualToConstant: 80),
+                folderPath.widthAnchor.constraint(equalTo: navigation.widthAnchor),
+                uploadProgress.widthAnchor.constraint(equalTo: uploadPresentation.widthAnchor),
+                uploadDetail.widthAnchor.constraint(equalTo: uploadPresentation.widthAnchor)
             ])
+            for insetView in [navigation, uploadPresentation, footer, capabilityExplanation, participants] {
+                insetView.leadingAnchor.constraint(equalTo: stack.leadingAnchor, constant: 16).isActive = true
+                insetView.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -32).isActive = true
+            }
         }
+        let toolbar = NSToolbar(identifier: "ReviewBrowser")
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = false
+        toolbar.delegate = self
+        window.toolbar = toolbar
         window.initialFirstResponder = documentsTable
+        refreshBrowserTheme()
         updateBrowserControls()
+    }
+
+    private var toolbarDefinitions: [(String, String, String, Selector, String)] {
+        [("back", "Back", "chevron.backward", #selector(goBack), "Go to the parent folder (⌘↑)"),
+         ("upload", "Upload PDFs…", "square.and.arrow.up", #selector(uploadPDF), "Upload PDFs to this folder"),
+         ("newFolder", "New Folder…", "folder.badge.plus", #selector(createFolder), "Create a folder"),
+         ("refresh", "Refresh", "arrow.clockwise", #selector(refreshDocuments(_:)), "Refresh server documents"),
+         ("delete", "Delete…", "trash", #selector(deleteSelectedItems), "Delete the selected items…")]
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.init("review.back"), .flexibleSpace, .init("review.upload"), .init("review.newFolder"),
+         .init("review.refresh"), .init("review.delete")]
+    }
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard let definition = toolbarDefinitions.first(where: { "review." + $0.0 == identifier.rawValue }) else { return nil }
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        item.label = definition.1
+        item.paletteLabel = definition.1
+        item.image = NSImage(systemSymbolName: definition.2, accessibilityDescription: definition.1)
+        item.target = self
+        item.action = definition.3
+        item.toolTip = definition.4
+        item.autovalidates = false
+        toolbarItems[definition.0] = item
+        return item
+    }
+
+    @objc private func refreshBrowserTheme() {
+        guard let window else { return }
+        let theme = InterfaceTheme.current
+        window.appearance = theme.nativeAppearance
+        window.backgroundColor = theme == .system ? .windowBackgroundColor : AppAppearance.chrome
+        window.titlebarAppearsTransparent = theme != .system
+        documentsTable.backgroundColor = theme == .system ? .controlBackgroundColor : AppAppearance.panel
+        if let scroll = documentsTable.enclosingScrollView {
+            scroll.backgroundColor = documentsTable.backgroundColor
+            scroll.contentView.backgroundColor = documentsTable.backgroundColor
+        }
+        func refresh(_ view: NSView) {
+            if let field = view as? NSTextField {
+                field.textColor = theme.color(for: "foreground") ?? .labelColor
+            }
+            view.needsDisplay = true
+            for child in view.subviews { refresh(child) }
+        }
+        if let content = window.contentView { refresh(content) }
+        documentsTable.reloadData()
+        window.displayIfNeeded()
+    }
+
+    // Shared by actual API callbacks and constructed-window tests; never timer driven.
+    func presentUploadProgress(file: String, index: Int, count: Int, sent: Int? = nil, total: Int? = nil) {
+        guard !sessionInvalidated else { return }
+        uploadPresentation.isHidden = false
+        uploadProgress.isHidden = false
+        let prefix = "File \(index) of \(count) · "
+        if let sent, let total, total > 0 {
+            let fraction = min(1, max(0, Double(sent) / Double(total)))
+            uploadProgress.isIndeterminate = fraction >= 1
+            uploadProgress.doubleValue = fraction * 100
+            let bytes = ByteCountFormatter.string(fromByteCount: Int64(max(0, sent)), countStyle: .file)
+            let size = ByteCountFormatter.string(fromByteCount: Int64(total), countStyle: .file)
+            uploadDetail.stringValue = prefix + (fraction >= 1 ? "Verifying " : "Uploading ") + file + " · \(bytes) of \(size) · \(Int(fraction * 100))%"
+        } else {
+            uploadProgress.isIndeterminate = true
+            uploadProgress.doubleValue = 0
+            uploadDetail.stringValue = prefix + "Preparing " + file + "…"
+        }
+        uploadDetail.toolTip = uploadDetail.stringValue
+        if uploadProgress.isIndeterminate { uploadProgress.startAnimation(nil) }
+        else { uploadProgress.stopAnimation(nil) }
+    }
+    func resetUploadProgress() {
+        uploadProgress.stopAnimation(nil)
+        uploadProgress.doubleValue = 0
+        uploadProgress.isIndeterminate = true
+        uploadProgress.isHidden = true
+        uploadDetail.stringValue = ""
+        uploadDetail.toolTip = nil
+        uploadPresentation.isHidden = true
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { rowCount }
@@ -246,6 +444,9 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         icon.heightAnchor.constraint(equalToConstant: 18).isActive = true
         let field = NSTextField(labelWithString: name)
         field.lineBreakMode = .byTruncatingMiddle
+        field.textColor = InterfaceTheme.current.color(for: "foreground") ?? .labelColor
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.toolTip = name
         let cell = NSStackView(views: [icon, field])
         cell.alignment = .centerY
         cell.spacing = 6
@@ -257,12 +458,28 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
 
     private func updateBrowserControls() {
         openButton.isEnabled = !busy && !documentsTable.selectedRowIndexes.isEmpty
-        uploadButton.isEnabled = !busy && project != nil
+        uploadButton.isEnabled = !busy && organizationActions && project != nil
         refreshButton.isEnabled = !busy
-        newFolderButton.isEnabled = !busy && folders != nil
+        newFolderButton.isEnabled = !busy && organizationActions && folders != nil
         backButton.isEnabled = !busy && folderID != nil
         folderPath.isEnabled = !busy
-        deleteButton.isEnabled = !busy && organizationActions && documentsTable.numberOfSelectedRows > 0
+        let presentation = ReviewCapabilityPresentation(busy: busy, foldersAvailable: folders != nil,
+                                                       organizationActions: organizationActions,
+                                                       selectionCount: documentsTable.numberOfSelectedRows,
+                                                       documentDeletion: documentDeletion,
+                                                       selectionContainsFolders: documentsTable.selectedRowIndexes.contains { $0 < visibleFolders.count })
+        deleteButton.isEnabled = presentation.deleteReason == nil
+        newFolderButton.toolTip = presentation.newFolderToolTip
+        deleteButton.toolTip = presentation.deleteToolTip
+        capabilityExplanation.stringValue = presentation.explanation
+        capabilityExplanation.toolTip = presentation.explanation
+        capabilityExplanation.setAccessibilityLabel(presentation.explanation)
+        capabilityExplanation.isHidden = presentation.explanation.isEmpty
+        for (key, button) in [("back", backButton), ("upload", uploadButton), ("newFolder", newFolderButton),
+                              ("refresh", refreshButton), ("delete", deleteButton)] {
+            toolbarItems[key]?.isEnabled = button.isEnabled
+            if key == "newFolder" || key == "delete" { toolbarItems[key]?.toolTip = button.toolTip }
+        }
     }
 
     @objc private func openClickedDocument() {
@@ -308,6 +525,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         self.project = project
         self.api = api
         organizationActions = list.organizationActions == true
+        documentDeletion = list.documentDeletion == true || organizationActions
         folders = list.folders?.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         documents = list.documents.filter { $0.file_size != nil }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
@@ -342,7 +560,8 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             return item
         }
         folderPath.toolTip = entries.map(\.name).joined(separator: " › ")
-        window?.title = "Drawbridge Review — " + (entries.last?.name ?? "Server Documents")
+        window?.title = ReviewCapabilityPresentation.browserTitle
+        window?.subtitle = ReviewCapabilityPresentation.subtitle(workspace: project?.name)
     }
 
     @objc private func openPathFolder() {
@@ -360,7 +579,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     @objc private func createFolder() {
-        guard !busy, let window, let project, let api, folders != nil else { return }
+        guard !busy, organizationActions, let window, let project, let api, folders != nil else { return }
         let alert = NSAlert()
         alert.messageText = "New Folder"
         alert.addButton(withTitle: "Create")
@@ -426,7 +645,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
 
     func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int,
                    proposedDropOperation operation: NSTableView.DropOperation) -> NSDragOperation {
-        guard !busy, !hasPendingChanges, api != nil, project != nil else { return [] }
+        guard !busy, organizationActions, !hasPendingChanges, api != nil, project != nil else { return [] }
         let folderRow = operation == .on && visibleFolders.indices.contains(row)
         if (info.draggingSource as? NSTableView) === documentsTable {
             return organizationActions && folderRow ? .move : []
@@ -438,7 +657,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
 
     func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int,
                    dropOperation: NSTableView.DropOperation) -> Bool {
-        guard !busy, !hasPendingChanges, let api, let project else { return false }
+        guard !busy, organizationActions, !hasPendingChanges, let api, let project else { return false }
         let folder = dropOperation == .on && visibleFolders.indices.contains(row) ? visibleFolders[row] : nil
         if (info.draggingSource as? NSTableView) === documentsTable {
             guard organizationActions, let folder else { return false }
@@ -468,11 +687,12 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     @objc private func deleteSelectedItems() {
-        guard !busy, organizationActions, let api, let project, let window else { return }
+        guard !busy, documentDeletion || organizationActions, let api, let project, let window else { return }
         let folders = visibleFolders
         let documents = visibleDocuments
         let selected = documentsTable.selectedRowIndexes
         guard !selected.isEmpty, selected.allSatisfy({ $0 < folders.count + documents.count }) else { return }
+        guard organizationActions || selected.allSatisfy({ $0 >= folders.count }) else { return }
         let items = selected.map { row -> (id: String, name: String, kind: String) in
             if row < folders.count {
                 let folder = folders[row]
@@ -560,7 +780,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     @objc private func uploadPDF() {
-        guard !busy, let window, let project, let api else { return }
+        guard !busy, organizationActions, let window, let project, let api else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.pdf]
         panel.allowsMultipleSelection = true
@@ -583,18 +803,12 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             }
             _ = try await self.requireReviewUsername(using: api, saveToSettings: true)
             for (index, file) in files.enumerated() {
-                let prefix = files.count > 1 ? "PDF \(index + 1) of \(files.count) · " : ""
                 do {
-                    self.status.stringValue = prefix + "Preparing \(file.lastPathComponent)…"
+                    self.presentUploadProgress(file: file.lastPathComponent, index: index + 1, count: files.count)
                     _ = try await api.upload(file, project: project, folderID: destination) { sent, size in
                         guard (try? self.checkLifecycle(generation, api: api)) != nil else { return }
-                        if sent == size {
-                            self.status.stringValue = prefix + "Verifying \(file.lastPathComponent)…"
-                        } else {
-                            let sentMB = ByteCountFormatter.string(fromByteCount: Int64(sent), countStyle: .file)
-                            let totalMB = ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
-                            self.status.stringValue = prefix + "Uploading \(sentMB) of \(totalMB)…"
-                        }
+                        self.presentUploadProgress(file: file.lastPathComponent, index: index + 1,
+                                                   count: files.count, sent: sent, total: size)
                     }
                     try self.checkLifecycle(generation, api: api)
                 } catch {
@@ -610,7 +824,9 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
     }
 
-    private func perform(_ work: @escaping @MainActor () async throws -> Void) {
+    // Internal so constructed-window tests can exercise completion and error cleanup
+    // through exactly the same operation boundary as toolbar actions.
+    func perform(_ work: @escaping @MainActor () async throws -> Void) {
         guard !sessionInvalidated else { return }
         guard !busy else {
             status.stringValue = "Wait for the current server operation to finish."
@@ -624,6 +840,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             defer {
                 if lifecycle == generation {
                     busy = false
+                    resetUploadProgress()
                     operationTask = nil
                     updateBrowserControls()
                 }
@@ -790,20 +1007,25 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     private func startSync(api: SharedReviewAPI, document: String, session: String) {
-        guard !sessionInvalidated, let socket = try? api.socket() else { return }
-        self.socket = socket
-        socket.resume()
-        listenTask = Task { [weak self] in
-            do {
-                let data = try JSONEncoder().encode(["type": "subscribe", "documentId": document, "sessionId": session])
-                try await socket.send(.string(String(decoding: data, as: UTF8.self)))
-                while !Task.isCancelled {
-                    _ = try await socket.receive()
-                    guard let self, self.sessionID == session else { return }
-                    self.syncRequested = true
-                    await self.sync(api: api, document: document, session: session)
-                }
-            } catch { /* Periodic replay keeps the review usable if the socket disconnects. */ }
+        guard !sessionInvalidated else { return }
+        // The socket only nudges replay; allocating/receiving from it proves neither
+        // authorization nor successful sync. HTTP polling must work without it.
+        // Injected offline transports must not escape to a real WebSocket.
+        if api.transport == nil, let socket = try? api.socket() {
+            self.socket = socket
+            socket.resume()
+            listenTask = Task { [weak self] in
+                do {
+                    let data = try JSONEncoder().encode(["type": "subscribe", "documentId": document, "sessionId": session])
+                    try await socket.send(.string(String(decoding: data, as: UTF8.self)))
+                    while !Task.isCancelled {
+                        _ = try await socket.receive()
+                        guard let self, self.sessionID == session else { return }
+                        self.syncRequested = true
+                        await self.sync(api: api, document: document, session: session)
+                    }
+                } catch { /* Authenticated HTTP replay remains authoritative if the hint socket disconnects. */ }
+            }
         }
         syncTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -816,6 +1038,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
 
     private func stopSync() {
         ready = false
+        updateReviewConnection(online: false)
         editSyncTask?.cancel()
         editSyncTask = nil
         syncTask?.cancel()
@@ -903,22 +1126,29 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                     }
                     let append = SharedReviewAPI.Append(sessionId: session, clientOpId: next.clientOpId,
                                                          payload: next.payload)
-                    let receipt: SharedReviewAPI.Receipt = try await api.post("documents/\(document)/ops", append)
+                    let receipt: SharedReviewAPI.Receipt = try await authenticatedSyncResponse(api: api, generation: generation, session: session) {
+                        try await api.post("documents/\(document)/ops", append)
+                    }
                     try checkLifecycle(generation, api: api)
                     guard sessionID == session else { return }
                     guard receipt.op.payload?.id == next.payload.id, receipt.op.payload?.page == next.payload.page else {
+                        updateReviewConnection(online: false)
                         throw SharedReviewError("The server returned an unexpected revision receipt.")
                     }
+                    updateReviewConnection(online: true)
                     let remaining = Array(pending.dropFirst())
                     try outbox.save(remaining)
                     pending = remaining
                     outboxNeedsSave = false
                 }
-                let response: SharedReviewAPI.Operations = try await api.get("documents/\(document)/ops", query: [
-                    URLQueryItem(name: "afterSeq", value: String(revision))
-                ])
+                let response: SharedReviewAPI.Operations = try await authenticatedSyncResponse(api: api, generation: generation, session: session) {
+                    try await api.get("documents/\(document)/ops", query: [
+                        URLQueryItem(name: "afterSeq", value: String(revision))
+                    ])
+                }
                 try checkLifecycle(generation, api: api)
                 guard sessionID == session else { return }
+                updateReviewConnection(online: true)
                 for operation in response.ops {
                     if operation.op_type == "drawbridge.markup.v1", let markup = operation.payload,
                        !pending.contains(where: { $0.payload.id == markup.id }) {
@@ -951,7 +1181,49 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private func updateReviewStatus(_ message: String) {
         guard syncStatus != message else { return }
         syncStatus = message
-        if editor?.pdfView.document === reviewPDF { editor?.updateStatusBar() }
+        // updateStatusBar refreshes all pane headers, including an inactive Review.
+        editor?.updateStatusBar()
+    }
+
+    private func authenticatedSyncResponse<Value>(api: SharedReviewAPI, generation: UUID, session: String,
+                                                   request: () async throws -> Value) async throws -> Value {
+        do {
+            let response = try await request()
+            try checkLifecycle(generation, api: api)
+            guard sessionID == session else { throw CancellationError() }
+            return response
+        } catch {
+            // Late completions from a closed/signed-out review cannot revive it or
+            // overwrite the transport state of a replacement session.
+            if lifecycle == generation, sessionID == session, !sessionInvalidated {
+                updateReviewConnection(online: false)
+            }
+            throw error
+        }
+    }
+
+    private func updateReviewConnection(online: Bool) {
+        let wasOnline = reviewIsOnline
+        connectionExpiryTask?.cancel()
+        connectionExpiryTask = nil
+        if online {
+            reviewConnection.receivedResponse(at: ProcessInfo.processInfo.systemUptime)
+            let generation = lifecycle
+            let session = sessionID
+            // Independent of the poll task: a hung request must not stay Online.
+            connectionExpiryTask = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(ReviewSyncConnection.freshness)) }
+                catch { return }
+                guard !Task.isCancelled, let self, self.lifecycle == generation, self.sessionID == session else { return }
+                self.updateReviewConnection(online: false)
+            }
+        } else {
+            reviewConnection.disconnect()
+        }
+        // Do not gate on syncStatus changing: repeated empty polls keep the same
+        // revision, and connection failures/recovery are independent of the outbox.
+        // A healthy repeated poll need not run the editor's expensive status refresh.
+        if !online || !wasOnline { editor?.updateStatusBar() }
     }
 
     private func apply(_ markup: SharedReviewAPI.Markup, owned: Bool) throws {

@@ -10,9 +10,18 @@ patterns = {
     'embedded cloud account': re.compile(rb'GoogleDrive-' + rb'(?!developer@example\.com|example@)[A-Za-z0-9._+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', re.I),
 }
 private_email = re.compile(rb'@[^\s]+\.(?:localdomain|local|lan|ts\.net)$', re.I)
+# Explicitly approved existing public commit metadata only. Immutable full IDs
+# bind this disposition to those two objects, not identities or future commits.
+# Tag metadata and every historical blob remain subject to the normal checks.
+accepted_commit_metadata = {
+    b'73befe3f05f4803c538df8bf4cb6d88ff94d4020',
+    b'cd79b9d19f10b43b811304d6e128a7b306e59165',
+}
 findings = set()
 for line in subprocess.check_output(['git', 'log', '--all', '--format=%H%x00%ae%x00%ce']).splitlines():
     commit, author, committer = line.split(b'\0')
+    if commit in accepted_commit_metadata:
+        continue
     if private_email.search(author) or private_email.search(committer):
         findings.add((commit.decode()[:12], 'private commit email'))
 for line in subprocess.check_output(['git', 'for-each-ref', 'refs/tags', '--format=%(refname)%00%(taggeremail:trim)']).splitlines():

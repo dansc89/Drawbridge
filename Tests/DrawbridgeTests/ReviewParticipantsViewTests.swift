@@ -102,17 +102,17 @@ final class ReviewParticipantsViewTests: XCTestCase {
         let panel = try XCTUnwrap(descendants(content).compactMap { $0 as? ReviewParticipantsView }.first)
         content.layoutSubtreeIfNeeded()
         let frame = panel.convert(panel.bounds, to: content)
-        XCTAssertEqual(frame.minX, 12, accuracy: 1)
-        XCTAssertEqual(frame.minY, 12, accuracy: 1)
+        XCTAssertEqual(frame.minX, 16, accuracy: 1)
+        XCTAssertEqual(frame.minY, 10, accuracy: 1)
         XCTAssertEqual(panel.disclosureButton.title, "Participants — unavailable")
         XCTAssertEqual(panel.rowsStack.arrangedSubviews.count, 0)
-        let expandedHeight = frame.height
+        XCTAssertTrue(panel.bodyStack.isHidden, "Browser starts compact without inventing presence")
+        let collapsedHeight = frame.height
         panel.disclosureButton.performClick(nil)
         content.layoutSubtreeIfNeeded()
-        XCTAssertLessThan(panel.frame.height, expandedHeight)
-        XCTAssertGreaterThan(panel.frame.height, 0)
+        XCTAssertGreaterThan(panel.frame.height, collapsedHeight)
         panel.disclosureButton.performClick(nil)
         content.layoutSubtreeIfNeeded()
-        XCTAssertEqual(panel.frame.height, expandedHeight, accuracy: 1)
+        XCTAssertEqual(panel.frame.height, collapsedHeight, accuracy: 1)
     }
 }

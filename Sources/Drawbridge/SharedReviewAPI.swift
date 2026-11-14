@@ -40,7 +40,7 @@ struct SharedReviewAPI: Sendable {
     }
     struct ProjectList: Decodable { let projects: [Project] }
     struct Folder: Decodable { let id: String; let parent_id: String?; let name: String }
-    struct DocumentList: Decodable { let documents: [Document]; let folders: [Folder]?; let organizationActions: Bool? }
+    struct DocumentList: Decodable { let documents: [Document]; let folders: [Folder]?; let organizationActions: Bool?; let documentDeletion: Bool? }
     struct MoveRequest: Encodable { let ids: [String]; let folderId: String }
     struct RemoveRequest: Encodable { let kind: String; let id: String; let confirmation: String }
     struct OrganizationReceipt: Decodable { let ok: Bool }
@@ -147,6 +147,54 @@ struct SharedReviewAPI: Sendable {
                         newRequest request: URLRequest) async -> URLRequest? { nil }
     }
 
+    // One high-water mark for the PDF, including resumed parts. Retransmissions
+    // must not double-count bytes or move the UI backward.
+    @MainActor private final class UploadProgress {
+        let total: Int
+        let lifetime: Lifetime
+        let callback: (@MainActor (Int, Int) -> Void)?
+        private var sent = 0
+        init(total: Int, lifetime: Lifetime, callback: (@MainActor (Int, Int) -> Void)?) {
+            self.total = total; self.lifetime = lifetime; self.callback = callback
+        }
+        func report(_ bytes: Int) {
+            guard !Task.isCancelled, lifetime.identity != nil else { return }
+            let value = min(total, max(0, bytes))
+            guard value > sent else { return }
+            sent = value
+            callback?(value, total)
+        }
+    }
+
+    // A per-task delegate overrides the session's delegate: it MUST reject
+    // redirects too, to prevent authenticated multipart POSTs escaping the origin.
+    private final class UploadDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+        private let lock = NSLock()
+        private var active = true
+        private let progress: UploadProgress
+        private let prefix: Int
+        private let length: Int
+        private let offset: Int
+        init(progress: UploadProgress, prefix: Int, length: Int, offset: Int) {
+            self.progress = progress; self.prefix = prefix; self.length = length; self.offset = offset
+        }
+        func stop() { lock.withLock { active = false } }
+        private var isActive: Bool { lock.withLock { active } }
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest) async -> URLRequest? { nil }
+        func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64,
+                        totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+            // Exclude multipart headers and the closing boundary from PDF bytes.
+            let payload = Int(min(Int64(length), max(0, totalBytesSent - Int64(prefix))))
+            guard payload > 0, isActive else { return }
+            Task { @MainActor [self] in
+                // Cancellation/completion can race callbacks already queued here.
+                guard isActive, task.state == .running else { return }
+                progress.report(offset + payload)
+            }
+        }
+    }
+
     private func request(_ path: String, query: [URLQueryItem] = []) throws -> URLRequest {
         try checkActive()
         var parts = URLComponents(url: origin, resolvingAgainstBaseURL: false)!
@@ -226,6 +274,7 @@ struct SharedReviewAPI: Sendable {
         guard (5...(1024 * 1024 * 1024)).contains(size) else {
             throw SharedReviewError("Choose a PDF up to 1 GiB.")
         }
+        let uploadProgress = await UploadProgress(total: size, lifetime: lifetime, callback: progress)
         if size <= 95_000_000 {
             let bytes = try Data(contentsOf: file)
             let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
@@ -233,9 +282,10 @@ struct SharedReviewAPI: Sendable {
                                             projectID: project.id, folderID: folderID)
             let created: CreatedDocument = try await post("projects/\(project.id)/documents",
                 DocumentRequest(name: file.lastPathComponent, folderId: folderID))
-            let result: CreatedDocument = try await uploadPart(bytes, to: "documents/\(created.document.id)/upload")
+            let result: CreatedDocument = try await uploadPart(bytes, to: "documents/\(created.document.id)/upload",
+                                                            progress: uploadProgress, offset: 0)
             try checkActive()
-            await progress?(size, size)
+            await uploadProgress.report(size)
             try checkActive()
             return result.document
         }
@@ -244,7 +294,7 @@ struct SharedReviewAPI: Sendable {
         defer { try? handle.close() }
         var hash = SHA256()
         while let bytes = try handle.read(upToCount: Self.uploadPartSize), !bytes.isEmpty {
-            try Task.checkCancellation()
+            try checkActive()
             hash.update(data: bytes)
         }
         let digest = hash.finalize().map { String(format: "%02x", $0) }.joined()
@@ -271,33 +321,38 @@ struct SharedReviewAPI: Sendable {
         if let document = status.document {
             defaults.removeObject(forKey: key)
             try checkActive()
-            await progress?(size, size)
+            await uploadProgress.report(size)
             try checkActive()
             return document
         }
         let path = "documents/\(documentID)"
         let uploadedParts = Set(status.parts)
         let partCount = (size + Self.uploadPartSize - 1) / Self.uploadPartSize
-        var uploadedBytes = 0
+        // Resumed parts may be noncontiguous: account for all of them up front.
+        var uploadedBytes = (0..<partCount).filter { uploadedParts.contains($0) }.reduce(0) {
+            $0 + min(Self.uploadPartSize, size - $1 * Self.uploadPartSize)
+        }
+        try checkActive()
+        await uploadProgress.report(uploadedBytes)
+        try checkActive()
         for index in 0..<partCount {
             let offset = index * Self.uploadPartSize
             let length = min(Self.uploadPartSize, size - offset)
             if uploadedParts.contains(index) {
-                uploadedBytes += length
                 continue
             }
             try handle.seek(toOffset: UInt64(offset))
             guard let bytes = try handle.read(upToCount: length), bytes.count == length else {
                 throw SharedReviewError("The PDF changed during upload. Select it again to retry.")
             }
-            try await sendUploadPart(bytes, path: path, index: index)
+            try await sendUploadPart(bytes, path: path, index: index, progress: uploadProgress, offset: uploadedBytes)
             uploadedBytes += length
             try checkActive()
-            await progress?(uploadedBytes, size)
+            await uploadProgress.report(uploadedBytes)
             try checkActive()
         }
         try checkActive()
-        await progress?(size, size)
+        await uploadProgress.report(size)
         try checkActive()
         let result: CreatedDocument = try await post(path + "/complete-upload", CompleteUpload(size: size, sha256: digest))
         defaults.removeObject(forKey: key)
@@ -311,11 +366,13 @@ struct SharedReviewAPI: Sendable {
         return created.document.id
     }
 
-    private func sendUploadPart(_ bytes: Data, path: String, index: Int) async throws {
+    private func sendUploadPart(_ bytes: Data, path: String, index: Int,
+                                progress: UploadProgress, offset: Int) async throws {
         for attempt in 0..<3 {
-            try Task.checkCancellation()
+            try checkActive()
             do {
-                let receipt: UploadPart = try await uploadPart(bytes, to: path + "/upload-parts/\(index)")
+                let receipt: UploadPart = try await uploadPart(bytes, to: path + "/upload-parts/\(index)",
+                                                             progress: progress, offset: offset)
                 guard receipt.index == index else { throw SharedReviewError("The server confirmed the wrong upload part.") }
                 return
             } catch let error as URLError where error.code != .cancelled && attempt < 2 {
@@ -326,9 +383,11 @@ struct SharedReviewAPI: Sendable {
         }
     }
 
-    private func uploadPart<Value: Decodable>(_ bytes: Data, to path: String) async throws -> Value {
+    private func uploadPart<Value: Decodable>(_ bytes: Data, to path: String,
+                                              progress: UploadProgress, offset: Int) async throws -> Value {
         let boundary = UUID().uuidString
         var body = Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"review.pdf\"\r\nContent-Type: application/pdf\r\n\r\n".utf8)
+        let prefix = body.count
         body.append(bytes)
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
         var request = try request(path)
@@ -337,9 +396,15 @@ struct SharedReviewAPI: Sendable {
         request.setValue("multipart/form-data; boundary=" + boundary, forHTTPHeaderField: "Content-Type")
         let uploadRequest = request
         let uploadBody = body
+        let delegate = UploadDelegate(progress: progress, prefix: prefix, length: bytes.count, offset: offset)
+        defer { delegate.stop() }
         let (data, response) = try await lifetime.run {
-            try await lifetime.session.upload(for: uploadRequest, from: uploadBody)
+            try await withTaskCancellationHandler {
+                try checkActive()
+                return try await lifetime.session.upload(for: uploadRequest, from: uploadBody, delegate: delegate)
+            } onCancel: { delegate.stop() }
         }
+        try checkActive()
         try validate(response)
         return try JSONDecoder().decode(Value.self, from: data)
     }

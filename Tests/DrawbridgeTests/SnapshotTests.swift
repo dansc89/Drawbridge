@@ -216,6 +216,28 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
             XCTAssertLessThan(box.data.count,50_000)
         }
     }
+    // Diagnostic output is strictly failure-only: never encode images or perform
+    // file I/O before a successful comparison's next placement/render.
+    private func preserveSnapshotMismatch(_ a: NSBitmapImageRep, _ b: NSBitmapImageRep,
+                                          differences: Int, stage: String, page: PDFPage,
+                                          source: URL, saved: URL) throws {
+        guard differences >= 1200,
+              let directory = ProcessInfo.processInfo.environment["DRAWBRIDGE_SNAPSHOT_FAILURE_DIR"] else { return }
+        let root = URL(fileURLWithPath: directory).appendingPathComponent("\(stage)-r\(page.rotation)-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+                                               attributes: [.posixPermissions: 0o700])
+        func write(_ data: Data, _ name: String) throws {
+            let url = root.appendingPathComponent(name)
+            try data.write(to: url)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
+        try write(XCTUnwrap(a.representation(using: .png, properties: [:])), "live.png")
+        try write(XCTUnwrap(b.representation(using: .png, properties: [:])), "saved.png")
+        try write(Data(contentsOf: source), "source.pdf")
+        try write(Data(contentsOf: saved), "saved.pdf")
+        let state = "differences=\(differences) rotation=\(page.rotation) size=\(a.pixelsWide)x\(a.pixelsHigh) appAppearance=\(String(describing: NSApp.appearance)) effectiveAppearance=\(NSApp.effectiveAppearance.name.rawValue) graphics=\(String(describing: NSGraphicsContext.current)) preview=\(SnapshotPageRendering.isPreview) vector=\(SnapshotPageRendering.isVectorOutput) annotations=\(page.annotations.map { String(describing: type(of: $0)) })\n"
+        try write(Data(state.utf8), "state.txt")
+    }
     func testPasteAllRotationsSaveReopenMoveDeleteUndoAndOriginalBytes() throws {
         _ = NSApplication.shared
         let source=try fixture(); defer { try? FileManager.default.removeItem(at:source) }
@@ -250,6 +272,7 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
                 let c = a.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!, d = b.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!
                 if abs(c.redComponent-d.redComponent)+abs(c.greenComponent-d.greenComponent)+abs(c.blueComponent-d.blueComponent) > 0.1 { differences += 1 }
             } }
+            try preserveSnapshotMismatch(a, b, differences: differences, stage: "fresh", page: doc.page(at: index)!, source: source, saved: output)
             XCTAssertLessThan(differences, 1200, "Fresh appearance matches saved stamp")
         }
         let reopened=try XCTUnwrap(PDFDocument(url:output)); XCTAssertEqual(RectangleMarkupRecord.capture(reopened).map(\.snapshotData), records.map(\.snapshotData))
@@ -267,9 +290,7 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
                 let a=expected.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!, b=actual.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!
                 if abs(a.redComponent-b.redComponent)+abs(a.greenComponent-b.greenComponent)+abs(a.blueComponent-b.blueComponent) > 0.1 { differences += 1 }
             } }
-            if ProcessInfo.processInfo.environment["DRAWBRIDGE_SNAPSHOT_QA"] != nil { try expected.representation(using:.png,properties:[:])!.write(to:URL(fileURLWithPath:"/tmp/snapshot-live-\(p.rotation).png"))
-            try actual.representation(using:.png,properties:[:])!.write(to:URL(fileURLWithPath:"/tmp/snapshot-saved-\(p.rotation).png"))
-            }
+            try preserveSnapshotMismatch(expected, actual, differences: differences, stage: "reopened", page: p, source: source, saved: output)
             XCTAssertLessThan(differences, 1200, "Live vs saved appearance, rotation \(p.rotation)")
         }
         let p=reopened.page(at:1)!, stamp=p.annotations.first { $0.type == "Stamp" }!
