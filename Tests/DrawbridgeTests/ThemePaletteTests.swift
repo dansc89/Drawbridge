@@ -99,7 +99,7 @@ import PDFKit
         let window = try XCTUnwrap(settings.window)
         defer { window.close() }
         let button = try XCTUnwrap(descendants(window.contentView!).compactMap { $0 as? NSButton }.first { $0.title == "Interface" })
-        let sidebar = try XCTUnwrap(button.superview)
+        let sidebar = try XCTUnwrap(button.superview?.superview)
         for (appearance, gray) in [(NSAppearance.Name.aqua, CGFloat(0.94)), (.darkAqua, CGFloat(0.14)), (.aqua, CGFloat(0.94))] {
             window.appearance = NSAppearance(named: appearance)
             sidebar.viewDidChangeEffectiveAppearance()
