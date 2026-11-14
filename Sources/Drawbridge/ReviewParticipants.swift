@@ -24,10 +24,12 @@ struct ReviewParticipantHeartbeat: Sendable {
     let sessionID: String
     let receivedAt: Date
     let isSyncing: Bool
+    var monotonicDeadline: TimeInterval? = nil
 }
 
 struct ReviewParticipants: Sendable {
-    enum Connection: Sendable { case unavailable, disconnected, connected }
+    enum Connection: Sendable { case unavailable, disconnected, connected, requiresReauthentication }
+    enum RosterCoverage: Sendable { case unknown, complete, partial(requiresReauthenticationCount: Int) }
     enum State: String, Sendable { case online = "Online", offline = "Offline", syncing = "Syncing" }
     struct Row: Equatable, Sendable {
         let participant: ReviewVerifiedParticipant
@@ -37,6 +39,9 @@ struct ReviewParticipants: Sendable {
     let members: [ReviewVerifiedParticipant]
     let heartbeats: [ReviewParticipantHeartbeat]
     let connection: Connection
+    var rosterCoverage: RosterCoverage = .unknown
+    var freshnessDeadline: TimeInterval? = nil
+    var isFresh: Bool { freshnessDeadline.map { ProcessInfo.processInfo.systemUptime < $0 } ?? true }
     // Local receipt time, not an untrusted remote device's wall clock.
     // The transport must retire a snapshot on disconnect and replace it on reconnect.
     static let heartbeatTimeout: TimeInterval = 30
@@ -51,16 +56,17 @@ struct ReviewParticipants: Sendable {
         }
     }
 
-    var participantCount: Int? { connection == .connected ? roster.count : nil }
+    var participantCount: Int? { connection == .connected && isFresh ? roster.count : nil }
 
     func rows(at now: Date) -> [Row] {
-        guard connection == .connected else { return [] }
+        guard connection == .connected && isFresh else { return [] }
         return roster.map { participant in
             let sessions = Dictionary(grouping: heartbeats.filter {
                 $0.workspaceID == workspaceID && $0.userID == participant.authenticatedUserID &&
                     !$0.sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }, by: \.sessionID)
             let live = sessions.values.compactMap { $0.max { $0.receivedAt < $1.receivedAt } }.filter {
+                if let deadline = $0.monotonicDeadline { return ProcessInfo.processInfo.systemUptime < deadline }
                 let age = now.timeIntervalSince($0.receivedAt)
                 return age >= 0 && age < Self.heartbeatTimeout
             }
@@ -70,17 +76,27 @@ struct ReviewParticipants: Sendable {
     }
 
     func onlineCount(at now: Date) -> Int? {
-        guard connection == .connected else { return nil }
+        guard connection == .connected && isFresh else { return nil }
         return rows(at: now).filter { $0.state != .offline }.count
     }
 
     func summary(at now: Date) -> String {
+        if connection == .connected && !isFresh { return "Disconnected — participant presence unknown." }
         switch connection {
         case .unavailable: return "Participant presence unavailable."
         case .disconnected: return "Disconnected — participant presence unknown."
+        case .requiresReauthentication:
+            return "Sign in again with Google under Settings → Drawbridge Review to enable verified participant presence."
         case .connected:
-            guard let count = participantCount, count > 0 else { return "No participants in this workspace." }
-            return "\(onlineCount(at: now) ?? 0) online · \(count) workspace participants"
+            let count = participantCount ?? 0
+            let prefix = "\(onlineCount(at: now) ?? 0) online · \(count) verified participants"
+            switch rosterCoverage {
+            case .unknown: return prefix + " — roster coverage unknown."
+            case .partial(let missing):
+                return prefix + " — partial roster; \(missing) members must sign in again with Google."
+            case .complete:
+                return count == 0 ? "No participants in this workspace." : "\(onlineCount(at: now) ?? 0) online · \(count) workspace participants"
+            }
         }
     }
 }

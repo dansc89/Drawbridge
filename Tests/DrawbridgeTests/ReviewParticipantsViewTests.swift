@@ -34,10 +34,10 @@ final class ReviewParticipantsViewTests: XCTestCase {
         let snapshot = ReviewParticipants(workspaceID: "w", members: members,
             heartbeats: [.init(workspaceID: "w", userID: "Ada", sessionID: "a", receivedAt: now, isSyncing: false),
                          .init(workspaceID: "w", userID: "Bo", sessionID: "b", receivedAt: now, isSyncing: true)],
-            connection: .connected)
+            connection: .connected, rosterCoverage: .complete)
         let view = ReviewParticipantsView(frame: .zero)
         view.render(snapshot, at: now)
-        XCTAssertEqual(view.disclosureButton.title, "Participants (3)")
+        XCTAssertEqual(view.disclosureButton.title, "Participants · 2 online")
         XCTAssertEqual(view.summaryField.stringValue, "2 online · 3 workspace participants")
         XCTAssertEqual(labels(in: view.rowsStack), ["Ada", "Online", "Bo", "Syncing", "Cy", "Offline"])
         view.render(snapshot, at: now.addingTimeInterval(30))
@@ -46,8 +46,8 @@ final class ReviewParticipantsViewTests: XCTestCase {
         XCTAssertEqual(view.disclosureButton.title, "Participants — disconnected")
         XCTAssertEqual(view.summaryField.stringValue, "Disconnected — participant presence unknown.")
         XCTAssertEqual(labels(in: view.rowsStack), [])
-        view.render(.init(workspaceID: "w", members: [], heartbeats: [], connection: .connected))
-        XCTAssertEqual(view.disclosureButton.title, "Participants (0)")
+        view.render(.init(workspaceID: "w", members: [], heartbeats: [], connection: .connected, rosterCoverage: .complete))
+        XCTAssertEqual(view.disclosureButton.title, "Participants · 0 online")
         XCTAssertEqual(view.summaryField.stringValue, "No participants in this workspace.")
     }
 
@@ -71,7 +71,7 @@ final class ReviewParticipantsViewTests: XCTestCase {
             ReviewVerifiedParticipant(workspaceID: "w", authenticatedUserID: "id-\($0)",
                                       verifiedName: "Verified reviewer \($0)")!
         }
-        let snapshot = ReviewParticipants(workspaceID: "w", members: members, heartbeats: [], connection: .connected)
+        let snapshot = ReviewParticipants(workspaceID: "w", members: members, heartbeats: [], connection: .connected, rosterCoverage: .complete)
         view.render(snapshot)
         content.layoutSubtreeIfNeeded()
         XCTAssertEqual(view.rowsStack.arrangedSubviews.count, 20)
@@ -84,7 +84,7 @@ final class ReviewParticipantsViewTests: XCTestCase {
         view.render(snapshot)
         content.layoutSubtreeIfNeeded()
         XCTAssertTrue(view.bodyStack.isHidden)
-        XCTAssertEqual(view.disclosureButton.title, "Participants (20)")
+        XCTAssertEqual(view.disclosureButton.title, "Participants · 0 online")
         view.disclosureButton.performClick(nil)
         content.layoutSubtreeIfNeeded()
         XCTAssertFalse(view.bodyStack.isHidden)

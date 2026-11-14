@@ -60,13 +60,13 @@ import XCTest
     }
 
     func testAuthenticatedPollFailuresAndRecoveryDoNotDependOnSocketOrOutbox() async throws {
-        try await withReview { review, _, fixture in
+        try await withReview { review, _, fixture, _, _ in
             XCTAssertFalse(review.reviewIsOnline, "session creation/socket allocation are not a sync response")
             fixture.releaseInitialPoll = true
             try await self.eventually { review.reviewIsOnline && review.syncStatus.hasPrefix("Synced") }
             XCTAssertTrue(fixture.authenticatedOps)
             // A clean outbox does not imply Online. Every unsuccessful sync response fails closed.
-            for code in [401, 403, 500] {
+            for code in [401, 500] {
                 fixture.statusCode = code
                 try await self.eventually { !review.reviewIsOnline }
                 fixture.statusCode = 200
@@ -81,8 +81,42 @@ import XCTest
         }
     }
 
+    func testForbiddenPollEndsAccessUntilExplicitCloseAndReopen() async throws {
+        try await withReview { review, editor, fixture, document, api in
+            fixture.releaseInitialPoll = true
+            try await self.eventually { review.reviewIsOnline && review.canEdit }
+            fixture.statusCode = 403
+            try await self.eventually {
+                !review.reviewIsOnline && !review.canEdit && review.syncStatus.hasPrefix("Review access ended")
+            }
+            let endedStatus = review.syncStatus
+            let stoppedPollCount = fixture.pollCount
+            fixture.statusCode = 200
+            // Observe more than two normal one-second poll intervals: a restored
+            // server must not silently reauthorize a session whose access ended.
+            let deadline = Date().addingTimeInterval(2.2)
+            while Date() < deadline {
+                XCTAssertFalse(review.reviewIsOnline)
+                XCTAssertFalse(review.canEdit)
+                XCTAssertEqual(review.syncStatus, endedStatus)
+                XCTAssertEqual(fixture.pollCount, stoppedPollCount, "403 must stop polling, not retry access")
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            let url = try XCTUnwrap(review.tabURL)
+            review.closeTab(at: url)
+            editor.unregisterSessionDocument(url)
+            let reopened = try await review.open(document, using: api, focusEditor: false)
+            XCTAssertTrue(reopened)
+            try await self.eventually {
+                review.reviewIsOnline && review.canEdit && review.syncStatus.hasPrefix("Synced")
+            }
+            XCTAssertGreaterThan(fixture.pollCount, stoppedPollCount)
+            XCTAssertEqual(fixture.sessionCount, 2, "Explicit reopen must recheck access with a new session")
+        }
+    }
+
     func testHungPollExpiresOnlineWithoutChangingLastSyncedState() async throws {
-        try await withReview { review, _, fixture in
+        try await withReview { review, _, fixture, _, _ in
             fixture.releaseInitialPoll = true
             try await self.eventually { review.reviewIsOnline && review.syncStatus.hasPrefix("Synced") }
             let lastSync = review.syncStatus
@@ -93,7 +127,7 @@ import XCTest
     }
 
     func testSessionTeardownRejectsDelayedSuccessfulPoll() async throws {
-        try await withReview { review, _, fixture in
+        try await withReview { review, _, fixture, _, _ in
             try await self.eventually { fixture.pollEntered }
             NotificationCenter.default.post(name: SettingsWindowController.reviewSessionDidChange, object: nil)
             fixture.releaseInitialPoll = true
@@ -104,7 +138,7 @@ import XCTest
     }
 
     func testOnlineCanStillHavePendingEditsAndRejectedAppendRetriesSameOutboxOperation() async throws {
-        try await withReview { review, editor, fixture in
+        try await withReview { review, editor, fixture, _, _ in
             fixture.releaseInitialPoll = true
             try await self.eventually { review.reviewIsOnline && review.canEdit }
             fixture.releaseAppend = false
@@ -134,12 +168,14 @@ import XCTest
         var appendIDs: [String] = []
         var releaseInitialPoll = false
         var pollEntered = false
+        var pollCount = 0
+        var sessionCount = 0
         var authenticatedOps = false
         var statusCode = 200
         var networkFailure = false
     }
 
-    private func withReview(_ body: @MainActor (SharedReviewWindowController, MainViewController, Fixture) async throws -> Void) async throws {
+    private func withReview(_ body: @MainActor (SharedReviewWindowController, MainViewController, Fixture, SharedReviewAPI.Document, SharedReviewAPI) async throws -> Void) async throws {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -164,7 +200,9 @@ import XCTest
             switch path {
             case "/v1/auth/me":
                 text = #"{"reviewUsernames":true,"creatorOnlyMarkups":true,"reviewUsername":"Reviewer"}"#
-            case "/v1/documents/document/sessions": text = #"{"session":{"id":"session"}}"#
+            case "/v1/documents/document/sessions":
+                fixture.sessionCount += 1
+                text = #"{"session":{"id":"session"}}"#
             case "/v1/documents/document/ops":
                 if request.httpMethod == "POST" {
                     let append = try XCTUnwrap(JSONSerialization.jsonObject(with: try XCTUnwrap(request.httpBody)) as? [String: Any])
@@ -177,6 +215,7 @@ import XCTest
                     return (data, HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: nil, headerFields: nil)!)
                 }
                 fixture.pollEntered = true
+                fixture.pollCount += 1
                 while !fixture.releaseInitialPoll { await Task.yield() }
                 fixture.authenticatedOps = request.value(forHTTPHeaderField: "Authorization") == "Bearer offline-test-token"
                 if fixture.networkFailure { throw URLError(.notConnectedToInternet) }
@@ -199,7 +238,7 @@ import XCTest
         }
         let opened = try await review.open(document, using: api, focusEditor: false)
         XCTAssertTrue(opened)
-        try await body(review, editor, fixture)
+        try await body(review, editor, fixture, document, api)
     }
 
     private func eventually(timeout: TimeInterval = 3, _ predicate: () -> Bool) async throws {

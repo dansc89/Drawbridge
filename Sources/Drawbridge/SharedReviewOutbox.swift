@@ -49,4 +49,15 @@ struct SharedReviewOutbox {
         let data = try PropertyListEncoder().encode(SavedEdits(baseDigest: baseDigest, edits: edits))
         try data.write(to: file, options: .atomic)
     }
+
+    /// Closed tabs still own durable work. Probe only this origin/device/document;
+    /// any nonempty queue (including a changed base) or unreadable file fails closed.
+    static func requireEmptyForDeletion(origin: URL, instanceID: String, documentID: String,
+                                       directory: URL? = nil) throws {
+        let probe = try Self(origin: origin, instanceID: instanceID, documentID: documentID,
+                             basePDF: Data(), directory: directory)
+        guard try probe.load().isEmpty else {
+            throw SharedReviewError("Reopen this Review PDF and sync its local edits before deleting it.")
+        }
+    }
 }

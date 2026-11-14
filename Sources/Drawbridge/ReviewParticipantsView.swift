@@ -21,7 +21,8 @@ final class ReviewParticipantsView: NSView {
         disclosureButton.setAccessibilityHelp("Show or hide workspace participants")
         summaryField.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         summaryField.textColor = .secondaryLabelColor
-        summaryField.lineBreakMode = .byTruncatingTail
+        summaryField.lineBreakMode = .byWordWrapping
+        summaryField.maximumNumberOfLines = 0
         rowsStack.orientation = .vertical
         rowsStack.alignment = .leading
         rowsStack.spacing = 4
@@ -58,12 +59,18 @@ final class ReviewParticipantsView: NSView {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    // Future transport owner must call again on snapshot changes and expiry ticks.
+    // Workspace transport owner calls on snapshot changes and monotonic expiry ticks.
     // An unavailable connection is not an authoritative empty roster.
     func render(_ snapshot: ReviewParticipants?, at now: Date = Date()) {
-        if let count = snapshot?.participantCount {
-            disclosureButton.title = "Participants (\(count))"
-        } else if snapshot?.connection == .disconnected {
+        if let count = snapshot?.onlineCount(at: now) {
+            if case .complete = snapshot?.rosterCoverage {
+                disclosureButton.title = "Participants · \(count) online"
+            } else {
+                disclosureButton.title = "Participants · \(count) verified online — partial/unknown roster"
+            }
+        } else if snapshot?.connection == .requiresReauthentication {
+            disclosureButton.title = "Participants — sign in again with Google"
+        } else if snapshot?.connection == .disconnected || snapshot?.connection == .connected {
             disclosureButton.title = "Participants — disconnected"
         } else {
             disclosureButton.title = "Participants — unavailable"

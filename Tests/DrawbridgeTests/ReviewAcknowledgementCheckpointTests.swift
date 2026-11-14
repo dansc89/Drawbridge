@@ -40,6 +40,9 @@ private final class CheckpointURLProtocol: URLProtocol, @unchecked Sendable {
         var ids: [String] = []
         var diskCounts: [Int] = []
         var failAt: Int?
+        var opsStatus = 200
+        var presenceJoins = 0
+        var presenceLeaves = 0
         var onAppend: ((Int) throws -> Void)?
         init() throws {
             directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -189,6 +192,254 @@ private final class CheckpointURLProtocol: URLProtocol, @unchecked Sendable {
         }
     }
 
+    func testSignoutCheckpointsFocusedNewAndExistingTextWithoutTransport() async throws {
+        for existing in [false, true] {
+            let fixture = try Fixture()
+            try await withReview(fixture, removeDirectory: true) { review, editor in
+                try await self.eventually { review.canEdit }
+                let markup = editor.pdfView.rectangleMarkup
+                let page = try XCTUnwrap(review.reviewPDF?.page(at: 0))
+                let bounds = CGRect(x: 10, y: 10, width: 120, height: 60)
+                let annotation = existing ? markup.create(on: page, bounds: bounds, kind: .text, text: "Before") : nil
+                markup.beginTextEditing(on: page, bounds: bounds, annotation: annotation)
+                let textView = try XCTUnwrap(editor.pdfView.subviews.compactMap { $0 as? MarkupInlineTextView }.first)
+                textView.string = "Unsent exact text\n🦋"
+                let requests = fixture.ids.count
+                review.perform(NSSelectorFromString("reviewSessionChanged"))
+                XCTAssertFalse(review.canEdit)
+                XCTAssertFalse(markup.isEditingText)
+                XCTAssertTrue(try fixture.outbox.load().contains { $0.payload.record?.text == "Unsent exact text\n🦋" })
+                XCTAssertTrue(review.canCloseReview())
+                for _ in 0..<20 { await Task.yield() }
+                XCTAssertEqual(fixture.ids.count, requests)
+                review.closeTab(at: try XCTUnwrap(review.tabURL))
+                XCTAssertTrue(try fixture.outbox.load().contains { $0.payload.record?.text == "Unsent exact text\n🦋" })
+            }
+        }
+    }
+
+    func testAccessLossCheckpointsActiveTextBeforeDisablingEdits() async throws {
+        let fixture = try Fixture()
+        try await withReview(fixture, removeDirectory: true) { review, editor in
+            try await self.eventually { review.canEdit }
+            let page = try XCTUnwrap(review.reviewPDF?.page(at: 0))
+            editor.pdfView.rectangleMarkup.beginTextEditing(on: page, bounds: CGRect(x: 10, y: 10, width: 120, height: 60))
+            let text = try XCTUnwrap(editor.pdfView.subviews.compactMap { $0 as? MarkupInlineTextView }.first)
+            text.string = "Access ended draft\n🦋"
+            fixture.opsStatus = 403
+            try await eventually { !review.canEdit }
+            XCTAssertFalse(editor.pdfView.rectangleMarkup.isEditingText)
+            XCTAssertEqual(try fixture.outbox.load().first?.payload.record?.text, "Access ended draft\n🦋")
+            XCTAssertTrue(fixture.ids.isEmpty)
+            XCTAssertTrue(review.canCloseReview())
+        }
+    }
+
+    func testSignoutCheckpointsInactiveSecondaryPaneText() async throws {
+        let fixture = try Fixture()
+        try await withReview(fixture, removeDirectory: true) { review, editor in
+            try await self.eventually { review.canEdit }
+            let secondary = MarkupPDFView(frame: editor.pdfView.frame)
+            secondary.setMarkupDocument(review.reviewPDF)
+            editor.secondaryPDFView = secondary
+            secondary.rectangleMarkup.canEdit = { [weak review] in review?.canEdit == true }
+            secondary.rectangleMarkup.onMutation = { [weak review] in review?.recordChanges(on: $0) }
+            let page = try XCTUnwrap(review.reviewPDF?.page(at: 0))
+            secondary.rectangleMarkup.beginTextEditing(on: page, bounds: CGRect(x: 10, y: 10, width: 120, height: 60))
+            let text = try XCTUnwrap(secondary.subviews.compactMap { $0 as? MarkupInlineTextView }.first)
+            text.string = "Inactive pane draft"
+            review.perform(NSSelectorFromString("reviewSessionChanged"))
+            XCTAssertFalse(secondary.rectangleMarkup.isEditingText)
+            XCTAssertEqual(try fixture.outbox.load().first?.payload.record?.text, "Inactive pane draft")
+            XCTAssertTrue(fixture.ids.isEmpty)
+        }
+    }
+
+    func testClosedTabDeletionChecksDurableQueueAndMalformedRecovery() async throws {
+        let fixture = try Fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let browser = SharedReviewWindowController(outboxDirectory: fixture.directory.appendingPathComponent("outbox"))
+        let api = SharedReviewAPI(origin: URL(string: "https://checkpoint.invalid")!, token: "test", displayName: "Reviewer", instanceID: "device")
+        XCTAssertNoThrow(try browser.ensureDeletionSafe([fixture.document], api: api))
+        try fixture.seed(1)
+        XCTAssertThrowsError(try browser.ensureDeletionSafe([fixture.document], api: api))
+        let restarted = SharedReviewWindowController(outboxDirectory: fixture.directory.appendingPathComponent("outbox"))
+        XCTAssertThrowsError(try restarted.ensureDeletionSafe([fixture.document], api: api))
+        try fixture.outbox.save([])
+        XCTAssertNoThrow(try restarted.ensureDeletionSafe([fixture.document], api: api))
+        let files = try FileManager.default.contentsOfDirectory(at: fixture.directory.appendingPathComponent("outbox"), includingPropertiesForKeys: nil)
+        try Data("malformed".utf8).write(to: XCTUnwrap(files.first))
+        XCTAssertThrowsError(try restarted.ensureDeletionSafe([fixture.document], api: api))
+        XCTAssertTrue(fixture.ids.isEmpty)
+    }
+
+    func testBlockedCloseAndQuitExplainFailureAndRetryAfterDiskRecovery() async throws {
+        let fixture = try Fixture()
+        try await withReview(fixture, removeDirectory: true) { review, editor in
+            try await self.eventually { review.canEdit }
+            let directory = fixture.directory.appendingPathComponent("outbox")
+            let backup = fixture.directory.appendingPathComponent("saved-outbox")
+            try FileManager.default.moveItem(at: directory, to: backup)
+            try Data("blocked".utf8).write(to: directory)
+            let markup = editor.pdfView.rectangleMarkup
+            let page = try XCTUnwrap(review.reviewPDF?.page(at: 0))
+            markup.beginTextEditing(on: page, bounds: CGRect(x: 10, y: 10, width: 120, height: 60))
+            let textView = try XCTUnwrap(editor.pdfView.subviews.compactMap { $0 as? MarkupInlineTextView }.first)
+            textView.string = "Retain on failure"
+            review.perform(NSSelectorFromString("reviewSessionChanged"))
+            XCTAssertFalse(review.canCloseReview())
+            XCTAssertFalse(review.canQuit())
+            XCTAssertTrue(review.closeBlockExplanation.contains("Checkpoint.pdf"))
+            XCTAssertTrue(review.closeBlockExplanation.contains("permissions"))
+            XCTAssertTrue(review.closeBlockExplanation.contains("already saved locally"))
+            let tab = try XCTUnwrap(review.tabURL)
+            editor.closeDocumentTab(at: tab)
+            editor.commandCloseDocument(nil)
+            XCTAssertEqual(review.tabURL, tab)
+            XCTAssertTrue(review.hasPendingChanges)
+            try FileManager.default.removeItem(at: directory)
+            try FileManager.default.moveItem(at: backup, to: directory)
+            XCTAssertTrue(review.canCloseReview())
+            XCTAssertTrue(review.canQuit())
+            XCTAssertTrue(try fixture.outbox.load().contains { $0.payload.record?.text == "Retain on failure" })
+        }
+    }
+
+    func testBrowserPresenceLivesUntilHiddenFinalReviewClosesAndRestartsOnReopen() async throws {
+        let fixture = try Fixture()
+        let active = SettingsWindowController.activeReviewSession
+        let attempted = SettingsWindowController.attemptedSessionRestore
+        SettingsWindowController.attemptedSessionRestore = true
+        SettingsWindowController.activeReviewSession = (URL(string: "https://checkpoint.invalid")!, .init(token: "test", instanceId: "device", displayName: "Reviewer"))
+        defer {
+            SettingsWindowController.activeReviewSession = active
+            SettingsWindowController.attemptedSessionRestore = attempted
+            UserDefaults.standard.removeObject(forKey: "DrawbridgeReviewFolder|https://checkpoint.invalid|device|workspace")
+        }
+        try await withReview(fixture, removeDirectory: true) { review, _ in
+            review.buildWindow()
+            review.showWindow(nil)
+            try await review.loadDocuments()
+            try await self.eventually { fixture.presenceJoins == 1 }
+            review.window?.close()
+            try await Task.sleep(for: .milliseconds(150))
+            XCTAssertEqual(fixture.presenceLeaves, 0, "browser close must not retire a lease while a Review PDF remains open")
+            review.closeTab(at: try XCTUnwrap(review.tabURL))
+            try await self.eventually { fixture.presenceLeaves == 1 }
+            review.showReviews(nil)
+            try await self.eventually { fixture.presenceJoins == 2 }
+            review.window?.close()
+            try await self.eventually { fixture.presenceLeaves == 2 }
+        }
+    }
+
+    func testEditorHandoffAndAdditionalReviewKeepPresenceUntilFinalHiddenTabCloses() async throws {
+        let fixture = try Fixture()
+        let active = SettingsWindowController.activeReviewSession
+        let attempted = SettingsWindowController.attemptedSessionRestore
+        SettingsWindowController.attemptedSessionRestore = true
+        SettingsWindowController.activeReviewSession = (URL(string: "https://checkpoint.invalid")!, .init(token: "test", instanceId: "device", displayName: "Reviewer"))
+        defer {
+            SettingsWindowController.activeReviewSession = active
+            SettingsWindowController.attemptedSessionRestore = attempted
+            UserDefaults.standard.removeObject(forKey: "DrawbridgeReviewFolder|https://checkpoint.invalid|device|workspace")
+        }
+        try await withReview(fixture, removeDirectory: true) { review, _ in
+            review.showWindow(nil)
+            try await review.loadDocuments()
+            try await self.eventually { fixture.presenceJoins == 1 }
+            let first = try XCTUnwrap(review.tabURL)
+            let second = SharedReviewAPI.Document(id: "second", name: "Second.pdf", file_size: fixture.document.file_size, file_sha256: fixture.document.file_sha256, folder_id: nil)
+            // Downloads use URLSession's file API, not the JSON transport seam.
+            let secondCache = try XCTUnwrap(SharedReviewPDFCache(origin: URL(string: "https://checkpoint.invalid")!, instanceID: "device", document: second, directory: fixture.cache))
+            try secondCache.store(fixture.bytes)
+            let opened = try await review.open(second, focusEditor: true)
+            XCTAssertTrue(opened)
+            XCTAssertFalse(try XCTUnwrap(review.window).isVisible)
+            let child = try XCTUnwrap(review.review(for: try XCTUnwrap(review.editor?.pdfView.document)))
+            let secondURL = try XCTUnwrap(child.tabURL)
+            XCTAssertNotEqual(first, secondURL)
+            review.closeTab(at: first)
+            try await Task.sleep(for: .milliseconds(150))
+            XCTAssertEqual(fixture.presenceLeaves, 0)
+            review.closeTab(at: secondURL)
+            try await self.eventually { fixture.presenceLeaves == 1 }
+        }
+    }
+
+    func testIncomingDeletionCannotDetachInactiveSecondaryTextEditor() async throws {
+        let fixture = try Fixture()
+        try await withReview(fixture, removeDirectory: true) { review, editor in
+            try await self.eventually { review.canEdit }
+            let secondary = MarkupPDFView(frame: editor.pdfView.frame)
+            secondary.setMarkupDocument(review.reviewPDF)
+            editor.secondaryPDFView = secondary
+            secondary.rectangleMarkup.canEdit = { review.canEdit }
+            let page = try XCTUnwrap(review.reviewPDF?.page(at: 0))
+            let annotation = try XCTUnwrap(secondary.rectangleMarkup.create(on: page, bounds: CGRect(x: 10, y: 10, width: 120, height: 60), kind: .text, text: "Before"))
+            let id = RectangleMarkupRecord.prefix + "editing-secondary"
+            annotation.setValue(id, forAnnotationKey: RectangleMarkupRecord.identityKey)
+
+            secondary.rectangleMarkup.beginTextEditing(on: page, bounds: annotation.bounds, annotation: annotation)
+            let text = try XCTUnwrap(secondary.subviews.compactMap { $0 as? MarkupInlineTextView }.first)
+            text.string = "Exact local draft 🦋"
+            let markup = SharedReviewAPI.Markup(id: id, page: 0, record: nil, ownerInstanceId: "remote")
+            let payload = try JSONSerialization.jsonObject(with: JSONEncoder().encode(markup))
+            let operation = try JSONDecoder().decode(SharedReviewAPI.Operation.self, from: JSONSerialization.data(withJSONObject: ["seq": 1, "op_type": "drawbridge.markup.v1", "payload": payload]))
+            XCTAssertThrowsError(try review.replayOperations([operation], instanceID: "device"))
+            XCTAssertTrue(annotation.page === page)
+            XCTAssertEqual(review.revision, 0)
+            XCTAssertEqual(secondary.rectangleMarkup.textDraftRecovery?.text, "Exact local draft 🦋")
+            secondary.rectangleMarkup.finishTextEditing(cancel: true)
+            try review.replayOperations([operation], instanceID: "device")
+            XCTAssertNil(annotation.page)
+            XCTAssertEqual(review.revision, 1)
+        }
+    }
+
+    func testOversizedDraftCannotBeOverwrittenAndSurvivesDocumentSwitch() async throws {
+        let fixture = try Fixture()
+        try await withReview(fixture, removeDirectory: true) { review, editor in
+            try await self.eventually { review.canEdit }
+            let viewer = editor.pdfView, markup = viewer.rectangleMarkup
+            let original = try XCTUnwrap(review.reviewPDF)
+            let page = try XCTUnwrap(original.page(at: 0))
+            let bounds = CGRect(x: 10, y: 10, width: 120, height: 60)
+            markup.beginTextEditing(on: page, bounds: bounds)
+            let text = try XCTUnwrap(viewer.subviews.compactMap { $0 as? MarkupInlineTextView }.first)
+            let exact = String(repeating: "🦋", count: 25001)
+            text.string = exact
+            markup.beginTextEditing(on: page, bounds: bounds.offsetBy(dx: 20, dy: 20))
+            XCTAssertEqual(markup.textDraftRecovery?.text, exact)
+            XCTAssertEqual(viewer.subviews.compactMap { $0 as? MarkupInlineTextView }.count, 1)
+            let other = PDFDocument(); other.insert(PDFPage(), at: 0)
+            viewer.setMarkupDocument(other)
+            XCTAssertFalse(review.canCloseReview(), "a suspended oversized draft must still block close")
+            viewer.setMarkupDocument(original)
+            XCTAssertEqual(markup.textDraftRecovery?.text, exact)
+            let restored = try XCTUnwrap(viewer.subviews.compactMap { $0 as? MarkupInlineTextView }.first)
+            restored.string = "Corrected draft"
+            XCTAssertTrue(review.canCloseReview())
+            XCTAssertEqual(try fixture.outbox.load().last?.payload.record?.text, "Corrected draft")
+        }
+    }
+
+    func testCorrectingRetainedOversizedDraftUnblocksCloseAndQuit() async throws {
+        let fixture = try Fixture()
+        try await withReview(fixture, removeDirectory: true) { review, editor in
+            try await self.eventually { review.canEdit }
+            let page = try XCTUnwrap(review.reviewPDF?.page(at: 0))
+            editor.pdfView.rectangleMarkup.beginTextEditing(on: page, bounds: CGRect(x: 10, y: 10, width: 120, height: 60))
+            let text = try XCTUnwrap(editor.pdfView.subviews.compactMap { $0 as? MarkupInlineTextView }.first)
+            text.string = String(repeating: "x", count: 100001)
+            XCTAssertFalse(review.canCloseReview())
+            text.string = "Repaired"
+            XCTAssertTrue(review.canCloseReview(), "a superseded recovery snapshot must not permanently block close")
+            XCTAssertTrue(review.canQuit())
+            XCTAssertFalse(review.hasPendingChanges)
+        }
+    }
+
     private func withReview(_ fixture: Fixture, removeDirectory: Bool = false,
                             _ body: (SharedReviewWindowController, MainViewController) async throws -> Void) async throws {
         _ = NSApplication.shared
@@ -199,8 +450,15 @@ private final class CheckpointURLProtocol: URLProtocol, @unchecked Sendable {
         api.transport = { request in
             let data: Data
             switch request.url!.path {
+            case "/v1/projects": data = Data(#"{"projects":[{"id":"workspace","name":"Workspace"}]}"#.utf8)
+            case "/v1/projects/workspace/documents": data = Data(#"{"documents":[]}"#.utf8)
+            case "/v1/projects/workspace/presence":
+                let body = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
+                if body["leave"] as? Bool == true { fixture.presenceLeaves += 1 }
+                else { fixture.presenceJoins += 1 }
+                data = Data(#"{"version":1,"workspaceId":"workspace","ttlSeconds":30,"members":[],"leases":[]}"#.utf8)
             case "/v1/auth/me": data = Data(#"{"reviewUsernames":true,"creatorOnlyMarkups":true,"reviewUsername":"Reviewer"}"#.utf8)
-            case "/v1/documents/checkpoint/sessions": data = Data(#"{"session":{"id":"session"}}"#.utf8)
+            case let path where path.hasSuffix("/sessions"): data = Data(#"{"session":{"id":"session"}}"#.utf8)
             case "/v1/documents/checkpoint/ops" where request.httpMethod == "POST":
                 let append = try JSONSerialization.jsonObject(with: request.httpBody!) as! [String: Any]
                 fixture.ids.append(append["clientOpId"] as! String)
@@ -208,13 +466,18 @@ private final class CheckpointURLProtocol: URLProtocol, @unchecked Sendable {
                 try fixture.onAppend?(fixture.ids.count)
                 if fixture.failAt == fixture.ids.count { throw URLError(.notConnectedToInternet) }
                 return try await session.data(for: request)
-            case "/v1/documents/checkpoint/ops": data = Data(#"{"ops":[]}"#.utf8)
+            case let path where path.hasSuffix("/ops"):
+                if fixture.opsStatus == 403 {
+                    return (Data(#"{"error":"Access ended"}"#.utf8), HTTPURLResponse(url: request.url!, statusCode: 403, httpVersion: nil, headerFields: nil)!)
+                }
+                data = Data(#"{"ops":[]}"#.utf8)
             default: data = fixture.bytes
             }
             return (data, HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
         }
         let editor = MainViewController()
         let review = SharedReviewWindowController(outboxDirectory: fixture.directory.appendingPathComponent("outbox"), cacheDirectory: fixture.cache)
+        review.makeReviewAPI = { _, _ in api }
         editor.sharedReview = review; review.editor = editor
         defer {
             fixture.onAppend = nil

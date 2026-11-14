@@ -1937,9 +1937,14 @@ final class RectangleMarkupTests: XCTestCase {
 
     func testActiveToolHighlightTracksEveryToolAndDisabledState() throws {
         _ = NSApplication.shared
+        let source = try fixture(rotation: 0)
+        defer { try? FileManager.default.removeItem(at: source) }
         let controller = MainViewController()
         _ = controller.view
-        controller.pdfView.rectangleMarkup.canEdit = { true }
+        // Select depends on an open document, independently of editing permission.
+        controller.openDocument(at: source)
+        XCTAssertNotNil(controller.pdfView.document)
+        XCTAssertTrue(controller.pdfView.rectangleMarkup.canEdit())
         let buttons = [controller.rectangleToolbar.selectButton, controller.rectangleToolbar.rectangleButton,
                        controller.rectangleToolbar.ellipseButton, controller.rectangleToolbar.lineButton,
                        controller.rectangleToolbar.arrowButton, controller.rectangleToolbar.polygonButton,
@@ -1950,6 +1955,14 @@ final class RectangleMarkupTests: XCTestCase {
             XCTAssertEqual(buttons.enumerated().filter { $0.element.showsActiveTool }.map { $0.offset }, [index])
         }
         controller.pdfView.rectangleMarkup.canEdit = { false }
+        for (index, tool) in tools.enumerated() {
+            controller.pdfView.rectangleMarkup.tool = tool
+            controller.refreshRectangleToolbar()
+            XCTAssertEqual(buttons.enumerated().filter { $0.element.showsActiveTool }.map { $0.offset },
+                           index == 0 ? [0] : [], "Read-only PDFs keep Select available, not editing tools")
+        }
+        controller.closeDocumentTab(at: source)
+        XCTAssertNil(controller.pdfView.document)
         controller.refreshRectangleToolbar()
         XCTAssertFalse(buttons.contains { $0.showsActiveTool })
     }

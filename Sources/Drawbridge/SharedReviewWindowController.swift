@@ -12,10 +12,7 @@ struct ReviewCapabilityPresentation {
     let deleteReason: String?
     var newFolderToolTip: String { newFolderReason ?? "Create a folder" }
     var deleteToolTip: String { deleteReason ?? "Delete selected items after confirming." }
-    var explanation: String {
-        [newFolderReason.map { "New Folder unavailable: " + $0 },
-         deleteReason.map { "Delete unavailable: " + $0 }].compactMap { $0 }.joined(separator: "\n")
-    }
+    let explanation: String
 
     init(busy: Bool, foldersAvailable: Bool, organizationActions: Bool, selectionCount: Int,
          documentDeletion: Bool = false, selectionContainsFolders: Bool = false) {
@@ -35,6 +32,10 @@ struct ReviewCapabilityPresentation {
         if selectionContainsFolders && !organizationActions {
             deleteReasons.append("Folder deletion is not available for your account. Select only PDFs.")
         }
+        // Busy/no-selection guidance is transient, not a persistent error.
+        explanation = [folderReasons.isEmpty ? nil : "New Folder unavailable: " + folderReasons.joined(separator: " "),
+                       deleteReasons.isEmpty ? nil : "Delete unavailable: " + deleteReasons.joined(separator: " ")]
+            .compactMap { $0 }.joined(separator: "\n")
         if busy { folderReasons.append(wait); deleteReasons.append(wait) }
         if canDelete && selectionCount == 0 {
             deleteReasons.append("Select one or more folders or PDFs first.")
@@ -62,11 +63,19 @@ struct ReviewSyncConnection {
 @MainActor
 private final class ReviewBrowserWindow: NSWindow {
     var navigate: ((Bool) -> Void)?
+    weak var browserTable: NSTableView?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        if modifiers == .command, let navigate, [125, 126].contains(event.keyCode) {
+        guard attachedSheet == nil else { return super.performKeyEquivalent(with: event) }
+        let editingText = firstResponder is NSTextView || firstResponder is NSTextField
+        if !editingText, modifiers == .command, let navigate, [125, 126].contains(event.keyCode) {
             navigate(event.keyCode == 125)
+            return true
+        }
+        if firstResponder === browserTable, modifiers.isEmpty,
+           [36, 76].contains(event.keyCode), let navigate {
+            navigate(true)
             return true
         }
         return super.performKeyEquivalent(with: event)
@@ -85,8 +94,18 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     var reviewIsOnline: Bool {
         !sessionInvalidated && sessionID != nil && reviewConnection.isOnline(at: ProcessInfo.processInfo.systemUptime)
     }
-    var canEdit: Bool { ready }
-    var hasPendingChanges: Bool { !invalidPages.isEmpty || outboxNeedsSave }
+    var canEdit: Bool { ready && !deletionInFlight }
+    var hasPendingChanges: Bool { !invalidPages.isEmpty || outboxNeedsSave || !retainedDrafts.isEmpty || reviewViewers.contains { $0.rectangleMarkup.isEditingText } }
+    private var preservingDrafts = false
+    private var deletionInFlight = false
+    // Derive recovery from the editors that own it, not append-only snapshots
+    // that survive correction/cancellation and permanently poison close/quit.
+    private var retainedDrafts: [RectangleMarkupController.TextDraftRecovery] {
+        guard let pdf = reviewPDF else { return [] }
+        return allReviewViewers.flatMap { $0.rectangleMarkup.textDraftRecoveries(for: pdf) }
+    }
+    private(set) var localSaveFailure: String?
+    private var cacheWarning = false
     private let outboxDirectory: URL?
     private let cacheDirectory: URL?
     private var additionalReviews: [URL: SharedReviewWindowController] = [:]
@@ -99,6 +118,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private var invalidPages = Set<Int>()
     private var retiredIDs = Set<String>()
     private let documentsTable = NSTableView()
+    private var replacingBrowserRows = false
     private let folderPath = NSPathControl()
     private var pathFolderIDs: [String?] = []
     private lazy var openButton = button("Open", #selector(openSelected))
@@ -125,6 +145,9 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private var visibleDocuments: [SharedReviewAPI.Document] { documents.filter { $0.folder_id == folderID } }
     private var rowCount: Int { visibleFolders.count + visibleDocuments.count }
     private var api: SharedReviewAPI?
+    private let workspacePresence = ReviewWorkspacePresence()
+    private var browserVisible = false
+    private var participantsView: ReviewParticipantsView?
     private var reviewAPI: SharedReviewAPI?
     private var reviewUsername: String?
     private var project: SharedReviewAPI.Project?
@@ -160,6 +183,8 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     deinit { NotificationCenter.default.removeObserver(self) }
 
     @objc private func reviewSessionChanged() {
+        workspacePresence.stop()
+        preserveTextDraftsLocally()
         lifecycle = UUID()
         sessionInvalidated = true
         // Pending edits (including failed local saves) and PDF/cache bytes are
@@ -189,9 +214,9 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
         busy = false
         resetUploadProgress()
-        if !retryPendingEditsSave() {
+        if !retryPendingEditsSave() || hasPendingChanges {
             updateReviewStatus("Signed out · Pending edits are only in memory")
-            status.stringValue = "Pending edits could not be saved locally. Keep this tab open to retain them."
+            status.stringValue = "Some work is only in memory. Keep this tab open; Close offers Retry and Save Recovery."
         } else {
             updateReviewStatus("Signed out · Local pending edits retained")
             status.stringValue = "Sign in and reopen Review to continue. Local edits and cached PDFs are retained."
@@ -235,7 +260,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         let window = ReviewBrowserWindow(contentRect: NSRect(x: 0, y: 0, width: 740, height: 480),
                               styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         window.title = ReviewCapabilityPresentation.browserTitle
-        window.minSize = NSSize(width: 480, height: 320)
+        window.contentMinSize = NSSize(width: 480, height: 320)
         window.toolbarStyle = .unified
         window.delegate = self
         window.isReleasedWhenClosed = false
@@ -243,6 +268,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         window.navigate = { [weak self] down in
             if down { self?.openSelected() } else { self?.goBack() }
         }
+        window.browserTable = documentsTable
 
         let nameColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
         nameColumn.title = "Name"
@@ -287,9 +313,12 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         // responder hierarchy for existing keyboard and path-control behavior.
         backButton.isHidden = true
         status.maximumNumberOfLines = 2
+        status.lineBreakMode = .byTruncatingMiddle
         status.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        openButton.keyEquivalent = "\r"
+        // Return is routed by ReviewBrowserWindow only while the table owns focus;
+        // a default-button equivalent would steal Return from text fields.
+        openButton.keyEquivalent = ""
         openButton.bezelStyle = .rounded
         openButton.toolTip = "Open the selected folder or PDF (Return)"
         let footer = NSStackView(views: [status, NSView(), openButton])
@@ -309,9 +338,10 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         uploadPresentation.addArrangedSubview(uploadDetail)
         uploadPresentation.addArrangedSubview(uploadProgress)
         resetUploadProgress()
-        // No supported workspace-presence transport: preserve honest unavailable
-        // state and disclosure, compact by default at the bottom-left.
+        // Verified workspace presence is independent of any open PDF.
         let participants = ReviewParticipantsView(frame: .zero)
+        participantsView = participants
+        workspacePresence.onChange = { [weak participants] snapshot in participants?.render(snapshot) }
         participants.disclosureButton.performClick(nil)
         capabilityExplanation.identifier = NSUserInterfaceItemIdentifier("review.capabilityExplanation")
         capabilityExplanation.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
@@ -352,7 +382,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
 
     private var toolbarDefinitions: [(String, String, String, Selector, String)] {
         [("back", "Back", "chevron.backward", #selector(goBack), "Go to the parent folder (⌘↑)"),
-         ("upload", "Upload PDFs…", "arrow.up.to.line", #selector(uploadPDF), "Upload PDFs to this folder"),
+         ("upload", "Upload PDFs…", "", #selector(uploadPDF), "Upload PDFs to this folder"),
          ("newFolder", "New Folder…", "folder.badge.plus", #selector(createFolder), "Create a folder"),
          ("refresh", "Refresh", "arrow.clockwise", #selector(refreshDocuments(_:)), "Refresh server documents"),
          ("delete", "Delete…", "trash", #selector(deleteSelectedItems), "Delete the selected items…")]
@@ -371,7 +401,8 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         let item = NSToolbarItem(itemIdentifier: identifier)
         item.label = definition.1
         item.paletteLabel = definition.1
-        item.image = NSImage(systemSymbolName: definition.2, accessibilityDescription: definition.1)
+        item.image = definition.0 == "upload" ? ReviewUploadIcon.image()
+            : NSImage(systemSymbolName: definition.2, accessibilityDescription: definition.1)
         if definition.0 == "upload" {
             let upload = NSButton(title: definition.1, target: self, action: definition.3)
             upload.image = item.image
@@ -446,6 +477,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     func numberOfRows(in tableView: NSTableView) -> Int { rowCount }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard (0..<rowCount).contains(row) else { return nil }
         let entries = visibleFolders
         let isFolder = entries.indices.contains(row)
         let name = isFolder ? entries[row].name : visibleDocuments[row - entries.count].name
@@ -455,6 +487,9 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         icon.widthAnchor.constraint(equalToConstant: 18).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 18).isActive = true
         let field = NSTextField(labelWithString: name)
+        field.maximumNumberOfLines = 1
+        field.cell?.wraps = false
+        field.cell?.isScrollable = false
         field.lineBreakMode = .byTruncatingMiddle
         field.textColor = InterfaceTheme.current.color(for: "foreground") ?? .labelColor
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -462,14 +497,27 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         let cell = NSStackView(views: [icon, field])
         cell.alignment = .centerY
         cell.spacing = 6
+        cell.toolTip = name
         cell.setAccessibilityLabel(isFolder ? "Folder, " + name : name)
         return cell
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) { updateBrowserControls() }
 
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { !busy || replacingBrowserRows }
+    func selectionShouldChange(in tableView: NSTableView) -> Bool { !busy || replacingBrowserRows }
+
     private func updateBrowserControls() {
-        openButton.isEnabled = !busy && !documentsTable.selectedRowIndexes.isEmpty
+        let rows = documentsTable.selectedRowIndexes
+        let validRows = !rows.isEmpty && rows.allSatisfy { (0..<rowCount).contains($0) }
+        let oneFolder = rows.count == 1 && rows.first.map { $0 < visibleFolders.count } == true
+        let onlyPDFs = validRows && rows.allSatisfy { $0 >= visibleFolders.count }
+        openButton.isEnabled = !busy && validRows && (oneFolder || onlyPDFs)
+        openButton.toolTip = validRows && !oneFolder && !onlyPDFs
+            ? "Select one folder or one or more PDFs."
+            : "Open the selected folder or PDFs (Return or ⌘↓)"
+        documentsTable.alphaValue = busy ? 0.6 : 1
+        documentsTable.toolTip = busy ? "Wait for the current operation to finish." : nil
         uploadButton.isEnabled = !busy && organizationActions && project != nil
         refreshButton.isEnabled = !busy
         newFolderButton.isEnabled = !busy && organizationActions && folders != nil
@@ -480,7 +528,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                                                        selectionCount: documentsTable.numberOfSelectedRows,
                                                        documentDeletion: documentDeletion,
                                                        selectionContainsFolders: documentsTable.selectedRowIndexes.contains { $0 < visibleFolders.count })
-        deleteButton.isEnabled = presentation.deleteReason == nil
+        deleteButton.isEnabled = validRows && presentation.deleteReason == nil
         newFolderButton.toolTip = presentation.newFolderToolTip
         deleteButton.toolTip = presentation.deleteToolTip
         capabilityExplanation.stringValue = presentation.explanation
@@ -497,7 +545,8 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
 
     @objc private func openClickedDocument() {
         guard (0..<rowCount).contains(documentsTable.clickedRow) else { return }
-        openRows(IndexSet(integer: documentsTable.clickedRow))
+        let rows = documentsTable.selectedRowIndexes
+        openRows(rows.contains(documentsTable.clickedRow) ? rows : IndexSet(integer: documentsTable.clickedRow))
     }
 
     private func button(_ title: String, _ action: Selector) -> NSButton {
@@ -526,8 +575,12 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         let projects: SharedReviewAPI.ProjectList = try await api.get("projects")
         try checkLifecycle(generation, api: api)
         guard let project = projects.projects.first(where: { $0.name == "AERO Collective" }) ?? projects.projects.first else {
+            workspacePresence.stop()
             throw SharedReviewError("Your account has no shared projects.")
         }
+        self.project = project
+        self.api = api
+        reconcileWorkspacePresence()
         let list: SharedReviewAPI.DocumentList = try await api.get("projects/\(project.id)/documents")
         try checkLifecycle(generation, api: api)
         let key = "DrawbridgeReviewFolder|\(origin.absoluteString)|\(api.instanceID)|\(project.id)"
@@ -549,8 +602,13 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private func showFolder() {
         if let workspaceKey { UserDefaults.standard.set(folderID, forKey: workspaceKey) }
         updateFolderPath()
+        // Index-based selections must never survive a new listing or navigation.
+        // Allow this explicit reset even when the reload is inside an operation.
+        replacingBrowserRows = true
+        documentsTable.deselectAll(nil)
         documentsTable.reloadData()
         documentsTable.deselectAll(nil)
+        replacingBrowserRows = false
         status.stringValue = rowCount == 0 ? "This folder is empty." : "\(rowCount) items"
         updateBrowserControls()
     }
@@ -621,7 +679,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     private func openRows(_ rows: IndexSet) {
-        guard !busy, !rows.isEmpty else { return }
+        guard !busy, !rows.isEmpty, rows.allSatisfy({ (0..<rowCount).contains($0) }) else { return }
         let entries = visibleFolders
         if rows.count == 1, let index = rows.first, entries.indices.contains(index) {
             folderID = entries[index].id
@@ -716,11 +774,10 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
         let selectedPDFs = selected.compactMap { row in row >= folders.count ? documents[row - folders.count] : nil }
         let ids = Set(selectedPDFs.map(\.id))
-        let affectedReviews = ([self] + Array(additionalReviews.values)).filter { review in
-            review.reviewAPI?.origin == api.origin && review.documentID.map(ids.contains) == true
-        }
-        if affectedReviews.contains(where: { $0.hasPendingChanges || !$0.pending.isEmpty }) {
-            status.stringValue = "Wait for the selected PDFs’ pending edits to sync before deleting them."
+        do {
+            try ensureDeletionSafe(selectedPDFs, api: api)
+        } catch {
+            status.stringValue = error.localizedDescription
             return
         }
         let generation = lifecycle
@@ -779,9 +836,21 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 }
             }
             let username = try await self.requireReviewUsername(using: api, saveToSettings: true)
+            // No suspension between the final local guard and disabling edits.
+            try self.ensureDeletionSafe(selectedPDFs, api: api)
+            let lockedReviews = ([self] + Array(self.additionalReviews.values)).filter {
+                $0.reviewAPI?.origin == api.origin && $0.documentID.map(ids.contains) == true
+            }
+            lockedReviews.forEach { $0.deletionInFlight = true }
+            self.editor?.refreshRectangleToolbar()
+            defer {
+                lockedReviews.forEach { $0.deletionInFlight = false }
+                self.editor?.refreshRectangleToolbar()
+            }
             for (index, item) in items.enumerated() {
-                let reviews = affectedReviews.filter { $0.documentID == item.id }
+                let reviews = lockedReviews.filter { $0.documentID == item.id }
                 do {
+                    try self.ensureDeletionSafe(selectedPDFs, api: api)
                     guard !reviews.contains(where: { $0.hasPendingChanges || !$0.pending.isEmpty }) else {
                         throw SharedReviewError("Wait for pending edits to sync.")
                     }
@@ -805,6 +874,25 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             try await self.loadDocuments()
             try self.checkLifecycle(generation, api: api)
             self.status.stringValue = items.count == 1 ? "Deleted 1 item." : "Deleted \(items.count) items."
+        }
+    }
+
+    func ensureDeletionSafe(_ documents: [SharedReviewAPI.Document], api: SharedReviewAPI) throws {
+        let ids = Set(documents.map(\.id))
+        let reviews = ([self] + Array(additionalReviews.values)).filter {
+            $0.reviewAPI?.origin == api.origin && $0.documentID.map(ids.contains) == true
+        }
+        reviews.forEach { $0.preserveTextDraftsLocally() }
+        guard !reviews.contains(where: { $0.hasPendingChanges || !$0.pending.isEmpty }) else {
+            throw SharedReviewError("Reopen the selected Review PDFs and finish and sync local edits before deleting. Nothing was deleted.")
+        }
+        for document in documents {
+            do {
+                try SharedReviewOutbox.requireEmptyForDeletion(origin: api.origin, instanceID: api.instanceID,
+                    documentID: document.id, directory: outboxDirectory)
+            } catch {
+                throw SharedReviewError("“\(document.name)” has pending or unreadable local recovery data. Reopen it and sync or recover its edits before deleting. Nothing was deleted.")
+            }
         }
     }
 
@@ -927,8 +1015,15 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         // Recheck access before serving locally retained drawing bytes.
         let response: SharedReviewAPI.CreatedSession = try await api.post("documents/\(document.id)/sessions", ["name": "Drawbridge Review"])
         try checkLifecycle(generation, api: api)
-        let cache = try SharedReviewPDFCache(origin: api.origin, instanceID: api.instanceID,
-                                             document: document, directory: cacheDirectory)
+        var cacheFailed = false
+        let cache: SharedReviewPDFCache?
+        do {
+            cache = try SharedReviewPDFCache(origin: api.origin, instanceID: api.instanceID,
+                document: document, directory: cacheDirectory, onIOFailure: { cacheFailed = true })
+        } catch {
+            cacheFailed = true
+            cache = nil
+        }
         let bytes: Data
         let cached = try cache?.load()
         if let cached {
@@ -940,6 +1035,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         guard let pdf = PDFDocument(data: bytes), pdf.pageCount > 0, !pdf.isLocked else {
             throw SharedReviewError("The shared PDF could not be opened.")
         }
+        try SharedReviewPDFCache.validate(bytes, document: document)
         if cached == nil { try cache?.store(bytes) }
         let outbox = try SharedReviewOutbox(origin: api.origin, instanceID: api.instanceID,
                                             documentID: document.id, basePDF: bytes, directory: outboxDirectory)
@@ -949,6 +1045,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         let review = tabURL == nil ? self : SharedReviewWindowController(outboxDirectory: outboxDirectory, cacheDirectory: cacheDirectory)
         review.editor = editor
         review.outbox = outbox
+        review.cacheWarning = cacheFailed
         review.pending = recoveredEdits
         review.reviewAPI = api
         review.reviewUsername = username
@@ -973,6 +1070,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         review.syncStatus = "Connecting…"
         if review !== self { additionalReviews[tab] = review }
         editor.openDocument(at: url)
+        reconcileWorkspacePresence()
         if focusEditor { showEditor(editor) }
         review.startSync(api: api, document: document.id, session: response.session.id)
         return true
@@ -989,15 +1087,21 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
 
     private func showEditor(_ editor: MainViewController) {
         window?.orderOut(nil)
+        browserVisible = false
+        reconcileWorkspacePresence()
         editor.view.window?.makeKeyAndOrderFront(nil)
     }
 
     func closeTab(at url: URL) {
-        if let review = additionalReviews.removeValue(forKey: url) {
+        if let review = additionalReviews[url] {
+            guard review.canCloseReview() else { return }
+            additionalReviews.removeValue(forKey: url)
             review.closeTab(at: url)
+            reconcileWorkspacePresence()
             return
         }
         guard url == tabURL else { return }
+        guard canCloseReview() else { return }
         stopSync()
         documentID = nil
         tabURL = nil
@@ -1006,6 +1110,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         reviewAPI = nil
         outbox = nil
         pending.removeAll()
+        reconcileWorkspacePresence()
     }
 
     private func requireReviewUsername(using api: SharedReviewAPI, saveToSettings: Bool) async throws -> String {
@@ -1144,7 +1249,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         records[index] = current
         guard retryPendingEditsSave() else { return }
         if !pending.isEmpty { updateReviewStatus("Saving… · \(pending.count) pending") }
-        if let api = reviewAPI, let documentID, editSyncTask == nil {
+        if !preservingDrafts, let api = reviewAPI, let documentID, editSyncTask == nil {
             let generation = lifecycle
             editSyncTask = Task {
                 defer { if lifecycle == generation { editSyncTask = nil } }
@@ -1163,6 +1268,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             try savePendingEdits()
             return true
         } catch {
+            localSaveFailure = Self.persistenceFailureDescription(error)
             updateReviewStatus("Review · Edits could not be saved on this Mac")
             return false
         }
@@ -1174,6 +1280,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         // Local edits call this immediately, regardless of the ack batch size.
         outboxNeedsSave = true
         try outbox.save(pending)
+        localSaveFailure = nil
         outboxNeedsSave = false
         uncheckpointedAcknowledgements = 0
     }
@@ -1232,12 +1339,13 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 do { try savePendingEdits() }
                 catch { /* outboxNeedsSave retains the actionable persistence error. */ }
             }
-            if outboxNeedsSave {
-                updateReviewStatus("Review · Edits could not be saved on this Mac")
-            } else if (error as? SharedReviewError)?.statusCode == 403 {
-                ready = false
-                updateReviewStatus("Review access ended · \(pending.count) pending")
+            if (error as? SharedReviewError)?.statusCode == 403 {
+                preserveTextDraftsLocally()
+                stopSync()
+                updateReviewStatus("Review access ended · Local work retained; reopen after signing in")
                 editor?.refreshRectangleToolbar()
+            } else if outboxNeedsSave {
+                updateReviewStatus("Review · Edits could not be saved on this Mac")
             } else if let error = error as? URLError, error.code != .cancelled {
                 updateReviewStatus("Offline · \(pending.count) pending")
             } else {
@@ -1247,8 +1355,9 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     private func updateReviewStatus(_ message: String) {
-        guard syncStatus != message else { return }
-        syncStatus = message
+        let presented = cacheWarning ? message + " · PDF cache unavailable (online download verified)" : message
+        guard syncStatus != presented else { return }
+        syncStatus = presented
         // updateStatusBar refreshes all pane headers, including an inactive Review.
         editor?.updateStatusBar()
     }
@@ -1331,8 +1440,6 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     private func apply(_ markup: SharedReviewAPI.Markup, owned: Bool) throws -> Bool {
-        let viewer = editor?.pdfView
-        let visibleViewer = viewer?.document === reviewPDF ? viewer : nil
         guard let page = reviewPDF?.page(at: markup.page) else {
             throw SharedReviewError("A revision refers to a missing page.")
         }
@@ -1348,11 +1455,11 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             return annotation
         }
         if let existing = page.annotations.first(where: { RectangleMarkupRecord.identity($0) == markup.id }) {
-            if visibleViewer?.rectangleMarkup.isEditingTextAnnotation(existing) == true {
+            if allReviewViewers.contains(where: { $0.rectangleMarkup.isEditingTextAnnotation(existing) }) {
                 throw SharedReviewError("Finish editing text to receive the latest revision.")
             }
-            if visibleViewer?.rectangleMarkup.selectedItems.contains(where: { $0 === existing }) == true {
-                visibleViewer?.rectangleMarkup.selected = nil
+            for viewer in reviewViewers where viewer.rectangleMarkup.selectedItems.contains(where: { $0 === existing }) {
+                viewer.rectangleMarkup.selected = nil
             }
             page.removeAnnotation(existing)
         }
@@ -1361,16 +1468,140 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         return true
     }
 
-    func canQuit() -> Bool {
-        guard !busy else { return false }
-        let reviews = [self] + Array(additionalReviews.values)
-        for review in reviews { review.retryPendingEditsSave() }
-        guard reviews.allSatisfy({ !$0.hasPendingChanges }) else {
-            NSSound.beep()
+    private var allReviewViewers: [MarkupPDFView] {
+        guard let editor else { return [] }
+        return [editor.pdfView, editor.secondaryPDFView].compactMap { $0 }
+    }
+    private var reviewViewers: [MarkupPDFView] {
+        guard let pdf = reviewPDF else { return [] }
+        return allReviewViewers.filter { $0.document === pdf }
+    }
+
+    /// Synchronous local-only checkpoint, including an inactive split pane.
+    func preserveTextDraftsLocally() {
+        preservingDrafts = true
+        defer { preservingDrafts = false }
+        for viewer in reviewViewers {
+            viewer.rectangleMarkup.finishTextEditing()
+        }
+        // Close/signout must save failed local edits, not checkpoint an ACK-only
+        // partial batch. Its durable prefix remains replayable until qualified sync.
+        if outboxNeedsSave { retryPendingEditsSave() }
+    }
+
+    static func persistenceFailureDescription(_ error: Error) -> String {
+        let error = error as NSError
+        if error.domain == NSCocoaErrorDomain {
+            switch error.code {
+            case NSFileWriteOutOfSpaceError: return "This Mac’s disk is full. Free space, then choose Retry."
+            case NSFileWriteNoPermissionError, NSFileReadNoPermissionError:
+                return "Drawbridge cannot access its local recovery folder. Check permissions, then choose Retry."
+            default: break
+            }
+        }
+        return "The local recovery folder is unavailable or could not be written. Check disk space and permissions, then choose Retry."
+    }
+
+    var closeBlockExplanation: String {
+        let name = tabURL?.lastPathComponent ?? "Review document"
+        let reason: String
+        if !retainedDrafts.isEmpty || reviewViewers.contains(where: { $0.rectangleMarkup.isEditingText }) {
+            reason = "An unfinished text draft is retained in memory. Copy it or save a recovery file before continuing."
+        } else if !invalidPages.isEmpty {
+            reason = "A markup is invalid or too large to sync. Undo or remove it, or save a recovery file and keep this tab open."
+        } else {
+            reason = localSaveFailure ?? "Edits have not yet been saved on this Mac. Choose Retry."
+        }
+        return "“\(name)” cannot close safely. \(reason) Server-pending edits that are already saved locally do not block closing. No work will be discarded."
+    }
+
+    @discardableResult
+    func canCloseReview() -> Bool {
+        preserveTextDraftsLocally()
+        guard !hasPendingChanges else {
+            presentBlockedClose()
             return false
         }
         return true
     }
 
+    private func presentBlockedClose() {
+        guard let window = editor?.view.window, window.attachedSheet == nil else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Keep Review work safe"
+        alert.informativeText = closeBlockExplanation
+        alert.addButton(withTitle: "Retry")
+        alert.addButton(withTitle: "Keep Open")
+        alert.addButton(withTitle: "Save Recovery…")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            if response == .alertFirstButtonReturn {
+                self.preserveTextDraftsLocally()
+                if self.hasPendingChanges { self.presentBlockedClose() }
+                else { self.updateReviewStatus("Saved on this Mac · You can close this tab now") }
+            } else if response == .alertThirdButtonReturn { self.saveLocalRecovery(in: window) }
+        }
+    }
+
+    private struct LocalRecovery: Codable {
+        let version: Int
+        let documentName: String
+        let basePDF: Data?
+        let workingPDF: Data?
+        let edits: [SharedReviewOutbox.Edit]
+        let textDrafts: [RectangleMarkupController.TextDraftRecovery]
+    }
+
+    private func saveLocalRecovery(in window: NSWindow) {
+        preserveTextDraftsLocally()
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = (tabURL?.deletingPathExtension().lastPathComponent ?? "Review") + ".review-recovery.plist"
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            do {
+                let recovery = LocalRecovery(version: 1, documentName: self.tabURL?.lastPathComponent ?? "Review",
+                    basePDF: self.basePDF, workingPDF: self.reviewPDF?.dataRepresentation(), edits: self.pending,
+                    textDrafts: self.retainedDrafts)
+                let bytes = try PropertyListEncoder().encode(recovery)
+                try bytes.write(to: url, options: .atomic)
+                guard try Data(contentsOf: url) == bytes else { throw SharedReviewError("Recovery verification failed.") }
+                self.updateReviewStatus("Recovery file saved and verified · Keep open to repair or retry local save")
+            } catch {
+                let alert = NSAlert(); alert.messageText = "Recovery file could not be saved"
+                alert.informativeText = Self.persistenceFailureDescription(error)
+                alert.beginSheetModal(for: window)
+            }
+        }
+    }
+
+    func canQuit() -> Bool {
+        guard !busy else { return false }
+        let reviews = [self] + Array(additionalReviews.values)
+        for review in reviews {
+            if !review.canCloseReview() { return false }
+        }
+        return true
+    }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool { !busy }
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        browserVisible = true
+        reconcileWorkspacePresence()
+    }
+
+    private func reconcileWorkspacePresence() {
+        let hasDocuments = tabURL != nil || additionalReviews.values.contains { $0.tabURL != nil }
+        guard !sessionInvalidated, browserVisible || hasDocuments, let api, let project else {
+            workspacePresence.stop()
+            return
+        }
+        workspacePresence.start(api: api, workspaceID: project.id)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        browserVisible = false
+        reconcileWorkspacePresence()
+    }
 }

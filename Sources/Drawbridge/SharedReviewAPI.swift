@@ -4,9 +4,11 @@ import Foundation
 struct SharedReviewError: LocalizedError {
     let errorDescription: String?
     let statusCode: Int?
-    init(_ message: String, statusCode: Int? = nil) {
+    let code: String?
+    init(_ message: String, statusCode: Int? = nil, code: String? = nil) {
         errorDescription = message
         self.statusCode = statusCode
+        self.code = code
     }
 }
 
@@ -121,6 +123,48 @@ struct SharedReviewAPI: Sendable {
     func checkActive() throws { try lifetime.check() }
     // Offline transport seam; live callers retain the normal URLSession path.
     var transport: (@MainActor @Sendable (URLRequest) async throws -> (Data, URLResponse))? = nil
+
+    // Versioned verified Workspace-only contract. No identity is sourced from client preferences.
+    struct PresenceSnapshot: Decodable, Sendable {
+        struct RosterCoverage: Decodable, Sendable {
+            let complete: Bool
+            let requiresReauthenticationCount: Int
+        }
+        struct Member: Decodable, Sendable { let userId: String; let verifiedName: String }
+        struct Lease: Decodable, Sendable { let userId: String; let sessionId: String; let remainingSeconds: Double }
+        let version: Int
+        let workspaceId: String
+        let ttlSeconds: Double
+        let members: [Member]
+        let leases: [Lease]
+        let onlineCount: Int
+        let rosterCoverage: RosterCoverage?
+    }
+    struct PresenceHeartbeat: Encodable, Sendable {
+        let connectionId: String
+        let sequence: Int
+        let leave: Bool
+    }
+    func presence(workspaceID: String, connectionID: String, sequence: Int,
+                  leave: Bool = false) async throws -> PresenceSnapshot {
+        guard !workspaceID.isEmpty, workspaceID.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }) else {
+            throw SharedReviewError("Invalid presence workspace identifier.")
+        }
+        var request = try request("projects/\(workspaceID)/presence")
+        request.httpMethod = "POST"
+        request.httpBody = try JSONEncoder().encode(PresenceHeartbeat(connectionId: connectionID, sequence: sequence, leave: leave))
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await data(for: request)
+        struct PresenceError: Decodable { let code: String? }
+        if (response as? HTTPURLResponse)?.statusCode == 403,
+           let reason = try? JSONDecoder().decode(PresenceError.self, from: data),
+           reason.code == "presence_reauthentication_required" {
+            throw SharedReviewError("Sign in again with Google under Settings → Drawbridge Review to enable verified participant presence.",
+                                    statusCode: 403, code: reason.code)
+        }
+        try validate(response)
+        return try JSONDecoder().decode(PresenceSnapshot.self, from: data)
+    }
 
     struct Capabilities: Decodable {
         let creatorOnlyMarkups: Bool?

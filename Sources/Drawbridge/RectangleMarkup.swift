@@ -415,8 +415,28 @@ final class RectangleMarkupController {
             }
             if tool != .select { selected = nil; onClickAway?() }; refresh(); (view as? MarkupPDFView)?.markupToolCursorChanged() }
     }
-    private var inlineText: (page:PDFPage, bounds:CGRect, annotation:PDFAnnotation?, editor:MarkupInlineTextView, backing:MarkupTextEditorBacking, wasDirty:Bool, scale:CGFloat, insets:NSEdgeInsets, rotation:Int, wasDisplayed:Bool)?
+    private typealias InlineTextDraft = (page:PDFPage, bounds:CGRect, annotation:PDFAnnotation?, editor:MarkupInlineTextView, backing:MarkupTextEditorBacking, wasDirty:Bool, scale:CGFloat, insets:NSEdgeInsets, rotation:Int, wasDisplayed:Bool)
+    private var inlineText: InlineTextDraft?
+    // Rejected drafts retain their actual editor, rich text and undo across tabs.
+    private var suspendedTextDrafts: [ObjectIdentifier: (document: PDFDocument, draft: InlineTextDraft)] = [:]
     var isEditingText: Bool { inlineText != nil }
+    struct TextDraftRecovery: Codable, Equatable {
+        let page: Int
+        let annotationID: String?
+        let text: String
+        let bounds: CGRect
+    }
+    var textDraftRecovery: TextDraftRecovery? {
+        guard let draft = inlineText, let document = draft.page.document else { return nil }
+        return .init(page: document.index(for: draft.page), annotationID: draft.annotation.flatMap(RectangleMarkupRecord.identity),
+                     text: draft.editor.string, bounds: draft.bounds)
+    }
+    func textDraftRecoveries(for document: PDFDocument) -> [TextDraftRecovery] {
+        var drafts = suspendedTextDrafts.values.filter { $0.document === document }.map(\.draft)
+        if let draft = inlineText, draft.page.document === document { drafts.append(draft) }
+        return drafts.map { .init(page: document.index(for: $0.page),
+            annotationID: $0.annotation.flatMap(RectangleMarkupRecord.identity), text: $0.editor.string, bounds: $0.bounds) }
+    }
     var fontSize: CGFloat = 18
     var fillColor: NSColor? = .orange
     var hatchStyle: DraftingHatch? = nil
@@ -570,6 +590,12 @@ final class RectangleMarkupController {
         guard boundDocument !== document else { return }
         cancelSnapshotCapture()
         finishTextEditing()
+        if let draft = inlineText, let previous = boundDocument {
+            suspendedTextDrafts[ObjectIdentifier(previous)] = (previous, draft)
+            draft.annotation?.shouldDisplay = draft.wasDisplayed
+            draft.editor.removeFromSuperview(); draft.backing.removeFromSuperview()
+            inlineText = nil
+        }
         if let previous = boundDocument {
             documentStates.setObject(DocumentState(dirty: hasUnsavedChanges, stamp: sourceStamp), forKey: previous)
         }
@@ -585,6 +611,15 @@ final class RectangleMarkupController {
             hasUnsavedChanges = state.dirty; sourceStamp = state.stamp
         }
         applyLayerVisibility()
+        if let document, let retained = suspendedTextDrafts.removeValue(forKey: ObjectIdentifier(document)), let view {
+            inlineText = retained.draft
+            retained.draft.annotation?.shouldDisplay = false
+            view.addSubview(retained.draft.backing); view.addSubview(retained.draft.editor)
+            positionTextEditor()
+            if let annotation = retained.draft.annotation {
+                invalidateTextEditingPresentation(on: retained.draft.page, in: view); selected = annotation
+            }
+        }
         refresh()
     }
 
@@ -1193,6 +1228,7 @@ final class RectangleMarkupController {
 
     func beginTextEditing(on page:PDFPage, bounds:CGRect, annotation:PDFAnnotation? = nil) {
         finishTextEditing()
+        guard inlineText == nil else { return }
         guard canEdit(), page.document === boundDocument, let view else { return }
         if let annotation, (!RectangleMarkupRecord.owns(annotation) && !canEditImportedAppearance(annotation)) || annotation.type != "FreeText" || annotation.isReadOnly || layerIsLocked(annotation) { return }
         let storage = NSTextStorage(), layout = NSLayoutManager()
@@ -1240,7 +1276,8 @@ final class RectangleMarkupController {
         refresh()
     }
     func isEditingTextAnnotation(_ annotation:PDFAnnotation)->Bool {
-        inlineText?.annotation === annotation || (view as? MarkupPDFView)?.isEditingLegacyTextAnnotation(annotation) == true
+        inlineText?.annotation === annotation || suspendedTextDrafts.values.contains { $0.draft.annotation === annotation } ||
+            (view as? MarkupPDFView)?.isEditingLegacyTextAnnotation(annotation) == true
     }
     private func invalidateTextEditingPresentation(on page:PDFPage,in target:PDFView?) {
         guard let target,target.document === page.document else{return}
@@ -1292,6 +1329,9 @@ final class RectangleMarkupController {
     }
     func finishTextEditing(cancel:Bool = false) {
         guard let draft = inlineText else { return }
+        // Never tear down a draft before a mutation that is known to be rejected.
+        // Access loss keeps the editor available for selection/copy and recovery.
+        guard cancel || (canEdit() && draft.editor.string.utf8.count <= 100000) else { return }
         inlineText = nil; draft.editor.onFinish = nil; draft.editor.onChange = nil
         let text = draft.editor.string
         let wasFirstResponder = view?.window?.firstResponder === draft.editor

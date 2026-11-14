@@ -139,12 +139,74 @@ final class ReviewNativeBrowserTests: XCTestCase {
         XCTAssertEqual(window.title, "Drawbridge Review — Server Documents")
         XCTAssertNotNil(table.doubleAction)
         XCTAssertTrue(table.target === controller)
-        XCTAssertTrue(descendants(content).compactMap { $0 as? NSButton }.contains { $0.keyEquivalent == "\r" })
+
         window.setContentSize(NSSize(width: 960, height: 600))
         content.layoutSubtreeIfNeeded()
         XCTAssertEqual(scroll.frame.width, content.bounds.width, accuracy: 1)
         XCTAssertGreaterThan(table.tableColumns[0].width, 600)
     }
+    @MainActor func testReturnNavigatesSelectedFolderOnlyWithTableFocusNotTextFieldEditor() async throws {
+        _ = NSApplication.shared
+        let active = SettingsWindowController.activeReviewSession
+        let attempted = SettingsWindowController.attemptedSessionRestore
+        let origin = URL(string: "https://browser-fixture.invalid")!
+        let instance = UUID().uuidString
+        SettingsWindowController.attemptedSessionRestore = true
+        SettingsWindowController.activeReviewSession = (origin, .init(token: "fixture-only", instanceId: instance, displayName: "Fixture"))
+        defer {
+            SettingsWindowController.activeReviewSession = active
+            SettingsWindowController.attemptedSessionRestore = attempted
+            UserDefaults.standard.removeObject(forKey: "DrawbridgeReviewFolder|\(origin.absoluteString)|\(instance)|p")
+        }
+        let controller = SharedReviewWindowController()
+        controller.buildWindow()
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close() }
+        // Same offline navigation fixture as ReviewBrowserUXRegressionTests;
+        // exercise real window key routing rather than an Open button's shape.
+        controller.makeReviewAPI = { origin, credentials in
+            var api = SharedReviewAPI(origin: origin, token: credentials.token, displayName: credentials.displayName, instanceID: credentials.instanceId)
+            api.transport = { request in
+                let json = request.url!.path == "/v1/projects"
+                    ? #"{"projects":[{"id":"p","name":"Fixture"}]}"#
+                    : #"{"organizationActions":true,"folders":[{"id":"f","name":"Folder"}],"documents":[{"id":"d","name":"Drawing.pdf","file_size":10}]}"#
+                return (Data(json.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
+            return api
+        }
+        try await controller.loadDocuments()
+        let content = try XCTUnwrap(window.contentView)
+        let table = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }.first)
+        let field = NSTextField(frame: NSRect(x: 10, y: 10, width: 200, height: 24))
+        field.stringValue = "Keep editing"
+        content.addSubview(field)
+        defer { field.removeFromSuperview() }
+        func key(_ code: UInt16, _ flags: NSEvent.ModifierFlags = []) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, characters: flags.isEmpty ? "\r" : "",
+                charactersIgnoringModifiers: flags.isEmpty ? "\r" : "", isARepeat: false, keyCode: code))
+        }
+        for code in [UInt16(36), UInt16(76)] { // Return and keypad Enter both obey the focus contract.
+            XCTAssertEqual(table.numberOfRows, 2)
+            table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+            XCTAssertTrue(window.makeFirstResponder(field))
+            let editor = try XCTUnwrap(field.currentEditor())
+            XCTAssertTrue(window.firstResponder === editor, "Use the actual text field editor, not a simulated focus flag")
+            XCTAssertFalse(window.performKeyEquivalent(with: try key(code)), "Return belongs to text editing, not browser navigation")
+            XCTAssertTrue(window.firstResponder === editor)
+            XCTAssertEqual(field.stringValue, "Keep editing")
+            XCTAssertEqual(table.numberOfRows, 2, "Typing Return must not open the selected folder")
+            XCTAssertEqual(table.selectedRow, 0)
+
+            XCTAssertTrue(window.makeFirstResponder(table))
+            XCTAssertTrue(window.firstResponder === table)
+            XCTAssertTrue(window.performKeyEquivalent(with: try key(code)))
+            XCTAssertEqual(table.numberOfRows, 0, "Return with table focus must actually enter the selected folder")
+            XCTAssertTrue(window.performKeyEquivalent(with: try key(126, .command)))
+            XCTAssertEqual(table.numberOfRows, 2, "Navigate back to repeat the focus test")
+        }
+    }
+
     @MainActor func testLiveThemeChangesRefreshDarkToDarkAndRestoreNativeFallback() throws {
         _ = NSApplication.shared
         let original = UserDefaults.standard.object(forKey: InterfaceTheme.defaultsKey)

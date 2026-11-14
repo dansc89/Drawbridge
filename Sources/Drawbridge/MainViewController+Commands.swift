@@ -423,9 +423,7 @@ extension MainViewController {
     }
     @objc func commandCloseDocument(_ sender: Any?) {
         if isActiveReview {
-            pdfView.rectangleMarkup.finishTextEditing()
-            activeReview?.retryPendingEditsSave()
-            guard activeReview?.hasPendingChanges != true else { NSSound.beep(); return }
+            guard activeReview?.canCloseReview() != false else { return }
         }
         if let url = openDocumentURL, closeRetainedSplitDocument(at: url) { return }
         guard confirmDiscardUnsavedChangesIfNeeded() else {
@@ -788,8 +786,9 @@ extension MainViewController {
             return hasDocument
         case #selector(commandSetPageDrawingScale(_:)), #selector(commandCalibrateDrawingScale(_:)):
             return !isActiveReview && hasDocument && pdfView.currentPage != nil && pdfView.rectangleMarkup.canEdit()
-        case #selector(snapshotCapture(_:)), #selector(polygonSnapshotCapture(_:)),
-             #selector(areaMeasure(_:)), #selector(perimeterMeasure(_:)):
+        case #selector(areaMeasure(_:)), #selector(perimeterMeasure(_:)):
+            return measurementCapability.canMeasure
+        case #selector(snapshotCapture(_:)), #selector(polygonSnapshotCapture(_:)):
             return hasDocument && pdfView.currentPage != nil && pdfView.rectangleMarkup.canEdit()
         case #selector(commandNavigateBack(_:)):
             return pdfView.canNavigateBackInHistory

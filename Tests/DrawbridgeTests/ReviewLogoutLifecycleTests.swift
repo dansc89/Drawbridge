@@ -81,7 +81,8 @@ import XCTest
             XCTAssertEqual(requests, 0)
             XCTAssertNil(capturedAPI(controller))
             controller.perform(NSSelectorFromString("refreshDocuments:"), with: nil)
-            for _ in 0..<1000 { if self.capturedAPI(controller) != nil { break }; await Task.yield() }
+            // API publication precedes the document-list request (and presence).
+            for _ in 0..<1000 { if requests == 2 { break }; await Task.yield() }
             XCTAssertNotNil(capturedAPI(controller), "explicit browser refresh must authorize the new identity")
             XCTAssertEqual(constructions, 1)
             XCTAssertEqual(requests, 2)

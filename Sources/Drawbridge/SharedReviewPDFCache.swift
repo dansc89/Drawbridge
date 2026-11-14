@@ -5,8 +5,11 @@ struct SharedReviewPDFCache {
     let file: URL
     private let expectedHash: String
     private let expectedSize: Int?
+    private let onIOFailure: (() -> Void)?
 
-    init?(origin: URL, instanceID: String, document: SharedReviewAPI.Document, directory: URL? = nil) throws {
+    init?(origin: URL, instanceID: String, document: SharedReviewAPI.Document, directory: URL? = nil,
+          onIOFailure: (() -> Void)? = nil) throws {
+        self.onIOFailure = onIOFailure
         guard let hash = document.file_sha256?.lowercased(), hash.utf8.count == 64,
               hash.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return nil }
         expectedHash = hash
@@ -17,8 +20,10 @@ struct SharedReviewPDFCache {
             Bundle.main.bundleIdentifier == "com.drawbridge.app.review-private-test" ? "Drawbridge Review Test" : "Drawbridge",
             isDirectory: true
         ).appendingPathComponent("Review PDFs", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+        } catch { onIOFailure?() }
         let scope = try JSONEncoder().encode([origin.absoluteString, instanceID, document.id])
         file = root.appendingPathComponent(Self.hexDigest(scope)).appendingPathExtension("pdf")
     }
@@ -29,6 +34,9 @@ struct SharedReviewPDFCache {
             return matches(bytes) ? bytes : nil
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             return nil
+        } catch {
+            onIOFailure?()
+            return nil
         }
     }
 
@@ -36,7 +44,16 @@ struct SharedReviewPDFCache {
         guard matches(bytes) else {
             throw SharedReviewError("The downloaded PDF did not match the server’s file checksum.")
         }
-        try bytes.write(to: file, options: .atomic)
+        do { try bytes.write(to: file, options: .atomic) }
+        catch { onIOFailure?() }
+    }
+
+    /// Download integrity is mandatory even when optional cache setup failed.
+    static func validate(_ bytes: Data, document: SharedReviewAPI.Document) throws {
+        guard document.file_size == nil || document.file_size == bytes.count,
+              document.file_sha256 == nil || document.file_sha256?.lowercased() == hexDigest(bytes) else {
+            throw SharedReviewError("The downloaded PDF did not match the server’s file checksum or size.")
+        }
     }
 
     private func matches(_ bytes: Data) -> Bool {

@@ -148,8 +148,14 @@ extension MainViewController {
     }
     @objc func areaMeasure(_ sender: Any?) { chooseMeasurementTool(.area) }
     @objc func perimeterMeasure(_ sender: Any?) { chooseMeasurementTool(.perimeter) }
+    var measurementCapability: ReviewMeasurementCapability {
+        let page = pdfView.currentPage
+        return ReviewMeasurementCapability(isReview: isActiveReview, editable: !isPDFProcessingBusy && pdfView.rectangleMarkup.canEdit(),
+            hasPage: page != nil, supportedPage: page.map(MeasurementMetadata.supportedPage) ?? false,
+            hasScale: page.flatMap(MeasurementMetadata.scale) != nil)
+    }
     private func chooseMeasurementTool(_ tool: RectangleMarkupController.Tool) {
-        guard pdfView.rectangleMarkup.canEdit(), let page = pdfView.currentPage else { beep(); return }
+        guard measurementCapability.canMeasure, let page = pdfView.currentPage else { return }
         if MeasurementMetadata.scale(on: page) == nil { commandSetPageDrawingScale(nil) }
         guard MeasurementMetadata.scale(on: page) != nil else { return }
         pdfView.rectangleMarkup.tool = tool
@@ -158,8 +164,14 @@ extension MainViewController {
     func refreshMeasurementScaleDisplay() {
         let scale = pdfView.currentPage.flatMap(MeasurementMetadata.scale)
         rectangleToolbar.scaleButton.title = pdfView.rectangleMarkup.tool == .calibrate ? "Pick endpoints…" : (scale?.name ?? "Scale…")
-        rectangleToolbar.scaleButton.toolTip = scale.map { "Current sheet: \($0.name). Set scale for one or several pages." } ?? "Set a drawing scale for one or several pages"
-        rectangleToolbar.scaleButton.isEnabled = !isActiveReview && pdfView.rectangleMarkup.canEdit()
+        rectangleToolbar.scaleButton.toolTip = measurementCapability.scaleReason
+            ?? scale.map { "Current sheet: \($0.name). Set scale for one or several pages." }
+            ?? "Set a drawing scale for one or several pages"
+        rectangleToolbar.scaleButton.isEnabled = measurementCapability.canSetScale
+        rectangleToolbar.areaButton.isEnabled = measurementCapability.canMeasure
+        rectangleToolbar.perimeterButton.isEnabled = measurementCapability.canMeasure
+        rectangleToolbar.areaButton.toolTip = measurementCapability.measurementReason ?? "Measure area"
+        rectangleToolbar.perimeterButton.toolTip = measurementCapability.measurementReason ?? "Measure perimeter"
     }
 }
 

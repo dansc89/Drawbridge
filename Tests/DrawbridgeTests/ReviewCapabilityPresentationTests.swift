@@ -34,7 +34,7 @@ import XCTest
                             XCTAssertTrue(state.deleteToolTip.contains("Wait for the current operation"))
                         }
                         if organization && selection == 0 { XCTAssertTrue(state.deleteToolTip.contains("Select one or more")) }
-                        XCTAssertEqual(state.explanation.isEmpty, !busy && folders && organization && selection > 0)
+                        XCTAssertEqual(state.explanation.isEmpty, folders && organization)
                     }
                 }
             }

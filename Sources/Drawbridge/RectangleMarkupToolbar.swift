@@ -187,7 +187,13 @@ extension MainViewController {
         if refreshProperties { rectangleToolbar.propertiesController.refresh() }
         else { rectangleToolbar.propertiesController.refreshEditingAvailabilityIfNeeded() }
         for (button, tool) in [(rectangleToolbar.penButton, RectangleMarkupController.Tool.pen), (rectangleToolbar.selectButton, RectangleMarkupController.Tool.select), (rectangleToolbar.rectangleButton, .rectangle), (rectangleToolbar.ellipseButton, .ellipse), (rectangleToolbar.lineButton, .line), (rectangleToolbar.arrowButton, .arrow), (rectangleToolbar.cloudButton, .cloud), (rectangleToolbar.polygonButton, .polygon), (rectangleToolbar.polylineButton, .polyline), (rectangleToolbar.textButton, .text), (rectangleToolbar.snapshotButton, .snapshotBox), (rectangleToolbar.areaButton, .area), (rectangleToolbar.perimeterButton, .perimeter)] {
-            button.isEnabled = enabled
+            if tool == .select {
+                button.isEnabled = pdfView.document != nil && !isPDFProcessingBusy
+            } else if tool == .area || tool == .perimeter {
+                button.isEnabled = measurementCapability.canMeasure
+            } else {
+                button.isEnabled = enabled
+            }
             button.state = s.tool == tool ? .on : .off
             button.contentTintColor = s.tool == tool ? .systemBlue : .labelColor
             button.needsDisplay = true
