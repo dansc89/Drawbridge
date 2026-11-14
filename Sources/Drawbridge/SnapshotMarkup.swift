@@ -133,10 +133,7 @@ struct SnapshotPayload: Sendable {
         var payload = Self(data: output as Data)
         let xs = points.map(\.x), ys = points.map(\.y)
         payload.placement = Placement(x: xs.min()!, y: ys.min()!, width: xs.max()!-xs.min()!, height: ys.max()!-ys.min()!, rotation: rotation)
-        guard let capturedPage = payload.page else { throw CocoaError(.fileWriteUnknown) }
-        // Prepare the first editing preview while the capture indicator is still
-        // visible, so the first Paste does not block to render the entire source.
-        _ = SnapshotPreviewCache.shared.prepare(payload.data, key: SnapshotPreviewCache.key(payload.data), page: capturedPage)
+        guard payload.page != nil else { throw CocoaError(.fileWriteUnknown) }
         return payload
     }
     /// Counter-rotate the pasted fragment so it keeps the orientation the user captured.
@@ -259,38 +256,24 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
     private let fragment: CGPDFDocument?
     private let captureRotation: Int
     private let style: SnapshotStyle
-    private let previewData: Data?
+    // Retained as content identity for existing view invalidation callers. Live
+    // presentation no longer produces raster-preview completion notifications.
     let previewKey: String?
-    private let screenPreview: CGImage?
-    private let viewportLock = NSLock()
-    private var previewViewport: CGRect?
-    private var previewDeviceScale: Double?
     var isRetired = false
     var usesViewportTiles = false
 
     func updatePreviewViewport(_ region: CGRect, deviceScale: Double = 1) {
-        guard let source = fragment?.page(at: 1) else { return }
-        let media = source.getBoxRect(.mediaBox)
-        let transform = SnapshotPayload.transform(size: media.size, bounds: bounds, rotation: captureRotation)
-        let scale = deviceScale * max(hypot(transform.a, transform.b), hypot(transform.c, transform.d))
-        viewportLock.lock(); previewViewport = region; previewDeviceScale = scale; viewportLock.unlock()
-        // PDFKit can reuse its annotation layer during zoom without invoking draw.
-        // Request detail from the real viewport density instead of its unit CTM.
-        if shouldDisplay, !isRetired, let previewData, let previewKey, let screenPreview {
-            SnapshotPreviewCache.shared.prepareVisible(data: previewData, key: previewKey, preview: screenPreview,
-                page: source, region: region.applying(transform.inverted()), scale: scale)
-        }
+        // Compatibility entry point for MarkupPDFView. Device density now comes
+        // from the drawing context, not delayed bitmap demand. Do not schedule
+        // raster refinement: its ready notification would reattach sharp vector
+        // layers unnecessarily. Viewport *annotation* tiling remains view-owned.
     }
 
     init(bounds: CGRect, document: CGPDFDocument, rotation: Int, style: SnapshotStyle, previewData: Data? = nil) {
         fragment = document
         captureRotation = rotation
         self.style = style
-        self.previewData = previewData
         previewKey = previewData.map(SnapshotPreviewCache.key)
-        if let previewData, let previewKey, let page = document.page(at: 1) {
-            screenPreview = SnapshotPreviewCache.shared.prepare(previewData, key: previewKey, page: page)
-        } else { screenPreview = nil }
         super.init(bounds: bounds, forType: .stamp, withProperties: nil)
         color = .clear
         shouldDisplay = true
@@ -308,9 +291,7 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         fragment = source.fragment
         captureRotation = source.captureRotation
         style = source.style
-        previewData = source.previewData
         previewKey = source.previewKey
-        screenPreview = source.screenPreview
         super.init(bounds: source.bounds, forType: .stamp, withProperties: nil)
         color = .clear
         shouldDisplay = source.shouldDisplay
@@ -321,9 +302,7 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         fragment = nil
         captureRotation = 0
         style = SnapshotStyle()
-        previewData = nil
         previewKey = nil
-        screenPreview = nil
         super.init(coder: coder)
     }
 
@@ -372,21 +351,11 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         guard !context.boundingBoxOfClipPath.isEmpty else { context.restoreGState(); return }
         let grouped = style.overlay || style.opacity < 1
         if grouped { context.beginTransparencyLayer(in: context.boundingBoxOfClipPath, auxiliaryInfo: nil) }
-        // PDFKit's annotation CGLayers have neither bitmap dimensions nor an
-        // NSGraphicsContext. Their clip is the annotation's page-space bounds.
-        // Printing contexts and whole-page vector previews keep the PDF path.
-        let localAppearance = !internalPreview && NSGraphicsContext.current == nil
-            && abs(clip.minX - bounds.minX) < 1 && abs(clip.minY - bounds.minY) < 1
-            && abs(clip.width - bounds.width) < 3 && abs(clip.height - bounds.height) < 3
-        let screenContext = NSGraphicsContext.current?.isDrawingToScreen != false
-            && (context.width > 0 || NSGraphicsContext.current?.isDrawingToScreen == true || localAppearance || internalPreview || SnapshotPageRendering.isViewportTile)
-        if !SnapshotPageRendering.isPreview, !SnapshotPageRendering.isVectorOutput, screenContext, let previewData, let previewKey, let screenPreview {
-            viewportLock.lock(); let viewport = previewViewport; let deviceScale = previewDeviceScale; viewportLock.unlock()
-            let fragmentViewport = viewport.map {
-                $0.applying(SnapshotPayload.transform(size: media.size, bounds: bounds, rotation: captureRotation).inverted())
-            }
-            SnapshotPreviewCache.shared.draw(data: previewData, key: previewKey, preview: screenPreview, page: source, visibleRegion: fragmentViewport, deviceScale: deviceScale, in: context)
-        } else { context.drawPDFPage(source) }
+        // Resolve embedded PDF operators at the caller's current device density
+        // on the first draw. View-owned viewport annotations bound high-zoom
+        // surfaces; a whole-fragment bitmap here loses detail even inside tiles.
+        // Raster content embedded in the PDF retains only its source resolution.
+        context.drawPDFPage(source)
         if grouped { context.endTransparencyLayer() }
         context.restoreGState()
     }

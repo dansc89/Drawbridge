@@ -266,7 +266,7 @@ final class MarkupRefreshPerformanceTests: XCTestCase {
         _ = NSApplication.shared
         let doc = try document(pages: 1)
         let page = try XCTUnwrap(doc.page(at: 0))
-        // A unique key prevents another test's cached detail from satisfying this test.
+        // A unique key isolates the no-raster-completion assertion from other tests.
         let data = try XCTUnwrap(doc.dataRepresentation()) + Data(("\n%viewport-" + UUID().uuidString + "\n").utf8)
         let stamp = try XCTUnwrap(try SnapshotStampFactory.make(payload: SnapshotPayload(data: data),
             bounds: page.bounds(for: .mediaBox), rotation: 0) as? DrawbridgeSnapshotAnnotation)
@@ -284,20 +284,41 @@ final class MarkupRefreshPerformanceTests: XCTestCase {
         return (view, window, try XCTUnwrap(stamp.previewKey))
     }
 
-    func testScaleNotificationRequestsSnapshotDetailWithoutClipNotificationOrDraw() throws {
+    func testScrollRefreshesVectorViewportWithoutRasterCompletion() throws {
+        let (view, window, key) = try snapshotView()
+        defer { view.setMarkupDocument(nil); withExtendedLifetime(window) {} }
+        var snapshotRequests = 0, overlays = 0
+        view.onViewportRefreshOperation = {
+            switch $0 { case .snapshotPreviewViewports: snapshotRequests += 1; case .hyperlinkOverlay: overlays += 1 }
+        }
+        let noRefinement = expectation(forNotification: SnapshotPreviewCache.ready, object: nil) {
+            ($0.userInfo?["captureKeys"] as? Set<String>)?.contains(key) == true
+        }
+        noRefinement.isInverted = true
+        let scale = view.scaleFactor
+        scroll(view)
+        XCTAssertEqual(snapshotRequests, 1)
+        XCTAssertEqual(overlays, 1)
+        XCTAssertEqual(view.scaleFactor, scale, accuracy: 0.000001)
+        wait(for: [noRefinement], timeout: 1)
+    }
+
+    func testScaleNotificationRefreshesVectorViewportWithoutRasterCompletion() throws {
         let (view, window, key) = try snapshotView()
         defer { view.setMarkupDocument(nil); withExtendedLifetime(window) {} }
         var snapshotRequests = 0
         view.onViewportRefreshOperation = { if case .snapshotPreviewViewports = $0 { snapshotRequests += 1 } }
-        expectation(forNotification: SnapshotPreviewCache.ready, object: nil) {
+        let noRefinement = expectation(forNotification: SnapshotPreviewCache.ready, object: nil) {
             ($0.userInfo?["captureKeys"] as? Set<String>)?.contains(key) == true
         }
+        noRefinement.isInverted = true
         view.scaleFactor = 4
         XCTAssertGreaterThan(snapshotRequests, 0, "Scale notifications must update the snapshot viewport/device density")
-        waitForExpectations(timeout: 5)
+        XCTAssertEqual(view.scaleFactor, 4, accuracy: 0.000001)
+        wait(for: [noRefinement], timeout: 1)
     }
 
-    func testZoomFeedbackRequestsSnapshotDetailWithoutPDFOrClipNotificationOrDraw() throws {
+    func testZoomFeedbackRefreshesVectorViewportWithoutRasterCompletion() throws {
         let (view, window, key) = try snapshotView()
         defer { view.setMarkupDocument(nil); withExtendedLifetime(window) {} }
         // Isolate the real zoom -> interactive feedback producer from PDFKit notifications.
@@ -307,13 +328,15 @@ final class MarkupRefreshPerformanceTests: XCTestCase {
         var snapshotRequests = 0, callbacks = 0
         view.onViewportRefreshOperation = { if case .snapshotPreviewViewports = $0 { snapshotRequests += 1 } }
         view.onViewportChanged = { callbacks += 1 }
-        expectation(forNotification: SnapshotPreviewCache.ready, object: nil) {
+        let noRefinement = expectation(forNotification: SnapshotPreviewCache.ready, object: nil) {
             ($0.userInfo?["captureKeys"] as? Set<String>)?.contains(key) == true
         }
+        noRefinement.isInverted = true
         XCTAssertTrue(view.zoom(by: 8))
         XCTAssertEqual(callbacks, 1)
         XCTAssertEqual(snapshotRequests, 1, "Interactive feedback must refresh once even when no clip notification arrives")
-        waitForExpectations(timeout: 5)
+        XCTAssertEqual(view.scaleFactor, 4, accuracy: 0.000001)
+        wait(for: [noRefinement], timeout: 1)
     }
 
     func testBatchScaleUndoNotifiesEachPageOnceWithFinalHeterogeneousMeasurementStates() throws {

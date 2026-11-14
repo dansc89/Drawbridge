@@ -92,6 +92,10 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private var additionalReviews: [URL: SharedReviewWindowController] = [:]
     private var outbox: SharedReviewOutbox?
     private var outboxNeedsSave = false
+    // Disk may retain this acknowledged prefix after a crash. Replay keeps the
+    // original clientOpIds, deduplicated by the backend's durable unique key.
+    private var uncheckpointedAcknowledgements = 0
+    private static let acknowledgementBatchSize = 16
     private var invalidPages = Set<Int>()
     private var retiredIDs = Set<String>()
     private let documentsTable = NSTableView()
@@ -1099,6 +1103,8 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         socket = nil
         sessionID = nil
         syncRequested = false
+        // Teardown leaves a safe replay superset; never flush an old session.
+        uncheckpointedAcknowledgements = 0
     }
 
     func recordChanges(on page: PDFPage) {
@@ -1149,11 +1155,12 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
 
     @discardableResult
     func retryPendingEditsSave() -> Bool {
-        guard outboxNeedsSave else { return true }
-        guard let outbox else { return false }
+        // Signing out stops transport, not local recovery. Failed new edits
+        // must remain saveable if the disk becomes writable later. Teardown
+        // clears ACK-only dirtiness; late network completions fail lifecycle checks.
+        guard outboxNeedsSave || uncheckpointedAcknowledgements > 0 else { return true }
         do {
-            try outbox.save(pending)
-            outboxNeedsSave = false
+            try savePendingEdits()
             return true
         } catch {
             updateReviewStatus("Review · Edits could not be saved on this Mac")
@@ -1161,9 +1168,19 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
     }
 
+    private func savePendingEdits() throws {
+        guard let outbox else { throw CancellationError() }
+        // Atomic replacement leaves the previous replayable queue on failure.
+        // Local edits call this immediately, regardless of the ack batch size.
+        outboxNeedsSave = true
+        try outbox.save(pending)
+        outboxNeedsSave = false
+        uncheckpointedAcknowledgements = 0
+    }
+
     private func sync(api: SharedReviewAPI, document: String, session: String) async {
         let generation = lifecycle
-        guard !sessionInvalidated, sessionID == session, let outbox, !syncing else { return }
+        guard !sessionInvalidated, sessionID == session, outbox != nil, !syncing else { return }
         syncing = true
         defer { syncing = false }
         do {
@@ -1171,8 +1188,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 syncRequested = false
                 while let next = pending.first {
                     if outboxNeedsSave {
-                        try outbox.save(pending)
-                        outboxNeedsSave = false
+                        try savePendingEdits()
                     }
                     let append = SharedReviewAPI.Append(sessionId: session, clientOpId: next.clientOpId,
                                                          payload: next.payload)
@@ -1186,11 +1202,13 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                         throw SharedReviewError("The server returned an unexpected revision receipt.")
                     }
                     updateReviewConnection(online: true)
-                    let remaining = Array(pending.dropFirst())
-                    try outbox.save(remaining)
-                    pending = remaining
-                    outboxNeedsSave = false
+                    pending.removeFirst()
+                    uncheckpointedAcknowledgements += 1
+                    if uncheckpointedAcknowledgements >= Self.acknowledgementBatchSize {
+                        try savePendingEdits()
+                    }
                 }
+                if uncheckpointedAcknowledgements > 0 { try savePendingEdits() }
                 let response: SharedReviewAPI.Operations = try await authenticatedSyncResponse(api: api, generation: generation, session: session) {
                     try await api.get("documents/\(document)/ops", query: [
                         URLQueryItem(name: "afterSeq", value: String(revision))
@@ -1199,13 +1217,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 try checkLifecycle(generation, api: api)
                 guard sessionID == session else { return }
                 updateReviewConnection(online: true)
-                for operation in response.ops {
-                    if operation.op_type == "drawbridge.markup.v1", let markup = operation.payload,
-                       !pending.contains(where: { $0.payload.id == markup.id }) {
-                        try apply(markup, owned: markup.ownerInstanceId == api.instanceID)
-                    }
-                    revision = operation.seq
-                }
+                try replayOperations(response.ops, instanceID: api.instanceID)
                 if response.ops.count == 500 { syncRequested = true }
             } while syncRequested || !pending.isEmpty
             let wasReady = ready
@@ -1214,6 +1226,12 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             if !wasReady, editor?.pdfView.document === reviewPDF { editor?.refreshRectangleToolbar() }
         } catch {
             guard lifecycle == generation, !sessionInvalidated, sessionID == session else { return }
+            // Flush a partial batch on ordinary transport failure. A failed disk
+            // checkpoint is not retried here: stop and keep the old disk snapshot.
+            if uncheckpointedAcknowledgements > 0, !outboxNeedsSave {
+                do { try savePendingEdits() }
+                catch { /* outboxNeedsSave retains the actionable persistence error. */ }
+            }
             if outboxNeedsSave {
                 updateReviewStatus("Review · Edits could not be saved on this Mac")
             } else if (error as? SharedReviewError)?.statusCode == 403 {
@@ -1276,14 +1294,50 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         if !online || !wasOnline { editor?.updateStatusBar() }
     }
 
-    private func apply(_ markup: SharedReviewAPI.Markup, owned: Bool) throws {
+    // Internal observation of actual replay UI invalidations for controller regression tests.
+    enum ReplayRefresh: Equatable { case page(Int), selectionAndList }
+    var replayRefreshObserver: ((ReplayRefresh) -> Void)?
+
+    func replayOperations(_ operations: [SharedReviewAPI.Operation], instanceID: String) throws {
+        guard !sessionInvalidated else { throw CancellationError() }
+        // Scoped to one fetched response, including a partially applied response.
+        // No suspension: revision/order and local-edit shielding remain sequential.
+        var touchedPages = Set<Int>()
+        defer { refreshReplayPages(touchedPages) }
+        for operation in operations {
+            if operation.op_type == "drawbridge.markup.v1", let markup = operation.payload,
+               !pending.contains(where: { $0.payload.id == markup.id }) {
+                if try apply(markup, owned: markup.ownerInstanceId == instanceID) {
+                    touchedPages.insert(markup.page)
+                }
+            }
+            revision = operation.seq
+        }
+    }
+
+    private func refreshReplayPages(_ indices: Set<Int>) {
+        guard !indices.isEmpty, let pdf = reviewPDF, let editor,
+              editor.pdfView.document === pdf else { return }
+        let viewer = editor.pdfView
+        for index in indices.sorted() {
+            guard let page = pdf.page(at: index) else { continue }
+            viewer.refreshAnnotationRendering(on: page, importedAppearanceChanged: true)
+            editor.markPageMarkupCacheDirty(page)
+            replayRefreshObserver?(.page(index))
+        }
+        viewer.rectangleMarkup.refresh()
+        editor.scheduleMarkupsRefresh(selecting: viewer.rectangleMarkup.selected)
+        replayRefreshObserver?(.selectionAndList)
+    }
+
+    private func apply(_ markup: SharedReviewAPI.Markup, owned: Bool) throws -> Bool {
         let viewer = editor?.pdfView
         let visibleViewer = viewer?.document === reviewPDF ? viewer : nil
         guard let page = reviewPDF?.page(at: markup.page) else {
             throw SharedReviewError("A revision refers to a missing page.")
         }
         if owned, markup.record == nil { retiredIDs.insert(markup.id) }
-        if owned, records[markup.page]?[markup.id] == markup.record { return }
+        if owned, records[markup.page]?[markup.id] == markup.record { return false }
         let replacement = try markup.record.map { record -> PDFAnnotation in
             guard record.id == markup.id, record.pageIndex == markup.page else {
                 throw SharedReviewError("A revision contains an invalid markup ID.")
@@ -1304,12 +1358,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
         if let replacement { page.addAnnotation(replacement) }
         records[markup.page, default: [:]][markup.id] = owned ? markup.record : nil
-        visibleViewer?.refreshAnnotationRendering(on: page, importedAppearanceChanged: true)
-        visibleViewer?.rectangleMarkup.refresh()
-        if visibleViewer != nil {
-            editor?.markPageMarkupCacheDirty(page)
-            editor?.scheduleMarkupsRefresh(selecting: visibleViewer?.rectangleMarkup.selected)
-        }
+        return true
     }
 
     func canQuit() -> Bool {

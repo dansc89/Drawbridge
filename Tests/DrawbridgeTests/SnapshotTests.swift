@@ -552,12 +552,12 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
         }
     }
 
-    func testSnapshotPreviewSharpensWithoutReplacingOriginalPDF() throws {
+    func testSnapshotFirstDrawIsVectorExactWithoutReplacingOriginalPDF() throws {
         let url = try fixture()
         defer { try? FileManager.default.removeItem(at: url) }
         let document = try XCTUnwrap(PDFDocument(url: url))
         let captured = try capture(try XCTUnwrap(document.page(at: 0)))
-        // Compressed, sub-megabyte captures must use the same fast preview path.
+        // Compressed, sub-megabyte captures must also resolve vectors immediately.
         XCTAssertLessThan(captured.data.count, 1_000_000)
         let payload = captured
         let fragment = try XCTUnwrap(payload.page), media = fragment.getBoxRect(.mediaBox)
@@ -575,18 +575,19 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
         func difference(_ actual: Data) -> Double {
             zip(actual, original).reduce(0.0) { $0 + abs(Double($1.0) - Double($1.1)) } / Double(original.count)
         }
-        let initial = difference(try tile(vector: false))
-        let deadline = Date().addingTimeInterval(8)
-        var final = initial
-        while final > 0.6 && Date() < deadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
-            final = difference(try tile(vector: false))
+        let key = try XCTUnwrap((stamp as? DrawbridgeSnapshotAnnotation)?.previewKey)
+        let noRefinement = expectation(forNotification: SnapshotPreviewCache.ready, object: nil) {
+            ($0.userInfo?["captureKeys"] as? Set<String>)?.contains(key) == true
         }
-        XCTAssertGreaterThan(initial, 1, "First draw must exercise the inexpensive preview")
-        XCTAssertLessThan(final, 0.6, "Background tiles must restore fine linework at device resolution")
-        XCTAssertEqual(try tile(vector: true), original, "Progressive preview must never replace the original PDF")
+        noRefinement.isInverted = true
+        XCTAssertEqual(difference(try tile(vector: false)), 0, "First live draw must already retain all vector detail")
+        wait(for: [noRefinement], timeout: 1)
+        XCTAssertEqual(try tile(vector: false), original, "Settling must not change the resolved pixels")
+        XCTAssertEqual(try tile(vector: true), original, "Live drawing must never replace the original PDF")
     }
 
+    // Synthetic ready notifications below retain compatibility-handler invariants.
+    // Live vector annotations no longer produce these notifications themselves.
     func testDetailRefreshPreservesMarkupOrderSelectionAndVectorPayload() throws {
         let url = try fixture(); defer { try? FileManager.default.removeItem(at: url) }
         let document = try XCTUnwrap(PDFDocument(url: url)), page = try XCTUnwrap(document.page(at: 0))
@@ -635,7 +636,7 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
         XCTAssertEqual(SnapshotPayload.read(stamp)?.data, payload.data)
     }
 
-    func testSnapshotTilesWaitForLatestViewportAndStillSharpen() throws {
+    func testSnapshotViewportGestureDoesNotQueueRasterRefinements() throws {
         let url = try fixture(); defer { try? FileManager.default.removeItem(at: url) }
         let source = try XCTUnwrap(PDFDocument(url: url))
         let original = try capture(try XCTUnwrap(source.page(at: 0)))
@@ -655,12 +656,12 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
         }
         RunLoop.main.run(until: Date().addingTimeInterval(0.08))
         XCTAssertEqual(notifications.value, 0, "Old zoom steps must not trigger tile refreshes during the gesture")
-        let deadline = Date().addingTimeInterval(5)
-        while notifications.value == 0 && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
-        XCTAssertGreaterThan(notifications.value, 0, "Detail for the final zoom level must load after settling")
+        RunLoop.main.run(until: Date().addingTimeInterval(1))
+        XCTAssertEqual(notifications.value, 0, "Settled vector viewports must not publish obsolete raster completion")
+        XCTAssertEqual(stamp.bounds, CGRect(x: 80, y: 90, width: 120, height: 80))
     }
 
-    func testSavedLocalSnapshotsRestoreBoundedEditingPreviews() throws {
+    func testSavedLocalSnapshotsRestoreVectorEditingAnnotations() throws {
         guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_SAVE_FIXTURE"] else { throw XCTSkip("Provide a saved Snapshot PDF for preview restoration testing") }
         let document = try XCTUnwrap(PDFDocument(url: URL(fileURLWithPath: path)))
         let saved = (0..<document.pageCount).flatMap { document.page(at: $0)?.annotations ?? [] }.filter { RectangleMarkupRecord.owns($0) && $0.type == "Stamp" }
@@ -680,7 +681,7 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
         XCTAssertEqual(importedLayers.value, 0, "PDFView must never build layers for the original heavy saved Stamp")
         let restored = (0..<document.pageCount).flatMap { document.page(at: $0)?.annotations ?? [] }.filter { RectangleMarkupRecord.owns($0) && $0.type == "Stamp" }
         XCTAssertEqual(restored.count, saved.count)
-        XCTAssertTrue(restored.allSatisfy { $0 is DrawbridgeSnapshotAnnotation }, "Reopened Snapshots must use bounded editing previews rather than PDFKit's full vector appearance")
+        XCTAssertTrue(restored.allSatisfy { $0 is DrawbridgeSnapshotAnnotation }, "Reopened Snapshots must use direct fragment rendering rather than PDFKit's imported Stamp appearance cache")
     }
 
     func testLocalSnapshotEditingPreviewStillSavesVectorAppearance() throws {
@@ -701,7 +702,7 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
         XCTAssertEqual(SnapshotPayload.read(saved)?.data, payload.data)
     }
 
-    func testViewportRequestsSharpDetailWithoutAnotherPDFKitDraw() throws {
+    func testViewportUpdateDoesNotQueueRasterDetailWithoutPDFKitDraw() throws {
         let url = try fixture()
         defer { try? FileManager.default.removeItem(at: url) }
         let document = try XCTUnwrap(PDFDocument(url: url))
@@ -709,13 +710,13 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
         let payload = try capture(page)
         let stamp = try XCTUnwrap(try SnapshotStampFactory.make(payload: payload, bounds: CGRect(x: 80, y: 90, width: 120, height: 80), rotation: 0) as? DrawbridgeSnapshotAnnotation)
         let key = try XCTUnwrap(stamp.previewKey)
-        expectation(forNotification: SnapshotPreviewCache.ready, object: nil) { notification in
+        let noRefinement = expectation(forNotification: SnapshotPreviewCache.ready, object: nil) { notification in
             (notification.userInfo?["captureKeys"] as? Set<String>)?.contains(key) == true
         }
-        // PDFKit can retain its CGLayer and skip the annotation's draw method.
-        // A Retina viewport update alone must schedule sharp detail.
+        noRefinement.isInverted = true
+        // Density is consumed by the next vector draw, never background raster work.
         stamp.updatePreviewViewport(stamp.bounds, deviceScale: 7)
-        waitForExpectations(timeout: 5)
+        wait(for: [noRefinement], timeout: 1)
     }
 
     func testSettledDetailRefreshDoesNotRestartZoomOrViewportDemand() throws {
