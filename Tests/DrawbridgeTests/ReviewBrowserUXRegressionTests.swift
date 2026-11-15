@@ -17,14 +17,22 @@ import XCTest
         XCTAssertTrue(busy.explanation.isEmpty, "Transient busy state is not a capability failure")
     }
 
-    func testUploadUsesOriginalTemplateAndExplicitLabel() throws {
+    func testUploadUsesOriginalTemplateInUnifiedIconOnlyToolbar() throws {
         _ = NSApplication.shared
         let controller = SharedReviewWindowController(); controller.buildWindow()
         defer { controller.window?.close() }
         let item = try XCTUnwrap(controller.window?.toolbar?.items.first { $0.itemIdentifier.rawValue == "review.upload" })
         let image = try XCTUnwrap(item.image)
         XCTAssertTrue(image.isTemplate)
-        XCTAssertEqual((item.view as? NSButton)?.title, "Upload PDFs…")
+        let toolbar = try XCTUnwrap(controller.window?.toolbar)
+        XCTAssertEqual(toolbar.displayMode, .iconOnly)
+        XCTAssertEqual(item.label, "Upload PDFs…", "Keep accessible/overflow label, not visible button text")
+        XCTAssertEqual(item.toolTip, "Upload PDFs to this folder")
+        let actions = toolbar.items.filter { $0.itemIdentifier != .flexibleSpace && $0.itemIdentifier.rawValue != "review.back" }
+        XCTAssertEqual(actions.map { $0.itemIdentifier.rawValue }, ["review.upload", "review.newFolder", "review.refresh", "review.delete"])
+        for action in actions {
+            XCTAssertNil(action.view, "\(action.itemIdentifier.rawValue) must use native icon-only toolbar rendering/grouping")
+        }
         XCTAssertNotEqual(image.tiffRepresentation, NSImage(systemSymbolName: "arrow.up.to.line", accessibilityDescription: nil)?.tiffRepresentation)
     }
 
@@ -104,6 +112,54 @@ import XCTest
         window.setContentSize(NSSize(width: 480, height: 320))
         content.layoutSubtreeIfNeeded()
         XCTAssertGreaterThanOrEqual(table.enclosingScrollView!.frame.height, 80)
+    }
+
+    func testUnpublishedUploadNeverAppearsAsDocumentAndCannotBeOpened() async throws {
+        _ = NSApplication.shared
+        let active = SettingsWindowController.activeReviewSession
+        let attempted = SettingsWindowController.attemptedSessionRestore
+        let origin = URL(string: "https://pending-upload-fixture.invalid")!
+        let instance = UUID().uuidString
+        SettingsWindowController.attemptedSessionRestore = true
+        SettingsWindowController.activeReviewSession = (origin, .init(token: "fixture-only", instanceId: instance, displayName: "Fixture"))
+        defer {
+            SettingsWindowController.activeReviewSession = active
+            SettingsWindowController.attemptedSessionRestore = attempted
+            UserDefaults.standard.removeObject(forKey: "DrawbridgeReviewFolder|\(origin.absoluteString)|\(instance)|p")
+        }
+        let controller = SharedReviewWindowController(); controller.buildWindow()
+        let window = try XCTUnwrap(controller.window)
+        defer { window.close() }
+        controller.makeReviewAPI = { origin, credentials in
+            var api = SharedReviewAPI(origin: origin, token: credentials.token, displayName: credentials.displayName, instanceID: credentials.instanceId)
+            api.transport = { request in
+                let json = request.url!.path == "/v1/projects"
+                    ? #"{"projects":[{"id":"p","name":"Fixture"}]}"#
+                    : #"{"organizationActions":true,"folders":[{"id":"f","name":"test2"}],"documents":[{"id":"pending","name":"Interrupted.pdf","folder_id":"f","file_size":null},{"id":"complete","name":"Ready.pdf","folder_id":"f","file_size":10}]}"#
+                return (Data(json.utf8), HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
+            return api
+        }
+        try await controller.loadDocuments()
+        let content = try XCTUnwrap(window.contentView)
+        let table = try XCTUnwrap(descendants(content).compactMap { $0 as? NSTableView }.first)
+        let open = try XCTUnwrap(descendants(content).compactMap { $0 as? NSButton }.first { $0.title == "Open" })
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        controller.perform(NSSelectorFromString("openSelected"))
+        XCTAssertEqual(table.numberOfRows, 1, "Only published PDFs appear")
+        let cell = try XCTUnwrap(controller.tableView(table, viewFor: table.tableColumns[0], row: 0))
+        XCTAssertTrue(descendants(cell).compactMap { $0 as? NSTextField }.contains { $0.stringValue == "Ready.pdf" })
+        XCTAssertFalse(open.isEnabled)
+        let pending = try JSONDecoder().decode(SharedReviewAPI.Document.self,
+            from: Data(#"{"id":"pending","name":"Interrupted.pdf","file_size":null}"#.utf8))
+        do {
+            _ = try await controller.open(pending)
+            XCTFail("Direct opening must reject unpublished documents too")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("not available")) }
+        table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        XCTAssertTrue(open.isEnabled)
+        try await controller.loadDocuments()
+        XCTAssertEqual(table.numberOfRows, 1, "Refreshing must never reveal staged files")
     }
 
     func testReviewMeasurementsRequireSupportedExistingScale() {

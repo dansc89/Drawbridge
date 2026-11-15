@@ -326,12 +326,17 @@ struct SharedReviewAPI: Sendable {
                                             projectID: project.id, folderID: folderID)
             let created: CreatedDocument = try await post("projects/\(project.id)/documents",
                 DocumentRequest(name: file.lastPathComponent, folderId: folderID))
-            let result: CreatedDocument = try await uploadPart(bytes, to: "documents/\(created.document.id)/upload",
-                                                            progress: uploadProgress, offset: 0)
-            try checkActive()
-            await uploadProgress.report(size)
-            try checkActive()
-            return result.document
+            do {
+                let result: CreatedDocument = try await uploadPart(bytes, to: "documents/\(created.document.id)/upload",
+                                                                progress: uploadProgress, offset: 0)
+                try checkActive()
+                await uploadProgress.report(size)
+                try checkActive()
+                return result.document
+            } catch {
+                await discardFailedUpload(created.document.id)
+                throw error
+            }
         }
 
         let handle = try FileHandle(forReadingFrom: file)
@@ -369,38 +374,54 @@ struct SharedReviewAPI: Sendable {
             try checkActive()
             return document
         }
-        let path = "documents/\(documentID)"
-        let uploadedParts = Set(status.parts)
-        let partCount = (size + Self.uploadPartSize - 1) / Self.uploadPartSize
-        // Resumed parts may be noncontiguous: account for all of them up front.
-        var uploadedBytes = (0..<partCount).filter { uploadedParts.contains($0) }.reduce(0) {
-            $0 + min(Self.uploadPartSize, size - $1 * Self.uploadPartSize)
-        }
-        try checkActive()
-        await uploadProgress.report(uploadedBytes)
-        try checkActive()
-        for index in 0..<partCount {
-            let offset = index * Self.uploadPartSize
-            let length = min(Self.uploadPartSize, size - offset)
-            if uploadedParts.contains(index) {
-                continue
+        do {
+            let path = "documents/\(documentID)"
+            let uploadedParts = Set(status.parts)
+            let partCount = (size + Self.uploadPartSize - 1) / Self.uploadPartSize
+            // Resumed parts may be noncontiguous: account for all of them up front.
+            var uploadedBytes = (0..<partCount).filter { uploadedParts.contains($0) }.reduce(0) {
+                $0 + min(Self.uploadPartSize, size - $1 * Self.uploadPartSize)
             }
-            try handle.seek(toOffset: UInt64(offset))
-            guard let bytes = try handle.read(upToCount: length), bytes.count == length else {
-                throw SharedReviewError("The PDF changed during upload. Select it again to retry.")
-            }
-            try await sendUploadPart(bytes, path: path, index: index, progress: uploadProgress, offset: uploadedBytes)
-            uploadedBytes += length
             try checkActive()
             await uploadProgress.report(uploadedBytes)
             try checkActive()
+            for index in 0..<partCount {
+                let offset = index * Self.uploadPartSize
+                let length = min(Self.uploadPartSize, size - offset)
+                if uploadedParts.contains(index) {
+                    continue
+                }
+                try handle.seek(toOffset: UInt64(offset))
+                guard let bytes = try handle.read(upToCount: length), bytes.count == length else {
+                    throw SharedReviewError("The PDF changed during upload. Select it again to retry.")
+                }
+                try await sendUploadPart(bytes, path: path, index: index, progress: uploadProgress, offset: uploadedBytes)
+                uploadedBytes += length
+                try checkActive()
+                await uploadProgress.report(uploadedBytes)
+                try checkActive()
+            }
+            try checkActive()
+            await uploadProgress.report(size)
+            try checkActive()
+            let result: CreatedDocument = try await post(path + "/complete-upload", CompleteUpload(size: size, sha256: digest))
+            defaults.removeObject(forKey: key)
+            return result.document
+        } catch {
+            defaults.removeObject(forKey: key)
+            await discardFailedUpload(documentID)
+            throw error
         }
-        try checkActive()
-        await uploadProgress.report(size)
-        try checkActive()
-        let result: CreatedDocument = try await post(path + "/complete-upload", CompleteUpload(size: size, sha256: digest))
-        defaults.removeObject(forKey: key)
-        return result.document
+    }
+
+    // Cancellation must not cancel cleanup. Revocation still blocks requests;
+    // server expiry handles unreachable/revoked clients. Never use normal deletion:
+    // a lost commit acknowledgement could refer to an already published PDF.
+    private func discardFailedUpload(_ documentID: String) async {
+        let cleanup = Task.detached {
+            let _: OrganizationReceipt? = try? await self.post("documents/\(documentID)/abort-upload", [String: String]())
+        }
+        await cleanup.value
     }
 
     private func createUpload(_ file: URL, project: Project, folderID: String?, key: String) async throws -> String {
@@ -438,6 +459,7 @@ struct SharedReviewAPI: Sendable {
         request.httpMethod = "POST"
         request.timeoutInterval = 180
         request.setValue("multipart/form-data; boundary=" + boundary, forHTTPHeaderField: "Content-Type")
+        if transport != nil { request.httpBody = body }
         let uploadRequest = request
         let uploadBody = body
         let delegate = UploadDelegate(progress: progress, prefix: prefix, length: bytes.count, offset: offset)
@@ -445,6 +467,7 @@ struct SharedReviewAPI: Sendable {
         let (data, response) = try await lifetime.run {
             try await withTaskCancellationHandler {
                 try checkActive()
+                if let transport { return try await transport(uploadRequest) }
                 return try await lifetime.session.upload(for: uploadRequest, from: uploadBody, delegate: delegate)
             } onCancel: { delegate.stop() }
         }

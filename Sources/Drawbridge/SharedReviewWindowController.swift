@@ -63,12 +63,22 @@ struct ReviewSyncConnection {
 @MainActor
 private final class ReviewBrowserWindow: NSWindow {
     var navigate: ((Bool) -> Void)?
+    var traverseHistory: ((Bool) -> Void)?
+    var requestDeletion: (() -> Void)?
     weak var browserTable: NSTableView?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
         guard attachedSheet == nil else { return super.performKeyEquivalent(with: event) }
         let editingText = firstResponder is NSTextView || firstResponder is NSTextField
+        if !editingText, firstResponder === browserTable, modifiers == .command, event.keyCode == 51, let requestDeletion {
+            requestDeletion()
+            return true
+        }
+        if !editingText, modifiers == .command, let traverseHistory, [123, 124].contains(event.keyCode) {
+            traverseHistory(event.keyCode == 124)
+            return true
+        }
         if !editingText, modifiers == .command, let navigate, [125, 126].contains(event.keyCode) {
             navigate(event.keyCode == 125)
             return true
@@ -138,11 +148,13 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private var documentDeletion = false
     private weak var reviewAlertSheet: NSWindow?
     private var folderID: String?
+    private var folderHistory: [String?] = []
+    private var folderHistoryIndex = -1
     private var workspaceKey: String?
     private var folders: [SharedReviewAPI.Folder]?
     private var documents: [SharedReviewAPI.Document] = []
     private var visibleFolders: [SharedReviewAPI.Folder] { (folders ?? []).filter { $0.parent_id == folderID } }
-    private var visibleDocuments: [SharedReviewAPI.Document] { documents.filter { $0.folder_id == folderID } }
+    private var visibleDocuments: [SharedReviewAPI.Document] { documents.filter { $0.file_size != nil && $0.folder_id == folderID } }
     private var rowCount: Int { visibleFolders.count + visibleDocuments.count }
     private var api: SharedReviewAPI?
     private let workspacePresence = ReviewWorkspacePresence()
@@ -204,6 +216,8 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         project = nil
         workspaceKey = nil
         folderID = nil
+        folderHistory.removeAll()
+        folderHistoryIndex = -1
         folders = nil
         documents.removeAll()
         organizationActions = false
@@ -231,9 +245,12 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         guard lifecycle == generation, !sessionInvalidated else { throw CancellationError() }
     }
 
+    var reviewAlertPresenter: ((NSAlert) -> NSApplication.ModalResponse)?
+
     private func presentReviewAlert(_ alert: NSAlert, in window: NSWindow,
                                     generation: UUID, api: SharedReviewAPI) async throws -> NSApplication.ModalResponse {
         try checkLifecycle(generation, api: api)
+        if let reviewAlertPresenter { return reviewAlertPresenter(alert) }
         let sheet = alert.window
         reviewAlertSheet = sheet
         let response = await withCheckedContinuation { continuation in
@@ -266,8 +283,10 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         window.isReleasedWhenClosed = false
         self.window = window
         window.navigate = { [weak self] down in
-            if down { self?.openSelected() } else { self?.goBack() }
+            if down { self?.openSelected() } else { self?.goToParent() }
         }
+        window.traverseHistory = { [weak self] forward in self?.traverseFolderHistory(forward: forward) }
+        window.requestDeletion = { [weak self] in self?.deleteSelectedItems() }
         window.browserTable = documentsTable
 
         let nameColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
@@ -299,7 +318,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         backButton.imagePosition = .imageLeading
         backButton.keyEquivalent = "["
         backButton.keyEquivalentModifierMask = .command
-        backButton.toolTip = "Go to the parent folder (⌘↑)"
+        backButton.toolTip = "Go back (⌘←)"
         folderPath.pathStyle = .standard
         folderPath.target = self
         folderPath.action = #selector(openPathFolder)
@@ -381,11 +400,11 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     private var toolbarDefinitions: [(String, String, String, Selector, String)] {
-        [("back", "Back", "chevron.backward", #selector(goBack), "Go to the parent folder (⌘↑)"),
+        [("back", "Back", "chevron.backward", #selector(goBack), "Go back (⌘←)"),
          ("upload", "Upload PDFs…", "", #selector(uploadPDF), "Upload PDFs to this folder"),
          ("newFolder", "New Folder…", "folder.badge.plus", #selector(createFolder), "Create a folder"),
          ("refresh", "Refresh", "arrow.clockwise", #selector(refreshDocuments(_:)), "Refresh server documents"),
-         ("delete", "Delete…", "trash", #selector(deleteSelectedItems), "Delete the selected items…")]
+         ("delete", "Delete…", "trash", #selector(deleteSelectedItems), "Delete the selected items… (⌘⌫)")]
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -403,14 +422,6 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         item.paletteLabel = definition.1
         item.image = definition.0 == "upload" ? ReviewUploadIcon.image()
             : NSImage(systemSymbolName: definition.2, accessibilityDescription: definition.1)
-        if definition.0 == "upload" {
-            let upload = NSButton(title: definition.1, target: self, action: definition.3)
-            upload.image = item.image
-            upload.imagePosition = .imageLeading
-            upload.bezelStyle = .rounded
-            upload.toolTip = definition.4
-            item.view = upload
-        }
         item.target = self
         item.action = definition.3
         item.toolTip = definition.4
@@ -512,16 +523,20 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         let validRows = !rows.isEmpty && rows.allSatisfy { (0..<rowCount).contains($0) }
         let oneFolder = rows.count == 1 && rows.first.map { $0 < visibleFolders.count } == true
         let onlyPDFs = validRows && rows.allSatisfy { $0 >= visibleFolders.count }
-        openButton.isEnabled = !busy && validRows && (oneFolder || onlyPDFs)
+        let includesIncomplete = validRows && rows.contains { row in
+            row >= visibleFolders.count && visibleDocuments[row - visibleFolders.count].file_size == nil
+        }
+        openButton.isEnabled = !busy && validRows && (oneFolder || onlyPDFs) && !includesIncomplete
         openButton.toolTip = validRows && !oneFolder && !onlyPDFs
             ? "Select one folder or one or more PDFs."
+            : includesIncomplete ? "This file is not available."
             : "Open the selected folder or PDFs (Return or ⌘↓)"
         documentsTable.alphaValue = busy ? 0.6 : 1
         documentsTable.toolTip = busy ? "Wait for the current operation to finish." : nil
         uploadButton.isEnabled = !busy && organizationActions && project != nil
         refreshButton.isEnabled = !busy
         newFolderButton.isEnabled = !busy && organizationActions && folders != nil
-        backButton.isEnabled = !busy && folderID != nil
+        backButton.isEnabled = !busy && folderHistoryIndex > 0
         folderPath.isEnabled = !busy
         let presentation = ReviewCapabilityPresentation(busy: busy, foldersAvailable: folders != nil,
                                                        organizationActions: organizationActions,
@@ -586,6 +601,8 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         let key = "DrawbridgeReviewFolder|\(origin.absoluteString)|\(api.instanceID)|\(project.id)"
         if workspaceKey != key {
             workspaceKey = key
+            folderHistory.removeAll()
+            folderHistoryIndex = -1
             folderID = UserDefaults.standard.string(forKey: key)
         }
         self.project = project
@@ -593,9 +610,9 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         organizationActions = list.organizationActions == true
         documentDeletion = list.documentDeletion == true || organizationActions
         folders = list.folders?.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        documents = list.documents.filter { $0.file_size != nil }
-            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        if !(folders ?? []).contains(where: { $0.id == folderID }) { folderID = nil }
+        documents = list.documents.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        if !isAvailableFolder(folderID) { folderID = nil }
+        reconcileFolderHistory()
         showFolder()
     }
 
@@ -639,14 +656,54 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         guard !busy, let clicked = folderPath.clickedPathItem,
               let index = folderPath.pathItems.firstIndex(of: clicked),
               pathFolderIDs.indices.contains(index), pathFolderIDs[index] != folderID else { return }
-        folderID = pathFolderIDs[index]
+        navigateToFolder(pathFolderIDs[index])
+    }
+
+    // History is workspace-scoped and in-memory. Refreshes prune removed folders,
+    // never add visits; entering a folder or going Up truncates forward history.
+    private func isAvailableFolder(_ id: String?) -> Bool {
+        id == nil || (folders ?? []).contains { $0.id == id }
+    }
+
+    private func reconcileFolderHistory() {
+        var valid: [String?] = []
+        var currentIndex = -1
+        for (index, id) in folderHistory.enumerated() where isAvailableFolder(id) {
+            if index == folderHistoryIndex { currentIndex = valid.count }
+            valid.append(id)
+        }
+        guard currentIndex >= 0, valid[currentIndex] == folderID else {
+            folderHistory = [folderID]
+            folderHistoryIndex = 0
+            return
+        }
+        folderHistory = valid
+        folderHistoryIndex = currentIndex
+    }
+
+    private func navigateToFolder(_ id: String?) {
+        guard !busy, id != folderID, isAvailableFolder(id) else { return }
+        folderHistory = Array(folderHistory.prefix(folderHistoryIndex + 1))
+        folderHistory.append(id)
+        folderHistoryIndex = folderHistory.count - 1
+        folderID = id
         showFolder()
     }
 
-    @objc private func goBack() {
-        guard !busy, let folderID else { return }
-        self.folderID = folders?.first(where: { $0.id == folderID })?.parent_id
+    private func traverseFolderHistory(forward: Bool) {
+        guard !busy else { return }
+        let index = folderHistoryIndex + (forward ? 1 : -1)
+        guard folderHistory.indices.contains(index) else { return }
+        folderHistoryIndex = index
+        folderID = folderHistory[index]
         showFolder()
+    }
+
+    @objc private func goBack() { traverseFolderHistory(forward: false) }
+
+    private func goToParent() {
+        guard let folderID else { return }
+        navigateToFolder(folders?.first(where: { $0.id == folderID })?.parent_id)
     }
 
     @objc private func createFolder() {
@@ -682,14 +739,17 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         guard !busy, !rows.isEmpty, rows.allSatisfy({ (0..<rowCount).contains($0) }) else { return }
         let entries = visibleFolders
         if rows.count == 1, let index = rows.first, entries.indices.contains(index) {
-            folderID = entries[index].id
-            showFolder()
+            navigateToFolder(entries[index].id)
             return
         }
         let available = visibleDocuments
         let selected = rows.map { $0 - entries.count }
         guard selected.allSatisfy(available.indices.contains) else {
             status.stringValue = "Select one folder or one or more PDFs."
+            return
+        }
+        guard selected.allSatisfy({ available[$0].file_size != nil }) else {
+            status.stringValue = "This file is not available."
             return
         }
         perform {
@@ -858,10 +918,11 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                         SharedReviewAPI.RemoveRequest(kind: item.kind, id: item.id, confirmation: username))
                 } catch {
                     try self.checkLifecycle(generation, api: api)
-                    if index > 0 { try? await self.loadDocuments() }
+                    // Even the first rejection can reflect another participant’s new
+                    // contents. Never leave a stale listing that looks empty.
+                    try? await self.loadDocuments()
                     try self.checkLifecycle(generation, api: api)
-                    let reason = item.kind == "folder" && (error as? SharedReviewError)?.statusCode == 409
-                        ? "Move or delete the folder’s contents first." : error.localizedDescription
+                    let reason = error.localizedDescription
                     throw SharedReviewError("Deleted \(index) of \(items.count) selected items. Couldn’t delete “\(item.name)”. \(reason)")
                 }
                 try self.checkLifecycle(generation, api: api)
@@ -996,6 +1057,9 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     func open(_ document: SharedReviewAPI.Document, using connection: SharedReviewAPI? = nil,
               focusEditor: Bool = true) async throws -> Bool {
         guard !sessionInvalidated else { throw CancellationError() }
+        guard document.file_size != nil else {
+            throw SharedReviewError("This file is not available. Try uploading it again.")
+        }
         let generation = lifecycle
         guard let api = connection ?? api, let editor else { return false }
         try checkLifecycle(generation, api: api)

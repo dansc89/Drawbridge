@@ -1092,6 +1092,24 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
                     let c=a.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!, d=b.colorAt(x:x,y:y)!.usingColorSpace(.deviceRGB)!
                     if abs(c.redComponent-d.redComponent)+abs(c.greenComponent-d.greenComponent)+abs(c.blueComponent-d.blueComponent)>0.1 { differences += 1 }
                 } }
+                if differences >= 1200, let diagnosticRoot = ProcessInfo.processInfo.environment["DRAWBRIDGE_SNAPSHOT_DIAGNOSTICS"] {
+                    do {
+                        let root = URL(fileURLWithPath: diagnosticRoot)
+                        let name = "filters-r\(rotation)-\(filter.rawValue)"
+                        try a.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent(name + "-live.png"))
+                        try b.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent(name + "-saved.png"))
+                        try Data(contentsOf: out).write(to: root.appendingPathComponent(name + ".pdf"))
+                        let fresh = try XCTUnwrap(PDFDocument(url: source))
+                        let freshPage = try XCTUnwrap(fresh.page(at: 0))
+                        let freshStamp = try SnapshotStampFactory.make(payload: payload, bounds: selected.bounds, rotation: rotation, style: style)
+                        freshPage.addAnnotation(freshStamp)
+                        let c = try XCTUnwrap(NSBitmapImageRep(data: freshPage.drawbridgeThumbnail(of: CGSize(width: 500, height: 500), for: .mediaBox).tiffRepresentation!))
+                        try c.representation(using: .png, properties: [:])?.write(to: root.appendingPathComponent(name + "-fresh-live.png"))
+                        print("SNAPSHOT_FILTER_DIAGNOSTIC", name, differences, "bounds", selected.bounds, "preview", SnapshotPageRendering.isPreview, "vector", SnapshotPageRendering.isVectorOutput)
+                    } catch {
+                        print("SNAPSHOT_FILTER_DIAGNOSTIC_ERROR", error)
+                    }
+                }
                 XCTAssertLessThan(differences,1200,"Live and saved filter match at rotation \(rotation), \(filter)")
                 session.undo.undo(); XCTAssertNotEqual(SnapshotStyle.read(session.selected!),style)
                 session.undo.redo(); XCTAssertEqual(SnapshotStyle.read(session.selected!),style)

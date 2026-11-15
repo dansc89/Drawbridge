@@ -115,6 +115,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 time.sleep(.01)
             (root / 'responded').touch()
             self.reply({'document': {'id': 'd', 'name': 'sample.pdf'}})
+        elif self.path == '/v1/documents/d/abort-upload':
+            self.rfile.read(length)
+            (root / 'aborted-upload').touch()
+            self.reply({'ok': True})
         elif self.path == '/v1/projects/p/documents':
             self.rfile.read(length)
             self.reply({'document': {'id': 'd', 'name': 'sample.pdf'}})
@@ -230,6 +234,10 @@ server.serve_forever()
         if invalidate { api.invalidate() } else { upload.cancel() }
         do { _ = try await upload.value; XCTFail("revoked upload succeeded") }
         catch { XCTAssertTrue(error is CancellationError || (error as? URLError)?.code == .cancelled) }
+        if !invalidate {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("aborted-upload").path),
+                          "Caller cancellation must still request server staging cleanup")
+        }
         let stoppedCount = count
         try fixture.releaseResponse()
         try await Task.sleep(for: .milliseconds(150))
