@@ -98,6 +98,7 @@ final class SnapshotVectorReplay: @unchecked Sendable {
 @MainActor
 final class SnapshotReplayPreparation {
     static let shared = SnapshotReplayPreparation()
+    static let ready = Notification.Name("DrawbridgeSnapshotVectorReplayReady")
 
     struct Source: Sendable {
         let key: String
@@ -186,7 +187,7 @@ final class SnapshotReplayPreparation {
         if viewports.values.contains(where: { $0.contains(where: { $0.key == source.key }) }) {
             if let replay {
                 Self.resident.insert(replay, for: source.key)
-                NotificationCenter.default.post(name: SnapshotPreviewCache.ready, object: nil,
+                NotificationCenter.default.post(name: Self.ready, object: nil,
                                                 userInfo: ["captureKeys": Set([source.key])])
             } else if SnapshotVectorReplay.hasCapacity(for: source.data.count) {
                 failed.insert(source.key)

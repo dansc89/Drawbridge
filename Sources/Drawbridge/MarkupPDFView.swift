@@ -592,6 +592,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         installViewportObserversIfNeeded()
         rectangleMarkup.install(on: self)
         NotificationCenter.default.addObserver(self, selector: #selector(snapshotPreviewReady(_:)), name: SnapshotPreviewCache.ready, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(snapshotPreviewReady(_:)), name: SnapshotReplayPreparation.ready, object: nil)
     }
 
     private var pendingSnapshotDetailKeys = Set<String>()
