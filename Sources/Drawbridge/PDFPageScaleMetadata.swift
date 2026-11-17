@@ -66,7 +66,7 @@ enum PDFPageScaleMetadata {
                 guard cyx.isFinite, abs(cyx - expected) <= expected * 1e-6 else { return nil }
             }
         }
-        let ratio = (measure["/R"] as? String).map { $0.hasPrefix("u:") ? String($0.dropFirst(2)) : $0 }
+        let ratio = ((measure["/DrawbridgeScaleName"] ?? measure["/R"]) as? String).map { $0.hasPrefix("u:") ? String($0.dropFirst(2)) : $0 }
         let value = DrawingScale(unitsPerPoint: x.0, unit: x.1,
                                  name: ratio ?? String(format: "1 PDF point = %.8g %@", x.0, x.1))
         return value.isValid ? value : nil
@@ -99,7 +99,7 @@ enum PDFPageScaleMetadata {
     private static func readDictionary(_ source: CGPDFDictionaryRef, depth: Int) -> [String: Any] {
         guard depth < 8 else { return [:] }
         var result: [String: Any] = [:]
-        for key in ["Type", "Subtype", "Name", "R", "U"] {
+        for key in ["Type", "Subtype", "Name", "R", "U", "DrawbridgeScaleName"] {
             var string: CGPDFStringRef?; var name: UnsafePointer<CChar>?
             if CGPDFDictionaryGetString(source, key, &string), let string, let text = CGPDFStringCopyTextString(string) { result["/" + key] = "u:" + (text as String) }
             else if CGPDFDictionaryGetName(source, key, &name), let name { result["/" + key] = "/" + String(cString: name) }
@@ -145,7 +145,7 @@ enum PDFPageScaleMetadata {
 
     /// Copy-on-write avoids changing shared viewport/measure objects on other pages.
     /// Returns the exact authorized /VP value for the writer's preservation check.
-    static func install(scale: DrawingScale?, page: inout [String: Any], objects: inout [String: Any], next: inout Int) -> Any {
+    static func install(scale: DrawingScale?, page: inout [String: Any], objects: inout [String: Any], next: inout Int, preservingMeasure: Bool = false) -> Any {
         let geometry = effectivePage(page, objects: objects)
         let existing = entries(page, objects: objects)
         let whole = existing.filter { wholePage(dictionary($0, objects: objects), page: geometry) }
@@ -183,10 +183,12 @@ enum PDFPageScaleMetadata {
             if sameBaseUnit {
                 for key in ["/D", "/A", "/V", "/T"] { if let value = previous[key] { measure[key] = value } }
             }
+            if preservingMeasure, !previous.isEmpty { measure = previous }
+            measure["/DrawbridgeScaleName"] = "u:" + scale.name
             let measureRef = "\(next) 0 R"; next += 1
             objects["obj:" + measureRef] = ["value": measure]
             viewport["/Type"] = "/Viewport"; viewport["/Measure"] = measureRef
-            viewport["/BBox"] = geometry["/MediaBox"]
+            if !preservingMeasure || viewport["/BBox"] == nil { viewport["/BBox"] = geometry["/MediaBox"] }
             viewport["/NM"] = viewport["/NM"] ?? "u:" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
             let viewportRef = "\(next) 0 R"; next += 1
             objects["obj:" + viewportRef] = ["value": viewport]

@@ -171,7 +171,8 @@ enum PDFRectangleWriter {
             let written = try mergingVerifiedChanges(baseline: inspected, delta: delta)
             profile("candidate inspection")
             stage = "annotation verification"
-            guard try ownedRecordsMatch(written, records: records) else { print("Rectangle writer: markup verification failed"); return false }
+            let annotationRecords = records.filter { $0.pageScale == nil && !$0.pageScaleCleared }
+            guard try ownedRecordsMatch(written, records: annotationRecords) else { print("Rectangle writer: markup verification failed"); return false }
             stage = "Apple reader verification"
             guard let readable = PDFDocument(url: candidate), readable.pageCount == (try pages(inspected).count) else {
                 print("Rectangle writer: Apple PDF reader rejected candidate"); return false
@@ -658,8 +659,25 @@ enum PDFRectangleWriter {
                       let id = ownedIdentity(dictionary(entry, objects: objects)) else { return nil }
                 return (id, reference)
             }, uniquingKeysWith: { first, _ in first })
+            let carriers = (recordsByPage[index] ?? []).filter { $0.pageScale != nil || $0.pageScaleCleared }
+            guard carriers.count <= 1 else { throw CocoaError(.fileWriteUnknown) }
+            if let carrier = carriers.first {
+                let standard = PDFPageScaleMetadata.scale(page: page, objects: objects)
+                let desired = carrier.pageScale
+                let equivalent = standard != nil && desired != nil && standard!.unit == desired!.unit && abs(standard!.unitsPerPoint - desired!.unitsPerPoint) <= desired!.unitsPerPoint * 1e-12
+                let pending = document.page(at: index)?.annotations.contains { RectangleMarkupRecord.identity($0) == carrier.id && $0.value(forAnnotationKey: MeasurementMetadata.pendingScaleKey) as? Bool == true } == true
+                let hasWhole = PDFPageScaleMetadata.entries(page, objects: objects).contains { PDFPageScaleMetadata.wholePage(PDFPageScaleMetadata.dictionary($0, objects: objects), page: PDFPageScaleMetadata.effectivePage(page, objects: objects)) }
+                if pending || !hasWhole || equivalent {
+                    if !equivalent || standard?.name != desired?.name {
+                        scaleViewports["obj:" + reference] = PDFPageScaleMetadata.install(
+                            scale: desired, page: &page, objects: &objects, next: &next,
+                            preservingMeasure: equivalent
+                        )
+                    }
+                }
+            }
             var entries = existing.filter { !owned($0, objects: objects) }
-            for record in recordsByPage[index] ?? [] {
+            for record in recordsByPage[index] ?? [] where record.pageScale == nil && !record.pageScaleCleared {
                 let oldReference = existingByID["u:" + record.id]
                 let annotationRef = oldReference ?? "\(next) 0 R"; if oldReference == nil { next += 1 }
                 let appearanceRef = "\(next) 0 R"; next += 1
@@ -689,11 +707,6 @@ enum PDFRectangleWriter {
                     }
                     annotation["/DrawbridgeSnapshotPDF"] = payloadRef
                     annotation["/DrawbridgeSnapshotStyle"] = "u:" + record.snapshotStyle.json
-                }
-                if record.pageScaleCleared { annotation["/DrawbridgePageScaleCleared"] = true; annotation["/F"] = 98 }
-                if let scale = record.pageScale {
-                    annotation["/DrawbridgePageScale"] = "u:" + MeasurementMetadata.json(scale)
-                    annotation["/F"] = 98 // Hidden, NoView, ReadOnly; never printed.
                 }
                 if let measurement = record.measurement {
                     annotation["/DrawbridgeMeasurement"] = "u:" + MeasurementMetadata.json(measurement)
@@ -795,18 +808,6 @@ enum PDFRectangleWriter {
                 entries.append(annotationRef)
             }
             if entries.isEmpty { page.removeValue(forKey: "/Annots") } else { page["/Annots"] = entries }
-            let carriers = (recordsByPage[index] ?? []).filter { $0.pageScale != nil || $0.pageScaleCleared }
-            guard carriers.count <= 1 else { throw CocoaError(.fileWriteUnknown) }
-            if let carrier = carriers.first {
-                let standard = PDFPageScaleMetadata.scale(page: page, objects: objects)
-                let desired = carrier.pageScale
-                let equivalent = standard != nil && desired != nil && standard!.unit == desired!.unit && abs(standard!.unitsPerPoint - desired!.unitsPerPoint) <= desired!.unitsPerPoint * 1e-12
-                let pending = document.page(at: index)?.annotations.contains { RectangleMarkupRecord.identity($0) == carrier.id && $0.value(forAnnotationKey: MeasurementMetadata.pendingScaleKey) as? Bool == true } == true
-                let hasWhole = PDFPageScaleMetadata.entries(page, objects: objects).contains { PDFPageScaleMetadata.wholePage(PDFPageScaleMetadata.dictionary($0, objects: objects), page: PDFPageScaleMetadata.effectivePage(page, objects: objects)) }
-                if !equivalent && (pending || !hasWhole) {
-                    scaleViewports["obj:" + reference] = PDFPageScaleMetadata.install(scale: desired, page: &page, objects: &objects, next: &next)
-                }
-            }
             object["value"] = page; objects["obj:\(reference)"] = object
         }
         qpdf[0]["maxobjectid"] = next - 1; qpdf[1] = objects; json["qpdf"] = qpdf

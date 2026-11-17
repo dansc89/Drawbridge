@@ -87,6 +87,8 @@ final class PDFPageScaleMetadataTests: XCTestCase {
             let value = try XCTUnwrap(MeasurementMetadata.scale(on: reopened.page(at: i)!))
             XCTAssertEqual(value.unitsPerPoint, i % 2 == 0 ? quarter.unitsPerPoint : 0.1111111, accuracy: 1e-12)
             XCTAssertEqual(reopened.page(at: i)?.rotation, i * 90)
+            XCTAssertFalse(reopened.page(at: i)!.annotations.contains(where: MeasurementMetadata.isPageScaleMetadata))
+            if i % 2 == 0 { XCTAssertEqual(value.name, quarter.name) }
             let entries = PDFPageScaleMetadata.entries(try page(written, index: i), objects: after)
             XCTAssertEqual(entries.count, 2); XCTAssertEqual(entries.last as? String, "8 0 R")
         }

@@ -422,6 +422,27 @@ final class PDFAnnotationFlattenerTests: XCTestCase {
         XCTAssertTrue(preserved.annotations.contains(where: MeasurementMetadata.isPageScaleMetadata))
     }
 
+    func testSavingPageLabelsMigratesOldScaleMarkerWithoutFlattening() throws {
+        let dir = try directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let source = try fixture(in: dir, scaleFactor: 0.125)
+        let output = dir.appendingPathComponent("saved.pdf")
+        let document = try XCTUnwrap(PDFDocument(url: source))
+        let page = try XCTUnwrap(document.page(at: 0))
+        XCTAssertTrue(page.annotations.contains(where: MeasurementMetadata.isPageScaleMetadata))
+
+        XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: output,
+            pageLabels: [0: "S200"], records: RectangleMarkupRecord.capture(document)))
+        let result = try XCTUnwrap(PDFDocument(url: output))
+        let savedPage = try XCTUnwrap(result.page(at: 0))
+        XCTAssertEqual(savedPage.label, "S200")
+        XCTAssertEqual(MeasurementMetadata.scale(on: savedPage), MeasurementMetadata.scale(on: page))
+        XCTAssertFalse(savedPage.annotations.contains(where: MeasurementMetadata.isPageScaleMetadata))
+        XCTAssertTrue(savedPage.annotations.contains { $0.type == "Link" })
+        XCTAssertTrue(savedPage.annotations.contains { $0.type == "Stamp" })
+        XCTAssertFalse(PDFAnnotationFlattener.canUnflatten(result))
+    }
+
     func testFlattenPrivateCalibrationFixture() throws {
         guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_FLATTEN_SCALE_FIXTURE"] else {
             throw XCTSkip("No optional calibration fixture")
@@ -435,7 +456,13 @@ final class PDFAnnotationFlattenerTests: XCTestCase {
         XCTAssertGreaterThan(report.removedScaleMarkers, 0)
         print("CALIBRATION FIXTURE removed=\(report.removedScaleMarkers)")
         let result = try XCTUnwrap(PDFDocument(url: output))
+        let savedURL = dir.appendingPathComponent("saved.pdf")
+        XCTAssertTrue(PDFRectangleWriter.write(document: input, source: source, destination: savedURL,
+            pageLabels: [0: "Temporary test label"], records: RectangleMarkupRecord.capture(input)))
+        let saved = try XCTUnwrap(PDFDocument(url: savedURL))
+        XCTAssertEqual(saved.page(at: 0)?.label, "Temporary test label")
         XCTAssertEqual(result.pageCount, input.pageCount)
+        XCTAssertEqual(saved.pageCount, input.pageCount)
         for index in 0..<input.pageCount {
             let before = try XCTUnwrap(input.page(at: index))
             let after = try XCTUnwrap(result.page(at: index))
@@ -444,6 +471,9 @@ final class PDFAnnotationFlattenerTests: XCTestCase {
             XCTAssertEqual(MeasurementMetadata.scale(on: before)?.unitsPerPoint, MeasurementMetadata.scale(on: after)?.unitsPerPoint)
             XCTAssertEqual(before.annotations.filter { $0.type == "Link" }.count, after.annotations.filter { $0.type == "Link" }.count)
             XCTAssertFalse(after.annotations.contains(where: MeasurementMetadata.isPageScaleMetadata))
+            let savedPage = try XCTUnwrap(saved.page(at: index))
+            XCTAssertEqual(MeasurementMetadata.scale(on: savedPage), MeasurementMetadata.scale(on: before))
+            XCTAssertFalse(savedPage.annotations.contains(where: MeasurementMetadata.isPageScaleMetadata))
         }
     }
 
