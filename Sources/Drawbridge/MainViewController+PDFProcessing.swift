@@ -248,6 +248,9 @@ extension MainViewController {
                     if report.removedSHXComments > 0 {
                         details.append("Removed \(report.removedSHXComments) redundant AutoCAD text comment box(es). The original drawing text and linework are preserved.")
                     }
+                    if report.removedScaleMarkers > 0 {
+                        details.append("Removed \(report.removedScaleMarkers) duplicate scale marker(s) from the markup list. Page calibration is preserved.")
+                    }
                     if report.retainedMarkups > 0 {
                         details.append("\(report.retainedMarkups) unsupported or hidden markup(s) remain editable.")
                     }

@@ -10,11 +10,13 @@ enum PDFAnnotationFlattener {
         let flattened: Int
         let retainedMarkups: Int
         let removedSHXComments: Int
+        let removedScaleMarkers: Int
         let restoredAnnotations: Int
-        init(flattened: Int, retainedMarkups: Int, removedSHXComments: Int, restoredAnnotations: Int = 0) {
+        init(flattened: Int, retainedMarkups: Int, removedSHXComments: Int, removedScaleMarkers: Int = 0, restoredAnnotations: Int = 0) {
             self.flattened = flattened
             self.retainedMarkups = retainedMarkups
             self.removedSHXComments = removedSHXComments
+            self.removedScaleMarkers = removedScaleMarkers
             self.restoredAnnotations = restoredAnnotations
         }
     }
@@ -81,6 +83,7 @@ enum PDFAnnotationFlattener {
         var flattened = 0
         var retained = 0
         var removedSHXComments = 0
+        var removedScaleMarkers = 0
         for reference in pages {
             var page = try dictionary(reference, objects)
             let annotations = array(page["/Annots"], objects)
@@ -91,6 +94,10 @@ enum PDFAnnotationFlattener {
                 let value = resolve(annotation, objects) as? [String: Any] ?? [:]
                 let type = value["/Subtype"] as? String ?? ""
                 let flags = value["/F"] as? Int ?? 0
+                if isRedundantScaleMarker(value, page: page, objects: objects) {
+                    removedScaleMarkers += 1
+                    continue
+                }
                 // AutoCAD already draws SHX glyphs in the page content. These
                 // zero-border comments contain redundant text metadata, not ink.
                 // Some viewers still display/select their rectangular hit areas.
@@ -120,15 +127,18 @@ enum PDFAnnotationFlattener {
             page["/Annots"] = targets
             objects["obj:\(reference)"] = ["value": page]
         }
-        guard flattened + removedSHXComments > 0 else { throw failure("No visible markups with usable appearances were found. Links, forms, hidden items, and unsupported markups are left unchanged.", code: 2) }
-        catalog[recoveryKey] = ["/Version": 1, "/Pages": recovery]
+        let hasRecoverableChanges = flattened + removedSHXComments > 0
+        guard hasRecoverableChanges || removedScaleMarkers > 0 else { throw failure("No visible markups with usable appearances were found. Links, forms, hidden items, and unsupported markups are left unchanged.", code: 2) }
+        if hasRecoverableChanges {
+            catalog[recoveryKey] = ["/Version": 1, "/Pages": recovery]
+        }
         catalog[marker] = protection
         objects["obj:\(root)"] = ["value": catalog]
         setObjects(objects, in: &json)
         let prepareJSON = try writeJSON(json, name: "protect.json")
         let prepared = directory.appendingPathComponent("protected.pdf")
         try run([source.path, "--stream-data=preserve", "--update-from-json=\(prepareJSON.path)", prepared.path])
-        progress(flattened > 0 ? "Flattening \(flattened) markups into page content…" : "Removing \(removedSHXComments) redundant CAD text comments…")
+        progress(flattened > 0 ? "Flattening \(flattened) markups into page content…" : "Removing redundant metadata annotations…")
         let flat = directory.appendingPathComponent("flattened.pdf")
         try run([prepared.path, "--flatten-annotations=screen", "--stream-data=preserve", flat.path])
         progress("Restoring links and checking page geometry…")
@@ -146,17 +156,19 @@ enum PDFAnnotationFlattener {
             page["/Annots"] = annotations
             outputObjects["obj:\(reference)"] = ["value": page]
         }
-        guard var archive = outputCatalog[recoveryKey] as? [String: Any],
-              var recoveryPages = archive["/Pages"] as? [[String: Any]] else { throw failure("Missing unflatten recovery data.") }
-        for index in recoveryPages.indices {
-            let reference = recoveryPages[index]["/Page"] as! String
-            let page = try dictionary(reference, outputObjects)
-            recoveryPages[index]["/FlattenedContents"] = contentSnapshot(page["/Contents"], outputObjects)
-            recoveryPages[index]["/FlattenedDrawingHash"] = "u:" + (try drawingHash(reference, outputObjects))
-            recoveryPages[index]["/FlattenedResources"] = try resourceSnapshot(reference, outputObjects)
+        if hasRecoverableChanges {
+            guard var archive = outputCatalog[recoveryKey] as? [String: Any],
+                  var recoveryPages = archive["/Pages"] as? [[String: Any]] else { throw failure("Missing unflatten recovery data.") }
+            for index in recoveryPages.indices {
+                let reference = recoveryPages[index]["/Page"] as! String
+                let page = try dictionary(reference, outputObjects)
+                recoveryPages[index]["/FlattenedContents"] = contentSnapshot(page["/Contents"], outputObjects)
+                recoveryPages[index]["/FlattenedDrawingHash"] = "u:" + (try drawingHash(reference, outputObjects))
+                recoveryPages[index]["/FlattenedResources"] = try resourceSnapshot(reference, outputObjects)
+            }
+            archive["/Pages"] = recoveryPages
+            outputCatalog[recoveryKey] = archive
         }
-        archive["/Pages"] = recoveryPages
-        outputCatalog[recoveryKey] = archive
         outputObjects["obj:\(outputRoot)"] = ["value": outputCatalog]
         setObjects(outputObjects, in: &output)
         let restoreJSON = try writeJSON(output, name: "restore.json")
@@ -181,7 +193,7 @@ enum PDFAnnotationFlattener {
         progress(replacingSource ? "Saving flattened PDF…" : "Writing flattened copy…")
         if cancelled() { throw CancellationError() }
         try MainViewController.commitStagedSave(from: final, to: destination)
-        return Report(flattened: flattened, retainedMarkups: retained, removedSHXComments: removedSHXComments)
+        return Report(flattened: flattened, retainedMarkups: retained, removedSHXComments: removedSHXComments, removedScaleMarkers: removedScaleMarkers)
     }
 
     static func canUnflatten(_ document: PDFDocument) -> Bool {
@@ -516,6 +528,22 @@ enum PDFAnnotationFlattener {
         guard let pages = json["pages"] as? [[String: Any]] else { throw failure("Missing page tree.") }
         return try pages.map { guard let ref = $0["object"] as? String else { throw failure("Invalid page reference.") }; return ref }
     }
+    /// Old Drawbridge saves stored sheet calibration in a hidden square.
+    /// Other PDF apps can list it as a markup even though its appearance is empty.
+    private static func isRedundantScaleMarker(_ annotation: [String: Any], page: [String: Any], objects: [String: Any]) -> Bool {
+        let identity = annotation["/NM"] as? String ?? annotation["/T"] as? String
+        guard annotation["/Subtype"] as? String == "/Square",
+              annotation["/F"] as? Int == 98,
+              identity?.hasPrefix("u:" + RectangleMarkupRecord.prefix) == true,
+              let encoded = annotation["/DrawbridgePageScale"] as? String,
+              encoded.hasPrefix("u:"), encoded.utf8.count < 4096,
+              let legacy = try? JSONDecoder().decode(DrawingScale.self, from: Data(encoded.dropFirst(2).utf8)),
+              legacy.isValid,
+              let standard = PDFPageScaleMetadata.scale(page: page, objects: objects),
+              standard.unit == legacy.unit else { return false }
+        return abs(standard.unitsPerPoint - legacy.unitsPerPoint) <= legacy.unitsPerPoint * 1e-12
+    }
+
     private static func isRedundantSHXComment(_ annotation: [String: Any], _ objects: [String: Any]) -> Bool {
         guard annotation["/Subtype"] as? String == "/Square",
               let author = annotation["/T"] as? String,

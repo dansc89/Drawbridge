@@ -5,7 +5,7 @@ import XCTest
 @testable import Drawbridge
 
 final class PDFAnnotationFlattenerTests: XCTestCase {
-    private func fixture(in directory: URL, noAppearance: Bool = false, signed: Bool = false, shxComments: Bool = false) throws -> URL {
+    private func fixture(in directory: URL, noAppearance: Bool = false, signed: Bool = false, shxComments: Bool = false, scaleFactor: Double? = nil) throws -> URL {
         // Nonzero crop origin, inherited rotation, transformed appearance, interactive
         // link, widget, hidden markup, missing appearance, outline and page label.
         let base = "0.9 g 20 30 260 180 re f 0 G 2 w 40 50 m 250 170 l S\n"
@@ -34,6 +34,12 @@ final class PDFAnnotationFlattenerTests: XCTestCase {
                 "<< \(common) /Border [0 0 0] /F 4 >>"
             ]
             objects[2] = objects[2].replacingOccurrences(of: "9 0 R]", with: "9 0 R 13 0 R 14 0 R 15 0 R 16 0 R 17 0 R]")
+        }
+        if let scaleFactor {
+            let scale = DrawingScale(unitsPerPoint: 0.125, unit: "ft", name: "Test scale")
+            objects.append("<< /Type /Annot /Subtype /Square /Rect [0 0 2 2] /F 98 /NM (DrawbridgeRectangleV1:test) /DrawbridgePageScale (\(MeasurementMetadata.json(scale))) >>")
+            let viewport = "/VP [<< /Type /Viewport /BBox [0 0 320 240] /Measure << /Subtype /RL /X [<< /U (ft) /C \(scaleFactor) >>] >> >>]"
+            objects[2] = objects[2].replacingOccurrences(of: "9 0 R]", with: "9 0 R \(objects.count) 0 R] \(viewport)")
         }
         var bytes = Data("%PDF-1.7\n".utf8)
         var offsets = [0]
@@ -388,6 +394,57 @@ final class PDFAnnotationFlattenerTests: XCTestCase {
         let changed = try Data(contentsOf: source)
         XCTAssertThrowsError(try PDFAnnotationFlattener.unflatten(source: source))
         XCTAssertEqual(try Data(contentsOf: source), changed)
+    }
+
+    func testFlattenRemovesOnlyDuplicatePageScaleMarkers() throws {
+        let dir = try directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let source = try fixture(in: dir, noAppearance: true, scaleFactor: 0.125)
+        let output = dir.appendingPathComponent("cleaned.pdf")
+        let report = try PDFAnnotationFlattener.flatten(source: source, destination: output)
+        XCTAssertEqual(report.removedScaleMarkers, 1)
+        XCTAssertEqual(report.flattened, 0)
+        let cleaned = try XCTUnwrap(PDFDocument(url: output))
+        let page = try XCTUnwrap(cleaned.page(at: 0))
+        XCTAssertFalse(page.annotations.contains(where: MeasurementMetadata.isPageScaleMetadata))
+        XCTAssertEqual(MeasurementMetadata.scale(on: page)?.unitsPerPoint, 0.125)
+        XCTAssertTrue(page.annotations.contains { $0.type == "Link" })
+        XCTAssertEqual(page.label, "A1.00")
+        XCTAssertFalse(PDFAnnotationFlattener.canUnflatten(cleaned))
+
+        let mismatched = try fixture(in: dir, scaleFactor: 0.25)
+        let protected = dir.appendingPathComponent("protected.pdf")
+        let protectedReport = try PDFAnnotationFlattener.flatten(source: mismatched, destination: protected)
+        XCTAssertEqual(protectedReport.removedScaleMarkers, 0)
+        XCTAssertEqual(protectedReport.flattened, 1)
+        let preserved = try XCTUnwrap(PDFDocument(url: protected)?.page(at: 0))
+        XCTAssertTrue(preserved.annotations.contains(where: MeasurementMetadata.isPageScaleMetadata))
+    }
+
+    func testFlattenPrivateCalibrationFixture() throws {
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_FLATTEN_SCALE_FIXTURE"] else {
+            throw XCTSkip("No optional calibration fixture")
+        }
+        let source = URL(fileURLWithPath: path)
+        let dir = try directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let input = try XCTUnwrap(PDFDocument(url: source))
+        let output = dir.appendingPathComponent("cleaned.pdf")
+        let report = try PDFAnnotationFlattener.flatten(source: source, destination: output)
+        XCTAssertGreaterThan(report.removedScaleMarkers, 0)
+        print("CALIBRATION FIXTURE removed=\(report.removedScaleMarkers)")
+        let result = try XCTUnwrap(PDFDocument(url: output))
+        XCTAssertEqual(result.pageCount, input.pageCount)
+        for index in 0..<input.pageCount {
+            let before = try XCTUnwrap(input.page(at: index))
+            let after = try XCTUnwrap(result.page(at: index))
+            XCTAssertEqual(before.label, after.label)
+            XCTAssertEqual(MeasurementMetadata.scale(on: before)?.unit, MeasurementMetadata.scale(on: after)?.unit)
+            XCTAssertEqual(MeasurementMetadata.scale(on: before)?.unitsPerPoint, MeasurementMetadata.scale(on: after)?.unitsPerPoint)
+            XCTAssertEqual(before.annotations.filter { $0.type == "Link" }.count, after.annotations.filter { $0.type == "Link" }.count)
+            XCTAssertFalse(after.annotations.contains(where: MeasurementMetadata.isPageScaleMetadata))
+        }
     }
 
     func testRedundantSHXCommentsAreRemovedWithoutDroppingVisibleOrPrintableAnnotations() throws {
