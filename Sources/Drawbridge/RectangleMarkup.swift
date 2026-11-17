@@ -222,7 +222,10 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
     }
 
     static func capture(annotation: PDFAnnotation, pageIndex index: Int) -> Self? {
-                guard owns(annotation), let id = identity(annotation), let rgb = markupColor(annotation).usingColorSpace(.deviceRGB) else { return nil }
+                guard owns(annotation), let id = identity(annotation) else { return nil }
+                let isScaleMetadata = MeasurementMetadata.isPageScaleMetadata(annotation)
+                let fallbackColor = isScaleMetadata ? NSColor(deviceRed: 0, green: 0, blue: 0, alpha: 1) : nil
+                guard let rgb = markupColor(annotation).usingColorSpace(.deviceRGB) ?? fallbackColor else { return nil }
                 var record = Self(id: id, pageIndex: index, bounds: annotation.bounds,
                             red: Double(rgb.redComponent), green: Double(rgb.greenComponent), blue: Double(rgb.blueComponent),
                             lineWidth: Double(annotation.border?.lineWidth ?? 2))
@@ -240,7 +243,7 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
                 let fill = polygonFill(annotation) ?? (copiedPayload != nil ? annotation.interiorColor : nil)
                 if ["Square", "Circle", "Polygon"].contains(annotation.type ?? ""), let rgb = fill?.usingColorSpace(.deviceRGB) { record.fill = [Double(rgb.redComponent), Double(rgb.greenComponent), Double(rgb.blueComponent)] }
                 record.measurement = MeasurementMetadata.measurement(annotation)
-                record.pageScale = MeasurementMetadata.isPageScaleMetadata(annotation) ? (annotation.page.flatMap { MeasurementMetadata.scale(on: $0) } ?? MeasurementMetadata.pageScale(annotation)) : nil
+                record.pageScale = isScaleMetadata ? (annotation.page.flatMap { MeasurementMetadata.scale(on: $0) } ?? MeasurementMetadata.pageScale(annotation)) : nil
                 record.pageScaleCleared = record.pageScale == nil && annotation.value(forAnnotationKey: MeasurementMetadata.clearedScaleKey) as? Bool == true
                 if record.measurement != nil { record.textRotation = (((annotation.page?.rotation ?? 0) % 360) + 360) % 360 }
                 let author = annotation.userName ?? ""

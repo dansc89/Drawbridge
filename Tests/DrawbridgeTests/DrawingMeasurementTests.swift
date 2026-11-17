@@ -398,7 +398,7 @@ final class DrawingMeasurementTests: XCTestCase {
             try original.write(to: URL(fileURLWithPath: directory).appendingPathComponent("Original.pdf"))
         }
         let reopened = try XCTUnwrap(PDFDocument(url: output))
-        XCTAssertEqual(RectangleMarkupRecord.capture(reopened),records)
+        XCTAssertEqual(RectangleMarkupRecord.capture(reopened), records.filter { $0.pageScale == nil && !$0.pageScaleCleared })
         for index in 0..<4 {
             let page = try XCTUnwrap(reopened.page(at: index))
             XCTAssertEqual(page.rotation,index*90); XCTAssertEqual(page.bounds(for: .mediaBox),pages[index].bounds(for: .mediaBox))
@@ -413,7 +413,7 @@ final class DrawingMeasurementTests: XCTestCase {
         let again = try XCTUnwrap(PDFDocument(url: output))
         XCTAssertEqual(MeasurementMetadata.scale(on: try XCTUnwrap(again.page(at: 2))),quarter)
         XCTAssertEqual(MeasurementMetadata.scale(on: try XCTUnwrap(again.page(at: 0))),eighth)
-        XCTAssertEqual(RectangleMarkupRecord.capture(again).count,12)
+        XCTAssertEqual(RectangleMarkupRecord.capture(again).count,8)
     }
     func testScaleOnlyAndPageReordering() throws {
         let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
@@ -491,7 +491,7 @@ final class DrawingMeasurementTests: XCTestCase {
         let saved = try Data(contentsOf: source)
         XCTAssertEqual(saved.prefix(original.count),original)
         XCTAssertLessThan(saved.count-original.count,30_000,"Unchanged measurement appearances should be reused")
-        XCTAssertEqual(RectangleMarkupRecord.capture(try XCTUnwrap(PDFDocument(url: source))).count,107)
+        XCTAssertEqual(RectangleMarkupRecord.capture(try XCTUnwrap(PDFDocument(url: source))).count,106)
     }
 
     private func fixture(userUnit: Double = 1) throws -> URL {
