@@ -178,7 +178,8 @@ final class PDFBookmarkExtractorTests: XCTestCase {
             XCTAssertEqual(PDFBookmarkExtractor.recognizedValue([reading], field: .number), expected)
         }
         XCTAssertNil(PDFBookmarkExtractor.recognizedValue(["GO.15", "G0.16"], field: .number))
-        XCTAssertNil(PDFBookmarkExtractor.recognizedValue(["GO.O5"], field: .number))
+        XCTAssertEqual(PDFBookmarkExtractor.recognizedValue(["GO.O5"], field: .number), "GO.05")
+        XCTAssertNil(PDFBookmarkExtractor.recognizedValue(["G1.OO5"], field: .number))
         XCTAssertNil(PDFBookmarkExtractor.recognizedValue(["GO.15 NOTES"], field: .number))
     }
 
