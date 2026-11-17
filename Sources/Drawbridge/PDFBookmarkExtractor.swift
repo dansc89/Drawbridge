@@ -139,8 +139,9 @@ enum PDFBookmarkExtractor {
                 return !overlap.isNull && overlap.width * overlap.height > min(a.width * a.height, b.width * b.height) * 0.65
             }
         }
-        if !preferOCR, !overlapping, !overprintedGlyphs, let text = value(native, field: field) {
-            return Result(text: text, source: "PDF text")
+        let nativeReading = !overlapping && !overprintedGlyphs ? value(native, field: field) : nil
+        if !preferOCR, let nativeReading {
+            return Result(text: nativeReading, source: "PDF text")
         }
         let fieldName = field == .number ? "sheet number" : "sheet title"
         progress?("Reading \(fieldName) • read 1 of 3")
@@ -159,6 +160,13 @@ enum PDFBookmarkExtractor {
             }
         }
         guard let first = readings.first else { return primary }
+        // OCR at different resolutions can disagree on O vs. zero. Prefer the
+        // underlying glyph only if the exact PDF text is also an OCR reading.
+        if field == .number, let nativeReading, readings.contains(nativeReading),
+           readings.contains(where: { isZeroLetterPair($0, nativeReading) }) {
+            return Result(text: nativeReading, source: "OCR + PDF text",
+                          alternatives: readings.filter { $0 != nativeReading })
+        }
         let chosen = field == .title ? preferredTitleReading(readings) : first
         return Result(text: chosen, source: readings.count == 1 ? "OCR" : "OCR disagreement", alternatives: readings.filter { $0 != chosen })
     }
@@ -279,17 +287,35 @@ enum PDFBookmarkExtractor {
         })
     }
 
+    /// Some OCR readings place a letter O in the numeric part of a sheet
+    /// identifier. Keep valid identifiers verbatim, including discipline prefixes
+    /// containing O. Repair only a unique one-character substitution.
+    private static func ocrNumber(_ raw: String) -> String? {
+        if let valid = value(raw, field: .number) { return valid }
+        let token = clean(raw).uppercased().replacingOccurrences(of: " ", with: "")
+        guard token.count <= 20, token.contains(where: { $0.isASCII && $0.isNumber }),
+              token.contains(where: { "._-".contains($0) }) else { return nil }
+        let repairs = Set(token.indices.compactMap { index -> String? in
+            guard token[index] == "O" else { return nil }
+            var candidate = token
+            candidate.replaceSubrange(index...index, with: "0")
+            return value(candidate, field: .number)
+        })
+        return repairs.count == 1 ? repairs.first : nil
+    }
+
     static func recognizedValue(_ lines: [String], field: Field) -> String? {
         if field == .number {
-            let valid = Set(lines.compactMap { value($0, field: .number) })
+            let valid = Set(lines.compactMap(ocrNumber))
             if valid.count == 1 {
                 if let token = valid.first, token.range(of: #"^[0-9]+(?:[._-][0-9]+)*$"#, options: .regularExpression) != nil,
                    lines.count == 2, lines.contains(where: { clean($0).range(of: #"^[A-Z]{1,4}$"#, options: .regularExpression) != nil }) {
-                    return value(lines.joined(), field: .number)
+                    return ocrNumber(lines.joined())
                 }
                 return valid.first
             }
             if valid.count > 1 { return nil }
+            return ocrNumber(lines.joined(separator: "\n"))
         }
         return value(lines.joined(separator: "\n"), field: field)
     }
@@ -328,19 +354,31 @@ enum PDFBookmarkExtractor {
         return Result(text: "", source: "needs review")
     }
 
+    private static func isZeroLetterPair(_ lhs: String, _ rhs: String) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        let differences = zip(lhs, rhs).filter { $0 != $1 }
+        guard differences.count == 1, let (left, right) = differences.first else { return false }
+        return (left == "O" && right == "0") || (left == "0" && right == "O")
+    }
+
     static func numberFormat(_ text: String) -> String {
         text.replacingOccurrences(of: "[0-9]", with: "#", options: .regularExpression)
     }
 
     /// Resolve only OCR-observed alternatives supported by at least two distinct peer identifiers.
-    /// Never rewrite native text, consult stale labels, or invent a character replacement.
+    /// Only syntactically valid existing labels may participate in disambiguation.
     static func resolveNumbers(_ results: [Result], labelHints: [String?] = []) -> [Result] {
+        let labelHints = labelHints.enumerated().map { index, hint in
+            guard let hint = hint.flatMap({ value($0, field: .number) }) else { return nil as String? }
+            if index < results.count, isZeroLetterPair(hint, results[index].text) { return nil }
+            return hint
+        }
         let support = Dictionary(grouping: results.filter { !$0.text.isEmpty }, by: { numberFormat($0.text) })
             .mapValues { Set($0.map(\.text)).count }
         let readingCounts = Dictionary(grouping: results.filter { !$0.text.isEmpty }, by: \.text)
             .mapValues(\.count)
         var resolved = results.enumerated().map { index, result in
-            guard result.source != "PDF text" else { return result }
+            guard result.source != "PDF text", result.source != "OCR + PDF text" else { return result }
             let stableDuplicate = result.alternatives.isEmpty && readingCounts[result.text, default: 0] > 1
             let visualSupportedElsewhere = labelHints.enumerated().contains {
                 $0.offset != index && $0.element == result.text
@@ -369,7 +407,7 @@ enum PDFBookmarkExtractor {
                 let result = resolved[index]
                 let readings = [result.text] + result.alternatives
                 let hasTwoNeighbors = index > 0 && index + 1 < resolved.count
-                guard result.source.hasPrefix("OCR"), index < labelHints.count,
+                guard result.source.hasPrefix("OCR"), result.source != "OCR + PDF text", index < labelHints.count,
                       let hint = labelHints[index],
                       (hasTwoNeighbors || !result.alternatives.isEmpty ||
                        support[numberFormat(result.text), default: 0] < 2),

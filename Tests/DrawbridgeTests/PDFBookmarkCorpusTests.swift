@@ -5,6 +5,40 @@ import XCTest
 
 /// Optional local corpus: no customer PDFs are copied into the repository.
 final class PDFBookmarkCorpusTests: XCTestCase {
+    func testScannedSheetNumbersSaveAsPageLabelsAndBookmarks() throws {
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_OCR_ZERO_FIXTURE"] else {
+            throw XCTSkip("No optional scanned sheet fixture")
+        }
+        let source = URL(fileURLWithPath: path)
+        let document = try XCTUnwrap(PDFDocument(url: source))
+        let expected = ["G0.15", "G0.16", "A1.10", "A1.80", "A5.00", "A6.01", "A7.21"]
+        let region = CGRect(x: 0.916, y: 0.024, width: 0.073, height: 0.044)
+        XCTAssertEqual(document.pageCount, expected.count)
+        let readings = try expected.indices.map { index in
+            let page = try XCTUnwrap(document.page(at: index))
+            return PDFBookmarkExtractor.extractAdaptiveNumber(
+                page: page, normalizedRect: region, box: .cropBox, preferOCR: true).result
+        }
+        let hints = expected.indices.map { index in
+            document.page(at: index)?.label?.components(separatedBy: " - ").first
+        }
+        let identifiers = PDFBookmarkExtractor.resolveNumbers(readings, labelHints: hints).map(\.text)
+        XCTAssertEqual(identifiers, expected)
+        document.outlineRoot = PDFBookmarkExtractor.outline(document: document,
+            sheets: identifiers.enumerated().map { ($0.offset, $0.element, "Title") },
+            destination: { PDFDestination(page: $0, at: .zero) })
+        let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pdf")
+        defer { try? FileManager.default.removeItem(at: output) }
+        let labels = Dictionary(uniqueKeysWithValues: identifiers.enumerated().map { ($0.offset, $0.element) })
+        guard case .saved = PDFTKBookmarkWriter.writeNavigation(in: document, sourceURL: source, to: output, pageLabels: labels) else {
+            return XCTFail("Could not save generated navigation")
+        }
+        let saved = try XCTUnwrap(PDFDocument(url: output))
+        XCTAssertEqual(expected.indices.map { saved.page(at: $0)?.label }, expected.map(Optional.some))
+        let outline = try XCTUnwrap(saved.outlineRoot)
+        XCTAssertEqual(expected.indices.map { outline.child(at: $0)?.label }, expected.map { Optional($0 + " - Title") })
+    }
+
     func testDesktopMixedLayoutAndAmbiguousProductionSheets() throws {
         guard let desktop = ProcessInfo.processInfo.environment["DRAWBRIDGE_BOOKMARK_DESKTOP_FIXTURES"] else {
             throw XCTSkip("Set DRAWBRIDGE_BOOKMARK_DESKTOP_FIXTURES to the Desktop PDF folder")

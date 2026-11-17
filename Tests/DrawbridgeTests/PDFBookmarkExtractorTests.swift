@@ -169,6 +169,31 @@ final class PDFBookmarkExtractorTests: XCTestCase {
         XCTAssertEqual(PDFBookmarkExtractor.value("SHEET TITLE:\nFLOOR PLAN\nAND NOTES", field: .title), "FLOOR PLAN AND NOTES")
     }
 
+    func testOCRRepairsZeroOnlyWhenTheOriginalIdentifierIsInvalid() {
+        let cases = [
+            "GO.15": "GO.15", "GO.16": "GO.16", "A1.O5": "A1.05",
+            "GO1.15": "GO1.15", "A1.15O": "A1.15O", "O0.15": "O0.15"
+        ]
+        for (reading, expected) in cases {
+            XCTAssertEqual(PDFBookmarkExtractor.recognizedValue([reading], field: .number), expected)
+        }
+        XCTAssertNil(PDFBookmarkExtractor.recognizedValue(["GO.15", "G0.16"], field: .number))
+        XCTAssertNil(PDFBookmarkExtractor.recognizedValue(["GO.O5"], field: .number))
+        XCTAssertNil(PDFBookmarkExtractor.recognizedValue(["GO.15 NOTES"], field: .number))
+    }
+
+    func testExistingZeroLetterConflictsCannotOverrideOCR() {
+        typealias R = PDFBookmarkExtractor.Result
+        let readings = [
+            R(text: "G0.14", source: "OCR"),
+            R(text: "G0.15", source: "OCR", alternatives: ["G0.17"]),
+            R(text: "GO.16", source: "OCR"),
+            R(text: "GO.17", source: "OCR")
+        ]
+        XCTAssertEqual(PDFBookmarkExtractor.resolveNumbers(
+            readings, labelHints: [nil, "GO.15", nil, nil])[1].text, "G0.15")
+    }
+
     func testResolutionUsesObservedAlternativeAndIndependentPeerFormats() {
         typealias R = PDFBookmarkExtractor.Result
         let ambiguous = R(text: "MO.10", source: "OCR disagreement", alternatives: ["M0.10"])
