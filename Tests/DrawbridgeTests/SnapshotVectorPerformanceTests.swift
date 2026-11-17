@@ -5,7 +5,7 @@ import XCTest
 
 /// Opt-in, bounded caller-thread work measurements. No private fixture is copied.
 @MainActor final class SnapshotVectorPerformanceTests: XCTestCase {
-    func testArchitecturalFragmentLiveDrawBudget() throws {
+    func testArchitecturalFragmentLiveDrawBudget() async throws {
         guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_VECTOR_PROFILE_PDF"] else {
             throw XCTSkip("Set DRAWBRIDGE_VECTOR_PROFILE_PDF to qualify live vector callback costs")
         }
@@ -14,6 +14,8 @@ import XCTest
         var samples = [Double]()
         var callbacksWithVisiblePixels = 0
         var resultRows = [[String: Any]]()
+        let viewport = SnapshotReplayPreparation.Viewport()
+        defer { SnapshotReplayPreparation.shared.update(viewport.id, sources: []) }
         for index in indexes {
             let page = try XCTUnwrap(document.page(at: index))
             let box = page.bounds(for: .cropBox)
@@ -23,6 +25,7 @@ import XCTest
             let destination = PDFPage(); destination.setBounds(box, for: .mediaBox)
             let stamp = try XCTUnwrap(try SnapshotStampFactory.make(payload: payload, bounds: box, rotation: 0) as? DrawbridgeSnapshotAnnotation)
             destination.addAnnotation(stamp); stamp.usesViewportTiles = true
+            try await SnapshotVectorReplayTests.awaitPreparation(of: stamp, in: viewport)
             var rowSamples = [Double]()
             for density: CGFloat in [2, 8, 16] {
                 for step in 0..<6 {
@@ -39,6 +42,10 @@ import XCTest
                     context.scaleBy(x: density, y: density)
                     context.translateBy(x: -region.minX, y: -region.minY); context.clip(to: region)
                     let previous = NSGraphicsContext.current; NSGraphicsContext.current = nil
+                    if density == 2 && step == 0 {
+                        SnapshotVectorReplayTests.assertReplayDraw { tile.draw(with: .mediaBox, in: context) }
+                        context.clear(region)
+                    }
                     let start = ProcessInfo.processInfo.systemUptime
                     tile.draw(with: .mediaBox, in: context)
                     let ms = (ProcessInfo.processInfo.systemUptime - start) * 1000

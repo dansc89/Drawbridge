@@ -70,8 +70,20 @@ final class SnapshotTileAllocationTests: XCTestCase {
         f.snapshots[0].bounds = f.snapshots[0].bounds.insetBy(dx: 95, dy: 0)
         f.view.updateSnapshotViewportTiles()
         XCTAssertGreaterThan(allocations, 0)
-        XCTAssertEqual(allocations, f.tiles.count)
-        XCTAssertTrue(old.allSatisfy { !$0.shouldDisplay })
+        // Only the edited owner's geometry changed. Stable tiles belonging to
+        // the other snapshot must survive: rebuilding both owners reintroduces
+        // the allocation churn the viewport-reuse optimization removed.
+        let changed = f.tiles.filter { $0.snapshot === f.snapshots[0] }
+        let unchanged = f.tiles.filter { $0.snapshot === f.snapshots[1] }
+        let oldChanged = old.filter { $0.snapshot === f.snapshots[0] }
+        let oldUnchanged = old.filter { $0.snapshot === f.snapshots[1] }
+        XCTAssertFalse(changed.isEmpty)
+        XCTAssertEqual(allocations, changed.count)
+        XCTAssertTrue(oldChanged.allSatisfy { !$0.shouldDisplay })
+        XCTAssertTrue(changed.allSatisfy { tile in !oldChanged.contains { $0 === tile } })
+        XCTAssertEqual(unchanged.count, oldUnchanged.count)
+        XCTAssertTrue(zip(unchanged, oldUnchanged).allSatisfy { $0 === $1 })
+        XCTAssertTrue(unchanged.allSatisfy { $0.shouldDisplay })
         for (index, owner) in f.snapshots.enumerated() {
             let ownerIndex = try XCTUnwrap(f.page.annotations.firstIndex { $0 === owner })
             let next = index == 0 ? f.snapshots[1] as PDFAnnotation : f.above

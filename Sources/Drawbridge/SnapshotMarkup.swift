@@ -34,14 +34,92 @@ struct SnapshotPayload: Sendable {
         annotation is DrawbridgeSnapshotAnnotation ||
         (annotation.type == "Stamp" && annotation.value(forAnnotationKey: key) is String)
     }
+    // Thread-scoped observation seam for synchronous payload validation work.
+    static var onReadDecode: (() -> Void)? {
+        get { Thread.current.threadDictionary["DrawbridgeSnapshotReadDecode"] as? (() -> Void) }
+        set { Thread.current.threadDictionary["DrawbridgeSnapshotReadDecode"] = newValue }
+    }
+    private final class ReadEntry {
+        weak var annotation: PDFAnnotation?
+        let encoded: String
+        let data: Data
+        let cost: Int
+        init(annotation: PDFAnnotation, encoded: String, data: Data) {
+            self.annotation = annotation; self.encoded = encoded; self.data = data
+            // Conservatively charge encoded text plus decoded bytes.
+            cost = data.count * 4
+        }
+    }
+    // All mutable state is lock-protected; no parser/PDFKit object is retained.
+    private final class ReadCache: @unchecked Sendable {
+        let lock = NSLock()
+        let budget: Int
+        var entries: [ObjectIdentifier: ReadEntry] = [:]
+        var cost = 0
+        init(budget: Int) { self.budget = budget }
+
+        // Weak-key death and replacement must release their actual admission cost.
+        func remove(_ id: ObjectIdentifier) {
+            if let old = entries.removeValue(forKey: id) { cost -= old.cost }
+        }
+        func reclaim() {
+            let dead = entries.compactMap { $0.value.annotation == nil ? $0.key : nil }
+            for id in dead { remove(id) }
+        }
+        func data(_ annotation: PDFAnnotation, encoded: String?) -> Data? {
+            let id = ObjectIdentifier(annotation)
+            lock.lock()
+            reclaim()
+            if let encoded, let entry = entries[id],
+               entry.annotation === annotation, entry.encoded == encoded {
+                lock.unlock()
+                return entry.data
+            }
+            // Discard stale bytes even when the new key is absent or invalid.
+            remove(id)
+            lock.unlock()
+            guard let encoded else { return nil }
+            onReadDecode?()
+            guard encoded.utf8.count <= maximumBytes * 2,
+                  let data = Data(base64Encoded: encoded), SnapshotPayload(data: data).page != nil else { return nil }
+            let entry = ReadEntry(annotation: annotation, encoded: encoded, data: data)
+            // An uncacheable valid payload must NEVER evict unrelated warm entries.
+            guard entry.cost <= budget else { return data }
+            lock.lock()
+            defer { lock.unlock() }
+            reclaim()
+            remove(id)
+            if cost + entry.cost > budget {
+                entries.removeAll(); cost = 0
+            }
+            entries[id] = entry
+            cost += entry.cost
+            return data
+        }
+    }
+    private static let sharedReadCache = ReadCache(budget: 64 * 1024 * 1024)
+    private static var readCache: ReadCache {
+        // Synchronous test scope only: a private thread-local instance, not a
+        // mutable process-wide budget. Production always uses sharedReadCache.
+        let dictionary = Thread.current.threadDictionary
+        guard let budget = dictionary["DrawbridgeSnapshotReadBudget"] as? Int, budget > 0 else {
+            return sharedReadCache
+        }
+        if let cache = dictionary["DrawbridgeSnapshotReadCache"] as? ReadCache, cache.budget == budget {
+            return cache
+        }
+        let cache = ReadCache(budget: budget)
+        dictionary["DrawbridgeSnapshotReadCache"] = cache
+        return cache
+    }
     static func read(_ annotation: PDFAnnotation) -> SnapshotPayload? {
-        guard let string = annotation.value(forAnnotationKey: key) as? String,
-              string.utf8.count <= maximumBytes * 2, let data = Data(base64Encoded: string) else { return nil }
+        guard let data = readCache.data(annotation, encoded: annotation.value(forAnnotationKey: key) as? String) else { return nil }
         var payload = Self(data: data)
+        // Placement/style are mutable and deliberately never cached with bytes.
         let b = annotation.bounds
         payload.placement = Placement(x: b.minX, y: b.minY, width: b.width, height: b.height, rotation: annotation.page?.rotation ?? 0)
         payload.style = SnapshotStyle.read(annotation)
-        return payload.page == nil ? nil : payload
+        return payload
     }
     @MainActor static func clipboard() -> SnapshotPayload? {
         guard let data = NSPasteboard.general.data(forType: clipboardType), data.count <= maximumBytes else { return nil }
@@ -254,6 +332,7 @@ enum SnapshotAppearance {
 /// without PDFKit's imported Stamp appearance cache.
 final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
     private let fragment: CGPDFDocument?
+    let replaySource: SnapshotReplayPreparation.Source?
     private let captureRotation: Int
     private let style: SnapshotStyle
     // Retained as content identity for existing view invalidation callers. Live
@@ -273,7 +352,9 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         fragment = document
         captureRotation = rotation
         self.style = style
-        previewKey = previewData.map(SnapshotPreviewCache.key)
+        let source = previewData.map { SnapshotReplayPreparation.Source(key: SnapshotPreviewCache.key($0), data: $0) }
+        replaySource = source
+        previewKey = source?.key
         super.init(bounds: bounds, forType: .stamp, withProperties: nil)
         color = .clear
         shouldDisplay = true
@@ -289,6 +370,7 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
 
     private init(presentationOf source: DrawbridgeSnapshotAnnotation) {
         fragment = source.fragment
+        replaySource = source.replaySource
         captureRotation = source.captureRotation
         style = source.style
         previewKey = source.previewKey
@@ -300,6 +382,7 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
 
     required init?(coder: NSCoder) {
         fragment = nil
+        replaySource = nil
         captureRotation = 0
         style = SnapshotStyle()
         previewKey = nil
@@ -355,7 +438,14 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         // on the first draw. View-owned viewport annotations bound high-zoom
         // surfaces; a whole-fragment bitmap here loses detail even inside tiles.
         // Raster content embedded in the PDF retains only its source resolution.
-        context.drawPDFPage(source)
+        // Only screen tiles use native replay. Print/export/filter/AP retain
+        // original CGPDF operators and existing exact rendering semantics.
+        if SnapshotPageRendering.isViewportTile, !SnapshotPageRendering.isVectorOutput,
+           let previewKey, let vectorReplay = SnapshotReplayPreparation.lease(previewKey) {
+            vectorReplay.draw(in: context)
+        } else {
+            context.drawPDFPage(source)
+        }
         if grouped { context.endTransparencyLayer() }
         context.restoreGState()
     }

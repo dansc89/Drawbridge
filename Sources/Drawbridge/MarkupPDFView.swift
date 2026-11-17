@@ -115,6 +115,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     /// this viewport must discard local demand, never remove page annotations.
     func retireSplitPane() {
         isRetiredSplitPane = true
+        SnapshotReplayPreparation.shared.update(snapshotReplayViewport.id, sources: [])
         snapshotTilesWorkItem?.cancel()
         snapshotTilesWorkItem = nil
         snapshotDetailRefreshWorkItem?.cancel()
@@ -138,6 +139,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     // those legitimate framework callbacks on macOS 26.
     func setMarkupDocument(_ document: PDFDocument?) {
         onWillReplaceDocument?()
+        SnapshotReplayPreparation.shared.update(snapshotReplayViewport.id, sources: [])
         rectangleMarkup.finishTextEditing()
         for page in tiledSnapshotPages.allObjects {
             page.annotations.filter { $0 is SnapshotViewportTileAnnotation }.forEach(page.removeAnnotation)
@@ -706,6 +708,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     /// leave a cached annotation image visible after the annotation is removed.
     private let snapshotPreviewPages = NSHashTable<PDFPage>.weakObjects()
 
+    private let snapshotReplayViewport = SnapshotReplayPreparation.Viewport()
     private var updatingSnapshotTiles = false
     private var snapshotTilesWorkItem: DispatchWorkItem?
     private let tiledSnapshotPages = NSHashTable<PDFPage>.weakObjects()
@@ -726,6 +729,8 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             !tiledSnapshotPages.allObjects.contains(where: { $0 === candidate })
         }
         let density = scaleFactor * (window?.backingScaleFactor ?? 1)
+        var replaySources = [SnapshotReplayPreparation.Source]()
+        var replayKeys = Set<String>()
         for page in pages {
             let visible = visiblePages.contains(where: { $0 === page })
             let originals = page.annotations.filter { !($0 is SnapshotViewportTileAnnotation) }
@@ -733,18 +738,27 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             let viewport = convert(contentClipView.map { convert($0.bounds, from: $0) } ?? bounds, to: page)
             var boundsByOwner = [ObjectIdentifier: [CGRect]]()
             for snapshot in snapshots {
+                let ownerRegion = snapshot.bounds.intersection(page.bounds(for: displayBox))
+                let region = viewport.intersection(ownerRegion)
+                let inViewport = visible && snapshot.shouldDisplay && !snapshot.isRetired
+                    && !region.isNull && !region.isEmpty
+                if inViewport, window != nil, let source = snapshot.replaySource, replayKeys.insert(source.key).inserted {
+                    replaySources.append(source)
+                }
                 let needsTiles = snapshotViewportTilesEnabled && visible && snapshot.shouldDisplay && !snapshot.isRetired
                     && max(snapshot.bounds.width, snapshot.bounds.height) * density > 4096
                 snapshot.usesViewportTiles = needsTiles
-                guard needsTiles else { continue }
-                let region = viewport.intersection(snapshot.bounds).intersection(page.bounds(for: displayBox))
-                guard !region.isNull, !region.isEmpty else { continue }
+                guard needsTiles, inViewport else { continue }
                 let span = 1024 / max(density, 1)
                 var tileRegions = [CGRect]()
                 for y in Int(floor(region.minY / span))...Int(floor(region.maxY / span)) {
                     for x in Int(floor(region.minX / span))...Int(floor(region.maxX / span)) {
-                        let tileBounds = CGRect(x: CGFloat(x) * span, y: CGFloat(y) * span, width: span, height: span).intersection(region)
-                        if !tileBounds.isEmpty { tileRegions.append(tileBounds) }
+                        // The viewport selects cells; it must not resize them.
+                        // Stable owner/page clipping lets sub-cell pans reuse the
+                        // same PDFKit annotation and its native vector surface.
+                        let tileBounds = CGRect(x: CGFloat(x) * span, y: CGFloat(y) * span, width: span, height: span).intersection(ownerRegion)
+                        let overlap = tileBounds.intersection(region)
+                        if !overlap.isNull && !overlap.isEmpty { tileRegions.append(tileBounds) }
                     }
                 }
                 boundsByOwner[ObjectIdentifier(snapshot)] = tileRegions
@@ -758,23 +772,39 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 $0.shouldDisplay && $0.snapshot === $1.snapshot && $0.bounds == $1.bounds
             }
             if !unchanged && (!oldTiles.isEmpty || !descriptors.isEmpty) {
+                let oldByOwner = Dictionary(grouping: oldTiles) { tile in
+                    tile.snapshot.map(ObjectIdentifier.init)
+                }
                 var tilesByOwner = [ObjectIdentifier: [SnapshotViewportTileAnnotation]]()
                 for snapshot in snapshots {
-                    tilesByOwner[ObjectIdentifier(snapshot)] = (boundsByOwner[ObjectIdentifier(snapshot)] ?? []).map {
-                        SnapshotViewportTileAnnotation(snapshot: snapshot, bounds: $0)
+                    let owner = ObjectIdentifier(snapshot)
+                    tilesByOwner[owner] = (boundsByOwner[owner] ?? []).map { bounds in
+                        oldByOwner[owner]?.first { $0.shouldDisplay && $0.bounds == bounds }
+                            ?? SnapshotViewportTileAnnotation(snapshot: snapshot, bounds: bounds)
                     }
                 }
-                oldTiles.forEach { $0.shouldDisplay = false }
-                // Retain the original stacking order. Tiles immediately follow
-                // their source, below every annotation originally above it.
-                page.annotations.forEach(page.removeAnnotation)
+                var desired = [PDFAnnotation]()
                 for annotation in originals {
-                    page.addAnnotation(annotation)
-                    tilesByOwner[ObjectIdentifier(annotation)]?.forEach(page.addAnnotation)
+                    desired.append(annotation)
+                    desired.append(contentsOf: tilesByOwner[ObjectIdentifier(annotation)] ?? [])
                 }
+                let retained = Set(desired.map(ObjectIdentifier.init))
+                for tile in oldTiles where !retained.contains(ObjectIdentifier(tile)) {
+                    tile.shouldDisplay = false
+                    page.removeAnnotation(tile)
+                }
+                // PDFKit has no indexed insertion API. Preserve the longest
+                // correct prefix, then reattach only the changed suffix in exact
+                // owner stacking order. Surviving cells retain their identity;
+                // an in-cell pan never reaches this mutation path at all.
+                let current = page.annotations
+                let prefix = zip(current, desired).prefix { $0 === $1 }.count
+                current.dropFirst(prefix).forEach(page.removeAnnotation)
+                desired.dropFirst(prefix).forEach(page.addAnnotation)
                 tiledSnapshotPages.add(page)
             }
         }
+        SnapshotReplayPreparation.shared.update(snapshotReplayViewport.id, sources: replaySources)
     }
 
     private func updateSnapshotPreviewViewports() {
@@ -1280,6 +1310,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         window?.acceptsMouseMovedEvents = true
+        if window == nil {
+            SnapshotReplayPreparation.shared.update(snapshotReplayViewport.id, sources: [])
+        } else {
+            scheduleSnapshotViewportTiles()
+        }
     }
 
     var ownsMarkupInteraction: Bool { rectangleMarkup.view === self }
