@@ -75,6 +75,39 @@ import XCTest
         XCTAssertTrue(EmbeddedPDFLayers.read(empty).isEmpty)
         XCTAssertEqual(panel.active.itemTitles, ["Unassigned"])
     }
+    func testBluebeamSnapshotLayerHidesAndShowsInEditingCanvas() async throws {
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_SNAPSHOT_NATIVE_LAYER_PDF"] else {
+            throw XCTSkip("Bluebeam Snapshot layer fixture is opt-in")
+        }
+        _ = NSApplication.shared
+        let source = URL(fileURLWithPath: path)
+        let copy = FileManager.default.temporaryDirectory.appendingPathComponent("SnapshotLayer-\(UUID()).pdf")
+        defer { try? FileManager.default.removeItem(at: copy) }
+        try FileManager.default.copyItem(at: source, to: copy)
+        let sourceBytes = try Data(contentsOf: copy)
+        let controller = MainViewController()
+        _ = controller.view
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 1200, height: 800),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentViewController = controller
+        defer { window.contentViewController = nil }
+        controller.openDocument(at: copy)
+        func stamp() throws -> DrawbridgeSnapshotAnnotation {
+            let doc = try XCTUnwrap(controller.pdfView.document)
+            let page = try XCTUnwrap(doc.page(at: 2))
+            return try XCTUnwrap(page.annotations.compactMap { $0 as? DrawbridgeSnapshotAnnotation }.first)
+        }
+        let layer = try XCTUnwrap(EmbeddedPDFLayers.read(controller.pdfView.document).first { $0.name == "ROOF" })
+        XCTAssertTrue(try stamp().hasNativeLayer)
+        XCTAssertTrue(try stamp().shouldDisplay)
+        try await controller.editNativePDFLayer(registryIndex: layer.registryIndex, operation: .visibility(false))
+        XCTAssertFalse(try stamp().shouldDisplay)
+        XCTAssertFalse(try stamp().shouldPrint)
+        try await controller.editNativePDFLayer(registryIndex: layer.registryIndex, operation: .visibility(true))
+        XCTAssertTrue(try stamp().shouldDisplay)
+        XCTAssertEqual(try Data(contentsOf: copy), sourceBytes)
+    }
+
     func testPrivatePurgeReloadKeepsRenderedArtworkOnEveryPreviouslyNonblankPage() throws {
         guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_PURGE_PRIVATE_FIXTURE"] else {
             throw XCTSkip("Private PDF render qualification opt-in")

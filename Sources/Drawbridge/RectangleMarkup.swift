@@ -492,6 +492,7 @@ final class RectangleMarkupController {
                 var replacedAppearance = false
                 let originalOrder = page.annotations
                 var replacements: [ObjectIdentifier: PDFAnnotation] = [:]
+                let nativeSnapshotLayers = EmbeddedPDFLayers.snapshotMembership(on: page)
                 for original in originalOrder where RectangleMarkupRecord.owns(original) {
                     if MarkupLayers.isMetadata(original) || MeasurementMetadata.isPageScaleMetadata(original) { continue }
                     if original.type == "Stamp", !(original is DrawbridgeSnapshotAnnotation), let payload = SnapshotPayload.read(original),
@@ -501,8 +502,11 @@ final class RectangleMarkupController {
                         }
                         replacement.userName = original.userName
                         replacement.contents = original.contents
-                        replacement.shouldDisplay = original.shouldDisplay
-                        replacement.shouldPrint = original.shouldPrint
+                        let nativeVisibility = RectangleMarkupRecord.identity(original).flatMap { nativeSnapshotLayers[$0] }
+                        (replacement as? DrawbridgeSnapshotAnnotation)?.hasNativeLayer = nativeVisibility != nil
+                        let nativeVisible = nativeVisibility.flatMap { $0 } ?? true
+                        replacement.shouldDisplay = original.shouldDisplay && nativeVisible
+                        replacement.shouldPrint = original.shouldPrint && nativeVisible
                         replacement.isReadOnly = original.isReadOnly
                         // Retire the imported AP before removal; PDFKit otherwise
                         // keeps its opaque image underneath later replacements.
@@ -1165,6 +1169,7 @@ final class RectangleMarkupController {
             replacement.setValue(identity, forAnnotationKey: RectangleMarkupRecord.identityKey)
             if let id = MarkupLayers.id(old) { replacement.setValue(id, forAnnotationKey: MarkupLayers.membershipKey) }
             replacement.userName = old.userName; replacement.contents = old.contents
+            (replacement as? DrawbridgeSnapshotAnnotation)?.hasNativeLayer = (old as? DrawbridgeSnapshotAnnotation)?.hasNativeLayer == true
             replacement.shouldDisplay = old.shouldDisplay; replacement.shouldPrint = old.shouldPrint
             replaceSnapshot(old, with: replacement, on: page)
         } catch { onSnapshotError?(error) }

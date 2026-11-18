@@ -229,10 +229,12 @@ struct SnapshotPayload: Sendable {
 /// installs a standard Stamp appearance for saved PDFs and other readers.
 @MainActor enum SnapshotStampFactory {
     static func make(payload: SnapshotPayload, bounds: CGRect, rotation: Int, style: SnapshotStyle = SnapshotStyle()) throws -> PDFAnnotation {
-        let data = try SnapshotFilterRenderer.filtered(payload.data, style: style)
+        guard style.isValid else { throw CocoaError(.fileReadCorruptFile) }
+        let deferFilter = style.isColorizedOverlay
+        let data = deferFilter ? payload.data : try SnapshotFilterRenderer.filtered(payload.data, style: style)
         guard let provider = CGDataProvider(data: data as CFData), let document = CGPDFDocument(provider),
               document.page(at: 1) != nil else { throw CocoaError(.fileReadCorruptFile) }
-        return DrawbridgeSnapshotAnnotation(bounds: bounds, document: document, rotation: rotation, style: style, previewData: data)
+        return DrawbridgeSnapshotAnnotation(bounds: bounds, document: document, rotation: rotation, style: style, previewData: data, deferredFilter: deferFilter ? style : nil)
     }
 }
 
@@ -240,9 +242,10 @@ struct SnapshotPayload: Sendable {
 /// No source page, catalog, filesystem path, or external reference is retained.
 enum SnapshotAppearance {
     static func install(data originalData: Data, bounds: CGRect, rotation: Int, pageTransform: CGAffineTransform, style: SnapshotStyle = SnapshotStyle(), objects: inout [String:Any], next: inout Int, forms: inout [Data:String]) throws -> [String:Any] {
-        let data = try SnapshotFilterRenderer.filtered(originalData, style: style)
+        let data = try SnapshotFilterRenderer.savedAppearance(originalData, style: style, rotation: rotation)
+        let fragmentRotation = style.isColorizedOverlay ? 0 : rotation
         guard SnapshotPayload(data: data).page != nil, let executable = PDFTKBookmarkWriter.executableURL() else { throw CocoaError(.fileReadCorruptFile) }
-        if let fragmentRef = forms[data], let size = SnapshotPayload(data: data).size { return wrapper(fragmentRef: fragmentRef, size: size, bounds: bounds, rotation: rotation, pageTransform: pageTransform, style: style) }
+        if let fragmentRef = forms[data], let size = SnapshotPayload(data: data).size { return wrapper(fragmentRef: fragmentRef, size: size, bounds: bounds, rotation: fragmentRotation, pageTransform: pageTransform, style: style) }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeSnapshot-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -311,7 +314,7 @@ enum SnapshotAppearance {
         fragmentDictionary.merge(encoding) { _, value in value }
         objects["obj:" + fragmentRef] = ["stream": ["dict": fragmentDictionary, "data":content.base64EncodedString()]]
         forms[data] = fragmentRef
-        return wrapper(fragmentRef: fragmentRef, size: size, bounds: bounds, rotation: rotation, pageTransform: pageTransform, style: style)
+        return wrapper(fragmentRef: fragmentRef, size: size, bounds: bounds, rotation: fragmentRotation, pageTransform: pageTransform, style: style)
     }
     private static func wrapper(fragmentRef: String, size: CGSize, bounds: CGRect, rotation: Int, pageTransform: CGAffineTransform, style: SnapshotStyle) -> [String:Any] {
         // PDFKit resolves soft masks in destination display space. Keep the BBox
@@ -320,9 +323,12 @@ enum SnapshotAppearance {
         // Capture rotation belongs only to the fragment placement below; it must
         // not substitute for the destination page's rotation/media-box transform.
         // Shared fragments and their vector resources/masks remain untouched.
-        let p = pageTransform, inverse = p.inverted()
-        let box = bounds.applying(p)
-        let t = SnapshotPayload.transform(size: size, bounds: bounds, rotation: rotation)
+        let localAppearance = style.isColorizedOverlay && pageTransform == .identity
+        let p = pageTransform
+        let inverse = p.inverted()
+        let placement = localAppearance ? CGRect(origin: .zero, size: bounds.size) : bounds
+        let box = placement.applying(p)
+        let t = SnapshotPayload.transform(size: size, bounds: placement, rotation: rotation)
         let drawing = "q /SnapshotGS gs \(p.a) \(p.b) \(p.c) \(p.d) \(p.tx) \(p.ty) cm \(t.a) \(t.b) \(t.c) \(t.d) \(t.tx) \(t.ty) cm /Snapshot Do Q"
         return ["stream":["dict":["/Type":"/XObject", "/Subtype":"/Form", "/BBox":[box.minX,box.minY,box.maxX,box.maxY], "/Matrix":[inverse.a,inverse.b,inverse.c,inverse.d,inverse.tx,inverse.ty], "/Resources":["/XObject":["/Snapshot":fragmentRef], "/ExtGState":["/SnapshotGS":["/Type":"/ExtGState", "/ca":style.opacity, "/CA":style.opacity, "/BM":"/Normal"]]], "/DrawbridgeRectangleAppearance":true], "data":Data(drawing.utf8).base64EncodedString()]]
     }
@@ -335,24 +341,45 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
     let replaySource: SnapshotReplayPreparation.Source?
     private let captureRotation: Int
     private let style: SnapshotStyle
-    // Retained as content identity for existing view invalidation callers. Live
-    // presentation no longer produces raster-preview completion notifications.
+    private let deferredFilter: SnapshotStyle?
     let previewKey: String?
     var isRetired = false
+    var hasNativeLayer = false
     var usesViewportTiles = false
+    private let viewportLock = NSLock()
+    // Quartz can defer evaluation of a soft mask beyond the draw callback.
+    // Keep the filtered document alive for the annotation's lifetime.
+    private let vectorDocumentLock = NSLock()
+    private var filteredVectorDocument: CGPDFDocument?
+    private var previewViewport: (region: CGRect, scale: Double)?
+    var usesCachedOverlay: Bool { style.isColorizedOverlay && replaySource != nil }
 
     func updatePreviewViewport(_ region: CGRect, deviceScale: Double = 1) {
-        // Compatibility entry point for MarkupPDFView. Device density now comes
-        // from the drawing context, not delayed bitmap demand. Do not schedule
-        // raster refinement: its ready notification would reattach sharp vector
-        // layers unnecessarily. Viewport *annotation* tiling remains view-owned.
+        guard !isRetired, shouldDisplay, usesCachedOverlay, let source = replaySource,
+              let page = fragment?.page(at: 1), bounds.width > 0, bounds.height > 0 else { return }
+        let media = page.getBoxRect(.mediaBox)
+        let transform = SnapshotPayload.transform(size: media.size, bounds: bounds, rotation: captureRotation)
+        let region = region.intersection(bounds).applying(transform.inverted()).intersection(media)
+        guard !region.isNull, !region.isEmpty else { return }
+        let scale = deviceScale * max(hypot(transform.a, transform.b), hypot(transform.c, transform.d))
+        viewportLock.withLock { previewViewport = (region, scale) }
+        let cache = SnapshotPreviewCache.shared
+        if let preview = cache.readyPreview(for: source.key) {
+            cache.prepareVisible(data: source.data, key: source.key, preview: preview, page: page, region: region, scale: scale, filter: deferredFilter)
+        } else {
+            cache.requestPreview(data: source.data, key: source.key, filter: deferredFilter)
+        }
     }
 
-    init(bounds: CGRect, document: CGPDFDocument, rotation: Int, style: SnapshotStyle, previewData: Data? = nil) {
+    init(bounds: CGRect, document: CGPDFDocument, rotation: Int, style: SnapshotStyle, previewData: Data? = nil, deferredFilter: SnapshotStyle? = nil) {
         fragment = document
         captureRotation = rotation
         self.style = style
-        let source = previewData.map { SnapshotReplayPreparation.Source(key: SnapshotPreviewCache.key($0), data: $0) }
+        self.deferredFilter = deferredFilter
+        let source = previewData.map { data in
+            let suffix = deferredFilter.map { ":colorized-overlay:" + $0.color.description } ?? ""
+            return SnapshotReplayPreparation.Source(key: SnapshotPreviewCache.key(data) + suffix, data: data)
+        }
         replaySource = source
         previewKey = source?.key
         super.init(bounds: bounds, forType: .stamp, withProperties: nil)
@@ -373,9 +400,11 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         replaySource = source.replaySource
         captureRotation = source.captureRotation
         style = source.style
+        deferredFilter = source.deferredFilter
         previewKey = source.previewKey
         super.init(bounds: source.bounds, forType: .stamp, withProperties: nil)
         color = .clear
+        hasNativeLayer = source.hasNativeLayer
         shouldDisplay = source.shouldDisplay
         shouldPrint = source.shouldPrint
     }
@@ -385,13 +414,19 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         replaySource = nil
         captureRotation = 0
         style = SnapshotStyle()
+        deferredFilter = nil
         previewKey = nil
         super.init(coder: coder)
     }
 
     override func draw(with box: PDFDisplayBox, in context: CGContext) {
         guard !isRetired, shouldDisplay else { return }
-        if usesViewportTiles && NSGraphicsContext.current?.isDrawingToScreen != false && !SnapshotPageRendering.isViewportTile && !SnapshotPageRendering.isPreview && !SnapshotPageRendering.isVectorOutput { return }
+        let isViewportTile = SnapshotPageRendering.isViewportTile
+        let isScreenPass = isViewportTile || (
+            context.width == 0 && NSGraphicsContext.current?.isDrawingToScreen != false
+        )
+        if usesViewportTiles && isScreenPass && !isViewportTile
+            && !SnapshotPageRendering.isPreview && !SnapshotPageRendering.isVectorOutput { return }
         guard let source = fragment?.page(at: 1) else {
             super.draw(with: box, in: context)
             return
@@ -432,6 +467,38 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
         let media = source.getBoxRect(.mediaBox)
         context.clip(to: media)
         guard !context.boundingBoxOfClipPath.isEmpty else { context.restoreGState(); return }
+        let viewport = viewportLock.withLock { previewViewport }
+        if usesCachedOverlay, let data = replaySource,
+           !SnapshotPageRendering.isPreview, !SnapshotPageRendering.isVectorOutput,
+           isScreenPass {
+            let cache = SnapshotPreviewCache.shared
+            if let preview = cache.readyPreview(for: data.key) {
+                cache.draw(data: data.data, key: data.key, preview: preview, page: source,
+                           visibleRegion: viewport?.region, deviceScale: viewport?.scale, filter: deferredFilter, in: context)
+            } else {
+                cache.requestPreview(data: data.data, key: data.key, filter: deferredFilter)
+            }
+            context.restoreGState()
+            return
+        }
+        let vectorPage: CGPDFPage
+        if let deferredFilter, let sourceData = replaySource?.data {
+            let document = vectorDocumentLock.withLock { () -> CGPDFDocument? in
+                if let filteredVectorDocument { return filteredVectorDocument }
+                guard let bytes = try? SnapshotFilterRenderer.filtered(sourceData, style: deferredFilter),
+                      let provider = CGDataProvider(data: bytes as CFData),
+                      let document = CGPDFDocument(provider) else { return nil }
+                filteredVectorDocument = document
+                return document
+            }
+            guard let page = document?.page(at: 1) else {
+                context.restoreGState()
+                return
+            }
+            vectorPage = page
+        } else {
+            vectorPage = source
+        }
         let grouped = style.overlay || style.opacity < 1
         if grouped { context.beginTransparencyLayer(in: context.boundingBoxOfClipPath, auxiliaryInfo: nil) }
         // Resolve embedded PDF operators at the caller's current device density
@@ -444,7 +511,7 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
            let previewKey, let vectorReplay = SnapshotReplayPreparation.lease(previewKey) {
             vectorReplay.draw(in: context)
         } else {
-            context.drawPDFPage(source)
+            context.drawPDFPage(vectorPage)
         }
         if grouped { context.endTransparencyLayer() }
         context.restoreGState()

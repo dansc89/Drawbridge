@@ -11,6 +11,7 @@ final class SnapshotPreviewCache: @unchecked Sendable {
     private let previews = NSCache<NSString, CGImage>()
     private let lock = NSLock()
     private var pending = Set<String>()
+    private var pendingPreviews = Set<String>()
     private var latestResolution = [String: Double]()
     private struct ViewportRequest {
         let region: CGRect
@@ -20,7 +21,7 @@ final class SnapshotPreviewCache: @unchecked Sendable {
     }
     private var viewports = [String: ViewportRequest]()
     private var viewportGeneration: UInt = 0
-    private let viewportQuietInterval: CFAbsoluteTime = 0.18
+    private let viewportQuietInterval: CFAbsoluteTime = 0.08
     // Detail work must yield to user gestures. These parsers belong exclusively
     // to this serial queue, so tiles can reuse decoded fonts and image resources.
     private let queue = DispatchQueue(label: "com.drawbridge.snapshot-preview", qos: .utility)
@@ -34,12 +35,39 @@ final class SnapshotPreviewCache: @unchecked Sendable {
 
     init(onRenderCompleted: (@Sendable (CGRect, Double) -> Void)? = nil) {
         self.onRenderCompleted = onRenderCompleted
-        images.totalCostLimit = 48 * 1024 * 1024; images.countLimit = 64
-        previews.totalCostLimit = 32 * 1024 * 1024; previews.countLimit = 16
+        // A 5K display can expose more than twelve 1024-pixel tiles.
+        // Keep enough for a full viewport without immediately evicting its first row.
+        images.totalCostLimit = 80 * 1024 * 1024; images.countLimit = 64
+        previews.totalCostLimit = 48 * 1024 * 1024; previews.countLimit = 16
     }
 
     static func key(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    func readyPreview(for key: String) -> CGImage? {
+        previews.object(forKey: key as NSString)
+    }
+
+    /// A soft-mask PDF can take hundreds of milliseconds even to draw a
+    /// clipped tile. Keep both parsing and initial sampling off the canvas.
+    func requestPreview(data: Data, key: String, filter: SnapshotStyle? = nil) {
+        guard readyPreview(for: key) == nil else { return }
+        // A viewport can fill the detail queue with sixteen tiles. A newly
+        // visible stamp still needs to be admitted for its first preview.
+        guard lock.withLock({ pendingPreviews.count < 16 && pendingPreviews.insert(key).inserted }) else { return }
+        queue.async { [self] in
+            let image = document(data: data, key: key)?.page(at: 1).flatMap { page in
+                let media = page.getBoxRect(.mediaBox)
+                let scale = min(2, 2048 / max(media.width, media.height))
+                return render(page, region: media, scale: scale, tint: filter?.color)
+            }
+            if let image {
+                previews.setObject(image, forKey: key as NSString, cost: image.bytesPerRow * image.height)
+            }
+            _ = lock.withLock { pendingPreviews.remove(key) }
+            if image != nil { announce(key) }
+        }
     }
 
     func prepare(_ data: Data, key: String, page: CGPDFPage) -> CGImage? {
@@ -53,20 +81,29 @@ final class SnapshotPreviewCache: @unchecked Sendable {
         return image
     }
 
-    func draw(data: Data, key: String, preview: CGImage, page: CGPDFPage, visibleRegion: CGRect? = nil, deviceScale: Double? = nil, in context: CGContext) {
+    func draw(data: Data, key: String, preview: CGImage, page: CGPDFPage, visibleRegion: CGRect? = nil, deviceScale: Double? = nil, filter: SnapshotStyle? = nil, in context: CGContext) {
         let media = page.getBoxRect(.mediaBox)
         let ctm = context.ctm
         // PDFKit may oversample a cached annotation layer. The viewport density
         // is authoritative when available; its internal CTM is not the zoom.
         let scale: Double = deviceScale ?? Double(max(hypot(ctm.a, ctm.b), hypot(ctm.c, ctm.d)))
         context.interpolationQuality = .high
+        let tiles = requestTiles(data: data, key: key, preview: preview, media: media,
+                                 visible: context.boundingBoxOfClipPath.intersection(media).intersection(visibleRegion ?? media),
+                                 scale: scale, filter: filter, collectImages: true)
+        context.saveGState()
+        // Clear pixels in a refined tile must reveal the underlying PDF.
+        // Painting them on top of the coarse preview would double the tint.
+        context.beginPath()
+        context.addRect(media)
+        for tile in tiles { context.addRect(tile.region) }
+        context.clip(using: .evenOdd)
         context.draw(preview, in: media)
-        requestTiles(data: data, key: key, preview: preview, media: media,
-                     visible: context.boundingBoxOfClipPath.intersection(media).intersection(visibleRegion ?? media),
-                     scale: scale, context: context)
+        context.restoreGState()
+        for tile in tiles { context.draw(tile.image, in: tile.region) }
     }
 
-    func prepareVisible(data: Data, key: String, preview: CGImage, page: CGPDFPage, region: CGRect, scale: Double) {
+    func prepareVisible(data: Data, key: String, preview: CGImage, page: CGPDFPage, region: CGRect, scale: Double, filter: SnapshotStyle? = nil) {
         let media = page.getBoxRect(.mediaBox)
         let visible = region.intersection(media)
         lock.lock()
@@ -88,15 +125,15 @@ final class SnapshotPreviewCache: @unchecked Sendable {
             let current = viewports[key]?.generation == generation
             lock.unlock()
             guard current else { return }
-            requestTiles(data: data, key: key, preview: preview, media: media,
-                         visible: visible, scale: scale, context: nil)
+            _ = requestTiles(data: data, key: key, preview: preview, media: media,
+                             visible: visible, scale: scale, filter: filter, collectImages: false)
         }
     }
 
-    private func requestTiles(data: Data, key: String, preview: CGImage, media: CGRect, visible: CGRect, scale: Double, context: CGContext?) {
+    private func requestTiles(data: Data, key: String, preview: CGImage, media: CGRect, visible: CGRect, scale: Double, filter: SnapshotStyle?, collectImages: Bool) -> [(region: CGRect, image: CGImage)] {
         let previewScale = Double(preview.width) / media.width
         guard scale.isFinite, scale > previewScale * 1.2, scale <= 512,
-              !visible.isNull, !visible.isEmpty else { return }
+              !visible.isNull, !visible.isEmpty else { return [] }
         let resolution = ceil(scale * 4) / 4
         lock.lock()
         if latestResolution.count > 64 { latestResolution.removeAll(keepingCapacity: true) }
@@ -107,6 +144,7 @@ final class SnapshotPreviewCache: @unchecked Sendable {
         let minX = Int(floor(visible.minX / span)), maxX = Int(floor(visible.maxX / span))
         let minY = Int(floor(visible.minY / span)), maxY = Int(floor(visible.maxY / span))
         var requested = 0
+        var ready = [(region: CGRect, image: CGImage)]()
         for y in minY...maxY { for x in minX...maxX {
             let region = CGRect(x: Double(x) * span, y: Double(y) * span, width: span, height: span).intersection(media)
             // The inclusive grid endpoint may lie exactly on the viewport's
@@ -115,15 +153,16 @@ final class SnapshotPreviewCache: @unchecked Sendable {
             guard !region.isEmpty, !region.intersection(visible).isEmpty else { continue }
             let tileKey = "\(key):\(resolution):\(x):\(y)"
             if let image = images.object(forKey: tileKey as NSString) {
-                context?.draw(image, in: region)
-            } else if mayRequest && requested < 8 {
-                request(data: data, key: tileKey, captureKey: key, region: region, scale: resolution)
+                if collectImages { ready.append((region, image)) }
+            } else if mayRequest && requested < 16 {
+                request(data: data, key: tileKey, captureKey: key, region: region, scale: resolution, filter: filter)
                 requested += 1
             }
         } }
+        return ready
     }
 
-    private func request(data: Data, key: String, captureKey: String, region: CGRect, scale: Double) {
+    private func request(data: Data, key: String, captureKey: String, region: CGRect, scale: Double, filter: SnapshotStyle?) {
         lock.lock()
         guard pending.count < 16, !pending.contains(key) else { lock.unlock(); return }
         pending.insert(key); lock.unlock()
@@ -136,7 +175,7 @@ final class SnapshotPreviewCache: @unchecked Sendable {
             // Queue-owned parsers never share PDFKit's mutable document.
             var rendered = false
             if let document = document(data: data, key: captureKey),
-               let page = document.page(at: 1), let image = render(page, region: region, scale: scale) {
+               let page = document.page(at: 1), let image = render(page, region: region, scale: scale, bleed: 2, tint: filter?.color) {
                 store(image, key: key)
                 rendered = true
             }
@@ -176,7 +215,7 @@ final class SnapshotPreviewCache: @unchecked Sendable {
         notificationScheduled = true
         lock.unlock()
         // Coalesce fast tiles instead of rebuilding PDFKit's page for each tile.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [self] in
             lock.lock()
             let keys = completedCaptures
             completedCaptures.removeAll(keepingCapacity: true)
@@ -190,16 +229,26 @@ final class SnapshotPreviewCache: @unchecked Sendable {
         images.setObject(image, forKey: key as NSString, cost: image.bytesPerRow * image.height)
     }
 
-    private func render(_ page: CGPDFPage, region: CGRect, scale: Double) -> CGImage? {
+    private func render(_ page: CGPDFPage, region: CGRect, scale: Double, bleed: Int = 0, tint: [Double]? = nil) -> CGImage? {
         let width = max(1, Int(ceil(region.width * scale - 0.000001)))
         let height = max(1, Int(ceil(region.height * scale - 0.000001)))
         guard width <= 2048, height <= 2048,
-              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+              let context = CGContext(data: nil, width: width + 2 * bleed, height: height + 2 * bleed, bitsPerComponent: 8, bytesPerRow: 0,
+                                      space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return nil }
+        if tint != nil {
+            context.setFillColor(gray: 1, alpha: 1)
+            context.fill(CGRect(x: 0, y: 0, width: context.width, height: context.height))
+        }
+        // Sample beyond tile edges so strokes and PDF transparency masks
+        // receive their neighboring pixels before the final crop.
+        context.translateBy(x: CGFloat(bleed), y: CGFloat(bleed))
         context.scaleBy(x: Double(width) / region.width, y: Double(height) / region.height)
         context.translateBy(x: -region.minX, y: -region.minY)
         context.drawPDFPage(page)
-        let image = context.makeImage()
+        if let tint { SnapshotFilterRenderer.applyOverlayTint(tint, to: context) }
+        let image = context.makeImage().flatMap {
+            bleed == 0 ? $0 : $0.cropping(to: CGRect(x: bleed, y: bleed, width: width, height: height))
+        }
         if image != nil { onRenderCompleted?(region, scale) }
         return image
     }

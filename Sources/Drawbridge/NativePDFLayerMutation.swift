@@ -41,9 +41,14 @@ enum NativePDFLayerMutation {
         let candidate = directory.appendingPathComponent("edited.pdf")
         // No original path is ever passed as a qpdf output, even on failure.
         try FileManager.default.copyItem(at: source, to: frozen)
-        var json = try PDFLayerPurger.inspect(frozen, helper: helper)
+        let changesPageContent: Bool
+        switch operation {
+        case .visibility: changesPageContent = false
+        case .deleteContent: changesPageContent = true
+        }
+        let json = try PDFLayerPurger.inspect(frozen, includeStreamData: changesPageContent, helper: helper)
         guard (json["encrypt"] as? [String: Any])?["encrypted"] as? Bool != true,
-              var tables = json["qpdf"] as? [[String: Any]], tables.count == 2 else { throw Failure.invalid }
+              let tables = json["qpdf"] as? [[String: Any]], tables.count == 2 else { throw Failure.invalid }
         var graph = tables[1]
         func resolve(_ value: Any?) -> Any? {
             if let ref = value as? String, let object = graph["obj:" + ref] as? [String: Any] { return object["value"] }
@@ -189,8 +194,13 @@ enum NativePDFLayerMutation {
                 stream["data"] = edited.base64EncodedString(); object["stream"] = stream; graph["obj:" + ref] = object
             }
         }
-        tables[1] = graph; json["qpdf"] = tables
-        try JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]).write(to: jsonURL)
+        // Visibility changes only catalog dictionaries. A sparse patch keeps
+        // every original page and appearance stream untouched.
+        let patchGraph = graph.filter { key, value in
+            !NSDictionary(dictionary: ["value": value]).isEqual(to: ["value": tables[1][key] ?? NSNull()])
+        }
+        let patch = ["qpdf": [tables[0], patchGraph]]
+        try PDFJSONPatchEncoder.data(withJSONObject: patch, options: [.withoutEscapingSlashes]).write(to: jsonURL)
         try run(helper, [frozen.path, "--update-from-json=" + jsonURL.path, "--stream-data=preserve", candidate.path])
         try run(helper, ["--check", candidate.path])
         guard let before = CGPDFDocument(frozen as CFURL), let after = CGPDFDocument(candidate as CFURL), before.numberOfPages == after.numberOfPages else { throw Failure.invalid }

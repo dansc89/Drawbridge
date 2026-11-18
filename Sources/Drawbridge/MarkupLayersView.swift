@@ -95,7 +95,7 @@ import PDFKit
             case "visible":
                 let check = NativeLayerButton(checkboxWithTitle: "", target: self, action: #selector(toggleEmbeddedVisibility(_:)))
                 check.generation = presentationGeneration; check.document = presentedDocument; check.embeddedLayer = layer
-                check.allowsMixedState = true
+                check.allowsMixedState = layer.visible == nil
                 check.state = layer.visible.map { $0 ? NSControl.StateValue.on : .off } ?? .mixed
                 check.isEnabled = layer.visible != nil && onEmbeddedVisibility != nil && session.canManageLayers() && session.canEdit()
                 check.toolTip = layer.visible == nil ? "Visibility depends on an unsupported PDF configuration." : explanation

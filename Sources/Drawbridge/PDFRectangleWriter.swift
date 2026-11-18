@@ -632,8 +632,10 @@ enum PDFRectangleWriter {
                   let data = Data(base64Encoded:String(encoded.dropFirst(2))), SnapshotPayload(data:data).page != nil else { continue }
             let styleJSON = (value["/DrawbridgeSnapshotStyle"] as? String).flatMap { $0.hasPrefix("u:") ? String($0.dropFirst(2)).data(using:.utf8) : nil }
             let style = styleJSON.flatMap { try? JSONDecoder().decode(SnapshotStyle.self,from:$0) } ?? SnapshotStyle()
-            guard style.isValid else { continue }
-            snapshotForms[try SnapshotFilterRenderer.filtered(data,style:style)] = fragment
+            guard style.isValid,
+                  !style.isColorizedOverlay || value["/DrawbridgeSnapshotAppearanceVersion"] as? Int == SnapshotFilterRenderer.savedOverlayAppearanceVersion else { continue }
+            let rotation = value["/DrawbridgeSnapshotBakedRotation"] as? Int ?? 0
+            snapshotForms[try SnapshotFilterRenderer.savedAppearance(data, style: style, rotation: rotation)] = fragment
         }
         // Highlight transparency/blending is a PDF 1.4 feature. Incremental saves
         // retain the original header, so upgrade through the catalog rather than
@@ -707,6 +709,10 @@ enum PDFRectangleWriter {
                     }
                     annotation["/DrawbridgeSnapshotPDF"] = payloadRef
                     annotation["/DrawbridgeSnapshotStyle"] = "u:" + record.snapshotStyle.json
+                    if record.snapshotStyle.isColorizedOverlay {
+                        annotation["/DrawbridgeSnapshotAppearanceVersion"] = SnapshotFilterRenderer.savedOverlayAppearanceVersion
+                        annotation["/DrawbridgeSnapshotBakedRotation"] = record.textRotation
+                    }
                 }
                 if let measurement = record.measurement {
                     annotation["/DrawbridgeMeasurement"] = "u:" + MeasurementMetadata.json(measurement)

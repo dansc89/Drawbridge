@@ -14,6 +14,7 @@ final class NativePDFWorkingSource: NSObject, @unchecked Sendable {
     var original: NativePDFOriginalSource?
     // A sidecar cannot commit this generation's native drawing streams.
     var requiresPDFSave = true
+    var capturedMarkupVersion: Int?
     init(output: NativePDFLayerMutation.Output) throws {
         guard let stamp = PDFMarkupSourceStamp.capture(output.url) else { throw NativePDFLayerMutation.Failure.invalid }
         self.output = output; self.stamp = stamp
@@ -72,21 +73,31 @@ extension MainViewController {
         defer { try? FileManager.default.removeItem(at: snapshot) }
         let source = currentPDFWorkingSource(fallback: originalURL)
         let stamp = currentPDFWorkingStamp
-        let records = RectangleMarkupRecord.capture(document)
-        let navigation = PDFTKBookmarkWriter.captureNavigation(in: document)
-        let labels = embeddedPageLabelsForSave(in: document)
         let imported = markup.importedPlan()
         let structure = pageStructureState?.plan(for: document, forceOriginal: imported != nil)
-        let saved: Bool
-        if let structure, let source {
-            saved = structure.write(document: document, currentSource: source, destination: snapshot, expectedStamp: stamp, labels: labels, records: records, navigation: navigation, importedPlan: imported, onCommitted: { _ in })
+        let layerInput: URL
+        let alreadyCaptured = generation == 0 || nativeWorkingSource?.capturedMarkupVersion == generation
+        if case .visibility = operation, alreadyCaptured, !markup.hasUnsavedChanges,
+           imported == nil, structure == nil, let source, stamp?.matchesSource(source) == true {
+            // The native visibility edit only needs the existing file when
+            // the session has no changes to capture. Keep the file work off main.
+            layerInput = source
         } else {
-            saved = Self.writePDFDocument(document, to: snapshot, pageLabels: labels, navigationSourceURL: source, rectangleRecords: records, rectangleSourceStamp: stamp, navigationSnapshot: navigation, importedPlan: imported)
+            let records = RectangleMarkupRecord.capture(document)
+            let navigation = PDFTKBookmarkWriter.captureNavigation(in: document)
+            let labels = embeddedPageLabelsForSave(in: document)
+            let saved: Bool
+            if let structure, let source {
+                saved = structure.write(document: document, currentSource: source, destination: snapshot, expectedStamp: stamp, labels: labels, records: records, navigation: navigation, importedPlan: imported, onCommitted: { _ in })
+            } else {
+                saved = Self.writePDFDocument(document, to: snapshot, pageLabels: labels, navigationSourceURL: source, rectangleRecords: records, rectangleSourceStamp: stamp, navigationSnapshot: navigation, importedPlan: imported)
+            }
+            guard saved, let frozen = PDFDocument(url: snapshot),
+                  EmbeddedPDFLayers.read(frozen).map(\.name) == EmbeddedPDFLayers.read(document).map(\.name) else { throw NativePDFLayerMutation.Failure.unsupported("the current edits could not be captured losslessly") }
+            layerInput = snapshot
         }
-        guard saved, let frozen = PDFDocument(url: snapshot),
-              EmbeddedPDFLayers.read(frozen).map(\.name) == EmbeddedPDFLayers.read(document).map(\.name) else { throw NativePDFLayerMutation.Failure.unsupported("the current edits could not be captured losslessly") }
         let output = try await Task.detached(priority: .userInitiated) {
-            try NativePDFLayerMutation.transform(source: snapshot, registryIndex: registryIndex, operation: operation)
+            try NativePDFLayerMutation.transform(source: layerInput, registryIndex: registryIndex, operation: operation)
         }.value
         guard pdfView === pane, pane.document === document, pane.rectangleMarkup === markup,
               markupChangeVersion == generation, !isPDFProcessingBusy,
@@ -107,6 +118,9 @@ extension MainViewController {
             guard let self else { return }
             self.nativeWorkingSource?.requiresPDFSave = true
             self.markMarkupChangedAndScheduleAutosave()
+            if let working = self.nativeWorkingSource, working.output === output {
+                working.capturedMarkupVersion = self.markupChangeVersion
+            }
             self.retainActiveSplitSession()
             self.configureNativePDFLayerControls()
         })

@@ -51,6 +51,32 @@ enum EmbeddedPDFLayers {
         return visible
     }
 
+    static func snapshotMembership(on page: PDFPage) -> [String: Bool?] {
+        guard let root = page.document?.documentRef?.catalog, let rawPage = page.pageRef?.dictionary else { return [:] }
+        var properties: CGPDFDictionaryRef?
+        var annotations: CGPDFArrayRef?
+        guard CGPDFDictionaryGetDictionary(root, "OCProperties", &properties), let properties,
+              CGPDFDictionaryGetArray(rawPage, "Annots", &annotations), let annotations else { return [:] }
+        var memberships: [String: Bool?] = [:]
+        for index in 0..<CGPDFArrayGetCount(annotations) {
+            var annotation: CGPDFDictionaryRef?
+            var group: CGPDFDictionaryRef?
+            var subtype: UnsafePointer<CChar>?
+            var type: UnsafePointer<CChar>?
+            var identity: CGPDFStringRef?
+            var owned: CGPDFObjectRef?
+            guard CGPDFArrayGetDictionary(annotations, index, &annotation), let annotation,
+                  CGPDFDictionaryGetName(annotation, "Subtype", &subtype), let subtype, String(cString: subtype) == "Stamp",
+                  CGPDFDictionaryGetDictionary(annotation, "OC", &group), let group,
+                  !CGPDFDictionaryGetObject(group, "DrawbridgeLayerID", &owned),
+                  CGPDFDictionaryGetString(annotation, "NM", &identity), let identity,
+                  let name = CGPDFStringCopyTextString(identity) else { continue }
+            let isGroup = CGPDFDictionaryGetName(group, "Type", &type) && type.map { String(cString: $0) == "OCG" } == true
+            memberships.updateValue(isGroup ? visibility(group, properties: properties) : nil, forKey: name as String)
+        }
+        return memberships
+    }
+
     static func read(_ document: PDFDocument?) -> [Layer] {
         guard let root = document?.documentRef?.catalog else { return [] }
         var properties: CGPDFDictionaryRef?

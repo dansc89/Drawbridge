@@ -32,6 +32,7 @@ struct SnapshotStyle: Codable, Equatable, Sendable {
               let data = json.data(using: .utf8), let style = try? JSONDecoder().decode(Self.self, from: data), style.isValid else { return Self() }
         return style
     }
+    var isColorizedOverlay: Bool { overlay && filter == .colorize }
     var nsColor: NSColor { NSColor(deviceRed: color[0], green: color[1], blue: color[2], alpha: 1) }
 }
 
@@ -40,14 +41,24 @@ struct SnapshotStyle: Codable, Equatable, Sendable {
 /// capture always remains embedded so returning to Original never loses detail.
 enum SnapshotFilterRenderer {
     // NSCache synchronizes concurrent reads and writes internally.
-    nonisolated(unsafe) private static let cache = NSCache<NSString, NSData>()
+    nonisolated(unsafe) private static let cache: NSCache<NSString, NSData> = {
+        let cache = NSCache<NSString, NSData>()
+        cache.totalCostLimit = 64 * 1024 * 1024
+        return cache
+    }()
     static func filtered(_ data: Data, style: SnapshotStyle) throws -> Data {
         guard style.isValid else { throw CocoaError(.fileReadCorruptFile) }
         if style.filter == .original && !style.overlay { return data }
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         let key = (digest + style.filter.rawValue + style.color.description + String(style.overlay)) as NSString
-        cache.totalCostLimit = 64 * 1024 * 1024
         if let cached = cache.object(forKey: key) { return cached as Data }
+        if style.isColorizedOverlay {
+            // Tint directly through the source ink mask. This avoids masking a
+            // second PDF form that already contains two transparency masks.
+            let result = try vectorColorize(data, style: style, tintOnly: true)
+            cache.setObject(result as NSData, forKey: key, cost: result.count)
+            return result
+        }
         if style.overlay {
             // Paper must be removed before PDFKit isolates its stamp surface.
             // Backdrop-dependent Multiply cannot expose the page beneath it.
@@ -106,10 +117,74 @@ enum SnapshotFilterRenderer {
         return filtered
     }
 
+    static let savedOverlayAppearanceVersion = 4
+
+    static func savedAppearance(_ data: Data, style: SnapshotStyle, rotation: Int) throws -> Data {
+        guard style.isColorizedOverlay else { return try filtered(data, style: style) }
+        guard style.isValid else { throw CocoaError(.fileReadCorruptFile) }
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let key = (digest + ":saved-overlay:" + style.color.description + ":" + String(rotation)) as NSString
+        if let cached = cache.object(forKey: key) { return cached as Data }
+        let vectorData = try filtered(data, style: style)
+        guard let provider = CGDataProvider(data: vectorData as CFData), let vectorDocument = CGPDFDocument(provider),
+              let page = vectorDocument.page(at: 1) else { throw CocoaError(.fileReadCorruptFile) }
+        let media = page.getBoxRect(.mediaBox)
+        // Small captures can retain 16× detail within the same budget
+        // that keeps large architectural overlays bounded.
+        let scale = min(16, 8192 / max(media.width, media.height),
+                        sqrt(24_000_000 / (media.width * media.height)))
+        let size = rotation % 180 == 0 ? media.size : CGSize(width: media.height, height: media.width)
+        let width = max(1, Int(floor(size.width * scale)))
+        let height = max(1, Int(floor(size.height * scale)))
+        guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
+        else { throw CocoaError(.fileWriteUnknown) }
+        var outputMedia = CGRect(origin: .zero, size: size)
+        context.scaleBy(x: Double(width) / size.width, y: Double(height) / size.height)
+        context.concatenate(SnapshotPayload.transform(size: media.size, bounds: outputMedia, rotation: rotation))
+        context.translateBy(x: -media.minX, y: -media.minY)
+        withExtendedLifetime(vectorDocument) { context.drawPDFPage(page) }
+
+        let bytes = NSMutableData()
+        guard let image = context.makeImage(), let consumer = CGDataConsumer(data: bytes),
+              let output = CGContext(consumer: consumer, mediaBox: &outputMedia, nil) else { throw CocoaError(.fileWriteUnknown) }
+        // Save a standard image plus alpha channel for third-party readers.
+        // The editable vector capture is persisted separately on the annotation.
+        output.beginPDFPage(nil)
+        output.draw(image, in: outputMedia)
+        output.endPDFPage()
+        output.closePDF()
+        let result = bytes as Data
+        cache.setObject(result as NSData, forKey: key, cost: result.count)
+        return result
+    }
+
+    static func applyOverlayTint(_ tint: [Double], to context: CGContext) {
+        guard let buffer = context.data else { return }
+        // Sample the source directly. Inverse PDF luminosity supplies tint
+        // coverage, including antialiased edges, without constructing PDF masks.
+        let pixels = buffer.assumingMemoryBound(to: UInt8.self)
+        let red = Int((255 * tint[0]).rounded())
+        let green = Int((255 * tint[1]).rounded())
+        let blue = Int((255 * tint[2]).rounded())
+        for y in 0..<context.height {
+            let row = pixels.advanced(by: y * context.bytesPerRow)
+            for x in stride(from: 0, to: context.width * 4, by: 4) {
+                let luminosity = (30 * Int(row[x]) + 59 * Int(row[x + 1]) + 11 * Int(row[x + 2]) + 50) / 100
+                let alpha = 255 - luminosity
+                row[x] = UInt8((red * alpha + 127) / 255)
+                row[x + 1] = UInt8((green * alpha + 127) / 255)
+                row[x + 2] = UInt8((blue * alpha + 127) / 255)
+                row[x + 3] = UInt8(alpha)
+            }
+        }
+    }
+
     /// Paint white through the source alpha, then tint through its inverse
     /// luminosity. PDF transparency evaluates the original paths/fonts/images at
     /// the reader's output resolution, not at a preselected bitmap density.
-    private static func vectorColorize(_ data: Data, style: SnapshotStyle, removeWhite: Bool = false) throws -> Data {
+    private static func vectorColorize(_ data: Data, style: SnapshotStyle, removeWhite: Bool = false, tintOnly: Bool = false) throws -> Data {
         guard let executable = PDFTKBookmarkWriter.executableURL(),
               let source = SnapshotPayload(data: data).page else { throw CocoaError(.fileReadCorruptFile) }
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DrawbridgeSnapshotColor-" + UUID().uuidString)
@@ -157,13 +232,22 @@ enum SnapshotFilterRenderer {
         var resources: [String: Any] = ["/ExtGState": [
             "/SourceAlpha": ["/Type": "/ExtGState", "/SMask": ["/S": "/Alpha", "/G": form]],
             "/SourceInk": ["/Type": "/ExtGState", "/SMask": ["/S": "/Luminosity", "/G": form, "/BC": [1, 1, 1], "/TR": transfer]]]]
+        if tintOnly, var states = resources["/ExtGState"] as? [String: Any] {
+            states.removeValue(forKey: "/SourceAlpha")
+            resources["/ExtGState"] = states
+        }
         if removeWhite { resources["/XObject"] = ["/SourceOriginal": form] }
         // Decimal formatting avoids PDF's unsupported exponent notation.
         func number(_ value: Double) -> String { String(format: "%.9f", locale: Locale(identifier: "en_US_POSIX"), value) }
         let rect = "\(number(media.minX)) \(number(media.minY)) \(number(media.width)) \(number(media.height)) re f"
         let tint = style.color.map(number).joined(separator: " ")
-        let drawing = removeWhite ? "q /SourceInk gs /SourceOriginal Do Q\n"
-            : "q /SourceAlpha gs 1 1 1 rg \(rect) Q\nq /SourceInk gs \(tint) rg \(rect) Q\n"
+        let drawing: String
+        if removeWhite {
+            drawing = "q /SourceInk gs /SourceOriginal Do Q\n"
+        } else {
+            let paper = tintOnly ? "" : "q /SourceAlpha gs 1 1 1 rg \(rect) Q\n"
+            drawing = paper + "q /SourceInk gs \(tint) rg \(rect) Q\n"
+        }
         page["/Contents"] = addStream([:], Data(drawing.utf8))
         page["/Resources"] = resources
         page["/Group"] = group

@@ -115,6 +115,108 @@ import XCTest
         try compare(payload: fixture(raster: true), density: 16, label: "raster-source")
     }
 
+    func testColorizedOverlayUsesCachedCanvasAndKeepsVectorOutput() async throws {
+        let payload = try fixture()
+        let bounds = CGRect(x: 0, y: 0, width: 2048, height: 1536)
+        let style = SnapshotStyle(overlay: true, opacity: 0.53, filter: .colorize)
+        let stamp = try XCTUnwrap(SnapshotStampFactory.make(payload: payload,
+            bounds: bounds, rotation: 0, style: style) as? DrawbridgeSnapshotAnnotation)
+        let key = try XCTUnwrap(stamp.previewKey)
+        let region = CGRect(x: 496, y: 392, width: 64, height: 64)
+        let ready = expectation(forNotification: SnapshotPreviewCache.ready, object: nil) {
+            ($0.userInfo?["captureKeys"] as? Set<String>)?.contains(key) == true &&
+                SnapshotPreviewCache.shared.readyPreview(for: key) != nil
+        }
+        stamp.updatePreviewViewport(region, deviceScale: 8)
+        await fulfillment(of: [ready], timeout: 10)
+        XCTAssertNotNil(SnapshotPreviewCache.shared.readyPreview(for: key))
+
+        let detailReady = expectation(forNotification: SnapshotPreviewCache.ready, object: nil) {
+            ($0.userInfo?["captureKeys"] as? Set<String>)?.contains(key) == true
+        }
+        let canvas = try render(region: region, density: 8, name: "colorized-canvas") { context in
+            SnapshotPageRendering.viewportTile { stamp.draw(with: .mediaBox, in: context) }
+        }
+        XCTAssertTrue(stride(from: 3, to: canvas.count, by: 4).contains { canvas[$0] > 24 })
+        XCTAssertLessThanOrEqual(stride(from: 3, to: canvas.count, by: 4).map { canvas[$0] }.max() ?? 255, 136,
+                                 "Preview opacity must be applied once")
+        let vector = try render(region: region, density: 8, name: "colorized-vector") { context in
+            SnapshotPageRendering.vector { stamp.draw(with: .mediaBox, in: context) }
+        }
+        XCTAssertTrue(stride(from: 3, to: vector.count, by: 4).contains { vector[$0] > 24 })
+        XCTAssertNotEqual(canvas, vector, "The initial canvas sample and vector output exercise different paths")
+        await fulfillment(of: [detailReady], timeout: 10)
+        let refined = try render(region: region, density: 8, name: "colorized-refined") { context in
+            SnapshotPageRendering.viewportTile { stamp.draw(with: .mediaBox, in: context) }
+        }
+        assertMatches(refined, vector, label: "settled-colorized-8x")
+    }
+
+    func testArchitecturalColorizedOverlayCanvasRedraw() async throws {
+        guard let path = ProcessInfo.processInfo.environment["DRAWBRIDGE_COLORIZED_OVERLAY_PDF"] else {
+            throw XCTSkip("Set DRAWBRIDGE_COLORIZED_OVERLAY_PDF to the local overlay fixture")
+        }
+        let document = try XCTUnwrap(PDFDocument(url: URL(fileURLWithPath: path)))
+        let page = try XCTUnwrap(document.page(at: 2))
+        let original = try XCTUnwrap(page.annotations.first(where: SnapshotPayload.isSnapshot))
+        let payload = try XCTUnwrap(SnapshotPayload.read(original))
+        let bounds = original.bounds
+        let constructionStart = CFAbsoluteTimeGetCurrent()
+        let stamp = try XCTUnwrap(SnapshotStampFactory.make(payload: payload, bounds: bounds,
+            rotation: 0, style: SnapshotStyle.read(original)) as? DrawbridgeSnapshotAnnotation)
+        let constructionMS = (CFAbsoluteTimeGetCurrent() - constructionStart) * 1000
+        print("ARCHITECTURAL_OVERLAY construction_ms=\(constructionMS)")
+        XCTAssertLessThan(constructionMS, 200, "Filtered PDF and preview preparation belong off the UI thread")
+        XCTAssertTrue(stamp.usesCachedOverlay)
+        let region = CGRect(x: bounds.midX, y: bounds.midY, width: 128, height: 128)
+        let key = try XCTUnwrap(stamp.previewKey)
+        let ready = expectation(forNotification: SnapshotPreviewCache.ready, object: nil) {
+            ($0.userInfo?["captureKeys"] as? Set<String>)?.contains(key) == true &&
+                SnapshotPreviewCache.shared.readyPreview(for: key) != nil
+        }
+        let preparationStart = CFAbsoluteTimeGetCurrent()
+        stamp.updatePreviewViewport(region, deviceScale: 6.52)
+        await fulfillment(of: [ready], timeout: 10)
+        print("ARCHITECTURAL_OVERLAY preview_ready_ms=\((CFAbsoluteTimeGetCurrent() - preparationStart) * 1000)")
+        XCTAssertNotNil(SnapshotPreviewCache.shared.readyPreview(for: key))
+
+        let context = try XCTUnwrap(CGContext(data: nil, width: 835, height: 835, bitsPerComponent: 8,
+            bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.scaleBy(x: 6.52, y: 6.52)
+        context.translateBy(x: -region.minX, y: -region.minY)
+        let previous = NSGraphicsContext.current
+        NSGraphicsContext.current = nil
+        defer { NSGraphicsContext.current = previous }
+        let samples = (0..<9).map { _ in
+            context.clear(region)
+            let start = CFAbsoluteTimeGetCurrent()
+            SnapshotPageRendering.viewportTile { stamp.draw(with: .cropBox, in: context) }
+            return (CFAbsoluteTimeGetCurrent() - start) * 1000
+        }
+        let bytes = try XCTUnwrap(context.data).assumingMemoryBound(to: UInt8.self)
+        XCTAssertTrue((0..<context.height).contains { y in
+            (0..<context.width).contains { x in bytes[y * context.bytesPerRow + x * 4 + 3] > 24 }
+        })
+        print("ARCHITECTURAL_OVERLAY median_ms=\(samples.sorted()[4]) max_ms=\(samples.max() ?? 0)")
+        XCTAssertLessThan(samples.sorted()[4], 40)
+
+        if let output = ProcessInfo.processInfo.environment["DRAWBRIDGE_COLORIZED_OVERLAY_QA_OUTPUT"] {
+            let source = URL(fileURLWithPath: path)
+            let destination = URL(fileURLWithPath: output)
+            XCTAssertNotEqual(source.standardizedFileURL, destination.standardizedFileURL)
+            guard source.standardizedFileURL != destination.standardizedFileURL else { return }
+            let records = RectangleMarkupRecord.capture(document)
+            XCTAssertTrue(records.contains { $0.snapshotData == payload.data })
+            XCTAssertTrue(PDFRectangleWriter.write(document: document, source: source, destination: destination,
+                                                   pageLabels: [:], records: records))
+            let saved = try XCTUnwrap(PDFDocument(url: destination))
+            let savedPage = try XCTUnwrap(saved.page(at: 2))
+            let savedStamp = try XCTUnwrap(savedPage.annotations.first(where: SnapshotPayload.isSnapshot))
+            XCTAssertEqual(SnapshotPayload.read(savedStamp)?.data, payload.data)
+            XCTAssertEqual(SnapshotStyle.read(savedStamp), SnapshotStyle.read(original))
+        }
+    }
+
     func testViewportUpdatesDoNotPublishDelayedRasterRefinements() throws {
         let payload = try fixture()
         let stamp = try XCTUnwrap(SnapshotStampFactory.make(payload: payload,

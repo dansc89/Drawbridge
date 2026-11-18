@@ -599,7 +599,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var snapshotDetailRefreshWorkItem: DispatchWorkItem?
     private var snapshotDetailRefreshGeneration: UInt = 0
     private var lastSnapshotViewportActivity: CFAbsoluteTime = 0
-    private let snapshotViewportQuietInterval: CFAbsoluteTime = 0.25
+    private let snapshotViewportQuietInterval: CFAbsoluteTime = 0.12
 
     @objc private func snapshotPreviewReady(_ notification: Notification) {
         guard !isRetiredSplitPane else { return }
@@ -743,8 +743,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
                 let region = viewport.intersection(ownerRegion)
                 let inViewport = visible && snapshot.shouldDisplay && !snapshot.isRetired
                     && !region.isNull && !region.isEmpty
-                if inViewport, window != nil, let source = snapshot.replaySource, replayKeys.insert(source.key).inserted {
-                    replaySources.append(source)
+                if inViewport, window != nil {
+                    snapshot.updatePreviewViewport(viewport, deviceScale: density)
+                    if !snapshot.usesCachedOverlay, let source = snapshot.replaySource, replayKeys.insert(source.key).inserted {
+                        replaySources.append(source)
+                    }
                 }
                 let needsTiles = snapshotViewportTilesEnabled && visible && snapshot.shouldDisplay && !snapshot.isRetired
                     && max(snapshot.bounds.width, snapshot.bounds.height) * density > 4096
