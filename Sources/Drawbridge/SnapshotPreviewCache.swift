@@ -10,6 +10,11 @@ final class SnapshotPreviewCache: @unchecked Sendable {
     private let images = NSCache<NSString, CGImage>()
     private let previews = NSCache<NSString, CGImage>()
     private let lock = NSLock()
+    private struct Tile {
+        let key: String
+        let region: CGRect
+    }
+
     private var pending = Set<String>()
     private var pendingPreviews = Set<String>()
     private var latestResolution = [String: Double]()
@@ -25,6 +30,9 @@ final class SnapshotPreviewCache: @unchecked Sendable {
     // Detail work must yield to user gestures. These parsers belong exclusively
     // to this serial queue, so tiles can reuse decoded fonts and image resources.
     private let queue = DispatchQueue(label: "com.drawbridge.snapshot-preview", qos: .utility)
+    // First display has a separate worker so a detail render for another
+    // capture cannot stall a newly pasted stamp. Each worker owns its parser.
+    private let previewQueue = DispatchQueue(label: "com.drawbridge.snapshot-first-preview", qos: .userInitiated)
     private var documents = [(key: String, document: CGPDFDocument)]()
     private var completedCaptures = Set<String>()
     private var notificationScheduled = false
@@ -56,17 +64,29 @@ final class SnapshotPreviewCache: @unchecked Sendable {
         // A viewport can fill the detail queue with sixteen tiles. A newly
         // visible stamp still needs to be admitted for its first preview.
         guard lock.withLock({ pendingPreviews.count < 16 && pendingPreviews.insert(key).inserted }) else { return }
-        queue.async { [self] in
-            let image = document(data: data, key: key)?.page(at: 1).flatMap { page in
+        previewQueue.async { [self] in
+            let image: CGImage?
+            if let provider = CGDataProvider(data: data as CFData),
+               let document = CGPDFDocument(provider), let page = document.page(at: 1) {
                 let media = page.getBoxRect(.mediaBox)
-                let scale = min(2, 2048 / max(media.width, media.height))
-                return render(page, region: media, scale: scale, tint: filter?.color)
+                // Show a bounded whole-capture preview first. Visible detail
+                // tiles refine at screen density once the viewport settles.
+                let scale = min(2, 1024 / max(media.width, media.height))
+                image = withExtendedLifetime(document) {
+                    render(page, region: media, scale: scale, tint: filter?.color)
+                }
+            } else {
+                image = nil
             }
             if let image {
                 previews.setObject(image, forKey: key as NSString, cost: image.bytesPerRow * image.height)
             }
             _ = lock.withLock { pendingPreviews.remove(key) }
-            if image != nil { announce(key) }
+            if image != nil {
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: Self.ready, object: nil, userInfo: ["captureKeys": Set([key])])
+                }
+            }
         }
     }
 
@@ -88,9 +108,19 @@ final class SnapshotPreviewCache: @unchecked Sendable {
         // is authoritative when available; its internal CTM is not the zoom.
         let scale: Double = deviceScale ?? Double(max(hypot(ctm.a, ctm.b), hypot(ctm.c, ctm.d)))
         context.interpolationQuality = .high
+        let clip = context.boundingBoxOfClipPath.intersection(media)
         let tiles = requestTiles(data: data, key: key, preview: preview, media: media,
-                                 visible: context.boundingBoxOfClipPath.intersection(media).intersection(visibleRegion ?? media),
+                                 visible: clip.intersection(visibleRegion ?? media),
                                  scale: scale, filter: filter, collectImages: true)
+        if tiles.isEmpty {
+            context.draw(preview, in: media)
+            return
+        }
+        if let coveringTile = tiles.first(where: { $0.region.contains(clip) }),
+           media.contains(context.boundingBoxOfClipPath) {
+            context.draw(coveringTile.image, in: coveringTile.region)
+            return
+        }
         context.saveGState()
         // Clear pixels in a refined tile must reveal the underlying PDF.
         // Painting them on top of the coarse preview would double the tint.
@@ -143,7 +173,7 @@ final class SnapshotPreviewCache: @unchecked Sendable {
         let span = 1024 / resolution
         let minX = Int(floor(visible.minX / span)), maxX = Int(floor(visible.maxX / span))
         let minY = Int(floor(visible.minY / span)), maxY = Int(floor(visible.maxY / span))
-        var requested = 0
+        var batches = [[Tile]]()
         var ready = [(region: CGRect, image: CGImage)]()
         for y in minY...maxY { for x in minX...maxX {
             let region = CGRect(x: Double(x) * span, y: Double(y) * span, width: span, height: span).intersection(media)
@@ -154,37 +184,82 @@ final class SnapshotPreviewCache: @unchecked Sendable {
             let tileKey = "\(key):\(resolution):\(x):\(y)"
             if let image = images.object(forKey: tileKey as NSString) {
                 if collectImages { ready.append((region, image)) }
-            } else if mayRequest && requested < 16 {
-                request(data: data, key: tileKey, captureKey: key, region: region, scale: resolution, filter: filter)
-                requested += 1
+            } else if mayRequest {
+                let tile = Tile(key: tileKey, region: region)
+                // Adjacent full cells share one PDF traversal at identical
+                // pixel density. Keep clipped sheet-edge cells independent.
+                if let pair = batches.indices.last, batches[pair].count == 1,
+                   let previous = batches[pair].first,
+                   previous.region.minY == region.minY,
+                   abs(previous.region.maxX - region.minX) * resolution < 0.000001,
+                   abs(previous.region.width * resolution - 1024) < 0.000001,
+                   abs(region.width * resolution - 1024) < 0.000001,
+                   abs(region.height * resolution - 1024) < 0.000001 {
+                    batches[pair].append(tile)
+                } else if batches.count < 16 {
+                    batches.append([tile])
+                }
             }
         } }
+        for batch in batches {
+            request(data: data, tiles: batch, captureKey: key, scale: resolution, filter: filter)
+        }
         return ready
     }
 
-    private func request(data: Data, key: String, captureKey: String, region: CGRect, scale: Double, filter: SnapshotStyle?) {
-        lock.lock()
-        guard pending.count < 16, !pending.contains(key) else { lock.unlock(); return }
-        pending.insert(key); lock.unlock()
+    private func request(data: Data, tiles: [Tile], captureKey: String, scale: Double, filter: SnapshotStyle?) {
+        let admitted = lock.withLock {
+            tiles.filter { pending.count < 16 && pending.insert($0.key).inserted }
+        }
+        guard !admitted.isEmpty else { return }
         queue.async { [self] in
-            lock.lock()
-            let relevant = isRelevant(captureKey: captureKey, region: region, scale: scale)
-            if !relevant { pending.remove(key) }
-            lock.unlock()
-            guard relevant else { return }
-            // Queue-owned parsers never share PDFKit's mutable document.
+            let current = lock.withLock {
+                admitted.filter { tile in
+                    if isRelevant(captureKey: captureKey, region: tile.region, scale: scale) { return true }
+                    pending.remove(tile.key)
+                    return false
+                }
+            }
+            guard let first = current.first else { return }
+            let region = current.dropFirst().reduce(first.region) { $0.union($1.region) }
             var rendered = false
             if let document = document(data: data, key: captureKey),
-               let page = document.page(at: 1), let image = render(page, region: region, scale: scale, bleed: 2, tint: filter?.color) {
-                store(image, key: key)
-                rendered = true
+               let page = document.page(at: 1),
+               let image = render(page, region: region, scale: scale, bleed: 2, tint: filter?.color) {
+                if current.count == 1 {
+                    store(image, key: first.key)
+                    rendered = true
+                } else {
+                    for tile in current {
+                        let x = ((tile.region.minX - region.minX) * scale).rounded()
+                        if let cell = independentCell(in: image, x: x) {
+                            store(cell, key: tile.key)
+                            rendered = true
+                        }
+                    }
+                }
             }
-            lock.lock()
-            pending.remove(key)
-            let stillRelevant = isRelevant(captureKey: captureKey, region: region, scale: scale)
-            lock.unlock()
+            let stillRelevant = lock.withLock {
+                current.forEach { pending.remove($0.key) }
+                return isRelevant(captureKey: captureKey, region: region, scale: scale)
+            }
             if rendered && stillRelevant { announce(captureKey) }
         }
+    }
+
+    private func independentCell(in image: CGImage, x: CGFloat) -> CGImage? {
+        let bounds = CGRect(x: 0, y: 0, width: 1024, height: 1024)
+        guard let crop = image.cropping(to: bounds.offsetBy(dx: x, dy: 0)),
+              let context = CGContext(data: nil, width: 1024, height: 1024, bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
+        else { return nil }
+        // Quartz crops share the atlas's backing allocation. Give each cached
+        // cell its own allocation so eviction can release the unused half.
+        context.setBlendMode(.copy)
+        context.interpolationQuality = .none
+        context.draw(crop, in: bounds)
+        return context.makeImage()
     }
 
     // Caller holds lock. Discard old-resolution and offscreen work before drawing
@@ -215,7 +290,7 @@ final class SnapshotPreviewCache: @unchecked Sendable {
         notificationScheduled = true
         lock.unlock()
         // Coalesce fast tiles instead of rebuilding PDFKit's page for each tile.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { [self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) { [self] in
             lock.lock()
             let keys = completedCaptures
             completedCaptures.removeAll(keepingCapacity: true)

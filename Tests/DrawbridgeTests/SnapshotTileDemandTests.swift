@@ -58,7 +58,7 @@ private final class SnapshotRenderEvidence: @unchecked Sendable {
         let published = CFAbsoluteTimeGetCurrent() - start
         let detail = evidence.detail
         print("SNAPSHOT_DEMAND trial=\(trial) renders=\(detail.count) return_s=\(returned) completion_s=\((detail.last?.2 ?? start) - start) publication_s=\(published)")
-        XCTAssertEqual(detail.count, expected, "Only positive-area visible detail tiles should be rendered")
+        XCTAssertEqual(detail.count, expected, "Batch adjacent visible tiles into the expected number of PDF draws")
         for (region, scale, _) in detail {
             let overlap = region.intersection(visible)
             XCTAssertGreaterThan(overlap.width * overlap.height, 0, "Do not traverse the vector PDF for an invisible edge tile")
@@ -78,6 +78,6 @@ private final class SnapshotRenderEvidence: @unchecked Sendable {
     }
 
     func testNonalignedDrawRetainsAllFourIntersectingTiles() throws {
-        try run(data: fixture(), visible: CGRect(x: 500, y: 500, width: 512, height: 512), expected: 4, trial: 0)
+        try run(data: fixture(), visible: CGRect(x: 500, y: 500, width: 512, height: 512), expected: 2, trial: 0)
     }
 }

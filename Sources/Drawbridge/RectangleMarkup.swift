@@ -1131,7 +1131,8 @@ final class RectangleMarkupController {
     }
     @discardableResult
     func pasteSnapshot(_ payload: SnapshotPayload, on page: PDFPage, center: CGPoint, inPlace: Bool = false) -> PDFAnnotation? {
-        guard !isCapturingSnapshot, canEdit(), !activeLayerIsLocked, page.document === boundDocument, let size = payload.size else { return nil }
+        guard !isCapturingSnapshot, canEdit(), !activeLayerIsLocked, page.document === boundDocument, let sourceDocument = payload.validatedDocument,
+              let size = sourceDocument.page(at: 1)?.getBoxRect(.mediaBox).size else { return nil }
         guard MeasurementMetadata.supportedPage(page) else { onSnapshotError?(SnapshotError.unsupportedPageUnits); return nil }
         let rotated = page.rotation % 180 != 0
         let paperSize = rotated ? CGSize(width:size.height,height:size.width) : size
@@ -1145,8 +1146,9 @@ final class RectangleMarkupController {
             rect = CGRect(x: c.x-paperSize.width/2, y: c.y-paperSize.height/2, width: paperSize.width, height: paperSize.height)
         }
         let annotation: PDFAnnotation
-        do { annotation = try SnapshotStampFactory.make(payload: payload, bounds: rect, rotation: page.rotation, style: payload.style) }
+        do { annotation = try SnapshotStampFactory.make(payload: payload, bounds: rect, rotation: page.rotation, style: payload.style, sourceDocument: sourceDocument) }
         catch { onSnapshotError?(error); return nil }
+        if !inPlace { (annotation as? DrawbridgeSnapshotAnnotation)?.prepareFirstPreview() }
         annotation.setValue(payload.style.json, forAnnotationKey: SnapshotStyle.key)
         annotation.setValue(payload.data.base64EncodedString(), forAnnotationKey: SnapshotPayload.key)
         annotation.setValue(RectangleMarkupRecord.prefix + UUID().uuidString, forAnnotationKey: RectangleMarkupRecord.identityKey)
@@ -1171,6 +1173,7 @@ final class RectangleMarkupController {
             replacement.userName = old.userName; replacement.contents = old.contents
             (replacement as? DrawbridgeSnapshotAnnotation)?.hasNativeLayer = (old as? DrawbridgeSnapshotAnnotation)?.hasNativeLayer == true
             replacement.shouldDisplay = old.shouldDisplay; replacement.shouldPrint = old.shouldPrint
+            if old.shouldDisplay { (replacement as? DrawbridgeSnapshotAnnotation)?.prepareFirstPreview() }
             replaceSnapshot(old, with: replacement, on: page)
         } catch { onSnapshotError?(error) }
     }

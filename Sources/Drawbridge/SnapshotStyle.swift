@@ -164,19 +164,35 @@ enum SnapshotFilterRenderer {
         guard let buffer = context.data else { return }
         // Sample the source directly. Inverse PDF luminosity supplies tint
         // coverage, including antialiased edges, without constructing PDF masks.
-        let pixels = buffer.assumingMemoryBound(to: UInt8.self)
         let red = Int((255 * tint[0]).rounded())
         let green = Int((255 * tint[1]).rounded())
         let blue = Int((255 * tint[2]).rounded())
+        let palette = (0...255).map { alpha -> UInt32 in
+            let r = UInt32((red * alpha + 127) / 255)
+            let g = UInt32((green * alpha + 127) / 255)
+            let b = UInt32((blue * alpha + 127) / 255)
+            return ((r << 24) | (g << 16) | (b << 8) | UInt32(alpha)).bigEndian
+        }
+        let width = context.width
+        let rowBytes = context.bytesPerRow
+        let white = UInt32(0xffffff00).bigEndian
+        let black = palette[255]
         for y in 0..<context.height {
-            let row = pixels.advanced(by: y * context.bytesPerRow)
-            for x in stride(from: 0, to: context.width * 4, by: 4) {
-                let luminosity = (30 * Int(row[x]) + 59 * Int(row[x + 1]) + 11 * Int(row[x + 2]) + 50) / 100
-                let alpha = 255 - luminosity
-                row[x] = UInt8((red * alpha + 127) / 255)
-                row[x + 1] = UInt8((green * alpha + 127) / 255)
-                row[x + 2] = UInt8((blue * alpha + 127) / 255)
-                row[x + 3] = UInt8(alpha)
+            let row = buffer.advanced(by: y * rowBytes).assumingMemoryBound(to: UInt32.self)
+            for x in 0..<width {
+                let rgb = row[x] & white
+                if rgb == white {
+                    row[x] = 0
+                } else if rgb == 0 {
+                    row[x] = black
+                } else {
+                    let color = UInt32(bigEndian: rgb)
+                    let r = Int(color >> 24)
+                    let g = Int((color >> 16) & 0xff)
+                    let b = Int((color >> 8) & 0xff)
+                    let luminosity = (30 * r + 59 * g + 11 * b + 50) / 100
+                    row[x] = palette[255 - luminosity]
+                }
             }
         }
     }

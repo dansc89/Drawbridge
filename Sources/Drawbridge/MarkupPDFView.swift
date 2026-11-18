@@ -599,7 +599,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     private var snapshotDetailRefreshWorkItem: DispatchWorkItem?
     private var snapshotDetailRefreshGeneration: UInt = 0
     private var lastSnapshotViewportActivity: CFAbsoluteTime = 0
-    private let snapshotViewportQuietInterval: CFAbsoluteTime = 0.12
+    private let snapshotViewportQuietInterval: CFAbsoluteTime = 0.09
 
     @objc private func snapshotPreviewReady(_ notification: Notification) {
         guard !isRetiredSplitPane else { return }

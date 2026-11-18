@@ -19,14 +19,15 @@ struct SnapshotPayload: Sendable {
     struct Placement: Codable, Sendable { var x: Double; var y: Double; var width: Double; var height: Double; var rotation: Int }
     static let placementType = NSPasteboard.PasteboardType("com.drawbridge.snapshot-placement")
     static let styleType = NSPasteboard.PasteboardType("com.drawbridge.snapshot-style")
-    var page: CGPDFPage? {
+    var validatedDocument: CGPDFDocument? {
         guard !data.isEmpty, data.count <= Self.maximumBytes,
               let provider = CGDataProvider(data: data as CFData), let pdf = CGPDFDocument(provider), pdf.numberOfPages == 1 else { return nil }
         guard let page = pdf.page(at: 1) else { return nil }
         let size = page.getBoxRect(.mediaBox).size
         guard size.width.isFinite, size.height.isFinite, (2...14400).contains(size.width), (2...14400).contains(size.height) else { return nil }
-        return page
+        return pdf
     }
+    var page: CGPDFPage? { validatedDocument?.page(at: 1) }
     var size: CGSize? { page?.getBoxRect(.mediaBox).size }
     /// Identification for UI refreshes must not decode and parse the embedded PDF.
     /// Actions that actually consume the capture still validate it with read().
@@ -228,12 +229,19 @@ struct SnapshotPayload: Sendable {
 /// Draw the captured fragment directly while editing. The incremental writer
 /// installs a standard Stamp appearance for saved PDFs and other readers.
 @MainActor enum SnapshotStampFactory {
-    static func make(payload: SnapshotPayload, bounds: CGRect, rotation: Int, style: SnapshotStyle = SnapshotStyle()) throws -> PDFAnnotation {
+    static func make(payload: SnapshotPayload, bounds: CGRect, rotation: Int, style: SnapshotStyle = SnapshotStyle(),
+                     sourceDocument: CGPDFDocument? = nil) throws -> PDFAnnotation {
         guard style.isValid else { throw CocoaError(.fileReadCorruptFile) }
         let deferFilter = style.isColorizedOverlay
-        let data = deferFilter ? payload.data : try SnapshotFilterRenderer.filtered(payload.data, style: style)
-        guard let provider = CGDataProvider(data: data as CFData), let document = CGPDFDocument(provider),
-              document.page(at: 1) != nil else { throw CocoaError(.fileReadCorruptFile) }
+        let usesOriginal = deferFilter || (style.filter == .original && !style.overlay)
+        let data = usesOriginal ? payload.data : try SnapshotFilterRenderer.filtered(payload.data, style: style)
+        let document: CGPDFDocument?
+        if usesOriginal {
+            document = sourceDocument ?? payload.validatedDocument
+        } else {
+            document = CGDataProvider(data: data as CFData).flatMap { CGPDFDocument($0) }
+        }
+        guard let document, document.page(at: 1) != nil else { throw CocoaError(.fileReadCorruptFile) }
         return DrawbridgeSnapshotAnnotation(bounds: bounds, document: document, rotation: rotation, style: style, previewData: data, deferredFilter: deferFilter ? style : nil)
     }
 }
@@ -353,6 +361,11 @@ final class DrawbridgeSnapshotAnnotation: PDFAnnotation {
     private var filteredVectorDocument: CGPDFDocument?
     private var previewViewport: (region: CGRect, scale: Double)?
     var usesCachedOverlay: Bool { style.isColorizedOverlay && replaySource != nil }
+
+    func prepareFirstPreview() {
+        guard usesCachedOverlay, let source = replaySource else { return }
+        SnapshotPreviewCache.shared.requestPreview(data: source.data, key: source.key, filter: deferredFilter)
+    }
 
     func updatePreviewViewport(_ region: CGRect, deviceScale: Double = 1) {
         guard !isRetired, shouldDisplay, usesCachedOverlay, let source = replaySource,
