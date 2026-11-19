@@ -203,4 +203,17 @@ import XCTest
         XCTAssertTrue(session.layerCatalog.layers.isEmpty)
         XCTAssertFalse(session.undo.canUndo)
     }
+    func testLineworkSnappingExcludesHiddenNativeLayers() throws {
+        for hidden in [false,true] {
+            let url = try fixture(off:hidden ? "5 0 R" : "6 0 R")
+            defer { try? FileManager.default.removeItem(at:url) }
+            let document = try XCTUnwrap(PDFDocument(url:url))
+            let page = try XCTUnwrap(document.page(at:0)?.pageRef)
+            let index = PDFPathScanner.index(page:page)
+            let point = index.nearest(to:CGPoint(x:11,y:10),tolerance:3,endpoints:true,midpoints:false,intersections:false)
+            if hidden { XCTAssertNil(point) }
+            else { XCTAssertEqual(point,CGPoint(x:10,y:10)) }
+        }
+    }
+
 }

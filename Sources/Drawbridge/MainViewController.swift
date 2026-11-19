@@ -611,7 +611,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         welcomeReviewButton.isEnabled = true
     }
 
-    @objc private func refreshWelcomeReviewVisibility() {
+    @objc func refreshWelcomeReviewVisibility() {
         welcomeReviewView.isHidden = pdfView.document != nil || (try? SettingsWindowController.sharedReviewCredentials()) == nil
     }
 
@@ -5695,6 +5695,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         var addedLineEndpoints = false
         for item in selectedItems {
             guard let page = item.annotation.page, page === pdfView.currentPage, item.annotation.shouldDisplay, pdfView.rectangleMarkup.layerIsVisible(item.annotation) else { continue }
+            if selectedItems.count == 1, let measurement = MeasurementMetadata.measurement(item.annotation),
+               measurement.isDistance(points:RectangleMarkupRecord.vertices(item.annotation)) { continue }
             let bounds = item.annotation.bounds
             let p1 = pdfView.convert(bounds.origin, from: page)
             let p2 = pdfView.convert(NSPoint(x: bounds.maxX, y: bounds.maxY), from: page)

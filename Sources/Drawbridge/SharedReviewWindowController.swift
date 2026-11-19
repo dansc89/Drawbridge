@@ -1,13 +1,11 @@
 import AppKit
+import CryptoKit
 import PDFKit
 import UniformTypeIdentifiers
 
 /// Presentation only; server capabilities and mutation authorization remain authoritative.
 struct ReviewCapabilityPresentation {
-    static let browserTitle = "Drawbridge Review — Server Documents"
-    static func subtitle(workspace: String?) -> String {
-        workspace.map { "Workspace: " + $0 } ?? ""
-    }
+    static let browserTitle = "Drawbridge Review"
     let newFolderReason: String?
     let deleteReason: String?
     var newFolderToolTip: String { newFolderReason ?? "Create a folder" }
@@ -65,11 +63,16 @@ private final class ReviewBrowserWindow: NSWindow {
     var navigate: ((Bool) -> Void)?
     var traverseHistory: ((Bool) -> Void)?
     var requestDeletion: (() -> Void)?
+    var requestNewFolder: (() -> Void)?
     weak var browserTable: NSTableView?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection([.command, .shift, .option, .control])
         guard attachedSheet == nil else { return super.performKeyEquivalent(with: event) }
+        if modifiers == [.command, .shift], event.keyCode == 45, let requestNewFolder {
+            requestNewFolder()
+            return true
+        }
         let editingText = firstResponder is NSTextView || firstResponder is NSTextField
         if !editingText, firstResponder === browserTable, modifiers == .command, event.keyCode == 51, let requestDeletion {
             requestDeletion()
@@ -133,6 +136,11 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private var pathFolderIDs: [String?] = []
     private lazy var openButton = button("Open", #selector(openSelected))
     private lazy var uploadButton = button("Upload PDFs…", #selector(uploadPDF))
+    private let browserConnection = NSImageView()
+    private let browserConnectionLabel = NSTextField(labelWithString: "Offline")
+    private var browserOnline = false
+    private var browserNeedsSignIn = false
+    private lazy var reconnectButton = button("Reconnect", #selector(reconnectBrowser))
     private lazy var refreshButton = button("Refresh", #selector(refreshDocuments(_:)))
     private let status = NSTextField(labelWithString: "Choose a shared PDF.")
     private let capabilityExplanation = NSTextField(wrappingLabelWithString: "")
@@ -195,10 +203,12 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     deinit { NotificationCenter.default.removeObserver(self) }
 
     @objc private func reviewSessionChanged() {
+        startupReconnectTask?.cancel()
         workspacePresence.stop()
         preserveTextDraftsLocally()
         lifecycle = UUID()
         sessionInvalidated = true
+        setBrowserConnection(online: false, needsSignIn: true)
         // Pending edits (including failed local saves) and PDF/cache bytes are
         // retained, never replayed by this invalidated review. Reopening requires
         // fresh server authorization and the existing origin/device outbox scope.
@@ -261,6 +271,36 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         return response
     }
 
+    private var startupReconnectTask: Task<Void, Never>?
+    func reconnectSavedAccountOnLaunch() {
+        startupReconnectTask?.cancel()
+        guard !SettingsWindowController.reviewSessionDefaults.bool(forKey:"DrawbridgeSkipReviewSessionRestore"),
+              SettingsWindowController.reviewSessionDefaults.string(forKey:"sharedServerDomain") != nil else { return }
+        startupReconnectTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                do {
+                    let (origin,credentials) = try SettingsWindowController.sharedReviewCredentials()
+                    let connection = makeReviewAPI(origin,credentials)
+                    defer { connection.invalidate() }
+                    let _: SharedReviewAPI.Capabilities = try await connection.get("auth/me")
+                    guard !Task.isCancelled else { return }
+                    setBrowserConnection(online:true)
+                    editor?.refreshWelcomeReviewVisibility()
+                    return
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    let failure = error as? SharedReviewError
+                    setBrowserConnection(online:false,needsSignIn:failure?.statusCode == 401)
+                    if failure?.statusCode == 401 { return }
+                    // Keep the saved account while the network or login Keychain recovers.
+                    if failure?.code != "credentials_unavailable", SettingsWindowController.activeReviewSession == nil { return }
+                }
+                do { try await Task.sleep(for:.seconds(5)) } catch { return }
+            }
+        }
+    }
+
     @objc func showReviews(_ sender: Any?) {
         if (try? SettingsWindowController.sharedReviewCredentials()) == nil, let editor {
             editor.settingsWindowController.prepare(section: .review)
@@ -286,6 +326,10 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             if down { self?.openSelected() } else { self?.goToParent() }
         }
         window.traverseHistory = { [weak self] forward in self?.traverseFolderHistory(forward: forward) }
+        window.requestNewFolder = { [weak self] in
+            guard self?.newFolderButton.isEnabled == true else { return }
+            self?.createFolder()
+        }
         window.requestDeletion = { [weak self] in self?.deleteSelectedItems() }
         window.browserTable = documentsTable
 
@@ -340,7 +384,14 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         openButton.keyEquivalent = ""
         openButton.bezelStyle = .rounded
         openButton.toolTip = "Open the selected folder or PDF (Return)"
-        let footer = NSStackView(views: [status, NSView(), openButton])
+        browserConnection.imageScaling = .scaleProportionallyDown
+        browserConnection.widthAnchor.constraint(equalToConstant: 18).isActive = true
+        browserConnectionLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        browserConnectionLabel.identifier = NSUserInterfaceItemIdentifier("review.connectionStatus")
+        let connection = NSStackView(views: [browserConnection, browserConnectionLabel])
+        connection.spacing = 4
+        connection.alignment = .centerY
+        let footer = NSStackView(views: [connection, reconnectButton, status, NSView(), openButton])
         footer.spacing = 12
         footer.alignment = .centerY
         uploadProgress.style = .bar
@@ -402,7 +453,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private var toolbarDefinitions: [(String, String, String, Selector, String)] {
         [("back", "Back", "chevron.backward", #selector(goBack), "Go back (⌘←)"),
          ("upload", "Upload PDFs…", "", #selector(uploadPDF), "Upload PDFs to this folder"),
-         ("newFolder", "New Folder…", "folder.badge.plus", #selector(createFolder), "Create a folder"),
+         ("newFolder", "New Folder…", "folder.badge.plus", #selector(createFolder), "New Folder (⇧⌘N)"),
          ("refresh", "Refresh", "arrow.clockwise", #selector(refreshDocuments(_:)), "Refresh server documents"),
          ("delete", "Delete…", "trash", #selector(deleteSelectedItems), "Delete the selected items… (⌘⌫)")]
     }
@@ -519,6 +570,16 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     func selectionShouldChange(in tableView: NSTableView) -> Bool { !busy || replacingBrowserRows }
 
     private func updateBrowserControls() {
+        let description = browserOnline ? "Online" : "Offline"
+        browserConnectionLabel.stringValue = description
+        browserConnection.image = NSImage(systemSymbolName: browserOnline ? "wifi" : "wifi.slash", accessibilityDescription: description)
+        browserConnection.contentTintColor = browserOnline ? .systemGreen : .secondaryLabelColor
+        browserConnection.toolTip = description
+        browserConnection.setAccessibilityLabel(description)
+        reconnectButton.isHidden = browserOnline
+        reconnectButton.isEnabled = !busy
+        reconnectButton.title = browserNeedsSignIn ? "Sign In…" : "Reconnect"
+
         let rows = documentsTable.selectedRowIndexes
         let validRows = !rows.isEmpty && rows.allSatisfy { (0..<rowCount).contains($0) }
         let oneFolder = rows.count == 1 && rows.first.map { $0 < visibleFolders.count } == true
@@ -568,6 +629,21 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         NSButton(title: title, target: self, action: action)
     }
 
+    @objc private func reconnectBrowser() {
+        if browserNeedsSignIn {
+            editor?.settingsWindowController.reconnectReviewAccount { [weak self] message in
+                self?.status.stringValue = message
+            }
+        }
+        else { refreshDocuments(nil) }
+    }
+
+    private func setBrowserConnection(online: Bool, needsSignIn: Bool = false) {
+        browserOnline = online
+        browserNeedsSignIn = needsSignIn
+        updateBrowserControls()
+    }
+
     @objc private func refreshDocuments(_ sender: Any?) {
         if sessionInvalidated, SettingsWindowController.activeReviewSession != nil {
             sessionInvalidated = false
@@ -585,7 +661,11 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         guard !sessionInvalidated else { throw CancellationError() }
         let (origin, credentials) = try SettingsWindowController.sharedReviewCredentials()
         let generation = lifecycle
-        let api = makeReviewAPI(origin, credentials)
+        var api = makeReviewAPI(origin, credentials)
+        api.connectionObserver = { [weak self] online, needsSignIn in
+            guard let self, self.lifecycle == generation else { return }
+            self.setBrowserConnection(online: online, needsSignIn: needsSignIn)
+        }
         capturedAPIs.append(api)
         let projects: SharedReviewAPI.ProjectList = try await api.get("projects")
         try checkLifecycle(generation, api: api)
@@ -613,6 +693,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         documents = list.documents.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         if !isAvailableFolder(folderID) { folderID = nil }
         reconcileFolderHistory()
+        setBrowserConnection(online: true)
         showFolder()
     }
 
@@ -639,7 +720,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             entries.append((folder.name, folder.id))
             cursor = folder.parent_id
         }
-        entries.append((project?.name ?? "Server Documents", nil))
+        entries.append(("Documents", nil))
         entries.reverse()
         pathFolderIDs = entries.map(\.id)
         folderPath.pathItems = entries.map { entry in
@@ -649,7 +730,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
         folderPath.toolTip = entries.map(\.name).joined(separator: " › ")
         window?.title = ReviewCapabilityPresentation.browserTitle
-        window?.subtitle = ReviewCapabilityPresentation.subtitle(workspace: project?.name)
+        window?.subtitle = ""
     }
 
     @objc private func openPathFolder() {
@@ -1037,7 +1118,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
         busy = true
         updateBrowserControls()
-        status.stringValue = "Contacting server…"
+        status.stringValue = "Loading..."
         let generation = lifecycle
         operationTask = Task {
             defer {
@@ -1049,7 +1130,14 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 }
             }
             do { try Task.checkCancellation(); try await work() }
-            catch { if lifecycle == generation { status.stringValue = error.localizedDescription } }
+            catch {
+                if lifecycle == generation {
+                    if error is URLError || (error as? SharedReviewError)?.statusCode == 401 || SettingsWindowController.activeReviewSession == nil {
+                        setBrowserConnection(online: false, needsSignIn: (error as? SharedReviewError)?.statusCode == 401 || SettingsWindowController.activeReviewSession == nil)
+                    }
+                    status.stringValue = error.localizedDescription
+                }
+            }
         }
     }
 
@@ -1276,14 +1364,22 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         uncheckpointedAcknowledgements = 0
     }
 
+    func scaleMarkerIdentity(on page: PDFPage) -> String? {
+        guard let pdf = reviewPDF, page.document === pdf, let documentID, let api = reviewAPI else { return nil }
+        let value = api.instanceID + "|" + documentID + "|" + String(pdf.index(for: page))
+        let digest = SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+        return RectangleMarkupRecord.prefix + "scale-" + digest
+    }
+
     func recordChanges(on page: PDFPage) {
         guard !sessionInvalidated else { return }
         guard let sessionID, outbox != nil, let pdf = reviewPDF, page.document === pdf else { return }
         let index = pdf.index(for: page)
         let previous = records[index] ?? [:]
         let current = page.annotations.reduce(into: [String: RectangleMarkupRecord]()) { result, annotation in
-            guard !annotation.isReadOnly, !MeasurementMetadata.isPageScaleMetadata(annotation),
+            guard (!annotation.isReadOnly || MeasurementMetadata.isPageScaleMetadata(annotation)),
                   !MarkupLayers.isMetadata(annotation) else { return }
+            if MeasurementMetadata.isPageScaleMetadata(annotation), RectangleMarkupRecord.identity(annotation) != scaleMarkerIdentity(on: page) { return }
             // A deleted server ID stays retired. Undo restores the annotation as a new revision.
             if let id = RectangleMarkupRecord.identity(annotation), retiredIDs.contains(id) {
                 annotation.setValue(RectangleMarkupRecord.prefix + UUID().uuidString, forAnnotationKey: RectangleMarkupRecord.identityKey)
@@ -1499,6 +1595,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             replayRefreshObserver?(.page(index))
         }
         viewer.rectangleMarkup.refresh()
+        editor.refreshMeasurementScaleDisplay()
         editor.scheduleMarkupsRefresh(selecting: viewer.rectangleMarkup.selected)
         replayRefreshObserver?(.selectionAndList)
     }
@@ -1506,6 +1603,11 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private func apply(_ markup: SharedReviewAPI.Markup, owned: Bool) throws -> Bool {
         guard let page = reviewPDF?.page(at: markup.page) else {
             throw SharedReviewError("A revision refers to a missing page.")
+        }
+        // Each reviewer calibrates their own measurements. Other reviewers retain
+        // their page scale, while each dimension carries its exact units and ratio.
+        if let record = markup.record, record.pageScale != nil || record.pageScaleCleared {
+            guard owned else { return false }
         }
         if owned, markup.record == nil { retiredIDs.insert(markup.id) }
         if owned, records[markup.page]?[markup.id] == markup.record { return false }
@@ -1515,7 +1617,14 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             }
             let annotation = try record.clipboardAnnotation(contents: record.text, rotation: page.rotation)
             annotation.setValue(record.id, forAnnotationKey: RectangleMarkupRecord.identityKey)
-            annotation.isReadOnly = !owned
+            if record.pageScale != nil || record.pageScaleCleared {
+                if let scale = record.pageScale { annotation.setValue(MeasurementMetadata.json(scale), forAnnotationKey: MeasurementMetadata.pageScaleKey) }
+                if record.pageScaleCleared { annotation.setValue(true, forAnnotationKey: MeasurementMetadata.clearedScaleKey) }
+                annotation.setValue(true, forAnnotationKey: MeasurementMetadata.pendingScaleKey)
+                annotation.shouldDisplay = false
+                annotation.shouldPrint = false
+                annotation.isReadOnly = true
+            } else { annotation.isReadOnly = !owned }
             return annotation
         }
         if let existing = page.annotations.first(where: { RectangleMarkupRecord.identity($0) == markup.id }) {

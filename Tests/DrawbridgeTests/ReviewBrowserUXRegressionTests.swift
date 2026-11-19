@@ -162,16 +162,50 @@ import XCTest
         XCTAssertEqual(table.numberOfRows, 1, "Refreshing must never reveal staged files")
     }
 
-    func testReviewMeasurementsRequireSupportedExistingScale() {
+    func testBrowserConnectionRecoversWithoutClearingSavedLogin() async throws {
+        _ = NSApplication.shared
+        let previous = SettingsWindowController.activeReviewSession
+        let attempted = SettingsWindowController.attemptedSessionRestore
+        let origin = URL(string:"https://connection-fixture.invalid")!
+        SettingsWindowController.activeReviewSession = (origin,.init(token:"retained",instanceId:"user",displayName:"Reviewer"))
+        SettingsWindowController.attemptedSessionRestore = true
+        defer {
+            SettingsWindowController.activeReviewSession = previous
+            SettingsWindowController.attemptedSessionRestore = attempted
+        }
+        let controller = SharedReviewWindowController(); controller.buildWindow()
+        defer { controller.window?.close() }
+        var offline = true
+        controller.makeReviewAPI = { origin, session in
+            var api = SharedReviewAPI(origin:origin,token:session.token,displayName:session.displayName,instanceID:session.instanceId)
+            api.transport = { request in
+                if offline { throw URLError(.notConnectedToInternet) }
+                let json = request.url!.path == "/v1/projects" ? #"{"projects":[{"id":"p","name":"Fixture"}]}"# : #"{"documents":[]}"#
+                return (Data(json.utf8),HTTPURLResponse(url:request.url!,statusCode:200,httpVersion:nil,headerFields:nil)!)
+            }
+            return api
+        }
+        do { try await controller.loadDocuments(); XCTFail("offline request should fail") } catch {}
+        let content = try XCTUnwrap(controller.window?.contentView)
+        let icon = try XCTUnwrap(descendants(content).compactMap { $0 as? NSImageView }.first { $0.accessibilityLabel() == "Offline" })
+        XCTAssertEqual(SettingsWindowController.activeReviewSession?.session.token,"retained")
+        offline = false
+        try await controller.loadDocuments()
+        XCTAssertEqual(icon.accessibilityLabel(),"Online")
+        XCTAssertEqual(descendants(content).compactMap { $0 as? NSTextField }.first { $0.identifier?.rawValue == "review.connectionStatus" }?.stringValue,"Online")
+        XCTAssertTrue(descendants(content).compactMap { $0 as? NSButton }.first { $0.title == "Reconnect" }?.isHidden == true)
+    }
+
+    func testReviewMeasurementsAllowCalibrationAfterUpload() {
         for review in [false, true] {
             for editable in [false, true] {
                 for scaled in [false, true] {
                     for supported in [false, true] {
                         let capability = ReviewMeasurementCapability(isReview: review, editable: editable,
                             hasPage: true, supportedPage: supported, hasScale: scaled)
-                        XCTAssertEqual(capability.canMeasure, editable && supported && (!review || scaled))
-                        XCTAssertEqual(capability.canSetScale, editable && !review)
-                        if review && !scaled { XCTAssertTrue(capability.measurementReason?.contains("no scale") == true) }
+                        XCTAssertEqual(capability.canMeasure, editable && supported)
+                        XCTAssertEqual(capability.canSetScale, editable && supported)
+                        if editable && supported { XCTAssertNil(capability.measurementReason) }
                     }
                 }
             }

@@ -159,6 +159,9 @@ extension RectangleMarkupRecord {
         annotation.setValue(author, forAnnotationKey: PDFAnnotationKey(rawValue: "/T"))
         annotation.setValue(Self.prefix + UUID().uuidString, forAnnotationKey: Self.identityKey)
         if let measurement {
+            if measurement.isDistance(points:vertices) {
+                annotation.bounds = MeasurementAppearance.dimensionBounds(measurement,points:vertices,rotation:rotation ?? textRotation,lineWidth:CGFloat(lineWidth))
+            }
             annotation.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey)
             MeasurementMetadata.updateLabel(annotation)
         }

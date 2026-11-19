@@ -36,7 +36,10 @@ import Security
     private lazy var cancelBrowserSignIn = button("Cancel", #selector(cancelReviewSignIn))
     private var browserSignInTask: Task<Void, Never>?
     private var signingIn = false
+    private var reconnectingAccount = false
+    private var reconnectStatus: ((String) -> Void)?
     // Injectable boundaries keep offline auth tests away from browser and user Keychain.
+    var reviewBrowserOpen: (URL) -> Bool = { NSWorkspace.shared.open($0) }
     var reviewAuthTransport: ReviewGoogleSignIn.Transport = ReviewGoogleSignIn.liveTransport
     var reviewGoogleIdentityToken: ((String) async throws -> String)?
     var reviewDeviceKey: ((URL, String) throws -> String)?
@@ -62,7 +65,7 @@ import Security
                 let listener = try ReviewOAuthLoopback()
                 defer { listener.cancel() }
                 let url = try attempt.authorizationURL(clientID: clientID, redirect: listener.redirect)
-                guard NSWorkspace.shared.open(url) else { throw SharedReviewError("Could not open the browser for Google sign-in.") }
+                guard reviewBrowserOpen(url) else { throw SharedReviewError("Could not open the browser for Google sign-in.") }
                 let callback = try await listener.callback()
                 try Self.checkReviewAuthGeneration(generation)
                 let code = try attempt.code(from: callback, redirect: listener.redirect)
@@ -99,6 +102,7 @@ import Security
         query[kSecReturnData as String] = true
         var result: CFTypeRef?
         let status = withoutKeychainPrompts { SecItemCopyMatching(query as CFDictionary, &result) }
+        if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess else { throw SharedReviewError("Review session is unavailable.") }
         return result as? Data
     }
@@ -115,11 +119,11 @@ import Security
         _ = withoutKeychainPrompts { SecItemDelete(serverKeychainQuery as CFDictionary) }
     }
     @discardableResult
-    static func persistReviewSession(origin: URL, session: ServerSession) throws -> Bool {
+    static func persistReviewSession(origin: URL, session: ServerSession, preservingSavedIdentity: Bool = false) throws -> Bool {
         let origin = try ReviewGoogleSignIn.origin(origin.absoluteString)
         guard validReviewSession(session) else { throw SharedReviewError("Invalid Review session. Sign in again.") }
         let saved = reviewSessionWrite(try JSONEncoder().encode(StoredReviewSession(version: 1, origin: origin.absoluteString, session: session)))
-        reviewSessionDefaults.set(!saved, forKey: skipSessionRestoreKey)
+        if saved || !preservingSavedIdentity { reviewSessionDefaults.set(!saved, forKey: skipSessionRestoreKey) }
         reviewSessionDefaults.set(origin.absoluteString, forKey: "sharedServerDomain")
         return saved
     }
@@ -135,7 +139,7 @@ import Security
             $0.rangeOfCharacter(from: .controlCharacters) == nil
         }
     }
-    private static let serverKeychainService = (Bundle.main.bundleIdentifier ?? "com.drawbridge.app") + ".shared-session"
+    static var serverKeychainService = (Bundle.main.bundleIdentifier ?? "com.drawbridge.app") + ".shared-session"
     private var keys: [ShortcutAction: NSTextField] = [:]
     private var modifiers: [ShortcutAction: NSPopUpButton] = [:]
     private let validation = NSTextField(labelWithString: "")
@@ -270,10 +274,10 @@ import Security
         serverSignOut.isHidden = current == nil
         browserSignIn.isEnabled = !signingIn && current == nil
         cancelBrowserSignIn.isHidden = !signingIn
-        if let message { serverStatus.stringValue = message }
+        if let message { reportReviewStatus(message) }
         else if let (_, session) = current {
-            serverStatus.stringValue = session.displayName.map { "Signed in as " + $0 } ?? "Signed in to Review."
-        } else if !signingIn { serverStatus.stringValue = "" }
+            reportReviewStatus(session.displayName.map { "Signed in as " + $0 } ?? "Signed in to Review.")
+        } else if !signingIn { reportReviewStatus("") }
     }
 
     // Review credentials use the macOS file-based Keychain. Silence its UI only
@@ -313,6 +317,10 @@ import Security
                 var request = URLRequest(url: origin.appendingPathComponent("v1/auth/logout"), timeoutInterval: 15)
                 request.httpMethod = "POST"
                 request.setValue("Bearer " + session.token, forHTTPHeaderField: "Authorization")
+                if let refreshToken = session.refreshToken {
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.httpBody = try? JSONEncoder().encode(["refreshToken": refreshToken])
+                }
                 do {
                     _ = try await transport(request)
                 } catch {
@@ -335,8 +343,21 @@ import Security
         browserSignInTask?.cancel()
     }
 
+    func reconnectReviewAccount(status: @escaping (String) -> Void) {
+        guard !signingIn else { return }
+        prepare(section: .review)
+        reconnectingAccount = true
+        reconnectStatus = status
+        startBrowserSignIn()
+    }
+
+    private func reportReviewStatus(_ message: String) {
+        serverStatus.stringValue = message
+        reconnectStatus?(message)
+    }
+
     @objc private func startBrowserSignIn() {
-        guard !signingIn, Self.activeReviewSession == nil else { return }
+        guard !signingIn, Self.activeReviewSession == nil || reconnectingAccount else { return }
         window?.makeFirstResponder(nil)
         guard let origin = try? ReviewGoogleSignIn.origin(serverDomain.stringValue) else {
             refreshServerLogin(message: "Enter the HTTPS address for your Review server.")
@@ -350,6 +371,8 @@ import Security
                 signingIn = false
                 browserSignInTask = nil
                 refreshServerLogin(message: serverStatus.stringValue)
+                reconnectingAccount = false
+                reconnectStatus = nil
             }
             do {
                 struct Exchange: Decodable { let session: ServerSession? }
@@ -364,10 +387,10 @@ import Security
                 try Self.checkReviewAuthGeneration(generation)
                 var browserURL = URLComponents(url: origin.appendingPathComponent("review-access/complete"), resolvingAgainstBaseURL: false)!
                 browserURL.queryItems = [URLQueryItem(name: "id", value: id)]
-                guard let url = browserURL.url, NSWorkspace.shared.open(url) else {
+                guard let url = browserURL.url, reviewBrowserOpen(url) else {
                     throw SharedReviewError("Could not open your browser. Try signing in again.")
                 }
-                serverStatus.stringValue = "Waiting for sign-in in your browser…"
+                reportReviewStatus("Waiting for sign-in in your browser…")
                 let deadline = ContinuousClock.now + .seconds(600)
                 while ContinuousClock.now < deadline {
                     try await Task.sleep(for: .seconds(2))
@@ -381,13 +404,13 @@ import Security
                     Self.activeReviewSession = (origin, session)
                     NotificationCenter.default.post(name: Self.reviewSessionDidChange, object: nil)
                     let suffix = saved ? "" : " for this launch"
-                    serverStatus.stringValue = "Signed in as " + (session.displayName ?? "Review user") + suffix + "."
+                    reportReviewStatus("Signed in as " + (session.displayName ?? "Review user") + suffix + ".")
                     openVaultAfterSignIn()
                     return
                 }
-                serverStatus.stringValue = "Sign-in expired. Click Sign in to Review to try again."
+                reportReviewStatus("Sign-in expired. Click Sign In to try again.")
             } catch {
-                serverStatus.stringValue = Task.isCancelled ? "Sign-in canceled." : "Could not finish sign-in. Check your connection and try again."
+                reportReviewStatus(Task.isCancelled ? "Sign-in canceled." : "Could not finish sign-in. Check your connection and try again.")
             }
         }
     }
@@ -402,21 +425,27 @@ import Security
         editor?.sharedReview?.showReviews(nil)
     }
 
-    struct ServerSession: Codable {
+    struct ServerSession: Codable, Sendable {
         let token: String
         let instanceId: String
         let displayName: String?
         var workspaceIdentity: Bool? = nil
+        var refreshToken: String? = nil
+        var expiresAt: Double? = nil
     }
 
     static func sharedReviewCredentials() throws -> (URL, ServerSession) {
         if let activeReviewSession { return activeReviewSession }
-        defer { attemptedSessionRestore = true }
         if !attemptedSessionRestore, !reviewSessionDefaults.bool(forKey: skipSessionRestoreKey),
            let domain = reviewSessionDefaults.string(forKey: "sharedServerDomain"),
            let url = try? ReviewGoogleSignIn.origin(domain) {
-            if let data = try? reviewSessionRead(),
-               let stored = try? JSONDecoder().decode(StoredReviewSession.self, from: data),
+            // A temporarily locked/unavailable Keychain must remain retryable.
+            // Only a completed read can establish that no restorable login exists.
+            let data: Data?
+            do { data = try reviewSessionRead() }
+            catch { throw SharedReviewError("Saved Review login is temporarily unavailable. Reconnect to retry.", code:"credentials_unavailable") }
+            attemptedSessionRestore = true
+            if let data, let stored = try? JSONDecoder().decode(StoredReviewSession.self, from: data),
                stored.version == 1,
                let boundOrigin = try? ReviewGoogleSignIn.origin(stored.origin),
                stored.origin == boundOrigin.absoluteString,

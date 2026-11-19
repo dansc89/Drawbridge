@@ -1293,14 +1293,14 @@ final class RectangleMarkupTests: XCTestCase {
             NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:flags,timestamp:0,windowNumber:0,context:nil,characters:text,charactersIgnoringModifiers:text,isARepeat:false,keyCode:0)!
         }
         let session = RectangleMarkupController()
-        for (text,flags,tool) in [("e",NSEvent.ModifierFlags(),RectangleMarkupController.Tool.ellipse),("r",[],.rectangle),("l",[],.line),("v",[],.select),("a",[],.arrow),("t",[],.text),("N",[.shift],.polyline),("P",[.shift],.polygon)] {
+        for (text,flags,tool) in [("e",NSEvent.ModifierFlags(),RectangleMarkupController.Tool.ellipse),("r",[],.rectangle),("l",[],.line),("m",[],.perimeter),("L",[.shift],.perimeter),("v",[],.select),("a",[],.arrow),("t",[],.text),("N",[.shift],.polyline),("P",[.shift],.polygon)] {
             XCTAssertTrue(session.handleToolShortcut(key(text,flags))); XCTAssertEqual(session.tool,tool)
         }
-        for event in [key("n"),key("l",[.command]),key("r",[.option]),key("e",[.shift]),key("n",[.shift,.control]),key("a",[.command]),key("t",[.shift]),key("v",[.command])] { XCTAssertFalse(session.handleToolShortcut(event)) }
+        for event in [key("n"),key("l",[.command]),key("r",[.option]),key("e",[.shift]),key("n",[.shift,.control]),key("a",[.command]),key("t",[.shift]),key("v",[.command]),key("m",[.command]),key("M",[.shift])] { XCTAssertFalse(session.handleToolShortcut(event)) }
         XCTAssertTrue(session.handleToolShortcut(key("A",[.capsLock])))
         XCTAssertEqual(session.tool,.arrow)
         session.tool = .polygon
-        session.canEdit = { false }; XCTAssertFalse(session.handleToolShortcut(key("e"))); XCTAssertEqual(session.tool,.polygon)
+        session.canEdit = { false }; XCTAssertFalse(session.handleToolShortcut(key("m"))); XCTAssertFalse(session.handleToolShortcut(key("e"))); XCTAssertEqual(session.tool,.polygon)
     }
 
     func testPolylineSaveMoveResizeUndoAndImportedContentAtEveryRotation() throws {

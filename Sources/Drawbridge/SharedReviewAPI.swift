@@ -86,6 +86,11 @@ struct SharedReviewAPI: Sendable {
             credentials = Identity(token: token, name: name, instance: instance)
         }
         var identity: Identity? { lock.withLock { credentials } }
+        func updateToken(_ token: String) {
+            lock.withLock {
+                if let old = credentials { credentials = Identity(token: token, name: old.name, instance: old.instance) }
+            }
+        }
         func check() throws {
             try Task.checkCancellation()
             guard identity != nil else { throw CancellationError() }
@@ -123,6 +128,8 @@ struct SharedReviewAPI: Sendable {
     func checkActive() throws { try lifetime.check() }
     // Offline transport seam; live callers retain the normal URLSession path.
     var transport: (@MainActor @Sendable (URLRequest) async throws -> (Data, URLResponse))? = nil
+
+    var connectionObserver: (@MainActor @Sendable (Bool, Bool) -> Void)? = nil
 
     // Versioned verified Workspace-only contract. No identity is sourced from client preferences.
     struct PresenceSnapshot: Decodable, Sendable {
@@ -249,17 +256,42 @@ struct SharedReviewAPI: Sendable {
         return request
     }
 
+    private func authorized(_ request: URLRequest, force: Bool = false) async throws -> URLRequest {
+        try checkActive()
+        let token = try await ReviewSessionRenewal.credentials(origin: origin, instanceID: instanceID, fallback: token, force: force)
+        try checkActive()
+        lifetime.updateToken(token)
+        var updated = request
+        updated.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
+        return updated
+    }
+
     private func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        try await lifetime.run {
-            if let transport { return try await transport(request) }
-            return try await lifetime.session.data(for: request)
+        do {
+            let updated = try await authorized(request)
+            let result = try await lifetime.run {
+                let result: (Data, URLResponse)
+                if let transport { result = try await transport(updated) }
+                else { result = try await lifetime.session.data(for: updated) }
+                guard (result.1 as? HTTPURLResponse)?.statusCode == 401 else { return result }
+                let retry = try await authorized(updated, force: true)
+                guard retry.value(forHTTPHeaderField: "Authorization") != updated.value(forHTTPHeaderField: "Authorization") else { return result }
+                if let transport { return try await transport(retry) }
+                return try await lifetime.session.data(for: retry)
+            }
+            let code = (result.1 as? HTTPURLResponse)?.statusCode ?? 0
+            await connectionObserver?((200..<500).contains(code) && code != 401, code == 401)
+            return result
+        } catch {
+            if !Task.isCancelled { await connectionObserver?(false, (error as? SharedReviewError)?.statusCode == 401) }
+            throw error
         }
     }
 
     private func validate(_ response: URLResponse) throws {
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200..<300).contains(code) else {
-            if code == 401 { throw SharedReviewError("Session expired. Sign in again under Settings → Drawbridge Review.") }
+            if code == 401 { throw SharedReviewError("Review needs sign-in. Use Sign In in this window to reconnect.", statusCode: 401) }
             if code == 413 { throw SharedReviewError("The server rejected this PDF because it exceeds the upload limit.") }
             throw SharedReviewError("Drawbridge Review request failed (HTTP \(code)).", statusCode: code)
         }
@@ -460,7 +492,7 @@ struct SharedReviewAPI: Sendable {
         request.timeoutInterval = 180
         request.setValue("multipart/form-data; boundary=" + boundary, forHTTPHeaderField: "Content-Type")
         if transport != nil { request.httpBody = body }
-        let uploadRequest = request
+        let uploadRequest = try await authorized(request)
         let uploadBody = body
         let delegate = UploadDelegate(progress: progress, prefix: prefix, length: bytes.count, offset: offset)
         defer { delegate.stop() }

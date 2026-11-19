@@ -12,6 +12,7 @@ struct SavedMarkupAppearance: Codable {
     var snapshot: SnapshotStyle = SnapshotStyle()
     var hatch: DraftingHatch? = nil
     var textBox: TextBoxAppearance? = nil
+    var measurementScale: DrawingScale? = nil
 
     private static func validColor(_ color: [Double]) -> Bool {
         color.count == 4 && color.allSatisfy { $0.isFinite && (0...1).contains($0) }
@@ -20,7 +21,7 @@ struct SavedMarkupAppearance: Codable {
         Self.validColor(stroke) && (fill.map(Self.validColor) ?? true) &&
         width.isFinite && (0.25...72).contains(width) &&
         MarkupLinePattern(rawValue: pattern) != nil && opacity.isFinite && (0...1).contains(opacity) &&
-        fontSize.isFinite && (6...144).contains(fontSize) && snapshot.isValid && (hatch?.isValid ?? true) && (textBox?.valid ?? true)
+        (measurementScale?.isValid ?? true) && fontSize.isFinite && (6...144).contains(fontSize) && snapshot.isValid && (hatch?.isValid ?? true) && (textBox?.valid ?? true)
     }
     static func components(_ color: NSColor) -> [Double] {
         let rgb = color.usingColorSpace(.deviceRGB) ?? .red
@@ -44,12 +45,16 @@ extension RectangleMarkupController {
     var currentAppearance: SavedMarkupAppearance {
         SavedMarkupAppearance(stroke: SavedMarkupAppearance.components(strokeColor), width: Double(lineWidth),
                               pattern: linePattern.rawValue, opacity: strokeOpacity,
-                              fill: fillColor.map(SavedMarkupAppearance.components), fontSize: Double(fontSize), hatch: hatchStyle, textBox: textBoxDefaults)
+                              fill: fillColor.map(SavedMarkupAppearance.components), fontSize: Double([.area,.perimeter].contains(tool) ? measurementFontSize : fontSize), hatch: hatchStyle, textBox: textBoxDefaults, measurementScale: measurementScaleOverride)
     }
     func applyDefaults(_ style: SavedMarkupAppearance) {
         strokeColor = SavedMarkupAppearance.color(style.stroke); lineWidth = CGFloat(style.width)
         linePattern = MarkupLinePattern(rawValue: style.pattern) ?? .solid; strokeOpacity = style.opacity
         fillColor = style.fill.map(SavedMarkupAppearance.color); fontSize = CGFloat(style.fontSize)
+        if [.area,.perimeter].contains(tool) {
+            measurementFontSize = CGFloat(style.fontSize)
+            measurementScaleOverride = style.measurementScale
+        }
         hatchStyle = style.hatch
         textBoxDefaults = style.textBox ?? TextBoxAppearance()
     }
@@ -92,7 +97,10 @@ extension RectangleMarkupController {
                 style.opacity = MarkupStyle.strokeOpacity(annotation)
                 style.fill = RectangleMarkupRecord.polygonFill(annotation).map(SavedMarkupAppearance.components)
                 style.hatch = DraftingHatch.read(annotation)
-                if annotation.type == "FreeText" {
+                if let measurement = MeasurementMetadata.measurement(annotation) {
+                    style.fontSize = measurement.captionFontSize ?? 11
+                    style.measurementScale = measurement.scale
+                } else if annotation.type == "FreeText" {
                     style.fontSize = Double(RectangleMarkupRecord.textFontSize(annotation))
                     style.textBox = TextBoxAppearance.read(annotation)
                 }

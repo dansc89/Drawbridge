@@ -51,7 +51,9 @@ final class NodeInsertionTests: XCTestCase {
                 if variant == "polygon" || variant == "polyline" {
                     annotation = try XCTUnwrap(session.createPolyline(on: page, points: originalPoints, closed: closed))
                 } else {
-                    annotation = try XCTUnwrap(session.createMeasurement(on: page, points: originalPoints, kind: variant == "area" ? .area : .perimeter, closed: closed, scale: DrawingScale.architectural(inches: 0.25, name: "Quarter")!))
+                    // This fixture inserts on the measured path itself. New
+                    // distance markups default to an offset dimension line.
+                    annotation = try XCTUnwrap(session.createMeasurement(on: page, points: originalPoints, kind: variant == "area" ? .area : .perimeter, closed: closed, scale: DrawingScale.architectural(inches: 0.25, name: "Quarter")!, dimensionOffset: 0))
                 }
                 session.setLineAppearance(pattern: .dashed, opacity: 0.65)
                 if closed { RectangleMarkupRecord.setPolygonFill(NSColor.systemBlue.withAlphaComponent(0.25), on: annotation) }

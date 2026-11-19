@@ -29,6 +29,36 @@ import AppKit
         XCTAssertEqual(browserIDs, ["desktop-client"])
         XCTAssertEqual(result.displayName, "Server Verified Name")
     }
+    func testReconnectStartsBrowserWithoutDeletingExistingCredentials() async throws {
+        let old = SettingsWindowController.activeReviewSession
+        let oldDelete = SettingsWindowController.reviewSessionDelete
+        let domain = UserDefaults.standard.string(forKey:"sharedServerDomain")
+        defer {
+            SettingsWindowController.activeReviewSession = old
+            SettingsWindowController.reviewSessionDelete = oldDelete
+            if let domain { UserDefaults.standard.set(domain,forKey:"sharedServerDomain") }
+            else { UserDefaults.standard.removeObject(forKey:"sharedServerDomain") }
+        }
+        UserDefaults.standard.set(origin.absoluteString,forKey:"sharedServerDomain")
+        SettingsWindowController.activeReviewSession = (origin,.init(token:"expired",instanceId:"user",displayName:"Reviewer",workspaceIdentity:true))
+        SettingsWindowController.reviewSessionDelete = { XCTFail("reconnect must never require sign-out") }
+        let settings = SettingsWindowController(editor:MainViewController())
+        defer { settings.window?.close() }
+        var opened = false
+        var message = ""
+        settings.reviewAuthTransport = { request in
+            XCTAssertEqual(request.url?.path,"/v1/auth/access/start")
+            return Data("{}".utf8)
+        }
+        settings.reviewBrowserOpen = { _ in opened = true; return false }
+        settings.reconnectReviewAccount { message = $0 }
+        for _ in 0..<1000 { if opened && message.contains("Could not finish") { break }; await Task.yield() }
+        XCTAssertTrue(opened)
+        XCTAssertTrue(message.contains("Could not finish"))
+        XCTAssertEqual(SettingsWindowController.activeReviewSession?.session.token,"expired")
+        XCTAssertFalse(settings.window?.isVisible ?? true)
+    }
+
     func testPasswordCannotBypassConfiguredGoogleOrUnknownConfiguration() async throws {
         for config in [#"{"google":{"clientId":"desktop-client"},"passwordLoginEnabled":true}"#, "{}"] {
             let settings = SettingsWindowController(editor: MainViewController())

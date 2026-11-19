@@ -29,6 +29,30 @@ final class SelectedPagesScaleTests: XCTestCase {
         window.orderOut(nil)
         window.contentViewController = nil
     }
+    func testCalibrationUndoPreservesReadOnlyMeasurementsUpdatedByAnotherReviewer() throws {
+        try fixture { editor, document, _ in
+            let page = try XCTUnwrap(document.page(at:0))
+            let controller = editor.pdfView.rectangleMarkup
+            controller.bind(to:document)
+            controller.undo.groupsByEvent = false
+            let original = try XCTUnwrap(DrawingScale.architectural(inches:0.125,feet:1,name:"Original"))
+            let changed = try XCTUnwrap(DrawingScale.architectural(inches:0.25,feet:1,name:"Changed"))
+            controller.undo.beginUndoGrouping()
+            let remote = try XCTUnwrap(controller.createMeasurement(on:page,points:[CGPoint(x:10,y:10),CGPoint(x:80,y:10)],kind:.perimeter,closed:false,scale:original))
+            remote.isReadOnly = true
+            controller.undo.endUndoGrouping()
+            controller.undo.beginUndoGrouping()
+            controller.applyDrawingScale(changed,to:[page])
+            controller.undo.endUndoGrouping()
+            XCTAssertEqual(MeasurementMetadata.measurement(remote)?.scale,original)
+            var revision = try XCTUnwrap(MeasurementMetadata.measurement(remote))
+            revision.scale = changed
+            remote.setValue(MeasurementMetadata.json(revision),forAnnotationKey:MeasurementMetadata.measurementKey)
+            controller.undo.undo()
+            XCTAssertEqual(MeasurementMetadata.measurement(remote)?.scale,changed)
+        }
+    }
+
     private func switchTab(_ tab: Int, _ control: NSSegmentedControl) {
         control.selectedSegment = tab
         _ = control.sendAction(control.action, to: control.target)

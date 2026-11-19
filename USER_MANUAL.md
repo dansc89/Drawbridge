@@ -53,7 +53,7 @@ Select Drawbridge markups to move them, change their color or line weight, or de
 1. Choose **Measurements > Set Drawing Scale…** or click **Scale…** in the markup toolbar. Pick an architectural preset such as `1/8" = 1'-0"`, a metric ratio, or a custom inches-to-feet scale.
 2. Enter the PDF page numbers to apply it to, such as `1, 3-6, 9`. Multiple selections in the Pages sidebar populate the page list. Verify the scale against a known drawing dimension before measuring.
 3. Choose **Area** (`Shift+A`) and click each boundary corner. Click the first corner again, double-click the final corner, or press Enter to close the area.
-4. Choose **Perimeter / Length** (`Shift+L`) and click along a path. Click the first corner again to measure a closed perimeter. Double-click the last point or press Enter to measure an open path's total distance.
+4. Choose **Perimeter / Length** (`M`) and click along a path. Click the first corner again to measure a closed perimeter. Double-click the last point or press Enter to measure an open path's total distance.
 
 Choose **Measurements > Calibrate Drawing Scale…** to calibrate a resized drawing against a known dimension. Click both endpoints, enter the distance in feet or meters, and select the PDF pages that share this scale. Feet accept decimals or feet and inches (for example, `20' 6 1/2"`). Calibration is saved with the pages and recalculates existing measurements; Undo restores the previous scale and totals. The PDF page size does not change.
 

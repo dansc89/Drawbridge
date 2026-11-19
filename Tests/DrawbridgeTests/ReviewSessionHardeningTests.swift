@@ -77,13 +77,13 @@ import XCTest
             }
         }
     }
-    func testLockedReadFailedWriteAndFailedDeleteRemainSuppressedAcrossRestart() async throws {
+    func testTemporaryKeychainFailureRetriesButExplicitLogoutStaysSignedOut() async throws {
         try await isolated { store, defaults in
             try Settings.persistReviewSession(origin: self.origin, session: self.session)
             store.locked = true
             XCTAssertThrowsError(try Settings.sharedReviewCredentials())
             store.locked = false
-            XCTAssertThrowsError(try Settings.sharedReviewCredentials(), "only attempt restore once per launch")
+            XCTAssertEqual(try Settings.sharedReviewCredentials().1.token,self.session.token, "unlocking Keychain must restore the saved account")
             store.failWrite = true
             XCTAssertFalse(try Settings.persistReviewSession(origin: self.origin, session: self.session))
             self.restart()
@@ -98,6 +98,23 @@ import XCTest
             XCTAssertEqual(store.reads, before, "restart suppression must precede Keychain read")
         }
     }
+    func testRenewalWriteFailurePreservesIdentityAndRefreshAcrossActualRestartState() async throws {
+        try await isolated { store, defaults in
+            let saved = Settings.ServerSession(token:"expired-access",instanceId:"account",displayName:"Verified",workspaceIdentity:true,refreshToken:"saved-refresh",expiresAt:0)
+            XCTAssertTrue(try Settings.persistReviewSession(origin:self.origin,session:saved))
+            store.failWrite = true
+            var renewed = saved
+            renewed = Settings.ServerSession(token:"fresh-access",instanceId:"account",displayName:"Verified",workspaceIdentity:true,refreshToken:"saved-refresh",expiresAt:9999999999)
+            XCTAssertFalse(try Settings.persistReviewSession(origin:self.origin,session:renewed,preservingSavedIdentity:true))
+            XCTAssertFalse(defaults.bool(forKey:"DrawbridgeSkipReviewSessionRestore"))
+            self.restart()
+            let restored = try Settings.sharedReviewCredentials()
+            XCTAssertEqual(restored.1.instanceId,"account")
+            XCTAssertEqual(restored.1.refreshToken,"saved-refresh")
+            XCTAssertEqual(restored.1.token,"expired-access","a retained refresh credential renews this after restart")
+        }
+    }
+
     func testLogoutRejectsDelayedSignInBeforeDeviceKeyOrExchange() async throws {
         try await isolated { _, _ in
             let settings = Settings(editor: MainViewController())

@@ -785,7 +785,7 @@ extension MainViewController {
              #selector(commandActualSize(_:)), #selector(commandFitWidth(_:)), #selector(commandFitPage(_:)), #selector(commandGoToSheet(_:)), #selector(selectSelectionTool(_:)):
             return hasDocument
         case #selector(commandSetPageDrawingScale(_:)), #selector(commandCalibrateDrawingScale(_:)):
-            return !isActiveReview && hasDocument && pdfView.currentPage != nil && pdfView.rectangleMarkup.canEdit()
+            return measurementCapability.canSetScale
         case #selector(areaMeasure(_:)), #selector(perimeterMeasure(_:)):
             return measurementCapability.canMeasure
         case #selector(snapshotCapture(_:)), #selector(polygonSnapshotCapture(_:)):

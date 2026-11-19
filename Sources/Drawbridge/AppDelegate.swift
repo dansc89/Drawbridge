@@ -74,6 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupMainMenu(controller: mainViewController)
         NSApp.activate(ignoringOtherApps: true)
         flushPendingOpenURLs()
+        sharedReview.reconnectSavedAccountOnLaunch()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -205,7 +206,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         measurementsMenu.addItem(withTitle: "Set Drawing Scale…", action: #selector(MainViewController.commandSetPageDrawingScale(_:)), keyEquivalent: "").target = controller
         measurementsMenu.addItem(withTitle: "Calibrate Drawing Scale…", action: #selector(MainViewController.commandCalibrateDrawingScale(_:)), keyEquivalent: "").target = controller
         measurementsMenu.addItem(withTitle: "Area (Shift+A)", action: #selector(MainViewController.areaMeasure(_:)), keyEquivalent: "").target = controller
-        measurementsMenu.addItem(withTitle: "Perimeter / Length (Shift+L)", action: #selector(MainViewController.perimeterMeasure(_:)), keyEquivalent: "").target = controller
+        measurementsMenu.addItem(withTitle: "Perimeter / Length (M)", action: #selector(MainViewController.perimeterMeasure(_:)), keyEquivalent: "").target = controller
         measurementsItem.submenu = measurementsMenu
 
         let fileItem = NSMenuItem()

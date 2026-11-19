@@ -114,7 +114,7 @@ extension MainViewController {
     }
     @discardableResult
     func applyDrawingScaleForm(_ form: DrawingScaleForm) -> Bool {
-        guard !isActiveReview, pdfView.rectangleMarkup.canEdit(), let document = pdfView.document,
+        guard pdfView.rectangleMarkup.canEdit(), let document = pdfView.document,
               form.matches(document), let scale = form.scale, let indices = form.pageIndices,
               !indices.isEmpty, indices.allSatisfy({ form.capturedPages.indices.contains($0) }) else { return false }
         let pages = indices.map { form.capturedPages[$0] }
@@ -124,7 +124,7 @@ extension MainViewController {
         return true
     }
     @objc func commandSetPageDrawingScale(_ sender: Any?) {
-        guard !isActiveReview, pdfView.rectangleMarkup.canEdit(), let document = pdfView.document, pdfView.currentPage != nil else { beep(); return }
+        guard pdfView.rectangleMarkup.canEdit(), let document = pdfView.document, pdfView.currentPage != nil else { beep(); return }
         pdfView.rectangleMarkup.finishTextEditing()
         pdfView.rectangleMarkup.cancelGesture()
         guard let form = makeDrawingScaleForm() else { return }
@@ -171,7 +171,7 @@ extension MainViewController {
         rectangleToolbar.areaButton.isEnabled = measurementCapability.canMeasure
         rectangleToolbar.perimeterButton.isEnabled = measurementCapability.canMeasure
         rectangleToolbar.areaButton.toolTip = measurementCapability.measurementReason ?? "Measure area"
-        rectangleToolbar.perimeterButton.toolTip = measurementCapability.measurementReason ?? "Measure perimeter"
+        rectangleToolbar.perimeterButton.toolTip = measurementCapability.measurementReason ?? "Measure Perimeter or Length (M)"
     }
 }
 
@@ -203,7 +203,7 @@ private final class CalibrationForm: NSView {
 @MainActor
 extension MainViewController {
     @objc func commandCalibrateDrawingScale(_ sender: Any?) {
-        guard !isActiveReview, pdfView.rectangleMarkup.canEdit(), let page = pdfView.currentPage else { beep(); return }
+        guard pdfView.rectangleMarkup.canEdit(), let page = pdfView.currentPage else { beep(); return }
         guard MeasurementMetadata.supportedPage(page) else {
             runAlert(title: "Unsupported page units", informativeText: "This page uses non-standard PDF units. Calibration is not available for it yet.", style: .warning); return
         }
@@ -215,7 +215,7 @@ extension MainViewController {
         view.window?.makeFirstResponder(pdfView)
     }
     func completeDrawingCalibration(on page: PDFPage, start: CGPoint, end: CGPoint) {
-        guard !isActiveReview, let document = pdfView.document, document.index(for: page) != NSNotFound, pdfView.rectangleMarkup.canEdit() else { return }
+        guard let document = pdfView.document, document.index(for: page) != NSNotFound, pdfView.rectangleMarkup.canEdit() else { return }
         let selection = pagesTableView.selectedRowIndexes
         let numbers = selection.count > 1 ? selection.map { String($0+1) }.joined(separator: ", ") : String(document.index(for: page)+1)
         let form = CalibrationForm(pageText: numbers, preferredUnit: MeasurementMetadata.scale(on: page)?.unit ?? "ft")

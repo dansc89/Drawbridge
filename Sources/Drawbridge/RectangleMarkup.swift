@@ -296,6 +296,7 @@ final class RectangleMarkupController {
     enum Tool: String { case select, pen, rectangle, ellipse, line, arrow, text, polyline, polygon, cloud, area, perimeter, calibrate, snapshotBox, snapshotPolygon, highlight }
     enum Corner: CaseIterable { case lowerLeft, lowerRight, upperLeft, upperRight }
     private enum Gesture {
+        case dimension(PDFPage, PDFAnnotation)
         case create(PDFPage, CGPoint)
         case vertex(PDFPage, PDFAnnotation, Int)
         case edit(PDFPage, PDFAnnotation, CGRect, CGPoint, Corner?)
@@ -312,6 +313,8 @@ final class RectangleMarkupController {
             if oldValue != matchPropertiesActive { (view as? MarkupPDFView)?.markupToolCursorChanged() }
         }
     }
+    var measurementFontSize: CGFloat = 11
+    var measurementScaleOverride: DrawingScale?
     var textBoxPaint: TextBoxPaint?
     let layerStates = NSMapTable<PDFDocument, MarkupLayerState>(keyOptions: .weakMemory, valueOptions: .strongMemory)
     private let fallbackUndo = UndoManager()
@@ -346,6 +349,7 @@ final class RectangleMarkupController {
         setSelectedItems(original + hits)
     }
 
+    private var previewDimensionOffset: Double?
     private var gesture: Gesture?
     private var pendingLine: (page: PDFPage, start: CGPoint)?
     private var preview: (PDFPage, CGRect)?
@@ -399,9 +403,12 @@ final class RectangleMarkupController {
     var onInvalidMeasurement: (() -> Void)?
     var canEdit: () -> Bool = { true }
     var canManageLayers: () -> Bool = { true }
+    var reviewScaleIdentity: ((PDFPage) -> String?)?
     var tool: Tool = .select {
         didSet {
             finishTextEditing(); cancelGesture()
+            (view as? MarkupPDFView)?.clearDrawingSnap()
+            if usesLineworkSnapping { (view as? MarkupPDFView)?.prepareLineworkSnapping() }
             if oldValue != tool {
                 if let original = appearanceBeforeSavedTool, [.highlight, .cloud].contains(oldValue) || SavedMarkupAppearance.load(oldValue, from: defaultPreferences) != nil { applyDefaults(original) }
                 appearanceBeforeSavedTool = nil
@@ -462,6 +469,7 @@ final class RectangleMarkupController {
         case ("c", []): return .cloud
         case ("r", []): return .rectangle
         case ("l", []): return .line
+        case ("m", []): return .perimeter
         case ("n", [.shift]): return .polyline
         case ("p", [.shift]): return .polygon
         case ("a", [.shift]): return .area
@@ -575,7 +583,12 @@ final class RectangleMarkupController {
                     polygon.shouldDisplay = original.shouldDisplay; polygon.shouldPrint = original.shouldPrint; polygon.isReadOnly = original.isReadOnly
                     RectangleMarkupRecord.setVertices(RectangleMarkupRecord.vertices(original),on:polygon)
                     if RectangleMarkupRecord.isCloud(original) { polygon.setValue(true, forAnnotationKey: RectangleMarkupRecord.cloudKey) }
-                    if measuredPath { MeasurementMetadata.updateLabel(polygon) }
+                    if measuredPath {
+                        if let measurement = MeasurementMetadata.measurement(polygon), measurement.isDistance(points:RectangleMarkupRecord.vertices(polygon)) {
+                            polygon.bounds = MeasurementAppearance.dimensionBounds(measurement,points:RectangleMarkupRecord.vertices(polygon),rotation:page.rotation,lineWidth:polygon.border?.lineWidth ?? 2)
+                        }
+                        MeasurementMetadata.updateLabel(polygon)
+                    }
                     RectangleMarkupRecord.setPolygonFill(RectangleMarkupRecord.polygonFill(original),on:polygon)
                     polygon.setValue(MarkupStyle.fillOpacity(original), forAnnotationKey: MarkupStyle.fillOpacityKey)
                     DraftingHatch.apply(DraftingHatch.read(original), to: polygon)
@@ -649,6 +662,13 @@ final class RectangleMarkupController {
     /// version without marking those newer edits clean.
     func acceptPersistedSource(at url: URL, stamp: PDFMarkupSourceStamp? = nil) { sourceStamp = stamp ?? PDFMarkupSourceStamp.capture(url) }
 
+    private var usesLineworkSnapping: Bool { [.line, .arrow, .calibrate, .area, .perimeter, .polyline, .polygon].contains(tool) }
+    private func drawingPoint(_ location: CGPoint, on page: PDFPage) -> CGPoint {
+        guard let view else { return location }
+        let point = view.convert(location, to: page)
+        return usesLineworkSnapping ? (view as? MarkupPDFView)?.drawingSnap(point, on: page) ?? point : point
+    }
+
     func pointerDown(at location: CGPoint, clickCount: Int = 1, modifiers: NSEvent.ModifierFlags = []) -> Bool {
         if matchPropertiesPointerDown(at: location) { return true }
         optionDrag = modifiers.contains(.option)
@@ -664,7 +684,7 @@ final class RectangleMarkupController {
             return false
         }
         bind(to: view.document)
-        let point = view.convert(location, to: page)
+        let point = drawingPoint(location, on: page)
         if tool == .pen || tool == .highlight {
             selected = nil
             view.setCurrentSelection(nil, animate: false)
@@ -750,6 +770,20 @@ final class RectangleMarkupController {
             return true
         }
         if let selected, selected.page === page, RectangleMarkupRecord.owns(selected), !selected.isReadOnly, !layerIsLocked(selected) {
+            if let measurement = MeasurementMetadata.measurement(selected) {
+                let points = RectangleMarkupRecord.vertices(selected)
+                if measurement.isDistance(points: points), !optionDrag {
+                    let handle = Self.dimensionHandle(measurement, points: points)
+                    let locationInView = view.convert(handle, from: page)
+                    if hypot(location.x-locationInView.x, location.y-locationInView.y) <= 8 {
+                        gesture = .dimension(page,selected)
+                        previewDimensionOffset = measurement.dimensionOffset ?? 0
+                        preview = (page,selected.bounds)
+                        refresh()
+                        return true
+                    }
+                }
+            }
             let vertices = RectangleMarkupRecord.vertices(selected)
             if let index = vertices.indices.first(where: { i in
                 guard !optionDrag else { return false }
@@ -791,9 +825,12 @@ final class RectangleMarkupController {
     }
 
     func pointerMoved(at location: CGPoint, modifiers: NSEvent.ModifierFlags = []) {
+        if usesLineworkSnapping, let view, let page = view.page(for: location, nearest: false) {
+            _ = drawingPoint(location, on: page)
+        } else { (view as? MarkupPDFView)?.clearDrawingSnap() }
         if let draft = pendingLine, let view {
             guard view.page(for: location, nearest: false) === draft.page else { return }
-            let point = view.convert(location, to: draft.page)
+            let point = drawingPoint(location, on: draft.page)
             let end = Self.clamped(modifiers.contains(.shift) ? MeasurementGeometry.constrained(point, from: draft.start) : point, to: draft.page.bounds(for: view.displayBox))
             previewEndpoints = (draft.start, end)
             preview = (draft.page, Self.lineBounds(draft.start, end, width: lineWidth))
@@ -801,7 +838,7 @@ final class RectangleMarkupController {
         }
         guard let view, let page = polylinePage else { return }
         guard view.page(for: location, nearest: false) === page else { return }
-        let point = view.convert(location,to:page)
+        let point = drawingPoint(location, on: page)
         polylineHover = Self.clamped(modifiers.contains(.shift) && !polylinePoints.isEmpty ? MeasurementGeometry.constrained(point, from: polylinePoints.last!) : point,to:page.bounds(for:view.displayBox)); refresh(presentationChanged: false)
     }
     @discardableResult
@@ -835,11 +872,14 @@ final class RectangleMarkupController {
         return create(on:page,bounds:bounds,kind:closed ? .polygon : .polyline,vertices:points)
     }
     @discardableResult
-    func createMeasurement(on page: PDFPage, points: [CGPoint], kind: DrawingMeasurement.Kind, closed: Bool, scale: DrawingScale) -> PDFAnnotation? {
-        let measurement = DrawingMeasurement(kind: kind, scale: scale, closed: closed)
+    func createMeasurement(on page: PDFPage, points: [CGPoint], kind: DrawingMeasurement.Kind, closed: Bool, scale: DrawingScale, dimensionOffset: Double = 18) -> PDFAnnotation? {
+        var measurement = DrawingMeasurement(kind: kind, scale: measurementScaleOverride ?? scale, closed: closed, captionFontSize: Double(measurementFontSize))
+        if measurement.isDistance(points: points) { measurement.dimensionOffset = dimensionOffset }
         guard measurement.valid(points: points), MeasurementMetadata.supportedPage(page) else { return nil }
         let padding: CGFloat = closed ? 8 : 24
-        let bounds = Self.polylineBounds(points, width: lineWidth).insetBy(dx: -padding, dy: -padding)
+        let bounds = measurement.isDistance(points: points)
+            ? MeasurementAppearance.dimensionBounds(measurement, points: points, rotation: page.rotation, lineWidth: lineWidth)
+            : Self.polylineBounds(points, width: lineWidth).insetBy(dx: -padding, dy: -padding)
         return create(on: page, bounds: bounds, kind: closed ? .polygon : .polyline, vertices: points, measurement: measurement)
     }
     /// Scale markers travel with each PDF page; settings survive save, deletion,
@@ -859,24 +899,30 @@ final class RectangleMarkupController {
     private func restoreDrawingScales(_ updates: [(PDFPage, DrawingScale?)], measurements: [(PDFAnnotation, DrawingMeasurement)]? = nil) {
         guard canEdit(), updates.allSatisfy({ $0.0.document === boundDocument }) else { return }
         let previous = updates.map { ($0.0, MeasurementMetadata.scale(on: $0.0)) }
-        let previousMeasurements = updates.flatMap { page, _ in page.annotations.compactMap { a -> (PDFAnnotation, DrawingMeasurement)? in MeasurementMetadata.measurement(a).map { (a,$0) } } }
+        let previousMeasurements = updates.flatMap { page, _ in
+            page.annotations.compactMap { annotation -> (PDFAnnotation, DrawingMeasurement)? in
+                guard !annotation.isReadOnly, !layerIsLocked(annotation) else { return nil }
+                return MeasurementMetadata.measurement(annotation).map { (annotation, $0) }
+            }
+        }
         undo.registerUndo(withTarget: self) { target in
             target.restoreDrawingScales(previous, measurements: previousMeasurements)
         }
         undo.setActionName("Set Page Scales")
         for (page, scale) in updates {
+            let markerID = reviewScaleIdentity?(page) ?? page.annotations.first(where: MeasurementMetadata.isPageScaleMetadata).flatMap(RectangleMarkupRecord.identity) ?? RectangleMarkupRecord.prefix + UUID().uuidString
             for carrier in page.annotations where MeasurementMetadata.isPageScaleMetadata(carrier) { page.removeAnnotation(carrier) }
             do {
                 let origin = page.bounds(for: .mediaBox).origin
                 let marker = PDFAnnotation(bounds: CGRect(origin: origin, size: CGSize(width: 2,height: 2)), forType: .square, withProperties: nil)
-                marker.setValue(RectangleMarkupRecord.prefix + UUID().uuidString, forAnnotationKey: RectangleMarkupRecord.identityKey)
+                marker.setValue(markerID, forAnnotationKey: RectangleMarkupRecord.identityKey)
                 if let scale { marker.setValue(MeasurementMetadata.json(scale), forAnnotationKey: MeasurementMetadata.pageScaleKey) }
                 else { marker.setValue(true, forAnnotationKey: MeasurementMetadata.clearedScaleKey) }
                 marker.setValue(true, forAnnotationKey: MeasurementMetadata.pendingScaleKey)
                 marker.color = .clear; marker.shouldDisplay = false; marker.shouldPrint = false; marker.isReadOnly = true
                 page.addAnnotation(marker)
                 for annotation in page.annotations {
-                    if let scale, var measurement = MeasurementMetadata.measurement(annotation) {
+                    if !annotation.isReadOnly, !layerIsLocked(annotation), let scale, var measurement = MeasurementMetadata.measurement(annotation) {
                         measurement.scale = scale
                         annotation.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey)
                         MeasurementMetadata.updateLabel(annotation)
@@ -887,6 +933,7 @@ final class RectangleMarkupController {
         // Restore heterogeneous per-measurement scales before publishing any page.
         // Capturing inverse state above keeps repeated undo/redo cycles exact.
         for (annotation, measurement) in measurements ?? [] {
+            guard !annotation.isReadOnly, !layerIsLocked(annotation), annotation.page?.document === boundDocument else { continue }
             annotation.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey)
             MeasurementMetadata.updateLabel(annotation)
         }
@@ -930,10 +977,20 @@ final class RectangleMarkupController {
         if pendingLine != nil { pointerMoved(at: location, modifiers: modifiers); return true }
         guard let view, let gesture else { return false }
         switch gesture {
+        case .dimension(let page, let annotation):
+            let points = RectangleMarkupRecord.vertices(annotation)
+            guard points.count == 2, var measurement = MeasurementMetadata.measurement(annotation) else { return false }
+            let end = Self.clamped(view.convert(location,to:page),to:page.bounds(for:view.displayBox))
+            let dx = points[1].x-points[0].x, dy = points[1].y-points[0].y
+            let length = max(0.001,hypot(dx,dy))
+            previewDimensionOffset = Double(((end.x-(points[0].x+points[1].x)/2)*(-dy)+(end.y-(points[0].y+points[1].y)/2)*dx)/length)
+            measurement.dimensionOffset = previewDimensionOffset
+            preview = (page,MeasurementAppearance.dimensionBounds(measurement,points:points,rotation:page.rotation,lineWidth:annotation.border?.lineWidth ?? 2))
         case .vertex(let page, let annotation, let index):
             var points = RectangleMarkupRecord.vertices(annotation)
             guard points.indices.contains(index) else { return false }
-            let candidate = view.convert(location,to:page)
+            var candidate = view.convert(location,to:page)
+            if MeasurementMetadata.measurement(annotation) != nil { candidate = (view as? MarkupPDFView)?.drawingSnap(candidate,on:page) ?? candidate }
             let anchor = points[index == 0 ? 1 : index-1]
             points[index] = Self.clamped(modifiers.contains(.shift) ? MeasurementGeometry.constrained(candidate, from: anchor) : candidate,to:page.bounds(for:view.displayBox))
             previewVertices = points
@@ -1052,6 +1109,8 @@ final class RectangleMarkupController {
         let candidate = preview?.1
         let endpoints = previewEndpoints
         let vertices = previewVertices
+        let dimensionOffset = previewDimensionOffset
+        previewDimensionOffset = nil
         self.gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil
         if (tool == .snapshotBox || tool == .cloud), case .create(let page, let start) = gesture,
            let candidate, max(candidate.width, candidate.height) * (view?.scaleFactor ?? 1) < 4 {
@@ -1061,6 +1120,8 @@ final class RectangleMarkupController {
         }
         guard canEdit(), let candidate, candidate.width >= 2, candidate.height >= 2 else { refresh(); return true }
         switch gesture {
+        case .dimension(let page, let annotation):
+            if let dimensionOffset { setDimensionOffset(dimensionOffset, of: annotation, on: page) }
         case .vertex(let page, let annotation, _):
             if let vertices { setVertexPositions(vertices,of:annotation,on:page) }
         case .create(let page, _):
@@ -1702,8 +1763,58 @@ final class RectangleMarkupController {
 
     private func vertexBounds(_ points: [CGPoint], annotation: PDFAnnotation) -> CGRect {
         let measurement = MeasurementMetadata.measurement(annotation)
+        if let measurement, measurement.isDistance(points: points) {
+            return MeasurementAppearance.dimensionBounds(measurement,points:points,rotation:annotation.page?.rotation ?? 0,lineWidth:annotation.border?.lineWidth ?? 2)
+        }
         let padding: CGFloat = measurement == nil ? 0 : (measurement!.closed ? 8 : 24)
         return Self.polylineBounds(points, width: annotation.border?.lineWidth ?? 2).insetBy(dx: -padding, dy: -padding)
+    }
+
+    func setMeasurementProperties(fontSize: CGFloat? = nil, scale: DrawingScale? = nil) {
+        guard canEdit(), fontSize.map({ $0.isFinite && (6...144).contains($0) }) ?? true,
+              scale?.isValid ?? true else { return }
+        guard let annotation = selected, let page = annotation.page,
+              var measurement = MeasurementMetadata.measurement(annotation) else {
+            if let fontSize { measurementFontSize = fontSize }
+            if let scale { measurementScaleOverride = scale }
+            onPresentationChanged?()
+            return
+        }
+        if let fontSize { measurement.captionFontSize = Double(fontSize) }
+        if let scale { measurement.scale = scale }
+        restoreMeasurementProperties(measurement, of: annotation, on: page)
+    }
+    private func restoreMeasurementProperties(_ measurement: DrawingMeasurement, of annotation: PDFAnnotation, on page: PDFPage) {
+        guard canEdit(), page.document === boundDocument, annotation.page === page, !annotation.isReadOnly,
+              !layerIsLocked(annotation), let previous = MeasurementMetadata.measurement(annotation),
+              measurement.valid(points:RectangleMarkupRecord.vertices(annotation)), previous != measurement else { return }
+        undo.registerUndo(withTarget:self) { $0.restoreMeasurementProperties(previous,of:annotation,on:page) }
+        undo.setActionName("Change Measurement Properties")
+        annotation.setValue(MeasurementMetadata.json(measurement),forAnnotationKey:MeasurementMetadata.measurementKey)
+        MeasurementMetadata.updateLabel(annotation)
+        selected = annotation
+        changed(page)
+    }
+
+    static func dimensionHandle(_ measurement: DrawingMeasurement, points: [CGPoint]) -> CGPoint {
+        let dx = points[1].x-points[0].x, dy = points[1].y-points[0].y
+        let length = max(0.001,hypot(dx,dy)), offset = CGFloat(measurement.dimensionOffset ?? 0)
+        return CGPoint(x:(points[0].x+points[1].x)/2-dy/length*offset,y:(points[0].y+points[1].y)/2+dx/length*offset)
+    }
+    func setDimensionOffset(_ offset: Double?, of annotation: PDFAnnotation, on page: PDFPage) {
+        guard canEdit(), page.document === boundDocument, annotation.page === page, !annotation.isReadOnly,
+              !layerIsLocked(annotation), var measurement = MeasurementMetadata.measurement(annotation),
+              measurement.isDistance(points:RectangleMarkupRecord.vertices(annotation)), offset.map({ $0.isFinite && abs($0) <= 14400 }) ?? true,
+              measurement.dimensionOffset != offset else { return }
+        let previous = measurement.dimensionOffset
+        undo.registerUndo(withTarget:self) { $0.setDimensionOffset(previous,of:annotation,on:page) }
+        undo.setActionName("Move Dimension Line")
+        measurement.dimensionOffset = offset
+        annotation.setValue(MeasurementMetadata.json(measurement),forAnnotationKey:MeasurementMetadata.measurementKey)
+        annotation.bounds = MeasurementAppearance.dimensionBounds(measurement,points:RectangleMarkupRecord.vertices(annotation),rotation:page.rotation,lineWidth:annotation.border?.lineWidth ?? 2)
+        MeasurementMetadata.updateLabel(annotation)
+        selected = annotation
+        changed(page)
     }
 
     private func replaceVertices(_ points: [CGPoint], bounds: CGRect, of annotation: PDFAnnotation, on page: PDFPage, action: String) {
@@ -1757,6 +1868,13 @@ final class RectangleMarkupController {
     static func hitTest(_ annotation: PDFAnnotation, at point: CGPoint, tolerance: CGFloat) -> Bool {
         let points = RectangleMarkupRecord.vertices(annotation)
         let radius = max(tolerance,(annotation.border?.lineWidth ?? 2)/2)
+        if let measurement = MeasurementMetadata.measurement(annotation), measurement.isDistance(points:points) {
+            let layout = MeasurementAppearance.dimensionLayout(measurement,points:points,rotation:annotation.page?.rotation ?? 0,lineWidth:annotation.border?.lineWidth ?? 2)
+            if layout.segments.contains(where:{ distanceFromSegment(point,$0.0,$0.1) <= radius }) { return true }
+            let x = (point.x-layout.center.x)*layout.cosine+(point.y-layout.center.y)*layout.sine
+            let y = -(point.x-layout.center.x)*layout.sine+(point.y-layout.center.y)*layout.cosine
+            return abs(x) <= layout.width/2+radius && abs(y) <= 8+radius
+        }
         if RectangleMarkupRecord.isCloud(annotation) {
             guard annotation.bounds.insetBy(dx: -radius, dy: -radius).contains(point) else { return false }
             let outline = RevisionCloud.path(points)
@@ -1859,8 +1977,8 @@ final class RectangleMarkupController {
         refresh(presentationChanged: false)
         return true
     }
-    func cancelGesture() { matchPropertiesActive = false; matchAppearance = nil; textBoxPaint = nil; groupMove = nil; selectionWindow = nil; penConstraintAnchor = nil; pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
-    func escape() { cancelSnapshotCapture(); cancelGesture(); selected = nil; onClickAway?(); tool = .select; refresh() }
+    func cancelGesture() { previewDimensionOffset = nil; matchPropertiesActive = false; matchAppearance = nil; textBoxPaint = nil; groupMove = nil; selectionWindow = nil; penConstraintAnchor = nil; pendingLine = nil; polylinePage = nil; polylinePoints = []; polylineHover = nil; gesture = nil; preview = nil; previewEndpoints = nil; previewVertices = nil; refresh() }
+    func escape() { (view as? MarkupPDFView)?.clearDrawingSnap(); cancelSnapshotCapture(); cancelGesture(); selected = nil; onClickAway?(); tool = .select; refresh() }
     // Observes real overlay work, including presentation-silent viewport refreshes.
     var onOverlayRefresh: (() -> Void)?
     func refresh(presentationChanged: Bool = true) {
@@ -1873,17 +1991,32 @@ final class RectangleMarkupController {
         if let view, let (page, bounds) = preview ?? selected.flatMap({ a in a.page.map { ($0, a.bounds) } }), page.document === view.document, (preview != nil || page === view.currentPage) {
             let rect = view.convert(bounds, from: page).standardized
             let vertices = selected.map { RectangleMarkupRecord.vertices($0) } ?? []
-            if !vertices.isEmpty, let annotation = selected {
+            if case .dimension(_, let annotation) = gesture, var measurement = MeasurementMetadata.measurement(annotation), let offset = previewDimensionOffset {
+                measurement.dimensionOffset = offset
+                let layout = MeasurementAppearance.dimensionLayout(measurement,points:vertices,rotation:page.rotation,lineWidth:annotation.border?.lineWidth ?? 2)
+                for segment in layout.segments { path.move(to:view.convert(segment.0,from:page)); path.addLine(to:view.convert(segment.1,from:page)) }
+                let handle = view.convert(Self.dimensionHandle(measurement,points:vertices),from:page)
+                path.addEllipse(in:CGRect(x:handle.x-5,y:handle.y-5,width:10,height:10))
+            } else if !vertices.isEmpty, let annotation = selected {
                 let original = annotation.bounds
                 let points = previewVertices ?? vertices.map { p in
                     CGPoint(x:bounds.minX+(p.x-original.minX)*bounds.width/original.width,
                             y:bounds.minY+(p.y-original.minY)*bounds.height/original.height)
                 }
-                for (i,p) in points.enumerated() {
-                    let q = view.convert(p,from:page)
-                    if i == 0 { path.move(to:q) } else { path.addLine(to:q) }
+                if let measurement = MeasurementMetadata.measurement(annotation), measurement.isDistance(points:points) {
+                    let layout = MeasurementAppearance.dimensionLayout(measurement,points:points,rotation:page.rotation,lineWidth:annotation.border?.lineWidth ?? 2)
+                    for segment in layout.segments { path.move(to:view.convert(segment.0,from:page)); path.addLine(to:view.convert(segment.1,from:page)) }
+                } else {
+                    for (i,p) in points.enumerated() {
+                        let q = view.convert(p,from:page)
+                        if i == 0 { path.move(to:q) } else { path.addLine(to:q) }
+                    }
+                    if annotation.type == "Polygon" { path.closeSubpath() }
                 }
-                if annotation.type == "Polygon" { path.closeSubpath() }
+                if let measurement = MeasurementMetadata.measurement(annotation), measurement.isDistance(points:points) {
+                    let handle = view.convert(Self.dimensionHandle(measurement,points:points),from:page)
+                    path.addEllipse(in:CGRect(x:handle.x-5,y:handle.y-5,width:10,height:10))
+                }
                 for point in points {
                     let q = view.convert(point,from:page)
                     path.addRect(CGRect(x:q.x-4,y:q.y-4,width:8,height:8))

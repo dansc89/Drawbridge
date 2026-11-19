@@ -134,6 +134,40 @@ import XCTest
         }
     }
 
+    func testOwnReviewCalibrationSyncsRestoresAndNeverChangesAnotherReviewersScale() async throws {
+        try await withReview { review, editor in
+            let page = try XCTUnwrap(review.reviewPDF?.page(at:0))
+            let scale = try XCTUnwrap(DrawingScale.architectural(inches:0.125,feet:1,name:"Test Scale"))
+            let controller = editor.pdfView.rectangleMarkup
+            controller.bind(to:review.reviewPDF)
+            controller.canEdit = { true }
+            controller.reviewScaleIdentity = { review.scaleMarkerIdentity(on:$0) }
+            controller.applyDrawingScale(scale,to:[page])
+            review.recordChanges(on:page)
+            let marker = try XCTUnwrap(page.annotations.first(where:MeasurementMetadata.isPageScaleMetadata))
+            let record = try XCTUnwrap(RectangleMarkupRecord.capture(annotation:marker,pageIndex:0))
+            XCTAssertEqual(record.id,review.scaleMarkerIdentity(on:page))
+            XCTAssertEqual(record.pageScale,scale)
+            // Replay in an independently empty page state using the real decoder.
+            let target = try XCTUnwrap(review.reviewPDF?.page(at:1))
+            var remote = RectangleMarkupRecord(id:try XCTUnwrap(review.scaleMarkerIdentity(on:target)),pageIndex:1,bounds:record.bounds,red:record.red,green:record.green,blue:record.blue,lineWidth:record.lineWidth)
+            remote.pageScale = scale
+            func op(_ owner: String, _ seq: Int) throws -> SharedReviewAPI.Operation {
+                let payload = SharedReviewAPI.Markup(id:remote.id,page:1,record:remote,ownerInstanceId:owner)
+                let encoded = try JSONSerialization.jsonObject(with:JSONEncoder().encode(payload))
+                return try JSONDecoder().decode(SharedReviewAPI.Operation.self,from:JSONSerialization.data(withJSONObject:["seq":seq,"op_type":"drawbridge.markup.v1","payload":encoded]))
+            }
+            try review.replayOperations([op("other",100)],instanceID:"device")
+            XCTAssertNil(MeasurementMetadata.scale(on:target))
+            try review.replayOperations([op("device",101)],instanceID:"device")
+            XCTAssertEqual(MeasurementMetadata.scale(on:target),scale)
+            let restored = try XCTUnwrap(target.annotations.first(where:MeasurementMetadata.isPageScaleMetadata))
+            XCTAssertFalse(restored.shouldDisplay)
+            XCTAssertFalse(restored.shouldPrint)
+            XCTAssertTrue(restored.isReadOnly)
+        }
+    }
+
     private func withReview(_ body: (SharedReviewWindowController, MainViewController) throws -> Void) async throws {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -1117,10 +1117,31 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         return segments
     }
 
-    private struct SnapSegmentInView {
-        let start: NSPoint
-        let end: NSPoint
+    private let lineworkSnapping = PDFLineworkSnapping()
+    private let lineworkSnapMarker = CAShapeLayer()
+    func prepareLineworkSnapping() {
+        if let page = currentPage { lineworkSnapping.prepare(page) }
     }
+    func drawingSnap(_ point: CGPoint, on page: PDFPage) -> CGPoint {
+        let snapped = lineworkSnapping.nearest(point, on: page, tolerance: 8 / max(scaleFactor, 0.01),
+            endpoints: isEndpointSnapEnabled, midpoints: isMidpointSnapEnabled, intersections: isIntersectionSnapEnabled)
+        if lineworkSnapMarker.superlayer == nil {
+            lineworkSnapMarker.strokeColor = NSColor.systemGreen.cgColor
+            lineworkSnapMarker.fillColor = NSColor.clear.cgColor
+            lineworkSnapMarker.lineWidth = 1.5
+            lineworkSnapMarker.zPosition = 2100
+            layer?.addSublayer(lineworkSnapMarker)
+        }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        lineworkSnapMarker.isHidden = snapped == nil
+        if let snapped {
+            let p = convert(snapped, from: page)
+            lineworkSnapMarker.path = CGPath(rect: CGRect(x:p.x-5,y:p.y-5,width:10,height:10), transform:nil)
+        }
+        CATransaction.commit()
+        return snapped ?? point
+    }
+    func clearDrawingSnap() { lineworkSnapMarker.isHidden = true }
 
     func beginRegionCaptureMode() {
         isRegionCaptureModeEnabled = true

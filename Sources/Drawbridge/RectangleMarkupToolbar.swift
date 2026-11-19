@@ -69,7 +69,7 @@ final class RectangleMarkupToolbar: ThemedToolbarStackView {
         matchPropertiesButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
         matchPropertiesButton.target = self; matchPropertiesButton.action = #selector(matchProperties(_:))
         addArrangedSubview(matchPropertiesButton)
-        for (button, symbol, name) in [(selectButton,"cursorarrow","Select markups (V)"),(penButton,"pencil","Pen (P)"),(rectangleButton,"rectangle","Draw Rectangle (R)"),(ellipseButton,"circle","Draw Ellipse (E)"),(lineButton,"line.diagonal","Draw Line (L)"),(arrowButton,"arrow.up.right","Draw Arrow (A)"),(cloudButton,"cloud","Revision Cloud (C)"),(polygonButton,"pentagon","Draw Polygon (Shift+P)"),(polylineButton,"point.topleft.down.to.point.bottomright.curvepath","Draw Polyline (Shift+N)"),(textButton,"textformat","Draw Text Box (T)"),(snapshotButton,"camera","Snapshot (G): drag a box or click corners and double-click to finish"),(areaButton,"square.dashed","Measure Area (Shift+A)"),(perimeterButton,"ruler","Measure Perimeter or Length (Shift+L)"),(editTextButton,"square.and.pencil","Edit Text"),(deleteButton,"trash","Delete selected markup (Delete)"),(undoButton,"arrow.uturn.backward","Undo (⌘Z)"),(redoButton,"arrow.uturn.forward","Redo (⇧⌘Z)")] {
+        for (button, symbol, name) in [(selectButton,"cursorarrow","Select markups (V)"),(penButton,"pencil","Pen (P)"),(rectangleButton,"rectangle","Draw Rectangle (R)"),(ellipseButton,"circle","Draw Ellipse (E)"),(lineButton,"line.diagonal","Draw Line (L)"),(arrowButton,"arrow.up.right","Draw Arrow (A)"),(cloudButton,"cloud","Revision Cloud (C)"),(polygonButton,"pentagon","Draw Polygon (Shift+P)"),(polylineButton,"point.topleft.down.to.point.bottomright.curvepath","Draw Polyline (Shift+N)"),(textButton,"textformat","Draw Text Box (T)"),(snapshotButton,"camera","Snapshot (G): drag a box or click corners and double-click to finish"),(areaButton,"square.dashed","Measure Area (Shift+A)"),(perimeterButton,"ruler","Measure Perimeter or Length (M)"),(editTextButton,"square.and.pencil","Edit Text"),(deleteButton,"trash","Delete selected markup (Delete)"),(undoButton,"arrow.uturn.backward","Undo (⌘Z)"),(redoButton,"arrow.uturn.forward","Redo (⇧⌘Z)")] {
             button.bezelStyle = .texturedRounded; button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: name)
             button.imagePosition = .imageOnly; button.toolTip = name; button.setAccessibilityLabel(name)
             if button is MarkupToolButton {
@@ -111,6 +111,9 @@ final class RectangleMarkupToolbar: ThemedToolbarStackView {
 extension MainViewController {
     func configureRectangleMarkup() {
         let session = pdfView.rectangleMarkup
+        session.reviewScaleIdentity = { [weak self] page in
+            page.document.flatMap { self?.sharedReview?.review(for: $0)?.scaleMarkerIdentity(on: page) }
+        }
         session.canManageLayers = { [weak self] in self?.isActiveReview != true }
         session.canEdit = { [weak self] in
             guard let self, let doc = self.pdfView.document else { return false }

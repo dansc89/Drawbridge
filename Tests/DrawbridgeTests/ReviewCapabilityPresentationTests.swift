@@ -12,10 +12,10 @@ import XCTest
         controller.buildWindow() // Construct only; never show or activate a window.
         let window = try XCTUnwrap(controller.window)
         defer { window.close() }
-        XCTAssertEqual(window.title, "Drawbridge Review — Server Documents")
+        XCTAssertEqual(window.title, "Drawbridge Review")
         XCTAssertEqual(window.subtitle, "")
         let path = try XCTUnwrap(descendants(try XCTUnwrap(window.contentView)).compactMap { $0 as? NSPathControl }.first)
-        XCTAssertEqual(path.pathItems.map(\.title), ["Server Documents"])
+        XCTAssertEqual(path.pathItems.map(\.title), ["Documents"])
     }
 
     func testExplanationMatrixMatchesExistingGatesWithoutInventingCapabilities() {
@@ -69,12 +69,8 @@ import XCTest
         }
     }
 
-    func testWorkspaceNameIsDisclosedVerbatimAndNeverUsedAsApplicationIdentity() {
-        for name in ["Example Review Pilot", "Design & Engineering", "日本語 Workspace"] {
-            XCTAssertEqual(ReviewCapabilityPresentation.subtitle(workspace: name), "Workspace: " + name)
-            XCTAssertEqual(ReviewCapabilityPresentation.browserTitle, "Drawbridge Review — Server Documents")
-        }
-        XCTAssertEqual(ReviewCapabilityPresentation.subtitle(workspace: nil), "")
+    func testBrowserTitleStaysConcise() {
+        XCTAssertEqual(ReviewCapabilityPresentation.browserTitle, "Drawbridge Review")
     }
 
     func testUnavailableControlsExplainMissingServerCapabilitiesPersistently() throws {

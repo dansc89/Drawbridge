@@ -136,7 +136,7 @@ final class ReviewNativeBrowserTests: XCTestCase {
         XCTAssertEqual(scroll.borderType, .noBorder)
         XCTAssertEqual(scroll.convert(scroll.bounds, to: content).minX, 0, accuracy: 1)
         XCTAssertEqual(scroll.frame.width, content.bounds.width, accuracy: 1)
-        XCTAssertEqual(window.title, "Drawbridge Review — Server Documents")
+        XCTAssertEqual(window.title, "Drawbridge Review")
         XCTAssertNotNil(table.doubleAction)
         XCTAssertTrue(table.target === controller)
 

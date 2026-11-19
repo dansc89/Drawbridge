@@ -9,6 +9,28 @@ import XCTest
         try XCTUnwrap(descendants(inspector.view).compactMap { $0 as? T }.first { $0.accessibilityLabel() == label }, "Missing inspector control: \(label)")
     }
     func fire(_ control: NSControl) { _ = control.target?.perform(control.action, with: control) }
+    func testDimensionInspectorEditsTextAndCustomScaleAndPreservesClipboard() throws {
+        let document = PDFDocument(), page = PDFPage(); document.insert(page, at: 0)
+        let session = RectangleMarkupController(); session.bind(to: document)
+        let original = DrawingScale(unitsPerPoint: 1/9, unit: "ft", name: "1/8 inch")
+        let annotation = try XCTUnwrap(session.createMeasurement(on: page, points: [CGPoint(x:80,y:100),CGPoint(x:170,y:100)], kind: .perimeter, closed:false, scale:original))
+        session.selected = annotation
+        let inspector = MarkupPropertiesViewController(); inspector.session = session; inspector.refresh()
+        let font = try control("Font size in points", in:inspector, as:NSTextField.self)
+        font.doubleValue = 20; fire(font)
+        XCTAssertEqual(MeasurementMetadata.measurement(annotation)?.captionFontSize,20)
+        let paper = try control("Measurement paper inches", in:inspector, as:NSTextField.self)
+        let real = try control("Measurement real distance", in:inspector, as:NSTextField.self)
+        paper.stringValue = "1/4"; real.stringValue = "1"; fire(real)
+        let changed = try XCTUnwrap(MeasurementMetadata.measurement(annotation))
+        XCTAssertEqual(changed.scale.unitsPerPoint,1/18,accuracy:0.000001)
+        XCTAssertEqual(changed.captionFontSize,20)
+        let record = try XCTUnwrap(RectangleMarkupRecord.capture(annotation:annotation,pageIndex:0))
+        let pasted = try JSONDecoder().decode(RectangleMarkupRecord.self,from:JSONEncoder().encode(record)).clipboardAnnotation(contents:nil)
+        XCTAssertEqual(MeasurementMetadata.measurement(pasted),changed)
+        session.canEdit = { false }; inspector.refresh()
+        XCTAssertFalse(font.isEnabled); XCTAssertFalse(real.isEnabled)
+    }
     func testHatchDefaultsPersistPerToolAndCreateGeometry() throws {
         let name = "DraftingInspector.\(UUID())"
         let prefs = UserDefaults(suiteName: name)!

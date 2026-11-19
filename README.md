@@ -64,7 +64,7 @@ The [user manual](USER_MANUAL.md) covers navigation, page/bookmark deletion, sav
 | Polyline | Shift+N |
 | Text box | T |
 | Area | Shift+A |
-| Perimeter / Length | Shift+L |
+| Perimeter / Length | M |
 | Undo / Redo | Cmd+Z / Shift+Cmd+Z |
 
 The Pen tool displays a pen cursor over the PDF, with the nib aligned to the drawing point.
@@ -77,7 +77,7 @@ Line and arrow tools use two clicks: start, then end. Text boxes let you type di
 
 Choose **Measurements > Set Drawing Scale…** to apply a preset or custom scale to one or several PDF pages. **Calibrate Drawing Scale…** uses two points and a known distance in feet or meters. Verify the result against a known dimension before taking measurements.
 
-Use **Area (Shift+A)** for a closed boundary. Use **Perimeter / Length (Shift+L)** for a closed perimeter or an open path. Click the first point to close, or press Enter to finish. Backspace removes the last unfinished point; Escape cancels. Editing nodes or changing page scale recalculates the totals and supports Undo/Redo.
+Use **Area (Shift+A)** for a closed boundary. Use **Perimeter / Length (M)** for a closed perimeter or an open path. Click the first point to close, or press Enter to finish. Backspace removes the last unfinished point; Escape cancels. Editing nodes or changing page scale recalculates the totals and supports Undo/Redo.
 
 Each page has one scale. Automatic snapping to drawing geometry, multiple scale regions, curved measurements, and takeoff exports are not supported. See the [measurement instructions](USER_MANUAL.md#drawing-measurements) for details.
 

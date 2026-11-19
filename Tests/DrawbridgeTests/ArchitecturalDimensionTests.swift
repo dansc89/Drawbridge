@@ -40,7 +40,7 @@ final class ArchitecturalDimensionTests: XCTestCase {
         }
         let document = PDFDocument(); let page = PDFPage(); document.insert(page, at: 0)
         let controller = RectangleMarkupController(); controller.bind(to: document)
-        let annotation = try XCTUnwrap(controller.createMeasurement(on: page, points: [CGPoint(x: 120,y: 80), CGPoint(x: 120,y: 280)], kind: .perimeter, closed: false, scale: DrawingScale(unitsPerPoint: 0.04, unit: "ft", name: "test")))
+        let annotation = try XCTUnwrap(controller.createMeasurement(on: page, points: [CGPoint(x: 120,y: 80), CGPoint(x: 120,y: 280)], kind: .perimeter, closed: false, scale: DrawingScale(unitsPerPoint: 0.04, unit: "ft", name: "test"), dimensionOffset: 0))
         let pixels = try render(annotation)
         XCTAssertFalse((90...104).contains { x in (165...195).contains { pixels.ink(x,$0) } }, "No horizontal glyphs extending left of vertical text")
         let record = try XCTUnwrap(RectangleMarkupRecord.capture(document).first)
@@ -64,7 +64,7 @@ final class ArchitecturalDimensionTests: XCTestCase {
         let controller = RectangleMarkupController(); controller.bind(to: document)
         let annotation = try XCTUnwrap(controller.createMeasurement(on: page,
             points: [CGPoint(x: 80,y: 120), CGPoint(x: 280,y: 120)], kind: .perimeter, closed: false,
-            scale: DrawingScale(unitsPerPoint: 0.07, unit: "ft", name: "test")))
+            scale: DrawingScale(unitsPerPoint: 0.07, unit: "ft", name: "test"), dimensionOffset: 0))
         annotation.color = .systemRed
         let pixels = try render(annotation)
         XCTAssertTrue(pixels.ink(80, 109), "Long extension below endpoint")
@@ -82,7 +82,7 @@ final class ArchitecturalDimensionTests: XCTestCase {
         let controller = RectangleMarkupController(); controller.bind(to: document)
         let annotation = try XCTUnwrap(controller.createMeasurement(on: page,
             points: [CGPoint(x: 80,y: 120), CGPoint(x: 280,y: 120)], kind: .perimeter, closed: false,
-            scale: DrawingScale(unitsPerPoint: 0.07, unit: "ft", name: "test")))
+            scale: DrawingScale(unitsPerPoint: 0.07, unit: "ft", name: "test"), dimensionOffset: 0))
         annotation.color = .black
         MarkupStyle.apply(pattern: .solid, opacity: 1, to: annotation)
         let opaque = try render(annotation)
@@ -104,7 +104,7 @@ final class ArchitecturalDimensionTests: XCTestCase {
         let controller = RectangleMarkupController(); controller.bind(to: document)
         let annotation = try XCTUnwrap(controller.createMeasurement(on: page,
             points: [CGPoint(x: 80,y: 120), CGPoint(x: 280,y: 120)], kind: .perimeter, closed: false,
-            scale: DrawingScale(unitsPerPoint: 0.07, unit: "ft", name: "test")))
+            scale: DrawingScale(unitsPerPoint: 0.07, unit: "ft", name: "test"), dimensionOffset: 0))
         annotation.color = .black
         let border = try XCTUnwrap(annotation.border); border.lineWidth = 2; annotation.border = border
         for pattern in MarkupLinePattern.allCases {
@@ -128,7 +128,7 @@ final class ArchitecturalDimensionTests: XCTestCase {
         let controller = RectangleMarkupController(); controller.bind(to: document)
         let points = [CGPoint(x: 80,y: 120), CGPoint(x: 280,y: 120)]
         let annotation = try XCTUnwrap(controller.createMeasurement(on: page, points: points, kind: .perimeter, closed: false,
-            scale: DrawingScale(unitsPerPoint: 0.07, unit: "ft", name: "test")))
+            scale: DrawingScale(unitsPerPoint: 0.07, unit: "ft", name: "test"), dimensionOffset: 0))
         let border = try XCTUnwrap(annotation.border); border.lineWidth = 4; annotation.border = border
         annotation.color = .black
         XCTAssertTrue(try render(annotation).ink(110, 121), "Selected four-point stroke must not be capped at one")
@@ -139,6 +139,33 @@ final class ArchitecturalDimensionTests: XCTestCase {
         let short = MeasurementAppearance.DimensionLayout(points: [.zero, CGPoint(x: 4,y: 0)],
             bounds: CGRect(x: -24,y: -24,width: 52,height: 48), rotation: 0, line: line, lineWidth: 4)
         XCTAssertLessThanOrEqual(short.strokeWidth, 0.1)
+    }
+
+    func testShortDimensionKeepsReadableTextAndOffsetMovesWithoutChangingDistance() throws {
+        let document = PDFDocument(); let page = PDFPage(); document.insert(page,at:0)
+        let controller = RectangleMarkupController(); controller.bind(to:document)
+        let points = [CGPoint(x:100,y:100),CGPoint(x:104.5,y:100)]
+        let scale = try XCTUnwrap(DrawingScale.architectural(inches:0.125,feet:1,name:"1/8"))
+        let annotation = try XCTUnwrap(controller.createMeasurement(on:page,points:points,kind:.perimeter,closed:false,scale:scale))
+        let measurement = try XCTUnwrap(MeasurementMetadata.measurement(annotation))
+        let layout = MeasurementAppearance.dimensionLayout(measurement,points:points,rotation:0,lineWidth:2)
+        XCTAssertEqual(layout.factor,1)
+        XCTAssertGreaterThan(layout.center.x,points[1].x)
+        XCTAssertEqual(measurement.dimensionOffset,18)
+        XCTAssertLessThan(annotation.bounds.height,48)
+        controller.undo.groupsByEvent = false
+        controller.undo.beginUndoGrouping()
+        controller.setDimensionOffset(-25,of:annotation,on:page)
+        controller.undo.endUndoGrouping()
+        XCTAssertEqual(RectangleMarkupRecord.vertices(annotation),points)
+        XCTAssertEqual(MeasurementMetadata.measurement(annotation)?.value(points:points),0.5)
+        XCTAssertEqual(MeasurementMetadata.measurement(annotation)?.dimensionOffset,-25)
+        controller.undo.undo()
+        XCTAssertEqual(MeasurementMetadata.measurement(annotation)?.dimensionOffset,18)
+        let record = try XCTUnwrap(RectangleMarkupRecord.capture(annotation:annotation,pageIndex:0))
+        let copy = try record.clipboardAnnotation(contents:record.text,rotation:0)
+        XCTAssertEqual(MeasurementMetadata.measurement(copy),measurement)
+        XCTAssertEqual(copy.bounds,annotation.bounds)
     }
 
     func testSavedDimensionsPreserveEndpointsAndContainCompleteAppearanceAtEveryRotation() throws {
@@ -210,8 +237,9 @@ final class ArchitecturalDimensionTests: XCTestCase {
                      [CGPoint(x: 180,y: 180), CGPoint(x: 184,y: 182)]]
         for rotation in [0, 90, 180, 270] {
             for pair in pairs {
-                let bounds = CGRect(x: min(pair[0].x,pair[1].x)-24, y: min(pair[0].y,pair[1].y)-24,
-                                    width: abs(pair[0].x-pair[1].x)+48, height: abs(pair[0].y-pair[1].y)+48)
+                let length = hypot(pair[1].x-pair[0].x,pair[1].y-pair[0].y)
+                let measurement = DrawingMeasurement(kind:.perimeter,scale:DrawingScale(unitsPerPoint:(22+10.5/12)/length,unit:"ft",name:"test"),closed:false)
+                let bounds = MeasurementAppearance.dimensionBounds(measurement,points:pair,rotation:rotation,lineWidth:2)
                 let layout = MeasurementAppearance.DimensionLayout(points: pair, bounds: bounds, rotation: rotation, line: line, lineWidth: 2)
                 let reversed = MeasurementAppearance.DimensionLayout(points: Array(pair.reversed()), bounds: bounds, rotation: rotation, line: line, lineWidth: 2)
                 XCTAssertEqual(layout.arrows, reversed.arrows)

@@ -50,42 +50,48 @@ final class ReviewBrowserNavigationTests: XCTestCase {
             XCTAssertEqual(path.pathItems.map(\.title), names, file: file, line: line)
             XCTAssertTrue(window.firstResponder === table, file: file, line: line)
         }
-        at(["Workspace"])
+        XCTAssertTrue(window.performKeyEquivalent(with:try key(45,[.command,.shift])))
+        let newFolder = try XCTUnwrap(window.attachedSheet)
+        XCTAssertTrue(descendants(try XCTUnwrap(newFolder.contentView)).compactMap { $0 as? NSTextField }.contains { $0.stringValue == "New Folder" })
+        window.endSheet(newFolder,returnCode:.alertSecondButtonReturn)
+        for _ in 0..<1000 { if window.attachedSheet == nil { break }; await Task.yield() }
+        XCTAssertTrue(window.makeFirstResponder(table))
+        at(["Documents"])
         try press(123); try press(124) // No history: both are harmless.
-        at(["Workspace"])
+        at(["Documents"])
         table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        try press(125); at(["Workspace", "A"])
+        try press(125); at(["Documents", "A"])
         table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        try press(125); at(["Workspace", "A", "Nested"])
-        try press(123); at(["Workspace", "A"])
-        try press(124); at(["Workspace", "A", "Nested"])
-        try press(126); at(["Workspace", "A"]) // Up visits parent and records that visit.
-        try press(126); at(["Workspace"])
+        try press(125); at(["Documents", "A", "Nested"])
+        try press(123); at(["Documents", "A"])
+        try press(124); at(["Documents", "A", "Nested"])
+        try press(126); at(["Documents", "A"]) // Up visits parent and records that visit.
+        try press(126); at(["Documents"])
         table.selectRowIndexes(IndexSet(integer: 1), byExtendingSelection: false)
-        try press(125); at(["Workspace", "B"])
-        try press(123); at(["Workspace"])
-        try press(123); at(["Workspace", "A"]) // Not the current folder's parent.
-        try press(124); at(["Workspace"])
-        try press(124); at(["Workspace", "B"]) // No selection required for forward.
-        try press(123); at(["Workspace"])
+        try press(125); at(["Documents", "B"])
+        try press(123); at(["Documents"])
+        try press(123); at(["Documents", "A"]) // Not the current folder's parent.
+        try press(124); at(["Documents"])
+        try press(124); at(["Documents", "B"]) // No selection required for forward.
+        try press(123); at(["Documents"])
         table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        try press(125); at(["Workspace", "A"]) // New navigation truncates forward history.
-        try press(124); at(["Workspace", "A"])
+        try press(125); at(["Documents", "A"]) // New navigation truncates forward history.
+        try press(124); at(["Documents", "A"])
         try await controller.loadDocuments()
-        try press(123); at(["Workspace"])
-        try press(124); at(["Workspace", "A"]) // Refresh keeps valid history.
+        try press(123); at(["Documents"])
+        try press(124); at(["Documents", "A"]) // Refresh keeps valid history.
 
         let field = NSTextField(string: "Keep editing")
         content.addSubview(field)
         XCTAssertTrue(window.makeFirstResponder(field))
         XCTAssertFalse(window.performKeyEquivalent(with: try key(123)))
         XCTAssertFalse(window.performKeyEquivalent(with: try key(124)))
-        XCTAssertEqual(path.pathItems.map(\.title), ["Workspace", "A"])
+        XCTAssertEqual(path.pathItems.map(\.title), ["Documents", "A"])
         XCTAssertEqual(field.stringValue, "Keep editing")
         window.endEditing(for: field); field.removeFromSuperview()
         XCTAssertTrue(window.makeFirstResponder(table))
         XCTAssertFalse(window.performKeyEquivalent(with: try key(123, [.command, .shift])))
-        at(["Workspace", "A"])
+        at(["Documents", "A"])
 
         var confirmations = 0
         let prompted = expectation(description: "Delete confirmation")
@@ -116,12 +122,12 @@ final class ReviewBrowserNavigationTests: XCTestCase {
 
         listing = #"{"organizationActions":true,"folders":[{"id":"b","name":"B"}],"documents":[]}"#
         try await controller.loadDocuments() // A was removed by another participant.
-        at(["Workspace"])
-        try press(123); at(["Workspace"])
-        try press(124); at(["Workspace"])
+        at(["Documents"])
+        try press(123); at(["Documents"])
+        try press(124); at(["Documents"])
         projectID = "other"
         try await controller.loadDocuments() // Never traverse folders from a previous workspace.
         try press(123); try press(124)
-        at(["Workspace"])
+        at(["Documents"])
     }
 }

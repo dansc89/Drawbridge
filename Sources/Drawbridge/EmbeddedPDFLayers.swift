@@ -13,7 +13,7 @@ enum EmbeddedPDFLayers {
         var visible: Bool? = nil
     }
 
-    private static func visibility(_ group: CGPDFDictionaryRef, properties: CGPDFDictionaryRef) -> Bool? {
+    static func visibility(_ group: CGPDFDictionaryRef, properties: CGPDFDictionaryRef) -> Bool? {
         var config: CGPDFDictionaryRef?
         var value: CGPDFObjectRef?
         guard CGPDFDictionaryGetDictionary(properties, "D", &config), let config,

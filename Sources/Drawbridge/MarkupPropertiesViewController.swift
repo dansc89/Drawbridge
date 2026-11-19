@@ -1,4 +1,5 @@
 import AppKit
+import PDFKit
 
 private final class MarkupInspectorContentView: NSView {
     override var isFlipped: Bool { true }
@@ -42,6 +43,12 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
     let fontSize = NSTextField()
     private var weightRow = NSStackView()
     private var fontRow = NSStackView()
+    private let measurementRows = NSStackView()
+    let measurementScale = NSPopUpButton()
+    let measurementPaper = NSTextField()
+    let measurementDistance = NSTextField()
+    let measurementUnit = NSPopUpButton()
+    private let measurementPresets: [(String, Double)] = [("1/16",0.0625),("1/8",0.125),("3/16",0.1875),("1/4",0.25),("3/8",0.375),("1/2",0.5),("1",1)]
     private var fillRow = NSStackView()
     private var strokeRow = NSStackView()
     private var strokeOpacityRow = NSStackView()
@@ -82,7 +89,21 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
             return row
         }
         weightRow = row("Line weight (pt)", weight)
-        fontRow = row("Font size (pt)", fontSize)
+        fontRow = row("Text size (pt)", fontSize)
+        measurementScale.addItems(withTitles:["Page scale"] + measurementPresets.map { $0.0 + "\" = 1′" } + ["Custom"])
+        measurementUnit.addItems(withTitles:["Feet","Meters"])
+        for control in [measurementScale,measurementPaper,measurementDistance,measurementUnit] as [NSControl] {
+            control.target = self; control.action = #selector(changeMeasurementScale(_:))
+        }
+        measurementPaper.setAccessibilityLabel("Measurement paper inches")
+        measurementDistance.setAccessibilityLabel("Measurement real distance")
+        measurementScale.setAccessibilityLabel("Measurement scale")
+        measurementUnit.setAccessibilityLabel("Measurement units")
+        measurementPaper.widthAnchor.constraint(equalToConstant:85).isActive = true
+        measurementDistance.widthAnchor.constraint(equalToConstant:85).isActive = true
+        let distance = NSStackView(views:[measurementDistance,measurementUnit]); distance.spacing = 4
+        measurementRows.orientation = .vertical; measurementRows.alignment = .leading; measurementRows.spacing = 8
+        for field in [row("Scale",measurementScale),row("Paper (in)",measurementPaper),row("Real distance",distance)] { measurementRows.addArrangedSubview(field) }
         fillRow = NSStackView(views: [filled, fill]); fillRow.spacing = 12
         hatchPattern.addItems(withTitles: DraftingHatch.Preset.allCases.map(\.title))
         hatchPattern.setAccessibilityLabel("Hatch pattern")
@@ -143,7 +164,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         setAsDefault.target = self; setAsDefault.action = #selector(saveDefault(_:))
         setAsDefault.toolTip = "Remember this appearance for future markups made with this tool."
         defaultStatus.font = .systemFont(ofSize: 11); defaultStatus.textColor = .secondaryLabelColor
-        propertiesContent = NSStackView(views: [membership, editingContext, captureHint, snapshotRows, strokeRow, weightRow, patternRow, strokeOpacityRow, fontRow, textBoxControls, hatchRows, fillRow, fillOpacityRow, note, setAsDefault, defaultStatus])
+        propertiesContent = NSStackView(views: [membership, editingContext, captureHint, snapshotRows, strokeRow, weightRow, patternRow, strokeOpacityRow, fontRow, measurementRows, textBoxControls, hatchRows, fillRow, fillOpacityRow, note, setAsDefault, defaultStatus])
         propertiesContent.orientation = .vertical; propertiesContent.alignment = .leading; propertiesContent.spacing = 10
         membership.target = self; membership.action = #selector(changeMembership(_:)); membership.setAccessibilityLabel("Assigned markup layer")
         let separator = NSBox(); separator.boxType = .separator
@@ -218,7 +239,21 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         editingContext.stringValue = selection == nil ? "New markup defaults" : (selection.map(session.layerIsLocked) == true ? "Locked layer markup" : "Selected markup")
         stroke.color = selection.map(RectangleMarkupRecord.markupColor) ?? session.strokeColor
         weight.doubleValue = Double(selection?.border?.lineWidth ?? session.lineWidth)
-        fontSize.doubleValue = Double(selection.map(RectangleMarkupRecord.textFontSize) ?? session.fontSize)
+        let measured = selection.flatMap(MeasurementMetadata.measurement)
+        let measuring = measured != nil || (selection == nil && [.area,.perimeter].contains(session.tool))
+        fontSize.doubleValue = measured?.captionFontSize ?? (measuring ? Double(session.measurementFontSize) : Double(selection.map(RectangleMarkupRecord.textFontSize) ?? session.fontSize))
+        measurementRows.isHidden = !measuring
+        let pageScale = session.view?.currentPage.flatMap(MeasurementMetadata.scale)
+        let selectedScale = measured?.scale ?? session.measurementScaleOverride ?? pageScale
+        measurementPaper.stringValue = "1"
+        measurementDistance.stringValue = selectedScale.map { String(format:"%.8g",$0.unitsPerPoint*72) } ?? ""
+        measurementUnit.selectItem(at:selectedScale?.unit == "m" ? 1 : 0)
+        let preset = measurementPresets.firstIndex { value in
+            selectedScale?.unit == "ft" && abs((selectedScale?.unitsPerPoint ?? 0)-1/(72*value.1)) < 1e-10
+        }
+        if let preset { measurementPaper.stringValue = measurementPresets[preset].0; measurementDistance.stringValue = "1" }
+        measurementScale.selectItem(at:selectedScale == pageScale ? 0 : preset.map { $0+1 } ?? measurementPresets.count+1)
+        for control in [measurementScale,measurementPaper,measurementDistance,measurementUnit] as [NSControl] { control.isEnabled = enabled && measuring }
         let color = selection.flatMap { RectangleMarkupRecord.owns($0) ? RectangleMarkupRecord.polygonFill($0) : $0.interiorColor?.withAlphaComponent(MarkupStyle.fillOpacity($0)) } ?? (selection == nil ? session.fillColor : nil)
         filled.state = color == nil ? .off : .on
         if let color { fill.color = color; fillOpacity.doubleValue = Double(color.alphaComponent) * 100 }
@@ -228,7 +263,7 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         strokeOpacity.doubleValue = (selection.map(MarkupStyle.strokeOpacity) ?? session.strokeOpacity) * 100
         stroke.color = stroke.color.withAlphaComponent(CGFloat(strokeOpacity.doubleValue / 100))
         patternRow.isHidden = text || highlight || snapshot || capturing; fillOpacityRow.isHidden = !closedShape
-        weightRow.isHidden = text || legacyHighlight || snapshot || capturing; fontRow.isHidden = !text; fillRow.isHidden = !closedShape
+        weightRow.isHidden = text || legacyHighlight || snapshot || capturing; fontRow.isHidden = !text && !measuring; fillRow.isHidden = !closedShape
         for control in [stroke, weight, fontSize, filled, linePattern, strokeOpacity] as [NSControl] { control.isEnabled = enabled }
         let hatch = selection.flatMap(DraftingHatch.read) ?? (selection == nil ? session.hatchStyle : nil)
         let patterned = hatch != nil && hatch?.preset != .solid
@@ -281,6 +316,26 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
     func controlTextDidEndEditing(_ notification: Notification) {
         if let field = notification.object as? NSTextField { changeNumber(field) }
     }
+    @objc func changeMeasurementScale(_ sender: NSControl) {
+        guard let session, session.canEdit() else { refresh(); return }
+        let scale: DrawingScale?
+        if sender === measurementScale, measurementScale.indexOfSelectedItem == 0 {
+            scale = session.view?.currentPage.flatMap(MeasurementMetadata.scale)
+            if session.selected == nil { session.measurementScaleOverride = nil; refresh(); return }
+        } else if sender === measurementScale, measurementPresets.indices.contains(measurementScale.indexOfSelectedItem-1) {
+            let preset = measurementPresets[measurementScale.indexOfSelectedItem-1]
+            scale = DrawingScale.architectural(inches:preset.1,feet:1,name:preset.0+"\" = 1′")
+        } else {
+            guard let paper = MeasurementParsing.parseArchitecturalInches(measurementPaper.stringValue), paper > 0,
+                  let distance = Double(measurementDistance.stringValue), distance > 0 else { refresh(); return }
+            let unit = measurementUnit.indexOfSelectedItem == 1 ? "m" : "ft"
+            scale = DrawingScale(unitsPerPoint:distance/(72*paper),unit:unit,name:measurementPaper.stringValue+"\" = "+measurementDistance.stringValue+" "+unit)
+        }
+        guard let scale, scale.isValid else { refresh(); return }
+        session.setMeasurementProperties(scale:scale)
+        refresh()
+    }
+
     @objc func changeNumber(_ sender: NSTextField) {
         if sender === hatchScale || sender === hatchAngle || sender === hatchWeight { changeHatch(sender); return }
         guard let session, let value = sender.objectValue as? NSNumber else { refresh(); return }
@@ -289,7 +344,10 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
             if sender === snapshotOpacity { changeSnapshot(sender) } else { changeAppearance(sender) }
             return
         }
-        if sender === fontSize { session.setFontSize(CGFloat(value.doubleValue)) }
+        if sender === fontSize {
+            if session.selected.flatMap(MeasurementMetadata.measurement) != nil || [.area,.perimeter].contains(session.tool) { session.setMeasurementProperties(fontSize:CGFloat(value.doubleValue)) }
+            else { session.setFontSize(CGFloat(value.doubleValue)) }
+        }
         else { session.styleSelected(color: session.selected.map(RectangleMarkupRecord.markupColor) ?? session.strokeColor, width: CGFloat(value.doubleValue)) }
         refresh()
     }
