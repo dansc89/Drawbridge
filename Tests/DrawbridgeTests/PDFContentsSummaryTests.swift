@@ -41,6 +41,25 @@ final class PDFContentsSummaryTests: XCTestCase {
         [view] + view.subviews.flatMap { descendants(of: $0) }
     }
 
+    private func renderedArtwork(_ page: PDFPage) -> Data? {
+        // TIFF carries display-dependent ICC metadata. Compare actual pixels in
+        // a fixed color space so navigation is checked for visual changes.
+        var pixels = Data(count: 180 * 240 * 4)
+        let rendered = pixels.withUnsafeMutableBytes { storage -> Bool in
+            guard let context = CGContext(data: storage.baseAddress, width: 180, height: 240,
+                bitsPerComponent: 8, bytesPerRow: 180 * 4,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.setFillColor(CGColor(gray: 1, alpha: 1)); context.fill(CGRect(x: 0, y: 0, width: 180, height: 240))
+            let bounds = page.bounds(for: .mediaBox)
+            context.scaleBy(x: 180 / bounds.width, y: 240 / bounds.height)
+            context.translateBy(x: -bounds.minX, y: -bounds.minY)
+            page.draw(with: .mediaBox, to: context)
+            return true
+        }
+        return rendered ? pixels : nil
+    }
+
     func testNavigationHasNoContentsSectionAndBothModesRemainUsable() throws {
         _ = NSApplication.shared
         let controller = MainViewController()
@@ -81,7 +100,7 @@ final class PDFContentsSummaryTests: XCTestCase {
         let annotation = PDFAnnotation(bounds: CGRect(x: 40, y: 50, width: 60, height: 70), forType: .square, withProperties: nil)
         annotation.contents = "Consultant annotation"
         page.addAnnotation(annotation)
-        let before = (0..<3).map { document.page(at: $0)?.thumbnail(of: NSSize(width: 180, height: 240), for: .mediaBox).tiffRepresentation }
+        let before = (0..<3).map { document.page(at: $0).flatMap(renderedArtwork) }
         let root = PDFOutline(), bookmark = PDFOutline()
         bookmark.label = "Third sheet"
         bookmark.destination = PDFDestination(page: try XCTUnwrap(document.page(at: 2)), at: CGPoint(x: 0, y: 800))
@@ -114,7 +133,7 @@ final class PDFContentsSummaryTests: XCTestCase {
         // Navigation must leave actual rendered artwork/annotation appearances unchanged.
         for index in 0..<3 {
             XCTAssertNotNil(before[index])
-            XCTAssertEqual(document.page(at: index)?.thumbnail(of: NSSize(width: 180, height: 240), for: .mediaBox).tiffRepresentation, before[index])
+            XCTAssertEqual(document.page(at: index).flatMap(renderedArtwork), before[index])
         }
         controller.pdfView.setMarkupDocument(nil)
         controller.requestChromeRefresh(immediate: true)

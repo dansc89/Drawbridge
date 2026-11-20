@@ -48,7 +48,10 @@ private final class SnapshotRenderEvidence: @unchecked Sendable {
         let ready = expectation(description: "Actual detail publication")
         ready.assertForOverFulfill = false
         let observer = NotificationCenter.default.addObserver(forName: SnapshotPreviewCache.ready, object: nil, queue: .main) { notification in
-            if (notification.userInfo?["captureKeys"] as? Set<String>)?.contains(key) == true { ready.fulfill() }
+            // A ready notification publishes each completed tile row. Wait for
+            // every expected row before inspecting the complete draw evidence.
+            if (notification.userInfo?["captureKeys"] as? Set<String>)?.contains(key) == true,
+               evidence.detail.count >= expected { ready.fulfill() }
         }
         defer { NotificationCenter.default.removeObserver(observer) }
         let start = CFAbsoluteTimeGetCurrent()
