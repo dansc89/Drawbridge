@@ -1049,12 +1049,14 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 URLQueryItem(name: "afterSeq", value: String(revision))
             ])
             try checkLifecycle(generation, api: api)
-            for operation in response.ops {
+            let resolved = try await api.resolveSnapshots(response.ops, document: document.id, session: "")
+            try checkLifecycle(generation, api: api)
+            for operation in resolved {
                 guard operation.seq > revision else { throw SharedReviewError("The server returned revisions out of order.") }
                 if let markup = operation.payload { records[markup.id] = markup.record }
                 revision = operation.seq
             }
-            if response.ops.count < 500 { break }
+            if response.ops.count < 500 && resolved.count == response.ops.count { break }
         }
         let markups = records.values.sorted { $0.id < $1.id }
         try await Task.detached(priority: .userInitiated) {
@@ -1393,7 +1395,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
         let ids = Set(previous.keys).union(current.keys)
         for id in ids where previous[id] != current[id] {
-            if let record = current[id], (!record.isValid || (try? JSONEncoder().encode(record).count) ?? Int.max > 1_500_000) {
+            if let record = current[id], !SharedReviewAPI.canSync(record) {
                 invalidPages.insert(index)
                 updateReviewStatus("Markup can’t sync. Remove or undo it to continue.")
                 return
@@ -1457,8 +1459,10 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                     if outboxNeedsSave {
                         try savePendingEdits()
                     }
+                    let wire = try await api.prepareSnapshot(next.payload, document: document, session: session)
+                    try checkLifecycle(generation, api: api)
                     let append = SharedReviewAPI.Append(sessionId: session, clientOpId: next.clientOpId,
-                                                         payload: next.payload)
+                                                         payload: wire)
                     let receipt: SharedReviewAPI.Receipt = try await authenticatedSyncResponse(api: api, generation: generation, session: session) {
                         try await api.post("documents/\(document)/ops", append)
                     }
@@ -1484,8 +1488,11 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 try checkLifecycle(generation, api: api)
                 guard sessionID == session else { return }
                 updateReviewConnection(online: true)
-                try replayOperations(response.ops, instanceID: api.instanceID)
-                if response.ops.count == 500 { syncRequested = true }
+                let resolved = try await api.resolveSnapshots(response.ops, document: document, session: session)
+                try checkLifecycle(generation, api: api)
+                guard sessionID == session else { return }
+                try replayOperations(resolved, instanceID: api.instanceID)
+                if response.ops.count == 500 || resolved.count < response.ops.count { syncRequested = true }
             } while syncRequested || !pending.isEmpty
             let wasReady = ready
             ready = true

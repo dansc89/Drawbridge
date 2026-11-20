@@ -109,3 +109,5 @@ PDF viewing, markup editing, and sheet indexing run locally on your Mac. The opt
 [Report an issue](https://github.com/dansc89/Drawbridge/issues) with your app version, macOS version, the action you took, and what happened. Attach only synthetic or sanitized sample PDFs you have permission to publish. Remove client details, document metadata, annotations, and private file paths from samples and logs. Report security vulnerabilities privately using the [security policy](SECURITY.md).
 
 For the source corresponding to a released build, open the tag listed on its [release page](https://github.com/dansc89/Drawbridge/releases/latest). That tag also contains its `DEVELOPMENT.md` build, signing, notarization, and test instructions.
+
+Large Review Snapshots upload their original vector PDF once per document and reuse it for later placement and appearance changes. Transfers use lossless compression, and received Snapshot data is verified and cached within a bounded budget. Pending Snapshot edits stay saved locally until the server acknowledges them. All Review participants need a version supporting Snapshot assets to receive these larger markups.

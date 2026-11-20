@@ -26,11 +26,13 @@ struct SharedReviewAPI: Sendable {
         let page: Int
         let record: RectangleMarkupRecord?
         var ownerInstanceId: String? = nil
+        var snapshotAsset: SnapshotAsset? = nil
     }
     struct Operation: Decodable {
         let seq: Int
         let op_type: String
         let payload: Markup?
+        init(seq: Int, op_type: String, payload: Markup?) { self.seq = seq; self.op_type = op_type; self.payload = payload }
         private enum CodingKeys: String, CodingKey { case seq, op_type, payload }
         init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -81,6 +83,7 @@ struct SharedReviewAPI: Sendable {
         private let lock = NSLock()
         private var credentials: Identity?
         private var cancellations: [UUID: @Sendable () -> Void] = [:]
+        let snapshotAssets = SnapshotAssetMemoryCache()
         let session = URLSession(configuration: .ephemeral, delegate: NoRedirect(), delegateQueue: nil)
         init(token: String, name: String?, instance: String) {
             credentials = Identity(token: token, name: name, instance: instance)
@@ -103,6 +106,7 @@ struct SharedReviewAPI: Sendable {
                 return result
             }
             session.invalidateAndCancel()
+            snapshotAssets.removeAll()
             cancel.forEach { $0() }
         }
         func run<Value: Sendable>(_ operation: @escaping @Sendable () async throws -> Value) async throws -> Value {
@@ -516,4 +520,140 @@ struct SharedReviewAPI: Sendable {
         parts.queryItems = [URLQueryItem(name: "token", value: token)]
         return lifetime.session.webSocketTask(with: parts.url!)
     }
+}
+
+extension SharedReviewAPI {
+    struct SnapshotAsset: Codable, Hashable, Sendable {
+        let sha256: String
+        let byteCount: Int
+        var isValid: Bool {
+            (1...SnapshotPayload.maximumBytes).contains(byteCount) && sha256.utf8.count == 64 &&
+                sha256.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+        }
+    }
+
+    static func canSync(_ record: RectangleMarkupRecord) -> Bool {
+        guard record.isValid else { return false }
+        var metadata = record
+        if record.kind == .snapshot {
+            guard let bytes = record.snapshotData, bytes.count <= SnapshotPayload.maximumBytes else { return false }
+            metadata.snapshotData = nil
+        }
+        return ((try? JSONEncoder().encode(metadata).count) ?? Int.max) <= 1_500_000
+    }
+
+    /// The durable outbox retains the complete original PDF. Only the wire copy
+    /// uses an immutable document-scoped asset; retry never consumes local work.
+    func prepareSnapshot(_ markup: Markup, document: String, session: String) async throws -> Markup {
+        guard var record = markup.record, record.kind == .snapshot,
+              let bytes = record.snapshotData,
+              try JSONEncoder().encode(record).count > 256 * 1024 else { return markup }
+        guard Self.canSync(record) else { throw SharedReviewError("Snapshot is invalid or exceeds 32 MiB.") }
+        let asset = SnapshotAsset(sha256: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined(), byteCount: bytes.count)
+        let path = "documents/\(document)/snapshot-assets/\(asset.sha256)"
+        let query = [URLQueryItem(name: "sessionId", value: session)]
+        var probe = try request(path, query: query); probe.httpMethod = "HEAD"
+        let (_, status) = try await data(for: probe)
+        if (status as? HTTPURLResponse)?.statusCode == 404 {
+            var upload = try request(path, query: query)
+            upload.httpMethod = "PUT"; upload.httpBody = bytes; upload.timeoutInterval = 120
+            // Lossless wire compression preserves the exact PDF and its digest.
+            if let compressed = try? (bytes as NSData).compressed(using: .zlib),
+               compressed.count + 4096 < bytes.count {
+                upload.httpBody = compressed as Data
+                upload.setValue("deflate-raw", forHTTPHeaderField: "X-Drawbridge-Snapshot-Compression")
+            }
+            upload.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+            let (_, response) = try await data(for: upload)
+            if let code = (response as? HTTPURLResponse)?.statusCode, [404,405,501].contains(code) {
+                throw SharedReviewError("This Review server needs the Snapshot sync update. Your edit is saved locally for retry.")
+            }
+            try validate(response)
+        } else {
+            try validate(status)
+            guard let response = status as? HTTPURLResponse,
+                  response.value(forHTTPHeaderField: "X-Drawbridge-Snapshot-SHA256") == asset.sha256,
+                  Int(response.value(forHTTPHeaderField: "Content-Length") ?? "") == asset.byteCount else {
+                throw SharedReviewError("This Review server needs the Snapshot sync update. Your edit is saved locally for retry.")
+            }
+        }
+        try checkActive()
+        lifetime.snapshotAssets.store(bytes, document: document, asset: asset)
+        record.snapshotData = nil
+        return Markup(id: markup.id, page: markup.page, record: record,
+                      ownerInstanceId: markup.ownerInstanceId, snapshotAsset: asset)
+    }
+
+    /// Resolve and verify every required asset before advancing the replay cursor.
+    /// A missing/corrupt asset leaves this batch retryable at its original revision.
+    func resolveSnapshots(_ operations: [Operation], document: String, session: String) async throws -> [Operation] {
+        var result: [Operation] = []
+        try checkActive()
+        var resolvedBytes = 0
+        var admitted = Set<SnapshotAsset>()
+        for operation in operations {
+            guard var markup = operation.payload, let asset = markup.snapshotAsset else { result.append(operation); continue }
+            guard asset.isValid, var record = markup.record, record.kind == .snapshot, record.snapshotData == nil else {
+                throw SharedReviewError("The server returned an invalid Snapshot reference.")
+            }
+            if !admitted.contains(asset) {
+                if resolvedBytes > 0 && resolvedBytes + asset.byteCount > SnapshotPayload.maximumBytes { break }
+                resolvedBytes += asset.byteCount
+                admitted.insert(asset)
+            }
+            let bytes: Data
+            if let cached = lifetime.snapshotAssets.data(document: document, asset: asset) { bytes = cached }
+            else {
+                let request = try request("documents/\(document)/snapshot-assets/\(asset.sha256)",
+                                          query: [URLQueryItem(name: "sessionId", value: session)])
+                let (downloaded, response) = try await data(for: request)
+                try validate(response)
+                guard downloaded.count == asset.byteCount,
+                      SHA256.hash(data: downloaded).map({ String(format: "%02x", $0) }).joined() == asset.sha256 else {
+                    throw SharedReviewError("Snapshot download failed its integrity check. It will be retried.")
+                }
+                bytes = downloaded
+
+            }
+            record.snapshotData = bytes
+            guard Self.canSync(record) else { throw SharedReviewError("The downloaded Snapshot is invalid.") }
+            try checkActive()
+            lifetime.snapshotAssets.store(bytes, document: document, asset: asset)
+            markup = Markup(id: markup.id, page: markup.page, record: record, ownerInstanceId: markup.ownerInstanceId)
+            result.append(Operation(seq: operation.seq, op_type: operation.op_type, payload: markup))
+        }
+        return result
+    }
+}
+
+
+/// Bounded to this authenticated API lifetime. Data uses copy-on-write storage;
+/// reuse across polls avoids downloading the same vector PDF for style/move edits.
+private final class SnapshotAssetMemoryCache: @unchecked Sendable {
+    private struct Key: Hashable { let document: String; let asset: SharedReviewAPI.SnapshotAsset }
+    private let lock = NSLock()
+    private var entries: [Key: Data] = [:]
+    private var order: [Key] = []
+    private var bytes = 0
+    private let limit = 64 * 1024 * 1024
+    func data(document: String, asset: SharedReviewAPI.SnapshotAsset) -> Data? {
+        lock.withLock {
+            let key = Key(document: document, asset: asset)
+            guard let value = entries[key] else { return nil }
+            order.removeAll { $0 == key }; order.append(key)
+            return value
+        }
+    }
+    func store(_ data: Data, document: String, asset: SharedReviewAPI.SnapshotAsset) {
+        guard data.count <= limit else { return }
+        lock.withLock {
+            let key = Key(document: document, asset: asset)
+            if entries[key] != nil { order.removeAll { $0 == key }; order.append(key); return }
+            while bytes + data.count > limit, let first = order.first {
+                bytes -= entries.removeValue(forKey: first)?.count ?? 0; order.removeFirst()
+            }
+            entries[key] = data; order.append(key); bytes += data.count
+        }
+    }
+    func removeAll() { lock.withLock { entries.removeAll(); order.removeAll(); bytes = 0 } }
 }

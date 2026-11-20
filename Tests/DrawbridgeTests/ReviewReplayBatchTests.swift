@@ -57,6 +57,22 @@ import XCTest
             XCTAssertEqual(page.annotations.first?.bounds.minX,20)
         }
     }
+    func testLargeSnapshotPasteIsDurablyQueuedWithoutRecoveryOnlyCloseBlock() async throws {
+        try await withReview { review, editor in
+            let page = try XCTUnwrap(review.reviewPDF?.page(at: 0))
+            let source=PDFDocument();let sourcePage=PDFPage();sourcePage.setBounds(CGRect(x:0,y:0,width:100,height:80),for:.mediaBox);source.insert(sourcePage,at:0)
+            var bytes=try XCTUnwrap(source.dataRepresentation())
+            bytes.append(Data(("\n%"+String(repeating:"x",count:2*1024*1024)+"\n").utf8))
+            editor.pdfView.rectangleMarkup.bind(to:review.reviewPDF)
+            editor.pdfView.rectangleMarkup.canEdit = { true }
+            let annotation=try XCTUnwrap(editor.pdfView.rectangleMarkup.pasteSnapshot(SnapshotPayload(data:bytes),on:page,center:CGPoint(x:100,y:100)))
+            review.recordChanges(on:page)
+            XCTAssertNotNil(annotation.page)
+            XCTAssertFalse(review.hasPendingChanges,"Complete Snapshot must be saved in the durable outbox, not trapped in invalidPages")
+            XCTAssertTrue(review.syncStatus.contains("pending"))
+            XCTAssertFalse(review.syncStatus.contains("can’t sync"))
+        }
+    }
     private func operation(_ seq: Int, _ id: String, page: Int = 0, text: String? = "markup", owner: String = "remote") throws -> SharedReviewAPI.Operation {
         let annotation = PDFAnnotation(bounds: CGRect(x: text == "last" || text == "updated" ? 40 : 20, y: 20, width: 70, height: 50), forType: .square, withProperties: nil)
         annotation.setValue(id, forAnnotationKey: RectangleMarkupRecord.identityKey)

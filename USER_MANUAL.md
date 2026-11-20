@@ -129,3 +129,7 @@ Choose **Drawbridge > Markup Author…** to set the name recorded on new markups
 ### Locking markup layers
 
 Use the **Lock** column in Layers to protect a layer’s markups from moving, editing, deletion, and reassignment in Drawbridge. Show/Hide remains independent. Unlock the layer to edit its markups again. Lock state is retained when saving and reopening and supports Undo/Redo. Locking the active layer changes the destination for new markups to Unassigned. Locked layers cannot receive new markups or be removed until unlocked. This is an editing safeguard in Drawbridge, not password protection of the PDF.
+
+### Large Snapshots in Review
+
+Snapshot PDF data uploads separately from its position and appearance. Repeated pastes of the same capture within a document reuse that data, and moving or recoloring a Snapshot sends a small update. Lossless transfer compression preserves vectors and original PDF bytes. Pending edits are retained locally for retry. Review participants must update to a version supporting Snapshot assets to receive larger captures.
