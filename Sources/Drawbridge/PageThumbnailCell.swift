@@ -92,6 +92,8 @@ final class PageThumbnailCache {
     private var pending: [WeakCell] = []
     private var scheduled = false
     private var generation = 0
+    private var renderAfter: TimeInterval = 0
+    var isInteractionActive: () -> Bool = { false }
     private struct WeakCell { weak var cell: PageThumbnailCell? }
     private(set) var renderedCount = 0
 
@@ -103,12 +105,14 @@ final class PageThumbnailCache {
         images.removeAllObjects()
         pending.removeAll()
         generation += 1
+        renderAfter = 0
         renderedCount = 0
     }
 
-    func invalidate(_ page: PDFPage?) {
+    func invalidate(_ page: PDFPage?, afterEditing: Bool = false) {
         if let page { images.removeObject(forKey: page) }
         else { images.removeAllObjects() }
+        if afterEditing { renderAfter = ProcessInfo.processInfo.systemUptime + 0.75 }
     }
 
     func request(_ cell: PageThumbnailCell) {
@@ -118,10 +122,10 @@ final class PageThumbnailCache {
         schedule()
     }
 
-    private func schedule() {
+    private func schedule(after delay: TimeInterval = 0.01) {
         guard !scheduled, !pending.isEmpty else { return }
         scheduled = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             self.scheduled = false
             self.renderNext()
@@ -130,6 +134,13 @@ final class PageThumbnailCache {
 
     private func renderNext() {
         guard let document else { pending.removeAll(); return }
+        // A dense page's thumbnail interprets its full content stream. It must
+        // not be queued immediately behind every stroke on the input thread.
+        let quietDelay = renderAfter - ProcessInfo.processInfo.systemUptime
+        if quietDelay > 0 || isInteractionActive() {
+            schedule(after: max(0.1, quietDelay))
+            return
+        }
         while !pending.isEmpty {
             let item = pending.removeFirst()
             guard let cell = item.cell, cell.window != nil, !cell.visibleRect.isEmpty,

@@ -274,7 +274,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         editMenu.addItem(withTitle: "Paste", action: #selector(MainViewController.commandPaste(_:)), keyEquivalent: "v").target = controller
         let pasteInPlace = editMenu.addItem(withTitle: "Paste in Place", action: #selector(MainViewController.commandPasteInPlace(_:)), keyEquivalent: "V")
         pasteInPlace.keyEquivalentModifierMask = [.command, .shift]; pasteInPlace.target = controller
-        editMenu.addItem(withTitle: "Select All Text", action: #selector(MainViewController.commandSelectAll(_:)), keyEquivalent: "a").target = controller
+        editMenu.addItem(withTitle: "Select All", action: #selector(MainViewController.commandSelectAll(_:)), keyEquivalent: "a").target = controller
         editMenu.addItem(NSMenuItem.separator())
         editMenu.addItem(withTitle: "Find…", action: #selector(MainViewController.commandFocusSearch(_:)), keyEquivalent: "f").target = controller
         editMenu.addItem(withTitle: "Find Next", action: #selector(MainViewController.selectNextSearchHit), keyEquivalent: "g").target = controller

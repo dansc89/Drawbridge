@@ -78,4 +78,32 @@ final class PageThumbnailTests: XCTestCase {
         XCTAssertTrue(cell.representedPage === second.page(at: 0))
         XCTAssertNotNil(cell.preview.image)
     }
+
+    func testEditBurstCoalescesThumbnailAndWaitsForDrawingToFinish() async throws {
+        let document = document(count:1), page = try XCTUnwrap(document.page(at:0))
+        let window = NSWindow(contentRect:NSRect(x:0,y:0,width:220,height:180),styleMask:[.titled],backing:.buffered,defer:false)
+        let cell = PageThumbnailCell(frame:NSRect(x:0,y:0,width:220,height:164))
+        window.contentView = cell
+        cell.configure(page:page,number:1,label:"Drawing",current:true)
+        let cache = PageThumbnailCache(); cache.bind(document); cache.request(cell)
+        try await Task.sleep(for:.milliseconds(150))
+        let original = try XCTUnwrap(cell.preview.image?.tiffRepresentation)
+        XCTAssertEqual(cache.renderedCount,1)
+        var drawing = true
+        cache.isInteractionActive = { drawing }
+        for index in 0..<3 {
+            let annotation = PDFAnnotation(bounds:CGRect(x:70+index*10,y:30,width:40,height:60),forType:.square,withProperties:nil)
+            annotation.color = .red; annotation.interiorColor = .red
+            page.addAnnotation(annotation)
+            cache.invalidate(page,afterEditing:true); cache.request(cell)
+            try await Task.sleep(for:.milliseconds(30))
+        }
+        try await Task.sleep(for:.milliseconds(900))
+        XCTAssertEqual(cache.renderedCount,1,"Thumbnail work must not interrupt an active drawing gesture")
+        XCTAssertEqual(cell.preview.image?.tiffRepresentation,original,"Keep the existing thumbnail while drawing")
+        drawing = false
+        try await Task.sleep(for:.milliseconds(250))
+        XCTAssertEqual(cache.renderedCount,2,"The burst needs one final thumbnail, not one full-page render per stroke")
+        XCTAssertNotEqual(cell.preview.image?.tiffRepresentation,original)
+    }
 }

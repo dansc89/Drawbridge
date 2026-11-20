@@ -246,6 +246,22 @@ enum MarkupLayers {
         if layerCatalog.layers.first(where: { $0.id == id })?.visible == false { setLayerVisible(id, true) }
         annotation.setValue(id, forAnnotationKey: MarkupLayers.membershipKey)
     }
+    /// An insertion changes only this annotation's membership. Whole-document
+    /// visibility changes still use the full pass below.
+    func applyLayerVisibility(to annotation: PDFAnnotation) {
+        guard let state = layerState else { return }
+        if MarkupLayers.id(annotation) != nil || state.originalFlags.object(forKey: annotation) != nil {
+            let flags = state.originalFlags.object(forKey: annotation) ?? MarkupLayerFlags(annotation)
+            state.originalFlags.setObject(flags, forKey: annotation)
+            let visible = layerIsVisible(annotation)
+            annotation.shouldDisplay = visible && flags.display
+            annotation.shouldPrint = visible && flags.printFlag
+            (annotation as? DrawbridgeSnapshotAnnotation)?.isRetired = !annotation.shouldDisplay
+        }
+        if selected === annotation, !layerIsVisible(annotation) || layerIsLocked(annotation) {
+            selected = nil; onClickAway?()
+        }
+    }
     func applyLayerVisibility() {
         guard let document = view?.document, let state = layerState else { return }
         for index in 0..<document.pageCount {

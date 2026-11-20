@@ -1566,17 +1566,23 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     // Internal observation of actual replay UI invalidations for controller regression tests.
     enum ReplayRefresh: Equatable { case page(Int), selectionAndList }
     var replayRefreshObserver: ((ReplayRefresh) -> Void)?
+    var replayAnnotationScanObserver: ((Int, Int) -> Void)?
 
     func replayOperations(_ operations: [SharedReviewAPI.Operation], instanceID: String) throws {
         guard !sessionInvalidated else { throw CancellationError() }
         // Scoped to one fetched response, including a partially applied response.
         // No suspension: revision/order and local-edit shielding remain sequential.
         var touchedPages = Set<Int>()
+        let locallyPendingIDs = Set(pending.map { $0.payload.id })
+        // Batch-local indices cannot become stale across local edits, undo or a
+        // replaced document. Lists preserve PDFKit's first-match ordering even
+        // when an imported PDF contains duplicate annotation identities.
+        var annotationIndices: [Int: [String: [PDFAnnotation]]] = [:]
         defer { refreshReplayPages(touchedPages) }
         for operation in operations {
             if operation.op_type == "drawbridge.markup.v1", let markup = operation.payload,
-               !pending.contains(where: { $0.payload.id == markup.id }) {
-                if try apply(markup, owned: markup.ownerInstanceId == instanceID) {
+               !locallyPendingIDs.contains(markup.id) {
+                if try apply(markup, owned: markup.ownerInstanceId == instanceID, annotationIndices: &annotationIndices) {
                     touchedPages.insert(markup.page)
                 }
             }
@@ -1591,7 +1597,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         for index in indices.sorted() {
             guard let page = pdf.page(at: index) else { continue }
             viewer.refreshAnnotationRendering(on: page, importedAppearanceChanged: true)
-            editor.markPageMarkupCacheDirty(page)
+            editor.markPageMarkupCacheDirty(page, alreadyRefreshedView: viewer)
             replayRefreshObserver?(.page(index))
         }
         viewer.rectangleMarkup.refresh()
@@ -1600,7 +1606,8 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         replayRefreshObserver?(.selectionAndList)
     }
 
-    private func apply(_ markup: SharedReviewAPI.Markup, owned: Bool) throws -> Bool {
+    private func apply(_ markup: SharedReviewAPI.Markup, owned: Bool,
+                       annotationIndices: inout [Int: [String: [PDFAnnotation]]]) throws -> Bool {
         guard let page = reviewPDF?.page(at: markup.page) else {
             throw SharedReviewError("A revision refers to a missing page.")
         }
@@ -1627,7 +1634,16 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             } else { annotation.isReadOnly = !owned }
             return annotation
         }
-        if let existing = page.annotations.first(where: { RectangleMarkupRecord.identity($0) == markup.id }) {
+        if annotationIndices[markup.page] == nil {
+            let annotations = page.annotations
+            var index: [String: [PDFAnnotation]] = [:]
+            for annotation in annotations {
+                if let id = RectangleMarkupRecord.identity(annotation) { index[id, default: []].append(annotation) }
+            }
+            annotationIndices[markup.page] = index
+            replayAnnotationScanObserver?(markup.page, annotations.count)
+        }
+        if let existing = annotationIndices[markup.page]?[markup.id]?.first {
             if allReviewViewers.contains(where: { $0.rectangleMarkup.isEditingTextAnnotation(existing) }) {
                 throw SharedReviewError("Finish editing text to receive the latest revision.")
             }
@@ -1635,8 +1651,12 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 viewer.rectangleMarkup.selected = nil
             }
             page.removeAnnotation(existing)
+            annotationIndices[markup.page]?[markup.id]?.removeFirst()
         }
-        if let replacement { page.addAnnotation(replacement) }
+        if let replacement {
+            page.addAnnotation(replacement)
+            annotationIndices[markup.page, default: [:]][markup.id, default: []].append(replacement)
+        }
         records[markup.page, default: [:]][markup.id] = owned ? markup.record : nil
         return true
     }

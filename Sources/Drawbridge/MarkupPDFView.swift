@@ -823,9 +823,11 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
     }
 
-    enum AnnotationRefreshReason { case markupChanged, snapshotDetailReady, textEditorVisibilityChanged }
+    enum AnnotationRefreshReason { case markupChanged, nativeMarkupChanged, snapshotDetailReady, textEditorVisibilityChanged }
+    var annotationRefreshObserver: ((PDFPage, Bool, CGRect?, AnnotationRefreshReason) -> Void)?
 
     func refreshAnnotationRendering(on page: PDFPage, importedAppearanceChanged: Bool = false, region: CGRect? = nil, reason: AnnotationRefreshReason = .markupChanged) {
+        annotationRefreshObserver?(page, importedAppearanceChanged, region, reason)
         let hadViewportTiles = page.annotations.contains { $0 is SnapshotViewportTileAnnotation }
         // Retire stale display tiles before PDFKit invalidates the page. Doing
         // this later can leave a deleted Snapshot cached until the next zoom.

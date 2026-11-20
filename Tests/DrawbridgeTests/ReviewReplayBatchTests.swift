@@ -5,6 +5,58 @@ import XCTest
 @testable import Drawbridge
 
 @MainActor final class ReviewReplayBatchTests: XCTestCase {
+    func testDensePageReplayBenchmark() async throws {
+        guard ProcessInfo.processInfo.environment["DRAWBRIDGE_REPLAY_BENCHMARK"] == "1" else {
+            throw XCTSkip("Opt-in dense-page replay timing")
+        }
+        try await withReview { review, _ in
+            let page = try XCTUnwrap(review.reviewPDF?.page(at: 0))
+            for index in 0..<6000 {
+                let annotation = PDFAnnotation(bounds: CGRect(x: index % 200, y: index % 150, width: 8, height: 6), forType: .square, withProperties: nil)
+                annotation.contents = "Existing PDF markup"
+                page.addAnnotation(annotation)
+            }
+            let ids = (0..<250).map { RectangleMarkupRecord.prefix + "dense-\($0)" }
+            try review.replayOperations(try ids.enumerated().map { try self.operation($0.offset + 1, $0.element) }, instanceID: "device")
+            var samples: [Double] = []
+            var scans: [Int] = []
+            review.replayAnnotationScanObserver = { _, count in scans.append(count) }
+            for round in 0..<3 {
+                scans.removeAll()
+                let ops = try ids.enumerated().map { try self.operation((round+1)*250+$0.offset+1, $0.element, text: round % 2 == 0 ? "updated" : "last") }
+                let begin = CFAbsoluteTimeGetCurrent()
+                try review.replayOperations(ops, instanceID: "device")
+                samples.append((CFAbsoluteTimeGetCurrent()-begin)*1000)
+                XCTAssertEqual(scans, [6250], "One page scan per batch, rather than one per revision")
+            }
+            XCTAssertEqual(page.annotations.count, 6250)
+            XCTAssertEqual(review.revision, 1000)
+            print("DENSE_REPLAY existing=6000 operations=250 samplesMs=\(samples)")
+        }
+    }
+    func testReplayIndexPreservesDuplicateIdentityOrderAndRebuildsAfterLocalMutation() async throws {
+        try await withReview { review, _ in
+            let page = try XCTUnwrap(review.reviewPDF?.page(at: 0))
+            let id = RectangleMarkupRecord.prefix + "duplicate"
+            for _ in 0..<2 {
+                let annotation = PDFAnnotation(bounds: CGRect(x: 10,y: 10,width: 20,height: 20),forType: .square,withProperties: nil)
+                annotation.setValue(id,forAnnotationKey: RectangleMarkupRecord.identityKey)
+                page.addAnnotation(annotation)
+            }
+            var scans = 0
+            review.replayAnnotationScanObserver = { _, _ in scans += 1 }
+            try review.replayOperations([self.operation(1,id,text:"updated"), self.operation(2,id,text:nil)],instanceID:"device")
+            XCTAssertEqual(scans,1)
+            XCTAssertEqual(page.annotations.count,1)
+            let first = try XCTUnwrap(page.annotations.first)
+            XCTAssertEqual(first.bounds.minX,40,"Removal must preserve the first-match semantics of duplicate IDs")
+            page.removeAnnotation(first)
+            try review.replayOperations([self.operation(3,id,text:"fresh")],instanceID:"device")
+            XCTAssertEqual(scans,2,"A later batch must observe local changes, rather than a retained stale index")
+            XCTAssertEqual(page.annotations.count,1)
+            XCTAssertEqual(page.annotations.first?.bounds.minX,20)
+        }
+    }
     private func operation(_ seq: Int, _ id: String, page: Int = 0, text: String? = "markup", owner: String = "remote") throws -> SharedReviewAPI.Operation {
         let annotation = PDFAnnotation(bounds: CGRect(x: text == "last" || text == "updated" ? 40 : 20, y: 20, width: 70, height: 50), forType: .square, withProperties: nil)
         annotation.setValue(id, forAnnotationKey: RectangleMarkupRecord.identityKey)

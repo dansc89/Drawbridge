@@ -23,14 +23,13 @@ Version 1.0 starts the public release series. Fixes use patch versions such as 1
 - **Navigate drawing sets:** page thumbnails track the current sheet and refresh after markup changes. Switch to bookmarks, search sheet names, or use separate page and viewing-history controls.
 - **Index and link sheets:** generate sheet numbers/titles and bookmarks from title blocks, then batch-link sheet references. Processing dialogs report stages and page progress, with cancellation and review before applying bookmarks.
 - **Add vector markups:** pen, rectangle, ellipse, line, arrow, polygon, polyline, and on-page text boxes. The active tool is highlighted; a resizable right properties sidebar offers custom colors, six line patterns, lineweights, text sizes, and separate stroke and fill opacity for rectangles, ellipses, and polygons. **Set as Default** remembers each tool’s appearance across app restarts.
-- **Select and arrange markups:** Shift-click to add or remove individual selections. Drag left to right to select enclosed markups, or right to left to select touched markups. Move or delete the selection together. Right-click for Bring to Front or Send to Back.
 - **Snapshot drawing regions:** capture a box or polygon and paste it onto another sheet at its original paper size. Use the right properties sidebar for overlay, opacity, grayscale, Change Color, or invert. Original captures preserve vector linework; optional color filters use a bounded high-resolution image and can be reversed. Snapshots are embedded in the saved PDF.
 - **Measure drawings:** apply architectural or metric scales to several pages, calibrate against a known dimension, and trace area, perimeter, or open-path length. Measurement labels and page scales persist in the PDF. Whole-page scales use PDF viewport measurement metadata, with current-page, all-page, and custom-range options. Existing named detail viewports are preserved; separate X/Y scales are not currently supported.
 - **Review markups:** open the Markups List to see type, page, comment, author, and layer. Click a row to jump to the annotation, search by text or author, and batch-delete selected markups with Undo. Links and form controls are excluded; locked annotations stay visible.
 - **Organize markup layers:** assign markups and Snapshots through their right-click menu or the Markups List. Create, rename, show/hide, and remove layers in the right sidebar; choose an active layer for new markups. Assignments and visibility persist in the PDF. Use the Lock column to protect a layer’s markups from editing and deletion in Drawbridge.
 - **Manage pages and bookmarks:** Shift/Command-select several entries, then press Backspace/Delete or right-click to delete with confirmation. Undo/redo also works after saving while the document remains open. Deleting bookmarks leaves PDF pages intact.
 - **Save PDF changes:** save the open file or a separate copy. Markup saves append annotation changes rather than rasterizing or rebuilding drawing pages.
-- **Flatten and unflatten:** flatten supported imported annotations into page content. Drawbridge embeds recovery information so its flattened PDFs can be unflattened after reopening.
+- **Flatten and unflatten:** flatten supported consultant annotations into page content. Drawbridge embeds recovery information so its flattened PDFs can be unflattened after reopening.
 - **Reduce file size:** lossless compression with content verification. Image resolution is preserved; already-compressed images may not get smaller.
 - **Read and print:** document text search, text selection/copy, fit-page/fit-width views, and native macOS printing. Invert changes on-screen colors only, leaving saved and printed colors unchanged.
 
@@ -73,6 +72,8 @@ Hold **Shift** to constrain lines, arrows, pen strokes, and path segments to hor
 
 Line and arrow tools use two clicks: start, then end. Text boxes let you type directly on the page. Escape cancels an unfinished drawing. Shortcuts do not activate drawing tools while you are typing text.
 
+With the PDF canvas focused, **Command+A** selects the visible, editable markups on the current page. Press **Backspace/Delete** to delete them together; **Command+Z** restores the batch. Text fields and sidebar lists keep their normal Select All behavior.
+
 ## Drawing measurements
 
 Choose **Measurements > Set Drawing Scale…** to apply a preset or custom scale to one or several PDF pages. **Calibrate Drawing Scale…** uses two points and a known distance in feet or meters. Verify the result against a known dimension before taking measurements.
@@ -101,7 +102,7 @@ Third-party components and demo drawings retain their own licenses. See [third-p
 
 ## Privacy and security
 
-PDF viewing, markup editing, and sheet indexing run locally on your Mac. See [SECURITY.md](SECURITY.md) for private vulnerability reporting and contribution guidelines.
+PDF viewing, markup editing, and sheet indexing run locally on your Mac. The optional backend prototype is separate from the released app. See [SECURITY.md](SECURITY.md) for private vulnerability reporting and contribution guidelines.
 
 ## Support and development
 

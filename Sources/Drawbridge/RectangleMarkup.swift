@@ -338,6 +338,16 @@ final class RectangleMarkupController {
         additionalSelection = Array(valid.dropFirst())
         refresh()
     }
+    func selectAllMarkups(on page: PDFPage) {
+        guard page.document === boundDocument else { return }
+        cancelGesture()
+        tool = .select
+        view?.setCurrentSelection(nil, animate: false)
+        setSelectedItems(page.annotations.filter {
+            !MarkupLayers.isMetadata($0) && !MeasurementMetadata.isPageScaleMetadata($0)
+                && (RectangleMarkupRecord.owns($0) || ImportedMarkupState.selectable($0))
+        })
+    }
 
     func selectWindow(on page: PDFPage, from start: CGPoint, to end: CGPoint, extending original: [PDFAnnotation] = []) {
         let region = Self.rect(start, end)
@@ -402,6 +412,10 @@ final class RectangleMarkupController {
     private var snapshotCaptureID: UUID?
     var onInvalidMeasurement: (() -> Void)?
     var canEdit: () -> Bool = { true }
+    var hasActiveDrawingInteraction: Bool {
+        gesture != nil || pendingLine != nil || polylinePage != nil ||
+        inlineText != nil || selectionWindow != nil || groupMove != nil
+    }
     var canManageLayers: () -> Bool = { true }
     var reviewScaleIdentity: ((PDFPage) -> String?)?
     var tool: Tool = .select {
@@ -1513,11 +1527,32 @@ final class RectangleMarkupController {
         guard !items.isEmpty else { return }
         cancelGesture()
         undo.beginUndoGrouping()
-        for annotation in items {
-            if let page = annotation.page { setPresence(false, annotation: annotation, page: page, action: "Delete Markups") }
-        }
+        setBatchPresence(false, items: items.compactMap { annotation in annotation.page.map { (page: $0, annotation: annotation) } })
         undo.endUndoGrouping()
         selected = nil; refresh()
+    }
+
+    private func setBatchPresence(_ exists: Bool, items: [(page: PDFPage, annotation: PDFAnnotation)]) {
+        guard canEdit() else { return }
+        let items = items.filter { $0.page.document === boundDocument }
+        guard !items.isEmpty else { return }
+        undo.registerUndo(withTarget: self) { $0.setBatchPresence(!exists, items: items) }
+        undo.setActionName("Delete Markups")
+        var pages: [PDFPage] = []
+        for (page, annotation) in items {
+            if !pages.contains(where: { $0 === page }) { pages.append(page) }
+            if !RectangleMarkupRecord.owns(annotation) { importedState?.touch(annotation) }
+            (annotation as? DrawbridgeSnapshotAnnotation)?.isRetired = !exists
+            annotation.shouldDisplay = exists
+            if exists { page.addAnnotation(annotation); applyLayerVisibility(to: annotation) }
+            else { page.removeAnnotation(annotation) }
+        }
+        setSelectedItems(exists ? items.map(\.annotation) : [])
+        for page in pages {
+            let region = Self.nativeRefreshRegion(for: items.filter { $0.page === page }.map(\.annotation))
+            changed(page, importedAppearanceChanged: region == nil, region: region,
+                    reason: region == nil ? .markupChanged : .nativeMarkupChanged)
+        }
     }
 
     func hatchSelected(_ style: DraftingHatch?) {
@@ -1947,11 +1982,29 @@ final class RectangleMarkupController {
             annotation.shouldDisplay = false
             page.removeAnnotation(annotation); selected = nil
         }
-        applyLayerVisibility()
-        changed(page, importedAppearanceChanged: true)
+        if exists { applyLayerVisibility(to: annotation) }
+        let region = Self.nativeRefreshRegion(for: [annotation])
+        changed(page, importedAppearanceChanged: region == nil, region: region,
+                reason: region == nil ? .markupChanged : .nativeMarkupChanged)
     }
 
-    func changed(_ page: PDFPage, importedAppearanceChanged: Bool = true) {
+    private static func nativeRefreshRegion(for annotations: [PDFAnnotation]) -> CGRect? {
+        guard !annotations.isEmpty else { return nil }
+        var region = CGRect.null
+        for annotation in annotations {
+            // Imported APs and Snapshot stamps retain the existing full cache
+            // erasure. Live native annotations use PDFKit's annotation update.
+            guard RectangleMarkupRecord.owns(annotation), !annotation.hasAppearanceStream,
+                  annotation.type != "Stamp", CopiedMarkupPayload.read(annotation) == nil,
+                  annotation.value(forAnnotationKey: PDFAnnotationKey(rawValue: "/AP")) == nil else { return nil }
+            let padding = max(24, (annotation.border?.lineWidth ?? 2) * 3)
+            region = region.union(annotation.bounds.insetBy(dx: -padding, dy: -padding))
+        }
+        return region
+    }
+
+    func changed(_ page: PDFPage, importedAppearanceChanged: Bool = true,
+                 region: CGRect? = nil, reason: MarkupPDFView.AnnotationRefreshReason = .markupChanged) {
         // Saved owned markups carry an AP stream. Once edited, regenerate from
         // live geometry rather than retaining the old appearance underneath.
         if let selected, selected.page === page, RectangleMarkupRecord.owns(selected), !(selected is DrawbridgeSnapshotAnnotation) {
@@ -1960,13 +2013,15 @@ final class RectangleMarkupController {
         if let selected, selected.page === page { MeasurementMetadata.updateLabel(selected) }
         // Record capture runs off actor; keep copied payloads synchronized here,
         // after mutations (including undo), never serialize their old AP again.
-        for annotation in page.annotations where CopiedMarkupPayload.read(annotation) != nil {
-            annotation.removeValue(forAnnotationKey: PDFAnnotationKey(rawValue: "/AP"))
-            if let payload = CopiedMarkupPayload.capture(annotation) { payload.install(on: annotation) }
+        if reason != .nativeMarkupChanged {
+            for annotation in page.annotations where CopiedMarkupPayload.read(annotation) != nil {
+                annotation.removeValue(forAnnotationKey: PDFAnnotationKey(rawValue: "/AP"))
+                if let payload = CopiedMarkupPayload.capture(annotation) { payload.install(on: annotation) }
+            }
         }
         // A real style mutation during drafting survives cancellation of the text.
         if var draft = inlineText { draft.wasDirty = true; inlineText = draft }
-        hasUnsavedChanges = true; (view as? MarkupPDFView)?.refreshAnnotationRendering(on: page, importedAppearanceChanged: importedAppearanceChanged); refresh(); onMutation?(page)
+        hasUnsavedChanges = true; (view as? MarkupPDFView)?.refreshAnnotationRendering(on: page, importedAppearanceChanged: importedAppearanceChanged, region: region, reason: reason); refresh(); onMutation?(page)
     }
 
     @discardableResult

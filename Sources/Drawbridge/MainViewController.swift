@@ -4032,7 +4032,7 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             || pageMarkupCache.count < document.pageCount
     }
 
-    func markPageMarkupCacheDirty(_ page: PDFPage?) {
+    func markPageMarkupCacheDirty(_ page: PDFPage?, alreadyRefreshedView: MarkupPDFView? = nil) {
         guard let page, let document = pdfView.document else {
             pageThumbnailCache.invalidate(nil)
             pagesTableView.reloadData()
@@ -4042,20 +4042,21 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
         let pageIndex = document.index(for: page)
         guard pageIndex >= 0, pageIndex < document.pageCount else { return }
         dirtyMarkupPageIndexes.insert(pageIndex)
-        pageThumbnailCache.invalidate(page)
+        pageThumbnailCache.invalidate(page, afterEditing: true)
         if navigationModeControl.selectedSegment == 0 {
             pagesTableView.reloadData(forRowIndexes: IndexSet(integer: pageIndex), columnIndexes: IndexSet(integer: 0))
         }
-        invalidateVisibleMarkupRendering(on: page)
+        invalidateVisibleMarkupRendering(on: page, excluding: alreadyRefreshedView)
     }
 
-    private func invalidateVisibleMarkupRendering(on page: PDFPage) {
+    private func invalidateVisibleMarkupRendering(on page: PDFPage, excluding refreshed: MarkupPDFView? = nil) {
         if let peer = secondaryPDFView, peer.rectangleMarkup === pdfView.rectangleMarkup,
            let canonical = pdfView.document,
            let state = peer.captureTabViewState(), canonical.index(for: page) == state.current.pageIndex {
             installSplitPresentation(on: peer, from: canonical, state: state)
         }
         for pane in [pdfView, secondaryPDFView].compactMap({ $0 }) {
+            guard pane !== refreshed else { continue }
             guard pane.visiblePages.contains(where: { $0 === page }) || pane.currentPage === page else { continue }
             let pageBounds = page.bounds(for: pane.displayBox)
             let rectInView = pane.convert(pageBounds, from: page)

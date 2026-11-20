@@ -550,7 +550,9 @@ extension MainViewController {
         }
         if view.window?.firstResponder === pagesTableView { pagesTableView.selectAll(sender); return }
         if view.window?.firstResponder === bookmarksOutlineView { bookmarksOutlineView.selectAll(sender); return }
-        pdfView.selectAll(sender)
+        guard let page = pdfView.currentPage else { return }
+        pdfView.rectangleMarkup.selectAllMarkups(on: page)
+        view.window?.makeFirstResponder(pdfView)
     }
     @objc func commandEditMarkup(_ sender: Any?) { editSelectedMarkupText() }
     @objc func commandToggleSidebar(_ sender: Any?) { toggleSidebar() }

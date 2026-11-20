@@ -110,6 +110,9 @@ final class RectangleMarkupToolbar: ThemedToolbarStackView {
 @MainActor
 extension MainViewController {
     func configureRectangleMarkup() {
+        pageThumbnailCache.isInteractionActive = { [weak self] in
+            self?.pdfView.rectangleMarkup.hasActiveDrawingInteraction == true
+        }
         let session = pdfView.rectangleMarkup
         session.reviewScaleIdentity = { [weak self] page in
             page.document.flatMap { self?.sharedReview?.review(for: $0)?.scaleMarkerIdentity(on: page) }
@@ -122,7 +125,7 @@ extension MainViewController {
         }
         session.onMutation = { [weak self] page in
             guard let self else { return }
-            self.markPageMarkupCacheDirty(page)
+            self.markPageMarkupCacheDirty(page, alreadyRefreshedView: self.pdfView.rectangleMarkup.view as? MarkupPDFView)
             if let review = page.document.flatMap({ self.sharedReview?.review(for: $0) }) { review.recordChanges(on: page) }
             else { self.markMarkupChanged() }
             self.updateStatusBar()
