@@ -19,8 +19,9 @@ enum ReviewPDFLayerFixture {
         }
         return make(objects)
     }
-    static func forms() -> Data {
-        let content = "/OC /A BDC q 1 0 0 1 10 10 cm /F Do Q q 1 0 0 1 60 60 cm /F Do Q EMC\n"
+    static func forms(visibleTail: Bool = false) -> Data {
+        var content = "/OC /A BDC q 1 0 0 1 10 10 cm /F Do Q q 1 0 0 1 60 60 cm /F Do Q EMC\n"
+        if visibleTail { content += "/OC /B BDC 80 10 10 10 re f EMC\n" }
         let form = "0 0 0 rg 0 0 10 10 re f 12 0 5 10 re f\n"
         return make([
             "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R 6 0 R] /D << /BaseState /ON /Order [5 0 R 6 0 R] >> >> >>",
@@ -212,6 +213,39 @@ enum ReviewPDFLayerFixture {
         XCTAssertGreaterThan(try XCTUnwrap(image.colorAt(x:25,y:75)?.usingColorSpace(.deviceRGB)).redComponent,0.95)
         XCTAssertLessThan(try XCTUnwrap(image.colorAt(x:70,y:30)?.usingColorSpace(.deviceRGB)).redComponent,0.05)
         XCTAssertLessThan(try XCTUnwrap(image.colorAt(x:50,y:85)?.usingColorSpace(.deviceRGB)).greenComponent,0.05)
+    }
+
+    func testHiddenPathsAndFormsRetainOriginalVectorSelectionOrdinals() throws {
+        for (bytes, point, expected) in [
+            (ReviewPDFLayerFixture.data(),CGPoint(x:60,y:65),[1]),
+            (ReviewPDFLayerFixture.forms(visibleTail:true),CGPoint(x:80,y:15),[2])
+        ] {
+            let source = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString+".pdf")
+            try bytes.write(to:source); defer { try? FileManager.default.removeItem(at:source) }
+            let hidden = try NativePDFLayerMutation.transform(source:source,registryIndex:0,operation:.visibility(false))
+            let filtered = try XCTUnwrap(NativeDrawingLayerPatch.displayCopy(source:hidden.url,hiddenIndices:[0]))
+            let document = try XCTUnwrap(PDFDocument(url:filtered.url)), page = try XCTUnwrap(document.page(at:0))
+            XCTAssertEqual(PDFPathScanner.index(page:try XCTUnwrap(page.pageRef)).nativeSelection(at:point,tolerance:2)?.path,expected)
+            if expected == [2] {
+                let graph = try PDFLayerPurger.inspect(filtered.url,includeStreamData:false,helper:XCTUnwrap(PDFTKBookmarkWriter.executableURL()))
+                let tables = try XCTUnwrap(graph["qpdf"] as? [[String:Any]]), objects = tables[1]
+                func dictionary(_ value:Any?) -> [String:Any] {
+                    if let ref = value as? String { return (objects["obj:"+ref] as? [String:Any])?["value"] as? [String:Any] ?? [:] }
+                    return value as? [String:Any] ?? [:]
+                }
+                let pages = try XCTUnwrap(graph["pages"] as? [[String:Any]])
+                let resources = dictionary(dictionary(pages[0]["object"])["/Resources"])
+                XCTAssertEqual(dictionary(resources["/XObject"]).count,2,"All hidden occurrences reuse one empty Form alongside the original resource")
+            }
+
+        }
+        let saved = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString+".pdf")
+        defer { try? FileManager.default.removeItem(at:saved) }
+        try SharedReviewPDFExport.write(basePDF:ReviewPDFLayerFixture.forms(),records:[drawingRecord(path:[0,1])],to:saved)
+        let hidden = try NativePDFLayerMutation.transform(source:saved,registryIndex:0,operation:.visibility(false))
+        let filtered = try XCTUnwrap(NativeDrawingLayerPatch.displayCopy(source:hidden.url,hiddenIndices:[0]))
+        let document = try XCTUnwrap(PDFDocument(url:filtered.url)), page = try XCTUnwrap(document.page(at:0))
+        XCTAssertEqual(PDFPathScanner.index(page:try XCTUnwrap(page.pageRef)).nativeSelection(at:CGPoint(x:22,y:15),tolerance:2)?.path,[0,1])
     }
 
 }

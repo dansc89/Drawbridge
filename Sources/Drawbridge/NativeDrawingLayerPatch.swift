@@ -308,7 +308,10 @@ extension NativeDrawingLayerPatch {
             } else if token.text == "Tr" {
                 guard operands.count == 1, let value = Int(operands[0].text), (0...7).contains(value) else { throw fail("invalid text rendering mode") }
                 renderMode = value
-            } else if suppressed && pathPaints.contains(token.text) { edits.append((token.range, Data("n".utf8)))
+            } else if suppressed && pathPaints.contains(token.text) {
+                // Keep one paint event after clearing the path. The scanner's
+                // stable selectors must not shift when earlier paths are hidden.
+                edits.append((token.range, Data("n S".utf8)))
             } else if suppressed && token.text == "sh" { edits.append((range, Data()))
             } else if suppressed && textPaints.contains(token.text) {
                 // Invisible text still advances and clips exactly as before. The
@@ -321,7 +324,18 @@ extension NativeDrawingLayerPatch {
                       let streamObject = (objects["obj:" + reference] as? [String: Any])?["stream"] as? [String: Any],
                       var definition = streamObject["dict"] as? [String: Any] else { throw fail("invalid drawing resource") }
                 let own = try (definition["/OC"] as? String).map { try hiddenGroup($0, hidden: hidden) } ?? false
-                if suppressed || own { edits.append((range, Data()))
+                if suppressed || own {
+                    // Retain the Do ordinal with a shared empty Form, avoiding
+                    // both hidden geometry and parsing a large hidden XObject.
+                    let key = "DrawbridgeHiddenXObject"
+                    let empty: String
+                    if let cached = forms[key] { empty = cached }
+                    else {
+                        empty = self.stream(Data(), dictionary:["/Type":"/XObject","/Subtype":"/Form","/BBox":[0,0,1,1],"/Resources":[:]])
+                        forms[key] = empty
+                    }
+                    var name = "/DrawbridgeHiddenForm\(next)"; while xObjects[name] != nil && xObjects[name] as? String != empty { name += "x" }
+                    xObjects[name] = empty; edits.append((range,Data("\(name) Do".utf8)))
                 } else if definition["/Subtype"] as? String == "/Form" {
                     let originalResources = definition["/Resources"].map(dictionary) ?? resources
                     let signature = reference + ":" + SHA256.hash(data: try JSONSerialization.data(withJSONObject: originalResources, options: [.sortedKeys])).map { String(format:"%02x",$0) }.joined()
