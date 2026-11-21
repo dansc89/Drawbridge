@@ -407,6 +407,21 @@ import XCTest
         }
     }
 
+    func testNativeVisibilityKeepsForeignOrdinalWhenOwnedGroupsAreRebuilt() async throws {
+        try await withReview(basePDF:ReviewPDFLayerFixture.data(ownedFirst:true)) { review, editor in
+            let document = try XCTUnwrap(review.reviewPDF), page = try XCTUnwrap(document.page(at:0))
+            let layer = try XCTUnwrap(EmbeddedPDFLayers.read(document).first)
+            XCTAssertEqual(layer.registryIndex,1)
+            try await review.setPDFLayerVisible(layer,visible:false)
+            let context = try XCTUnwrap(CGContext(data:nil,width:100,height:100,bitsPerComponent:8,bytesPerRow:0,space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue))
+            context.setFillColor(CGColor(gray:1,alpha:1));context.fill(CGRect(x:0,y:0,width:100,height:100))
+            editor.pdfView.reviewLayerPresentation.draw(page,to:context)
+            let image = NSBitmapImageRep(cgImage:try XCTUnwrap(context.makeImage()))
+            XCTAssertGreaterThan(try XCTUnwrap(image.colorAt(x:25,y:75)?.usingColorSpace(.deviceRGB)).redComponent,0.95)
+            XCTAssertLessThan(try XCTUnwrap(image.colorAt(x:70,y:30)?.usingColorSpace(.deviceRGB)).redComponent,0.05)
+        }
+    }
+
     private func withReview(basePDF suppliedBase: Data? = nil, response: (@MainActor @Sendable (URLRequest) throws -> Data?)? = nil, _ body: (SharedReviewWindowController, MainViewController) async throws -> Void) async throws {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

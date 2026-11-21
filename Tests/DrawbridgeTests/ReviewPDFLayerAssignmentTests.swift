@@ -4,7 +4,7 @@ import XCTest
 @testable import Drawbridge
 
 enum ReviewPDFLayerFixture {
-    static func data(withAnnotation: Bool = false) -> Data {
+    static func data(withAnnotation: Bool = false, ownedFirst: Bool = false) -> Data {
         let content = "/OC /A BDC 0 0 0 rg 10 10 30 30 re f EMC\n/OC /B BDC 60 60 20 20 re f EMC\n"
         var objects = [
             "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R 6 0 R] /D << /BaseState /ON /Order [5 0 R 6 0 R] >> >> >>",
@@ -13,8 +13,12 @@ enum ReviewPDFLayerFixture {
             "<< /Length \(content.utf8.count) >>\nstream\n\(content)endstream",
             "<< /Type /OCG /Name (Duplicate) >>", "<< /Type /OCG /Name (Duplicate) >>"
         ]
+        if ownedFirst {
+            objects[0] = objects[0].replacingOccurrences(of:"/OCGs [5 0 R 6 0 R]",with:"/OCGs [7 0 R 5 0 R 6 0 R]")
+            objects.append("<< /Type /OCG /Name (Owned) /DrawbridgeLayerID (u:00000000-0000-0000-0000-000000000001) >>")
+        }
         if withAnnotation {
-            objects[2] = objects[2].replacingOccurrences(of:"/Contents 4 0 R",with:"/Contents 4 0 R /Annots [7 0 R]")
+            objects[2] = objects[2].replacingOccurrences(of:"/Contents 4 0 R",with:"/Contents 4 0 R /Annots [\(objects.count+1) 0 R]")
             objects.append("<< /Type /Annot /Subtype /Square /Rect [45 10 55 20] /C [1 0 0] /IC [1 0 0] /OC 5 0 R /F 4 >>")
         }
         return make(objects)
