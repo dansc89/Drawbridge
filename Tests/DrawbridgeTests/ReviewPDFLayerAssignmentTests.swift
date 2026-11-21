@@ -110,6 +110,10 @@ enum ReviewPDFLayerFixture {
         XCTAssertEqual(menu.items.filter { $0.title == "Duplicate (PDF)" }.count, 2)
         XCTAssertFalse(menu.items.contains { $0.title == "New Layer…" })
         XCTAssertTrue(session.canAssignLayer(snapshot))
+        let inspector = MarkupPropertiesViewController(); inspector.session = session; inspector.refresh()
+        XCTAssertEqual(inspector.membership.numberOfItems,3)
+        XCTAssertEqual(inspector.membership.itemTitles,["Unassigned","Duplicate (PDF)","Duplicate (PDF)"])
+
         session.assignPDFLayer(1, to: [snapshot])
         XCTAssertEqual(MarkupLayers.pdfIndex(snapshot), 1)
         session.undo.undo(); XCTAssertNil(MarkupLayers.pdfIndex(snapshot))
