@@ -7,6 +7,8 @@ import Vision
 
 @MainActor
 final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemValidation, NSSplitViewDelegate, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTextFieldDelegate {
+    let reviewNotificationsPanel = ReviewNotificationsPanel(frame: .zero)
+    lazy var originalDrawingLayers = OriginalDrawingLayerCoordinator(editor: self)
     struct PDFDocumentBox: @unchecked Sendable {
         let document: PDFDocument
     }
@@ -1626,7 +1628,8 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
             thumbnailsEmptyLabel,
             bookmarksSelectionLabel,
             bookmarksScrollView,
-            bookmarksEmptyLabel
+            bookmarksEmptyLabel,
+            reviewNotificationsPanel
         ])
         stack.orientation = .vertical
         stack.spacing = 8
@@ -5853,7 +5856,30 @@ final class MainViewController: NSViewController, NSToolbarDelegate, NSMenuItemV
 
     }
 
+    func updateReviewNotificationsPanel() {
+        let review = activeReview
+        reviewNotificationsPanel.isHidden = review == nil
+        reviewNotificationsPanel.bind(review?.notifications)
+        reviewNotificationsPanel.onRefresh = { [weak self] in
+            guard let review = self?.activeReview else { return }
+            Task { @MainActor in await review.refreshNotifications(force: true) }
+        }
+        reviewNotificationsPanel.onOlder = { [weak self] in
+            guard let review = self?.activeReview else { return }
+            Task { @MainActor in await review.loadOlderNotifications() }
+        }
+        reviewNotificationsPanel.onSelect = { [weak self] alert in
+            guard let self, let review = self.activeReview else { return }
+            Task { @MainActor in
+                do { try await review.openNotification(alert) }
+                catch is CancellationError { }
+                catch { self.runAlert(title: "Alert Not Opened", informativeText: error.localizedDescription, style: .warning) }
+            }
+        }
+    }
+
     func updateStatusBar() {
+        updateReviewNotificationsPanel()
         refreshRulers()
         updatePDFPaneHeaders()
         refreshFlattenButtonState()

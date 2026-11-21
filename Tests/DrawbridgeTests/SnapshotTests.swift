@@ -1202,6 +1202,52 @@ private final class SnapshotRefreshTrackingPage: PDFPage {
         XCTAssertLessThan(after,before*0.4)
     }
 
+    func testDeletingLastSnapshotRetiresSmallPreviewSurfaceWithoutReopening() throws {
+        _ = NSApplication.shared
+        let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }
+        let sourcePDF = try XCTUnwrap(PDFDocument(url: source))
+        let payload = try capture(XCTUnwrap(sourcePDF.page(at: 0)))
+        let page = PDFPage(); page.setBounds(CGRect(x: 0, y: 0, width: 600, height: 800), for: .mediaBox)
+        let document = PDFDocument(); document.insert(page, at: 0)
+        let window = NSWindow(contentRect: CGRect(x: -20000, y: -20000, width: 700, height: 600),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        let view = MarkupPDFView(frame: window.contentView!.bounds)
+        window.contentView?.addSubview(view); view.setMarkupDocument(document)
+        window.orderBack(nil)
+        defer { window.close() }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        view.autoScales = false; view.scaleFactor = 1
+        let session = view.rectangleMarkup; session.bind(to: document); session.canEdit = { true }
+        session.undo.groupsByEvent = false
+        session.undo.beginUndoGrouping()
+        let snapshot = try XCTUnwrap(session.pasteSnapshot(payload, on: page, center: CGPoint(x: 300, y: 400)))
+        session.undo.endUndoGrouping()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertFalse(page.annotations.contains { $0 is SnapshotViewportTileAnnotation }, "Exercise the small Snapshot path")
+        let originalScale = view.scaleFactor
+        let changes = SnapshotNotificationCounter()
+        let observer = NotificationCenter.default.addObserver(forName: .PDFViewScaleChanged, object: view, queue: .main) { _ in
+            MainActor.assumeIsolated { changes.value += 1 }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        view.refreshAnnotationRendering(on: page, importedAppearanceChanged: true, reason: .markupChanged)
+        XCTAssertEqual(changes.value, 0, "Unrelated Review edits must retain the fast refresh path")
+        session.deleteSelected()
+        XCTAssertFalse(snapshot.shouldDisplay)
+        XCTAssertFalse(page.annotations.contains { $0 === snapshot })
+        XCTAssertGreaterThanOrEqual(changes.value, 2, "Retire PDFKit's cached composited surface even without viewport tiles")
+        XCTAssertEqual(view.scaleFactor, originalScale, accuracy: 0.000001)
+        XCTAssertTrue(view.document === document, "No document reload is needed")
+        session.undo.undo()
+        XCTAssertTrue(snapshot.shouldDisplay)
+        XCTAssertTrue(page.annotations.contains { $0 === snapshot })
+        session.undo.redo()
+        XCTAssertFalse(snapshot.shouldDisplay)
+        XCTAssertFalse(page.annotations.contains { $0 === snapshot })
+        XCTAssertEqual(view.scaleFactor, originalScale, accuracy: 0.000001)
+    }
+
     func testSnapshotOpacityChangesRenderedAppearance() throws {
         _ = NSApplication.shared
         let source = try fixture(); defer { try? FileManager.default.removeItem(at: source) }

@@ -30,7 +30,7 @@ enum PDFIncrementalMarkupPatch {
             if let value = object["value"] {
                 appended.append(Data(try encode(value).utf8))
             } else if let stream = object["stream"] as? [String: Any], var dictionary = stream["dict"] as? [String: Any],
-                      dictionary["/DrawbridgeRectangleAppearance"] as? Bool == true,
+                      (dictionary["/DrawbridgeRectangleAppearance"] as? Bool == true || dictionary["/DrawbridgeDrawingLayerProgram"] as? Bool == true),
                       let encoded = stream["data"] as? String, let bytes = Data(base64Encoded: encoded) {
                 dictionary["/Length"] = bytes.count
                 appended.append(Data(try encode(dictionary).utf8)); appended.append(Data("\nstream\n".utf8))

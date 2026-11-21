@@ -100,6 +100,32 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     weak var editor: MainViewController?
     private(set) var tabURL: URL?
     private(set) var reviewPDF: PDFDocument?
+    private var nativeLayerVisibilityBusy = false
+    private var nativeLayerPresentationBytes: Data?
+    private var nativeLayerPresentationDocument: PDFDocument?
+
+    func restorePDFLayerPresentation() {
+        guard let presentation = nativeLayerPresentationDocument else { return }
+        for viewer in allReviewViewers {
+            guard let document = viewer.document, !viewer.reviewLayerPresentation.isInstalled(in: document) else { continue }
+            viewer.reviewLayerPresentation.install(presentation, for: document, box: viewer.displayBox)
+        }
+    }
+
+    func installDerivedLayerPresentation(_ bytes: Data) throws {
+        guard let pdf = reviewPDF, let presentation = PDFDocument(data: bytes), presentation.pageCount == pdf.pageCount else { throw CancellationError() }
+        nativeLayerPresentationBytes = bytes; nativeLayerPresentationDocument = presentation
+        for viewer in allReviewViewers {
+            if let document = viewer.document { viewer.reviewLayerPresentation.install(presentation, for: document, box: viewer.displayBox) }
+        }
+    }
+    func setPDFLayerVisible(_ layer: EmbeddedPDFLayers.Layer, visible: Bool) async throws {
+        guard !nativeLayerVisibilityBusy, let document = reviewPDF, let editor, editor.pdfView.document === document else { throw CancellationError() }
+        nativeLayerVisibilityBusy = true
+        defer { nativeLayerVisibilityBusy = false; editor.rectangleToolbar.propertiesController.layersView.refresh() }
+        try await editor.originalDrawingLayers.setVisible(layer, visible: visible, document: document)
+    }
+
     private(set) var basePDF: Data?
     private(set) var syncStatus = ""
     private var reviewConnection = ReviewSyncConnection()
@@ -121,6 +147,11 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private var cacheWarning = false
     private let outboxDirectory: URL?
     private let cacheDirectory: URL?
+    private(set) var cachedAlertRecipients: [SharedReviewAPI.AlertRecipient] = []
+    private var recipientsUpdated = Date.distantPast
+    var notifications = ReviewNotificationsInbox()
+    private var baseAlertIDs: [String: String] = [:]
+    private var baseAlertTargets: [ObjectIdentifier: String] = [:]
     private var additionalReviews: [URL: SharedReviewWindowController] = [:]
     private var outbox: SharedReviewOutbox?
     private var outboxNeedsSave = false
@@ -176,6 +207,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     private(set) var revision = 0
     private var pending: [SharedReviewOutbox.Edit] = []
     private var records: [Int: [String: RectangleMarkupRecord]] = [:]
+    private var notificationTask: Task<Void, Never>?
     private var syncTask: Task<Void, Never>?
     private var listenTask: Task<Void, Never>?
     private var socket: URLSessionWebSocketTask?
@@ -208,6 +240,8 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         preserveTextDraftsLocally()
         lifecycle = UUID()
         sessionInvalidated = true
+        notifications.reset()
+        cachedAlertRecipients = []; recipientsUpdated = .distantPast
         setBrowserConnection(online: false, needsSignIn: true)
         // Pending edits (including failed local saves) and PDF/cache bytes are
         // retained, never replayed by this invalidated review. Reopening requires
@@ -1198,6 +1232,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         if editor.secondaryPDFView != nil { editor.collapsePDFSplit() }
         let review = tabURL == nil ? self : SharedReviewWindowController(outboxDirectory: outboxDirectory, cacheDirectory: cacheDirectory)
         review.editor = editor
+        review.notifications = notifications
         review.outbox = outbox
         review.cacheWarning = cacheFailed
         review.pending = recoveredEdits
@@ -1210,8 +1245,11 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         review.invalidPages.removeAll()
         review.retiredIDs.removeAll()
         for index in 0..<pdf.pageCount {
-            for annotation in pdf.page(at: index)?.annotations ?? [] where annotation.type != "Link" {
-                annotation.isReadOnly = true
+            for (slot, annotation) in (pdf.page(at: index)?.annotations ?? []).enumerated() {
+                let target = "base:\(index):\(slot)"
+                review.baseAlertTargets[ObjectIdentifier(annotation)] = target
+                if let id = RectangleMarkupRecord.identity(annotation) { review.baseAlertIDs[id] = target }
+                if annotation.type != "Link" { annotation.isReadOnly = true }
             }
         }
         let filename = URL(fileURLWithPath: document.name).lastPathComponent
@@ -1221,6 +1259,8 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         review.tabURL = tab
         review.reviewPDF = pdf
         review.basePDF = bytes
+        review.nativeLayerPresentationBytes = nil
+        review.nativeLayerPresentationDocument = nil
         review.syncStatus = "Connecting…"
         if review !== self { additionalReviews[tab] = review }
         editor.openDocument(at: url)
@@ -1319,6 +1359,67 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
     }
 
+    func refreshNotifications(force: Bool = false) async {
+        guard !sessionInvalidated, let api = reviewAPI else { return }
+        await notifications.poll(api: api, force: force)
+        if force || Date().timeIntervalSince(recipientsUpdated) > 30 { _ = try? await alertRecipients() }
+    }
+
+    func loadOlderNotifications() async {
+        guard !sessionInvalidated, let api = reviewAPI else { return }
+        await notifications.older(api: api)
+    }
+
+    func alertTarget(_ annotation: PDFAnnotation) -> String? {
+        guard annotation.page?.document === reviewPDF, NativeDrawingAssignment.read(annotation) == nil,
+              !["Link", "Widget"].contains(annotation.type ?? "") else { return nil }
+        if let original = baseAlertTargets[ObjectIdentifier(annotation)] { return original }
+        guard let id = RectangleMarkupRecord.identity(annotation) else { return nil }
+        return baseAlertIDs[id] ?? id
+    }
+
+    func alertRecipients() async throws -> [SharedReviewAPI.AlertRecipient] {
+        guard !sessionInvalidated, let api = reviewAPI, let documentID else { throw CancellationError() }
+        let generation = lifecycle
+        let result: SharedReviewAPI.AlertRecipients = try await api.get("documents/\(documentID)/alert-recipients")
+        try checkLifecycle(generation, api: api)
+        cachedAlertRecipients = result.users; recipientsUpdated = Date()
+        return result.users
+    }
+
+    func sendAlert(markup: String, recipient: String) async throws {
+        guard !sessionInvalidated, let api = reviewAPI, let documentID, let sessionID else { throw CancellationError() }
+        let generation = lifecycle
+        // Make the target durable before asking another participant to open it.
+        if pending.contains(where: { $0.payload.id == markup }) {
+            await sync(api: api, document: documentID, session: sessionID)
+        }
+        try checkLifecycle(generation, api: api)
+        guard !pending.contains(where: { $0.payload.id == markup }) else {
+            throw SharedReviewError("This markup is still syncing. Try the alert again when it is synced.")
+        }
+        let key = notifications.retryKey(document: documentID, markup: markup, recipient: recipient)
+        let _: SharedReviewAPI.AlertReceipt = try await api.post("documents/\(documentID)/alerts",
+            SharedReviewAPI.AlertRequest(sessionId: sessionID, recipientId: recipient, markupId: markup, clientId: key))
+        try checkLifecycle(generation, api: api)
+        notifications.sent(document: documentID, markup: markup, recipient: recipient)
+        await refreshNotifications(force: true)
+    }
+
+    func openNotification(_ alert: SharedReviewAPI.ReviewNotification) async throws {
+        guard alert.isValid, !sessionInvalidated, let api = reviewAPI, let editor,
+              let root = editor.sharedReview else { throw CancellationError() }
+        guard try await root.open(alert.document, using: api), let target = editor.activeReview, target.documentID == alert.document.id,
+              let pdf = target.reviewPDF, let page = pdf.page(at: alert.page) else {
+            throw SharedReviewError("The alerted page is no longer available.")
+        }
+        editor.pdfView.go(to: alert.region, on: page)
+        if let annotation = page.annotations.first(where: { target.alertTarget($0) == alert.markupId && $0.shouldDisplay }) {
+            editor.pdfView.rectangleMarkup.selectFromList(annotation)
+        }
+        await notifications.markRead(alert.id, api: api)
+    }
+
     private func startSync(api: SharedReviewAPI, document: String, session: String) {
         guard !sessionInvalidated else { return }
         // The socket only nudges replay; allocating/receiving from it proves neither
@@ -1340,6 +1441,13 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
                 } catch { /* Authenticated HTTP replay remains authoritative if the hint socket disconnects. */ }
             }
         }
+        notificationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.sessionID == session else { return }
+                await self.refreshNotifications()
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
         syncTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self, self.sessionID == session else { return }
@@ -1354,6 +1462,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         updateReviewConnection(online: false)
         editSyncTask?.cancel()
         editSyncTask = nil
+        notificationTask?.cancel(); notificationTask = nil
         syncTask?.cancel()
         listenTask?.cancel()
         socket?.cancel(with: .goingAway, reason: nil)
@@ -1580,16 +1689,21 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         // Scoped to one fetched response, including a partially applied response.
         // No suspension: revision/order and local-edit shielding remain sequential.
         var touchedPages = Set<Int>()
+        var snapshotPages = Set<Int>()
+        var drawingPages = Set<Int>()
         let locallyPendingIDs = Set(pending.map { $0.payload.id })
         // Batch-local indices cannot become stale across local edits, undo or a
         // replaced document. Lists preserve PDFKit's first-match ordering even
         // when an imported PDF contains duplicate annotation identities.
         var annotationIndices: [Int: [String: [PDFAnnotation]]] = [:]
-        defer { refreshReplayPages(touchedPages) }
+        defer {
+            refreshReplayPages(touchedPages, snapshotPages: snapshotPages)
+            if let pageIndex = drawingPages.first, let page = reviewPDF?.page(at: pageIndex) { editor?.originalDrawingLayers.schedule(on: page) }
+        }
         for operation in operations {
             if operation.op_type == "drawbridge.markup.v1", let markup = operation.payload,
                !locallyPendingIDs.contains(markup.id) {
-                if try apply(markup, owned: markup.ownerInstanceId == instanceID, annotationIndices: &annotationIndices) {
+                if try apply(markup, owned: markup.ownerInstanceId == instanceID, annotationIndices: &annotationIndices, snapshotPages: &snapshotPages, drawingPages: &drawingPages) {
                     touchedPages.insert(markup.page)
                 }
             }
@@ -1597,13 +1711,14 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         }
     }
 
-    private func refreshReplayPages(_ indices: Set<Int>) {
+    private func refreshReplayPages(_ indices: Set<Int>, snapshotPages: Set<Int>) {
         guard !indices.isEmpty, let pdf = reviewPDF, let editor,
               editor.pdfView.document === pdf else { return }
         let viewer = editor.pdfView
         for index in indices.sorted() {
             guard let page = pdf.page(at: index) else { continue }
-            viewer.refreshAnnotationRendering(on: page, importedAppearanceChanged: true)
+            viewer.refreshAnnotationRendering(on: page, importedAppearanceChanged: true,
+                reason: snapshotPages.contains(index) ? .snapshotPresenceChanged : .markupChanged)
             editor.markPageMarkupCacheDirty(page, alreadyRefreshedView: viewer)
             replayRefreshObserver?(.page(index))
         }
@@ -1614,7 +1729,7 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
     }
 
     private func apply(_ markup: SharedReviewAPI.Markup, owned: Bool,
-                       annotationIndices: inout [Int: [String: [PDFAnnotation]]]) throws -> Bool {
+                       annotationIndices: inout [Int: [String: [PDFAnnotation]]], snapshotPages: inout Set<Int>, drawingPages: inout Set<Int>) throws -> Bool {
         guard let page = reviewPDF?.page(at: markup.page) else {
             throw SharedReviewError("A revision refers to a missing page.")
         }
@@ -1626,6 +1741,9 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
         if owned, markup.record == nil { retiredIDs.insert(markup.id) }
         if owned, records[markup.page]?[markup.id] == markup.record { return false }
         let replacement = try markup.record.map { record -> PDFAnnotation in
+            if let index = record.pdfLayerIndex, !EmbeddedPDFLayers.read(reviewPDF).indices.contains(index) {
+                throw SharedReviewError("A revision refers to a missing PDF layer.")
+            }
             guard record.id == markup.id, record.pageIndex == markup.page else {
                 throw SharedReviewError("A revision contains an invalid markup ID.")
             }
@@ -1657,11 +1775,18 @@ final class SharedReviewWindowController: NSWindowController, NSWindowDelegate, 
             for viewer in reviewViewers where viewer.rectangleMarkup.selectedItems.contains(where: { $0 === existing }) {
                 viewer.rectangleMarkup.selected = nil
             }
+            if NativeDrawingAssignment.read(existing) != nil { drawingPages.insert(markup.page) }
+            if SnapshotPayload.isSnapshot(existing) { snapshotPages.insert(markup.page) }
+            (existing as? DrawbridgeSnapshotAnnotation)?.isRetired = true
+            existing.shouldDisplay = false
             page.removeAnnotation(existing)
             annotationIndices[markup.page]?[markup.id]?.removeFirst()
         }
         if let replacement {
+            if NativeDrawingAssignment.read(replacement) != nil { drawingPages.insert(markup.page) }
+            if SnapshotPayload.isSnapshot(replacement) { snapshotPages.insert(markup.page) }
             page.addAnnotation(replacement)
+            editor?.pdfView.rectangleMarkup.applyLayerVisibility(to: replacement)
             annotationIndices[markup.page, default: [:]][markup.id, default: []].append(replacement)
         }
         records[markup.page, default: [:]][markup.id] = owned ? markup.record : nil

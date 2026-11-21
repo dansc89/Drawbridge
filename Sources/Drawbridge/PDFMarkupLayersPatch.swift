@@ -74,6 +74,18 @@ enum PDFMarkupLayersPatch {
         }
         return NSDictionary(dictionary: clean(a, before)).isEqual(to: clean(b, after))
     }
+    /// Foreign OCG registry order is stable when Drawbridge-owned groups are rebuilt.
+    /// Names are deliberately not identities: duplicate layer names are legal.
+    static func foreignReferences(_ objects: [String: Any]) -> [String] {
+        func dictionary(_ value: Any?) -> [String: Any] {
+            if let ref = value as? String { return (objects["obj:" + ref] as? [String: Any])?["value"] as? [String: Any] ?? [:] }
+            return value as? [String: Any] ?? [:]
+        }
+        let trailer = (objects["trailer"] as? [String: Any])?["value"] as? [String: Any] ?? [:]
+        let props = dictionary(dictionary(trailer["/Root"])["/OCProperties"])
+        var seen = Set<String>()
+        return (props["/OCGs"] as? [String] ?? []).filter { seen.insert($0).inserted && dictionary($0)["/DrawbridgeLayerID"] == nil && dictionary($0)["/Type"] as? String == "/OCG" }
+    }
     static func references(_ objects: [String: Any]) -> [String: String] {
         var result: [String: String] = [:]
         guard let trailer = (objects["trailer"] as? [String: Any])?["value"] as? [String: Any], let root = trailer["/Root"] as? String,

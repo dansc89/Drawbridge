@@ -4,7 +4,7 @@ import PDFKit
 @MainActor
 enum MarkupListPresentation {
     static func includes(_ annotation: PDFAnnotation) -> Bool {
-        guard !(annotation is SnapshotViewportTileAnnotation), !MarkupLayers.isMetadata(annotation), !MeasurementMetadata.isPageScaleMetadata(annotation) else { return false }
+        guard !(annotation is SnapshotViewportTileAnnotation), !MarkupLayers.isMetadata(annotation), NativeDrawingAssignment.read(annotation) == nil, !MeasurementMetadata.isPageScaleMetadata(annotation) else { return false }
         guard !["Link", "Widget", "Popup"].contains(annotation.type ?? "") else { return false }
         let author = (annotation.userName ?? "").lowercased()
         return !author.contains("autocad shx")
@@ -172,7 +172,7 @@ extension MainViewController {
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard menu === markupsTable.menu else { return }
         while menu.items.count > 1 { menu.removeItem(at: 1) }
-        guard pdfView.rectangleMarkup.canManageLayers() else { return }
+        guard pdfView.rectangleMarkup.canEdit() else { return }
         let annotations = markupsTable.selectedRowIndexes.compactMap { row in markupItems.indices.contains(row) ? markupItems[row].annotation : nil }
         let item = NSMenuItem(title: "Assign to Layer", action: nil, keyEquivalent: "")
         item.submenu = pdfView.rectangleMarkup.layerAssignmentMenu(for: annotations); menu.addItem(item)

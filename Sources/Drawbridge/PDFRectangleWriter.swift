@@ -120,7 +120,8 @@ enum PDFRectangleWriter {
             try reuseUnchangedNavigation(baseline: inspected, updated: &json)
             profile("navigation changes")
             stage = "annotation update"
-            let scaleViewports = try update(&json, records: records, document: document)
+            var drawingPages: [String: [String: Any]] = [:]
+            let scaleViewports = try update(&json, records: records, document: document, source: input, helper: executable, drawingPages: &drawingPages)
             var importedArrays: [Int: [Any]] = [:]
             var importedObjects: [String: [String: Any]] = [:]
             if let importedPlan {
@@ -157,7 +158,7 @@ enum PDFRectangleWriter {
             let candidate = directory.appendingPathComponent("candidate.pdf")
             let changed = try changedObjects(baseline: inspected, updated: json)
             stage = "original content verification"
-            guard try preservesOriginalObjects(baseline: inspected, updated: json, changed: changed, importedArrays: importedArrays, importedObjects: importedObjects, scaleViewports: scaleViewports) else { return false }
+            guard try preservesOriginalObjects(baseline: inspected, updated: json, changed: changed, importedArrays: importedArrays, importedObjects: importedObjects, scaleViewports: scaleViewports, drawingPages: drawingPages) else { return false }
             stage = "incremental serialization"
             let expectedSize = try PDFIncrementalMarkupPatch.append(original: original, baseline: inspected, updated: json, snapshot: input, to: candidate)
             profile("candidate write")
@@ -218,7 +219,7 @@ enum PDFRectangleWriter {
     /// Check the mutation boundary before serializing. Only navigation, annotation
     /// arrays, owned annotations, and explicitly authorized scale viewports may
     /// change. Original streams/resources and other page fields stay immutable.
-    static func preservesOriginalObjects(baseline: [String: Any], updated: [String: Any], changed: [String], importedArrays: [Int: [Any]] = [:], importedObjects: [String: [String: Any]] = [:], scaleViewports: [String: Any] = [:]) throws -> Bool {
+    static func preservesOriginalObjects(baseline: [String: Any], updated: [String: Any], changed: [String], importedArrays: [Int: [Any]] = [:], importedObjects: [String: [String: Any]] = [:], scaleViewports: [String: Any] = [:], drawingPages: [String: [String: Any]] = [:]) throws -> Bool {
         let before = try objectTable(baseline), after = try objectTable(updated)
         let pageRefs = try pages(baseline)
         let pageKeys = Set(pageRefs.map { "obj:" + $0 })
@@ -234,6 +235,13 @@ enum PDFRectangleWriter {
             if pageKeys.contains(key) || key == "obj:" + catalog {
                 guard var a = old["value"] as? [String: Any], var b = new["value"] as? [String: Any] else { return false }
                 var allowed = pageKeys.contains(key) ? ["/Annots"] : ["/Outlines", "/PageLabels", "/OCProperties"]
+                if let fields = drawingPages[key], pageKeys.contains(key) {
+                    guard Set(fields.keys) == ["/Contents", "/Resources"] else { return false }
+                    for (field, expected) in fields {
+                        guard NSArray(array: [expected]).isEqual(to: [b[field] ?? NSNull()]) else { return false }
+                        allowed.append(field)
+                    }
+                }
                 if let expected = scaleViewports[key], pageKeys.contains(key) {
                     guard NSArray(array: [expected]).isEqual(to: [b["/VP"] ?? NSNull()]) else { return false }
                     allowed.append("/VP")
@@ -597,14 +605,44 @@ enum PDFRectangleWriter {
         tables[1] = objects; json["qpdf"] = tables
     }
 
-    private static func update(_ json: inout [String: Any], records: [RectangleMarkupRecord], document: PDFDocument) throws -> [String: Any] {
+    private static func update(_ json: inout [String: Any], records: [RectangleMarkupRecord], document: PDFDocument, source: URL, helper: URL, drawingPages: inout [String: [String: Any]]) throws -> [String: Any] {
         var scaleViewports: [String: Any] = [:]
         var qpdf = try tableArray(json); var objects = qpdf[1]
         var next = (qpdf[0]["maxobjectid"] as? Int ?? 0) + 1
         let layerCatalogs = records.compactMap(\.layerCatalog)
         guard layerCatalogs.count <= 1 else { throw CocoaError(.fileWriteUnknown) }
+        let pdfLayerReferences = PDFMarkupLayersPatch.foreignReferences(objects)
+        guard records.allSatisfy({ $0.pdfLayerIndex == nil || pdfLayerReferences.indices.contains($0.pdfLayerIndex!) }) else { throw CocoaError(.fileWriteUnknown) }
         let layerReferences = try PDFMarkupLayersPatch.install(catalogText: layerCatalogs.first, objects: &objects, next: &next)
         guard records.allSatisfy({ $0.layerID == nil || layerReferences[$0.layerID!] != nil }) else { throw CocoaError(.fileWriteUnknown) }
+        var drawingEdits = records.compactMap { record -> NativeDrawingLayerPatch.Edit? in
+            guard let assignment = record.nativeDrawing else { return nil }
+            return .init(page: record.pageIndex, path: assignment.path, layers: record.pdfLayerIndex.map { [$0] } ?? [], fingerprint: assignment.fingerprint)
+        }
+        var bakedTargets: [String: [Int]] = [:]
+        let currentDrawingPaths = Set(drawingEdits.map { "\($0.page):" + $0.path.map(String.init).joined(separator: ".") })
+        for (index, reference) in try pages(json).enumerated() {
+            let page = dictionary(reference, objects: objects)
+            for entry in annotations(page["/Annots"], objects: objects) {
+                let annotation = dictionary(entry, objects: objects)
+                guard ownedIdentity(annotation) != nil,
+                      let text = annotation["/DrawbridgeDrawingAssignment"] as? String, text.hasPrefix("u:"),
+                      let data = String(text.dropFirst(2)).data(using: .utf8),
+                      let assignment = try? JSONDecoder().decode(NativeDrawingAssignment.self, from: data), assignment.isValid else { continue }
+                let key = "\(index):" + assignment.path.map(String.init).joined(separator: ".")
+                bakedTargets[key] = (annotation["/DrawbridgePDFLayerIndex"] as? Int).map { [$0] } ?? []
+                if !currentDrawingPaths.contains(key) {
+                    drawingEdits.append(.init(page: index, path: assignment.path, layers: assignment.originalLayers, fingerprint: assignment.fingerprint))
+                }
+            }
+        }
+        drawingEdits = drawingEdits.filter { edit in
+            bakedTargets["\(edit.page):" + edit.path.map(String.init).joined(separator: ".")] != edit.layers
+        }
+        if !drawingEdits.isEmpty {
+            let result = try NativeDrawingLayerPatch(objects: objects, next: next, source: source, helper: helper).apply(drawingEdits, pages: pages(json))
+            objects = result.objects; next = result.next; drawingPages = result.authorized
+        }
         var snapshotForms: [Data:String] = [:]
         var snapshotPayloads: [Data:String] = [:]
         // Identical captures share one indirect PDF string rather than embedding
@@ -685,8 +723,14 @@ enum PDFRectangleWriter {
                 let appearanceRef = "\(next) 0 R"; next += 1
                 let b = record.bounds
                 var annotation: [String:Any] = ["/Type": "/Annot", "/Subtype": subtype(record.kind), "/Rect": [b.minX,b.minY,b.maxX,b.maxY], "/T": "u:\(record.author)", "/NM": "u:\(record.id)", "/Contents": "u:\(record.kind.rawValue.capitalized)", "/F": 4, "/C": [record.red,record.green,record.blue], "/BS": ["/W":record.lineWidth,"/S":"/S"], "/AP": ["/N":appearanceRef]]
-                if let id = record.layerID { annotation["/DrawbridgeLayerID"] = "u:" + id; annotation["/OC"] = layerReferences[id] }
-                else if let oldReference, let old = (objects["obj:" + oldReference] as? [String: Any])?["value"] as? [String: Any], old["/DrawbridgeLayerID"] == nil { annotation["/OC"] = old["/OC"] }
+                if let index = record.pdfLayerIndex {
+                    annotation["/DrawbridgePDFLayerIndex"] = index; annotation["/OC"] = pdfLayerReferences[index]
+                }
+                else if let id = record.layerID { annotation["/DrawbridgeLayerID"] = "u:" + id; annotation["/OC"] = layerReferences[id] }
+                else if let oldReference, let old = (objects["obj:" + oldReference] as? [String: Any])?["value"] as? [String: Any], old["/DrawbridgeLayerID"] == nil, old["/DrawbridgePDFLayerIndex"] == nil { annotation["/OC"] = old["/OC"] }
+                if let assignment = record.nativeDrawing {
+                    annotation["/DrawbridgeDrawingAssignment"] = "u:" + assignment.json; annotation["/F"] = 98
+                }
                 if let catalog = record.layerCatalog { annotation["/DrawbridgeLayerCatalog"] = "u:" + catalog; annotation["/F"] = 98 }
                 if let tool = record.inkTool { annotation["/DrawbridgeInkTool"] = "u:" + tool }
                 if record.kind == .polyline && record.inkTool == "highlight" { annotation["/DrawbridgeMarkerAppearanceVersion"] = 1 }
@@ -900,6 +944,11 @@ enum PDFRectangleWriter {
                           let actual = try? JSONDecoder().decode(CopiedMarkupPayload.self, from: data),
                           actual == payload else { return false }
                 } else if value["/DrawbridgeCopiedMarkup"] != nil { return false }
+                if value["/DrawbridgeDrawingAssignment"] as? String != expected.nativeDrawing.map({ "u:" + $0.json }) { return false }
+                if let index = expected.pdfLayerIndex {
+                    let refs = PDFMarkupLayersPatch.foreignReferences(objects)
+                    if !refs.indices.contains(index) || value["/OC"] as? String != refs[index] || value["/DrawbridgePDFLayerIndex"] as? Int != index { return false }
+                }
                 if let id = expected.layerID, value["/OC"] as? String != PDFMarkupLayersPatch.references(objects)[id] { return false }
                 if expected.layerCatalog != nil && value["/F"] as? Int != 98 { return false }
                 if let tool = expected.inkTool, value["/DrawbridgeInkTool"] as? String != "u:" + tool { return false }

@@ -77,6 +77,34 @@ enum EmbeddedPDFLayers {
         return memberships
     }
 
+    /// Plain native OCG membership of original annotations, without modifying
+    /// their PDF dictionaries or treating native groups as Drawbridge layers.
+    static func annotationMembership(on page: PDFPage) -> [(slot: Int, layer: Int, display: Bool, printFlag: Bool)] {
+        guard let root = page.document?.documentRef?.catalog, let raw = page.pageRef?.dictionary else { return [] }
+        var properties: CGPDFDictionaryRef?, groups: CGPDFArrayRef?, annotations: CGPDFArrayRef?
+        guard CGPDFDictionaryGetDictionary(root, "OCProperties", &properties), let properties,
+              CGPDFDictionaryGetArray(properties, "OCGs", &groups), let groups,
+              CGPDFDictionaryGetArray(raw, "Annots", &annotations), let annotations,
+              CGPDFArrayGetCount(annotations) == page.annotations.count else { return [] }
+        var native: [CGPDFDictionaryRef] = []
+        for index in 0..<CGPDFArrayGetCount(groups) {
+            var group: CGPDFDictionaryRef?, owned: CGPDFObjectRef?, type: UnsafePointer<CChar>?
+            guard CGPDFArrayGetDictionary(groups,index,&group), let group,
+                  CGPDFDictionaryGetName(group,"Type",&type), type.map({ String(cString:$0) }) == "OCG",
+                  !CGPDFDictionaryGetObject(group,"DrawbridgeLayerID",&owned), !native.contains(group) else { continue }
+            native.append(group)
+        }
+        return (0..<CGPDFArrayGetCount(annotations)).compactMap { slot in
+            var annotation: CGPDFDictionaryRef?, group: CGPDFDictionaryRef?, subtype: UnsafePointer<CChar>?
+            guard CGPDFArrayGetDictionary(annotations,slot,&annotation), let annotation,
+                  CGPDFDictionaryGetDictionary(annotation,"OC",&group), let group, let layer = native.firstIndex(of:group),
+                  CGPDFDictionaryGetName(annotation,"Subtype",&subtype), let subtype,
+                  page.annotations[slot].type == String(cString:subtype) else { return nil }
+            var flags: CGPDFInteger = 0; CGPDFDictionaryGetInteger(annotation,"F",&flags)
+            return (slot,layer,flags & 35 == 0,flags & 4 != 0)
+        }
+    }
+
     static func read(_ document: PDFDocument?) -> [Layer] {
         guard let root = document?.documentRef?.catalog else { return [] }
         var properties: CGPDFDictionaryRef?

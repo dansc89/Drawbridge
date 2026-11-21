@@ -268,7 +268,7 @@ import XCTest
         grouped(c) { c.setLayerLocked(id, false) }; XCTAssertTrue(controller.validateMenuItem(menu))
         annotation.isReadOnly = true; XCTAssertFalse(controller.validateMenuItem(menu))
     }
-    func testLayerRestrictionsRemoveListMenuAndRejectAssignment() throws {
+    func testReviewAllowsExistingLayerAssignmentButNotCatalogChanges() throws {
         let source = try fixture()
         defer { try? FileManager.default.removeItem(at: source) }
         let controller = MainViewController()
@@ -287,10 +287,11 @@ import XCTest
 
         session.canManageLayers = { false }
         controller.menuNeedsUpdate(menu)
-        XCTAssertFalse(menu.items.contains { $0.title == "Assign to Layer" })
-        XCTAssertTrue(session.layerAssignmentMenu(for: [markup]).items.isEmpty)
+        XCTAssertTrue(menu.items.contains { $0.title == "Assign to Layer" })
+        XCTAssertFalse(session.layerAssignmentMenu(for: [markup]).items.contains { $0.title == "New Layer…" })
         grouped(session) { session.assignLayer(layer, to: [markup]) }
-        XCTAssertNil(MarkupLayers.id(markup))
+        XCTAssertEqual(MarkupLayers.id(markup), layer)
+        XCTAssertNil(session.addLayer(named: "Unavailable"))
         XCTAssertTrue(session.canDeleteMarkup(markup))
         markup.isReadOnly = true
         XCTAssertFalse(session.canDeleteMarkup(markup))

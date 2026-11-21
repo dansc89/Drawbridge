@@ -192,6 +192,9 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
     }
     @objc private func changeMembership(_ sender: NSPopUpButton) {
         guard let session else { return }; let index = sender.indexOfSelectedItem - 1
+        if index >= session.layerCatalog.layers.count, let annotation = session.selected {
+            session.assignPDFLayer(index - session.layerCatalog.layers.count, to: [annotation]); return
+        }
         let id = session.layerCatalog.layers.indices.contains(index) ? session.layerCatalog.layers[index].id : nil
         if let annotation = session.selected { session.assignLayer(id, to: [annotation]) } else { session.setActiveLayer(id) }
     }
@@ -204,11 +207,17 @@ final class MarkupPropertiesViewController: NSViewController, NSTextFieldDelegat
         guard let session else { return }
         lastEditingAvailability = session.canEdit()
         layersView.session = session; layersView.refresh()
-        membership.removeAllItems(); membership.addItems(withTitles: ["Unassigned"] + session.layerCatalog.layers.map(\.name))
+        membership.removeAllItems(); membership.addItems(withTitles: ["Unassigned"] + session.layerCatalog.layers.map(\.name) + (session.layerState?.pdfLayers.map { $0.name + " (PDF)" } ?? []))
         let currentID = session.selected.flatMap(MarkupLayers.id) ?? (session.selected == nil ? session.layerCatalog.activeID : nil)
         membership.selectItem(at: currentID.flatMap { id in session.layerCatalog.layers.firstIndex { $0.id == id }.map { $0 + 1 } } ?? 0)
-        membership.isEnabled = session.canManageLayers() && session.canEdit() && (session.selected.map(session.canAssignLayer) ?? true)
+        if let annotation = session.selected, let index = MarkupLayers.pdfIndex(annotation) {
+            membership.selectItem(at: session.layerCatalog.layers.count + 1 + index)
+        }
+        membership.isEnabled = (session.canManageLayers() || session.selected != nil) && session.canEdit() && (session.selected.map(session.canAssignLayer) ?? true)
         for (index, layer) in session.layerCatalog.layers.enumerated() { membership.item(at: index + 1)?.isEnabled = !layer.locked }
+        for index in 0..<(session.layerState?.pdfLayers.count ?? 0) {
+            membership.item(at:session.layerCatalog.layers.count + 1 + index)?.isEnabled = session.selected.map(RectangleMarkupRecord.owns) == true
+        }
         membership.toolTip = session.selected == nil ? "Layer for new markups" : "Selected markup's layer"
         if lastDefaultTool != session.defaultTool { defaultStatus.stringValue = ""; lastDefaultTool = session.defaultTool }
         setAsDefault.isEnabled = session.canEdit() && session.defaultTool != nil

@@ -171,9 +171,9 @@ struct SnapshotPayload: Sendable {
         if let placement, let encoded = try? JSONEncoder().encode(placement) { NSPasteboard.general.setData(encoded, forType: Self.placementType) }
         NSPasteboard.general.setString(style.json, forType: Self.styleType)
     }
-    @MainActor static func capture(page: PDFPage, points: [CGPoint]) throws -> Self {
+    @MainActor static func capture(page: PDFPage, points: [CGPoint], drawingSource: PDFPage? = nil) throws -> Self {
         guard points.count >= 3, points.count <= 512, points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }),
-              page.document?.allowsCopying != false, let source = page.pageRef else { throw CocoaError(.fileReadNoPermission) }
+              page.document?.allowsCopying != false, let source = (drawingSource ?? page).pageRef else { throw CocoaError(.fileReadNoPermission) }
         guard MeasurementMetadata.supportedPage(page) else { throw SnapshotError.unsupportedPageUnits }
         let crop = source.getBoxRect(.cropBox)
         let rotation = ((page.rotation % 360) + 360) % 360

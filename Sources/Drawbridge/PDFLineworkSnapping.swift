@@ -3,9 +3,11 @@ import PDFKit
 
 /// A bounded spatial index of painted PDF paths, built once away from pointer events.
 struct PDFLineworkIndex: Sendable {
-    struct Segment: Sendable { let a: CGPoint; let b: CGPoint }
+    struct Segment: Sendable { let a: CGPoint; let b: CGPoint; var source: [Int]? = nil }
+    struct NativeSelection: Sendable { let path: [Int]; let bounds: CGRect; let segments: [Segment]; let segmentCount: Int }
     let segments: [Segment]
     private let cells: [String: [Int]]
+    private let paths: [[Int]: [Int]]
     private let cellSize: CGFloat = 36
 
     init(segments: [Segment]) {
@@ -34,6 +36,29 @@ struct PDFLineworkIndex: Sendable {
             }
         }
         self.cells = cells
+        var paths: [[Int]: [Int]] = [:]
+        for (index, segment) in segments.enumerated() { if let source = segment.source { paths[source, default: []].append(index) } }
+        self.paths = paths
+    }
+    func nativeSelection(at point: CGPoint, tolerance: CGFloat) -> NativeSelection? {
+        guard point.x.isFinite, point.y.isFinite, tolerance.isFinite, tolerance > 0 else { return nil }
+        let radius = min(tolerance, cellSize * 2)
+        var nearby = Set<Int>(), best: [Int]?, distance = radius
+        for y in Int(floor((point.y-radius)/cellSize))...Int(floor((point.y+radius)/cellSize)) {
+            for x in Int(floor((point.x-radius)/cellSize))...Int(floor((point.x+radius)/cellSize)) { nearby.formUnion(cells["\(x),\(y)"] ?? []) }
+        }
+        for index in nearby.sorted() {
+            let line = segments[index]
+            guard let source = line.source else { continue }
+            let dx = line.b.x-line.a.x, dy = line.b.y-line.a.y, length = dx*dx+dy*dy
+            let t = length == 0 ? 0 : min(1, max(0, ((point.x-line.a.x)*dx+(point.y-line.a.y)*dy)/length))
+            let d = hypot(point.x-(line.a.x+t*dx),point.y-(line.a.y+t*dy))
+            if d < distance { distance = d; best = source }
+        }
+        guard let best, let ids = paths[best], let first = ids.first else { return nil }
+        var minX = segments[first].a.x, maxX = minX, minY = segments[first].a.y, maxY = minY
+        for index in ids { for p in [segments[index].a, segments[index].b] { minX = min(minX,p.x); maxX = max(maxX,p.x); minY = min(minY,p.y); maxY = max(maxY,p.y) } }
+        return .init(path: best, bounds: CGRect(x:minX,y:minY,width:maxX-minX,height:maxY-minY), segments: ids.prefix(2000).map { segments[$0] }, segmentCount: ids.count)
     }
 
     func nearest(to point: CGPoint, tolerance: CGFloat, endpoints: Bool, midpoints: Bool, intersections: Bool) -> CGPoint? {
@@ -93,6 +118,14 @@ final class PDFPathScanner {
     var visible: Bool { !markedVisibility.contains(false) }
     var depth = 0
     var operations = 0
+    var selector: [Int] = []
+    var paintOrdinal = 0
+    func paint(close: Bool = false) {
+        if close { line(start) }
+        let id = selector + [paintOrdinal]; paintOrdinal += 1
+        if visible { segments.append(contentsOf: path.prefix(max(0,500_000-segments.count)).map { .init(a:$0.a,b:$0.b,source:id) }) }
+        path.removeAll(keepingCapacity: true)
+    }
     let deadline = CFAbsoluteTimeGetCurrent() + 2
     func numbers(_ scanner: CGPDFScannerRef, _ count: Int) -> [CGFloat]? {
         operations += 1
@@ -159,16 +192,13 @@ final class PDFPathScanner {
         for op in ["S","f","F","f*","B","B*"] {
             CGPDFOperatorTableSetCallback(table, op) { _, info in
                 let s = Unmanaged<PDFPathScanner>.fromOpaque(info!).takeUnretainedValue()
-                if s.visible { s.segments.append(contentsOf: s.path.prefix(max(0,500_000-s.segments.count))) }
-                s.path.removeAll(keepingCapacity:true)
+                s.paint()
             }
         }
         for op in ["s","b","b*"] {
             CGPDFOperatorTableSetCallback(table, op) { _, info in
                 let s = Unmanaged<PDFPathScanner>.fromOpaque(info!).takeUnretainedValue()
-                s.line(s.start)
-                if s.visible { s.segments.append(contentsOf:s.path.prefix(max(0,500_000-s.segments.count))) }
-                s.path.removeAll(keepingCapacity:true)
+                s.paint(close: true)
             }
         }
         CGPDFOperatorTableSetCallback(table, "BMC") { _, info in
@@ -197,6 +227,7 @@ final class PDFPathScanner {
         CGPDFOperatorTableSetCallback(table, "n") { _, info in Unmanaged<PDFPathScanner>.fromOpaque(info!).takeUnretainedValue().path.removeAll(keepingCapacity:true) }
         CGPDFOperatorTableSetCallback(table, "Do") { scanner, info in
             let s = Unmanaged<PDFPathScanner>.fromOpaque(info!).takeUnretainedValue()
+            let ordinal = s.paintOrdinal; s.paintOrdinal += 1
             var name: UnsafePointer<CChar>?
             guard CGPDFScannerPopName(scanner, &name), let name else { return }
             let parent = CGPDFScannerGetContentStream(scanner)
@@ -212,15 +243,15 @@ final class PDFPathScanner {
             var group: CGPDFDictionaryRef?
             if CGPDFDictionaryGetDictionary(dictionary,"OC",&group), let group,
                s.optionalContent.flatMap({ EmbeddedPDFLayers.visibility(group,properties:$0) }) != true { return }
-            let saved = (s.matrix,s.stack,s.path,s.current,s.start,s.markedVisibility)
-            defer { (s.matrix,s.stack,s.path,s.current,s.start,s.markedVisibility) = saved }
+            let saved = (s.matrix,s.stack,s.path,s.current,s.start,s.markedVisibility,s.selector,s.paintOrdinal)
+            defer { (s.matrix,s.stack,s.path,s.current,s.start,s.markedVisibility,s.selector,s.paintOrdinal) = saved }
             var array: CGPDFArrayRef?
             if CGPDFDictionaryGetArray(dictionary, "Matrix", &array), let array, CGPDFArrayGetCount(array) == 6 {
                 var values = [CGFloat](repeating:0,count:6)
                 for i in 0..<6 { CGPDFArrayGetNumber(array,i,&values[i]) }
                 s.matrix = CGAffineTransform(a:values[0],b:values[1],c:values[2],d:values[3],tx:values[4],ty:values[5]).concatenating(s.matrix)
             }
-            s.path = []; s.stack = []; s.scan(content)
+            s.path = []; s.stack = []; s.selector.append(ordinal); s.paintOrdinal = 0; s.scan(content)
         }
         let scanner = CGPDFScannerCreate(stream, table, Unmanaged.passUnretained(self).toOpaque())
         CGPDFScannerScan(scanner)
@@ -252,6 +283,16 @@ final class PDFPathScanner {
                 self.index = result
             }
         }
+    }
+    func nativeSelection(_ point: CGPoint, on page: PDFPage, tolerance: CGFloat) async -> PDFLineworkIndex.NativeSelection? {
+        prepare(page)
+        let currentGeneration = generation
+        for _ in 0..<125 {
+            guard !Task.isCancelled, generation == currentGeneration else { return nil }
+            if let index { return index.nativeSelection(at: point, tolerance: tolerance) }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return nil
     }
     func nearest(_ point: CGPoint, on page: PDFPage, tolerance: CGFloat, endpoints: Bool, midpoints: Bool, intersections: Bool) -> CGPoint? {
         prepare(page)

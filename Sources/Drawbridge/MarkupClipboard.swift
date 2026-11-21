@@ -165,9 +165,11 @@ extension RectangleMarkupRecord {
             annotation.setValue(MeasurementMetadata.json(measurement), forAnnotationKey: MeasurementMetadata.measurementKey)
             MeasurementMetadata.updateLabel(annotation)
         }
+        if let nativeDrawing { annotation.setValue(nativeDrawing.json, forAnnotationKey: NativeDrawingAssignment.key); annotation.shouldDisplay = false; annotation.shouldPrint = false }
+        if let pdfLayerIndex { annotation.setValue(pdfLayerIndex, forAnnotationKey: MarkupLayers.pdfMembershipKey) }
         if let layerID { annotation.setValue(layerID, forAnnotationKey: MarkupLayers.membershipKey) }
         // The destination's layer catalog owns visibility/locks; do not import a foreign catalog.
-        annotation.shouldDisplay = true; annotation.shouldPrint = true
+        annotation.shouldDisplay = nativeDrawing == nil; annotation.shouldPrint = nativeDrawing == nil
         return annotation
     }
 }
@@ -209,6 +211,8 @@ extension RectangleMarkupController {
             records[index].bounds = records[index].bounds.offsetBy(dx: dx, dy: dy)
             guard let annotation = try? records[index].clipboardAnnotation(contents: items[index].contents, rotation: page.rotation) else { return [] }
             // Preserve known source layers; unknown cross-document layers go to the active layer.
+            // Native registry positions belong to the source PDF, never another clipboard destination.
+            records[index].pdfLayerIndex = nil
             if !layerCatalog.layers.contains(where: { $0.id == records[index].layerID }) {
                 annotation.removeValue(forAnnotationKey: MarkupLayers.membershipKey)
                 assignNewMarkupLayer(annotation)

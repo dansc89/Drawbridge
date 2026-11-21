@@ -72,6 +72,9 @@ extension MainViewController {
         // PDFKit pages remain backed by a retained immutable source document.
         let inserted = ordered.compactMap(foreign.page(at:))
         guard inserted.count == ordered.count else { return false }
+        guard !inserted.flatMap(\.annotations).contains(where: { MarkupLayers.pdfIndex($0) != nil || NativeDrawingAssignment.read($0) != nil }) else {
+            throw NativePDFLayerMutation.Failure.unsupported("pages with drawing-layer assignments cannot be inserted into another PDF without mapping its native layer registry")
+        }
         let layerPlan = try MarkupLayers.insertionPlan(source: foreign, pages: inserted, destination: pdfView.rectangleMarkup.layerCatalog)
         let structure = try preparePageStructure(document)
         let before = pageManagementSnapshot(document)

@@ -103,6 +103,8 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
     var strokeOpacity: Double = 1
     var fillOpacity: Double = 1
     var hatch: DraftingHatch? = nil
+    var nativeDrawing: NativeDrawingAssignment? = nil
+    var pdfLayerIndex: Int? = nil
     var layerID: String? = nil
     var layerCatalog: String? = nil
     var copiedMarkup: CopiedMarkupPayload? = nil
@@ -229,6 +231,8 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
                 var record = Self(id: id, pageIndex: index, bounds: annotation.bounds,
                             red: Double(rgb.redComponent), green: Double(rgb.greenComponent), blue: Double(rgb.blueComponent),
                             lineWidth: Double(annotation.border?.lineWidth ?? 2))
+                record.nativeDrawing = NativeDrawingAssignment.read(annotation)
+                record.pdfLayerIndex = MarkupLayers.pdfIndex(annotation)
                 record.layerID = MarkupLayers.id(annotation)
                 record.layerCatalog = annotation.value(forAnnotationKey: MarkupLayers.catalogKey) as? String
                 record.inkTool = annotation.type == "Ink" ? annotation.value(forAnnotationKey: inkToolKey) as? String : nil
@@ -272,6 +276,8 @@ struct RectangleMarkupRecord: Codable, Sendable, Equatable {
     var isValid: Bool {
         if let copiedMarkup, !copiedMarkup.isValid { return false }
         return id.hasPrefix(Self.prefix) && pageIndex >= 0 &&
+        (nativeDrawing == nil || (nativeDrawing!.isValid && kind == .rectangle && strokeOpacity == 0 && layerID == nil)) &&
+        (pdfLayerIndex == nil || ((0..<10000).contains(pdfLayerIndex!) && layerID == nil)) &&
         (revisionCloud != true || (kind == .polygon && measurement == nil && vertices.count <= 512)) &&
         (hatch == nil || (hatch!.isValid && [.rectangle, .ellipse, .polygon].contains(kind))) &&
         (inkTool == nil || (kind == .polyline && ["pen", "polyline", "highlight"].contains(inkTool!))) &&
@@ -344,7 +350,7 @@ final class RectangleMarkupController {
         tool = .select
         view?.setCurrentSelection(nil, animate: false)
         setSelectedItems(page.annotations.filter {
-            !MarkupLayers.isMetadata($0) && !MeasurementMetadata.isPageScaleMetadata($0)
+            !MarkupLayers.isMetadata($0) && NativeDrawingAssignment.read($0) == nil && !MeasurementMetadata.isPageScaleMetadata($0)
                 && (RectangleMarkupRecord.owns($0) || ImportedMarkupState.selectable($0))
         })
     }
@@ -398,6 +404,7 @@ final class RectangleMarkupController {
         guard !hasUnsavedChanges || sourceStamp == nil else { return }
         sourceStamp = url.flatMap(PDFMarkupSourceStamp.capture)
     }
+    var onDrawingLayerMutation: ((PDFPage) -> Void)?
     var onMutation: ((PDFPage) -> Void)?
     var onDraftChanged: (() -> Void)?
     var onDraftBegan: (() -> Void)?
@@ -519,7 +526,7 @@ final class RectangleMarkupController {
                     if MarkupLayers.isMetadata(original) || MeasurementMetadata.isPageScaleMetadata(original) { continue }
                     if original.type == "Stamp", !(original is DrawbridgeSnapshotAnnotation), let payload = SnapshotPayload.read(original),
                        let replacement = try? SnapshotStampFactory.make(payload: payload, bounds: original.bounds, rotation: page.rotation, style: SnapshotStyle.read(original)) {
-                        for key in [SnapshotPayload.key, SnapshotStyle.key, RectangleMarkupRecord.identityKey, MarkupLayers.membershipKey] {
+                        for key in [SnapshotPayload.key, SnapshotStyle.key, RectangleMarkupRecord.identityKey, MarkupLayers.membershipKey, MarkupLayers.pdfMembershipKey] {
                             if let value = original.value(forAnnotationKey: key) { replacement.setValue(value, forAnnotationKey: key) }
                         }
                         replacement.userName = original.userName
@@ -1191,7 +1198,8 @@ final class RectangleMarkupController {
             guard let self, self.snapshotCaptureID == captureID else { return }
             guard page.document === self.boundDocument else { self.cancelSnapshotCapture(); return }
             do {
-                var payload = try SnapshotPayload.capture(page: page, points: points)
+                let source = (self.view as? MarkupPDFView)?.reviewLayerPresentation.selectionSource(for:page)
+                var payload = try withExtendedLifetime(source?.1) { try SnapshotPayload.capture(page: page, points: points, drawingSource:source?.0) }
                 payload.style = style
                 payload.copy()
                 self.snapshotCaptureID = nil
@@ -1549,9 +1557,26 @@ final class RectangleMarkupController {
         }
         setSelectedItems(exists ? items.map(\.annotation) : [])
         for page in pages {
-            let region = Self.nativeRefreshRegion(for: items.filter { $0.page === page }.map(\.annotation))
+            let annotations = items.filter { $0.page === page }.map(\.annotation)
+            let region = Self.nativeRefreshRegion(for: annotations)
             changed(page, importedAppearanceChanged: region == nil, region: region,
-                    reason: region == nil ? .markupChanged : .nativeMarkupChanged)
+                    reason: annotations.contains(where: SnapshotPayload.isSnapshot) ? .snapshotPresenceChanged
+                        : (region == nil ? .markupChanged : .nativeMarkupChanged))
+            if annotations.contains(where: { NativeDrawingAssignment.read($0) != nil }) { onDrawingLayerMutation?(page) }
+        }
+    }
+
+    func commitNativeDrawingAssignment(_ record: RectangleMarkupRecord, on page: PDFPage) throws {
+        guard canEdit(), page.document === boundDocument, let assignment = record.nativeDrawing, record.isValid else { throw CancellationError() }
+        undo.beginUndoGrouping()
+        defer { selected = nil; refresh(); undo.setActionName("Assign Drawing to Layer"); undo.endUndoGrouping() }
+        if let existing = page.annotations.first(where: { NativeDrawingAssignment.read($0)?.path == assignment.path }) {
+            guard !existing.isReadOnly else { throw NativePDFLayerMutation.Failure.unsupported("this drawing-layer assignment belongs to another reviewer") }
+            setDrawingLayerMembership(record.pdfLayerIndex, on: existing)
+        } else {
+            let annotation = try record.clipboardAnnotation(contents: "Drawing layer assignment", rotation: page.rotation)
+            annotation.setValue(record.id, forAnnotationKey: RectangleMarkupRecord.identityKey)
+            setPresence(true, annotation: annotation, page: page, action: "Assign Drawing to Layer")
         }
     }
 
@@ -1977,7 +2002,7 @@ final class RectangleMarkupController {
         if exists {
             page.addAnnotation(annotation)
             annotation.shouldDisplay = true
-            selected = annotation
+            selected = NativeDrawingAssignment.read(annotation) == nil ? annotation : nil
         } else {
             annotation.shouldDisplay = false
             page.removeAnnotation(annotation); selected = nil
@@ -1985,7 +2010,9 @@ final class RectangleMarkupController {
         if exists { applyLayerVisibility(to: annotation) }
         let region = Self.nativeRefreshRegion(for: [annotation])
         changed(page, importedAppearanceChanged: region == nil, region: region,
-                reason: region == nil ? .markupChanged : .nativeMarkupChanged)
+                reason: SnapshotPayload.isSnapshot(annotation) ? .snapshotPresenceChanged
+                    : (region == nil ? .markupChanged : .nativeMarkupChanged))
+        if NativeDrawingAssignment.read(annotation) != nil { onDrawingLayerMutation?(page) }
     }
 
     private static func nativeRefreshRegion(for annotations: [PDFAnnotation]) -> CGRect? {

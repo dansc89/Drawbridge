@@ -73,6 +73,59 @@ import XCTest
             XCTAssertFalse(review.syncStatus.contains("can’t sync"))
         }
     }
+    func testSnapshotReplayReplacementAndDeletionRetireCachedAppearance() async throws {
+        try await withReview { review, editor in
+            let page = try XCTUnwrap(review.reviewPDF?.page(at: 0))
+            let source = PDFDocument(); let sourcePage = PDFPage()
+            sourcePage.setBounds(CGRect(x: 0, y: 0, width: 100, height: 80), for: .mediaBox)
+            source.insert(sourcePage, at: 0)
+            let session = RectangleMarkupController(); session.bind(to: review.reviewPDF); session.canEdit = { true }
+            let initial = try XCTUnwrap(session.pasteSnapshot(SnapshotPayload(data: XCTUnwrap(source.dataRepresentation())), on: page, center: CGPoint(x: 100, y: 100)) as? DrawbridgeSnapshotAnnotation)
+            let record = try XCTUnwrap(RectangleMarkupRecord.capture(annotation: initial, pageIndex: 0))
+            var reasons: [MarkupPDFView.AnnotationRefreshReason] = []
+            editor.pdfView.annotationRefreshObserver = { _, _, _, reason in reasons.append(reason) }
+            let update = SharedReviewAPI.Markup(id: record.id, page: 0, record: record, ownerInstanceId: "remote")
+            try review.replayOperations([.init(seq: 1, op_type: "drawbridge.markup.v1", payload: update)], instanceID: "device")
+            XCTAssertTrue(initial.isRetired); XCTAssertFalse(initial.shouldDisplay)
+            let replacement = try XCTUnwrap(page.annotations.compactMap { $0 as? DrawbridgeSnapshotAnnotation }.first)
+            XCTAssertFalse(replacement.isRetired)
+            let deletion = SharedReviewAPI.Markup(id: record.id, page: 0, record: nil, ownerInstanceId: "remote")
+            try review.replayOperations([.init(seq: 2, op_type: "drawbridge.markup.v1", payload: deletion)], instanceID: "device")
+            XCTAssertTrue(replacement.isRetired); XCTAssertFalse(replacement.shouldDisplay)
+            XCTAssertFalse(page.annotations.contains { $0 is DrawbridgeSnapshotAnnotation || $0 is SnapshotViewportTileAnnotation })
+            XCTAssertEqual(reasons.count, 2)
+            XCTAssertTrue(reasons.allSatisfy { $0 == .snapshotPresenceChanged })
+        }
+    }
+
+    func testNativeLayerVisibilityPreservesReviewPagesUndoAndRemoteMembership() async throws {
+        try await withReview(basePDF: ReviewPDFLayerFixture.data()) { review, editor in
+            let document = try XCTUnwrap(review.reviewPDF), page = try XCTUnwrap(document.page(at: 0))
+            let session = editor.pdfView.rectangleMarkup
+            session.bind(to: document); session.canEdit = { true }; session.canManageLayers = { false }
+            session.undo.groupsByEvent = false
+            session.undo.beginUndoGrouping()
+            let snapshot = try XCTUnwrap(session.pasteSnapshot(SnapshotPayload(data: ReviewPDFLayerFixture.data()), on: page, center: CGPoint(x: 50, y: 50)))
+            session.undo.endUndoGrouping()
+            session.assignPDFLayer(0, to: [snapshot])
+            let record = try XCTUnwrap(RectangleMarkupRecord.capture(annotation: snapshot, pageIndex: 0))
+            let layer = try XCTUnwrap(EmbeddedPDFLayers.read(document).first)
+            try await review.setPDFLayerVisible(layer, visible: false)
+            XCTAssertTrue(review.reviewPDF === document); XCTAssertTrue(document.page(at: 0) === page)
+            XCTAssertFalse(snapshot.shouldDisplay)
+            session.undo.undo(); XCTAssertNil(MarkupLayers.pdfIndex(snapshot)); XCTAssertTrue(snapshot.shouldDisplay)
+            session.undo.redo(); XCTAssertEqual(MarkupLayers.pdfIndex(snapshot), 0); XCTAssertFalse(snapshot.shouldDisplay)
+            let remoteAnnotation = try record.clipboardAnnotation(contents: record.text, rotation: 0)
+            let remote = try XCTUnwrap(RectangleMarkupRecord.capture(annotation: remoteAnnotation, pageIndex: 0))
+            let payload = SharedReviewAPI.Markup(id: remote.id, page: 0, record: remote, ownerInstanceId: "remote")
+            try review.replayOperations([.init(seq: 10, op_type: "drawbridge.markup.v1", payload: payload)], instanceID: "device")
+            let received = try XCTUnwrap(page.annotations.first { RectangleMarkupRecord.identity($0) == remote.id })
+            XCTAssertEqual(MarkupLayers.pdfIndex(received), 0); XCTAssertFalse(received.shouldDisplay)
+            try await review.setPDFLayerVisible(layer, visible: true)
+            XCTAssertTrue(snapshot.shouldDisplay); XCTAssertTrue(received.shouldDisplay)
+        }
+    }
+
     private func operation(_ seq: Int, _ id: String, page: Int = 0, text: String? = "markup", owner: String = "remote") throws -> SharedReviewAPI.Operation {
         let annotation = PDFAnnotation(bounds: CGRect(x: text == "last" || text == "updated" ? 40 : 20, y: 20, width: 70, height: 50), forType: .square, withProperties: nil)
         annotation.setValue(id, forAnnotationKey: RectangleMarkupRecord.identityKey)
@@ -236,7 +289,125 @@ import XCTest
         }
     }
 
-    private func withReview(_ body: (SharedReviewWindowController, MainViewController) throws -> Void) async throws {
+    func testNotificationsPanelAppearsOnlyForActiveReviewDocument() async throws {
+        try await withReview { review, editor in
+            _ = editor.view
+            editor.updateReviewNotificationsPanel()
+            XCTAssertFalse(editor.reviewNotificationsPanel.isHidden)
+            let reviewDocument = try XCTUnwrap(review.reviewPDF)
+            let local = PDFDocument(); local.insert(PDFPage(), at: 0)
+            editor.pdfView.setMarkupDocument(local)
+            editor.updateReviewNotificationsPanel()
+            XCTAssertTrue(editor.reviewNotificationsPanel.isHidden)
+            editor.pdfView.setMarkupDocument(reviewDocument)
+            editor.updateReviewNotificationsPanel()
+            XCTAssertFalse(editor.reviewNotificationsPanel.isHidden)
+        }
+    }
+
+    func testOriginalDrawingAssignmentInReviewKeepsCanonicalPageAndSmallWireRecord() async throws {
+        try await withReview(basePDF: ReviewPDFLayerFixture.forms()) { review, editor in
+            let document = try XCTUnwrap(review.reviewPDF), page = try XCTUnwrap(document.page(at:0))
+            let session = editor.pdfView.rectangleMarkup
+            session.bind(to:document); session.canEdit = { true }; session.undo.groupsByEvent = false
+            let selection = try XCTUnwrap(PDFPathScanner.index(page: XCTUnwrap(page.pageRef)).nativeSelection(at:CGPoint(x:10,y:15),tolerance:2))
+            try await editor.originalDrawingLayers.assign(page:page,selection:selection,layer:1)
+            XCTAssertTrue(editor.pdfView.document === document); XCTAssertTrue(document.page(at:0) === page)
+            let carrier = try XCTUnwrap(page.annotations.first { NativeDrawingAssignment.read($0) != nil })
+            XCTAssertFalse(carrier.shouldDisplay); XCTAssertNil(session.selected)
+            let record = try XCTUnwrap(RectangleMarkupRecord.capture(annotation:carrier,pageIndex:0))
+            XCTAssertLessThan(try JSONEncoder().encode(record).count,4096,"Only the vector selector and membership sync, never the drawing bytes")
+            XCTAssertEqual(record.pdfLayerIndex,1)
+            let layer = try XCTUnwrap(EmbeddedPDFLayers.read(document).first)
+            try await review.setPDFLayerVisible(layer,visible:false)
+            XCTAssertTrue(editor.pdfView.document === document)
+            session.undo.undo()
+            XCTAssertFalse(page.annotations.contains { NativeDrawingAssignment.read($0) != nil })
+            session.undo.redo()
+            XCTAssertEqual(page.annotations.compactMap { NativeDrawingAssignment.read($0) }.count,1)
+        }
+    }
+
+    func testAlertCanTargetAnotherAuthorsReadOnlyMarkupAndJumpToItsPage() async throws {
+        let id = RectangleMarkupRecord.prefix + "foreign-alert"
+        var sent = 0
+        let alert: [String: Any] = ["id":1,"document":["id":"replay","name":"Replay.pdf","file_size":100],
+            "markupId":id,"page":1,"bounds":[20,20,60,30],"sender":"Other","kind":"text","createdAt":1800000000000,"readAt":NSNull()]
+        let encodedAlert = try JSONSerialization.data(withJSONObject:alert)
+        try await withReview(response: { request in
+            switch request.url!.path {
+            case "/v1/documents/replay/alert-recipients": return Data(#"{"users":[{"id":"recipient","name":"Recipient","email":"recipient@example.com"}]}"#.utf8)
+            case "/v1/documents/replay/alerts":
+                sent += 1
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String:Any])
+                XCTAssertEqual(body["markupId"] as? String,id); XCTAssertEqual(body["recipientId"] as? String,"recipient")
+                return try JSONSerialization.data(withJSONObject:["alert":JSONSerialization.jsonObject(with:encodedAlert),"duplicate":false])
+            case "/v1/notifications": return Data(#"{"userId":"tester","alerts":[],"cursor":0,"oldest":null,"hasMore":false}"#.utf8)
+            default:return nil
+            }
+        }) { review, editor in
+            try review.replayOperations([self.operation(1,id,page:1,text:"Foreign",owner:"other-device")],instanceID:"device")
+            let page = try XCTUnwrap(review.reviewPDF?.page(at:1))
+            let annotation = try XCTUnwrap(page.annotations.first)
+            XCTAssertTrue(annotation.isReadOnly); XCTAssertEqual(review.alertTarget(annotation),id)
+            let roster = try await review.alertRecipients(); XCTAssertEqual(roster.first?.label,"recipient@example.com")
+            try await review.sendAlert(markup:id,recipient:"recipient"); XCTAssertEqual(sent,1)
+            let notification = try JSONDecoder().decode(SharedReviewAPI.ReviewNotification.self,from:encodedAlert)
+            try await review.openNotification(notification)
+            XCTAssertTrue(editor.pdfView.currentPage === page)
+            XCTAssertTrue(annotation.isReadOnly,"Alerting never changes editing permissions")
+        }
+    }
+
+    func testOriginalForeignPDFAnnotationFollowsNativeLayerVisibilityInReview() async throws {
+        try await withReview(basePDF:ReviewPDFLayerFixture.data(withAnnotation:true)) { review, editor in
+            let document = try XCTUnwrap(review.reviewPDF), page = try XCTUnwrap(document.page(at:0))
+            let annotation = try XCTUnwrap(page.annotations.first)
+            let session = editor.pdfView.rectangleMarkup; session.bind(to:document)
+            let layer = try XCTUnwrap(EmbeddedPDFLayers.read(document).first)
+            XCTAssertTrue(annotation.shouldDisplay); XCTAssertTrue(annotation.isReadOnly)
+            try await review.setPDFLayerVisible(layer,visible:false)
+            XCTAssertFalse(annotation.shouldDisplay)
+            try await review.setPDFLayerVisible(layer,visible:true)
+            XCTAssertTrue(annotation.shouldDisplay); XCTAssertTrue(annotation.isReadOnly)
+            XCTAssertTrue(page.annotations.first === annotation)
+        }
+    }
+
+    func testRemoteOriginalDrawingAssignmentCanBeHiddenWithoutChangingOwnership() async throws {
+        try await withReview(basePDF:ReviewPDFLayerFixture.forms()) { review, editor in
+            let document = try XCTUnwrap(review.reviewPDF), page = try XCTUnwrap(document.page(at:0))
+            var record = RectangleMarkupRecord(id:RectangleMarkupRecord.prefix + "remote-drawing",pageIndex:0,bounds:CGRect(x:9,y:9,width:12,height:12),red:0,green:0,blue:0,lineWidth:1)
+            record.nativeDrawing = .init(path:[0,0],originalLayers:[0]); record.pdfLayerIndex = 1; record.strokeOpacity = 0
+            let payload = SharedReviewAPI.Markup(id:record.id,page:0,record:record,ownerInstanceId:"other-device")
+            try review.replayOperations([.init(seq:1,op_type:"drawbridge.markup.v1",payload:payload)],instanceID:"device")
+            let annotation = try XCTUnwrap(page.annotations.first)
+            XCTAssertTrue(annotation.isReadOnly); XCTAssertFalse(annotation.shouldDisplay)
+            let layer = try XCTUnwrap(EmbeddedPDFLayers.read(document).first)
+            try await review.setPDFLayerVisible(layer,visible:false)
+            XCTAssertTrue(editor.pdfView.document === document)
+            XCTAssertTrue(annotation.isReadOnly); XCTAssertFalse(annotation.shouldDisplay)
+        }
+    }
+
+    func testAlertTargetsSnapshotAlreadyEmbeddedInUploadedPDFByItsOriginalSlot() async throws {
+        let bytes = ReviewPDFLayerFixture.data(), document = try XCTUnwrap(PDFDocument(data:bytes)), page = try XCTUnwrap(document.page(at:0))
+        let view = MarkupPDFView(); view.setMarkupDocument(document); view.rectangleMarkup.bind(to:document); view.rectangleMarkup.canEdit = { true }
+        let snapshot = try XCTUnwrap(view.rectangleMarkup.pasteSnapshot(SnapshotPayload(data:bytes),on:page,center:CGPoint(x:50,y:50)))
+        view.rectangleMarkup.assignPDFLayer(1,to:[snapshot])
+        let record = try XCTUnwrap(RectangleMarkupRecord.capture(annotation:snapshot,pageIndex:0))
+        let saved = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString+".pdf")
+        defer { try? FileManager.default.removeItem(at:saved) }
+        try SharedReviewPDFExport.write(basePDF:bytes,records:[record],to:saved)
+        try await withReview(basePDF:Data(contentsOf:saved)) { review, _ in
+            let annotation = try XCTUnwrap(review.reviewPDF?.page(at:0)?.annotations.first(where:SnapshotPayload.isSnapshot))
+            XCTAssertTrue(annotation.isReadOnly)
+            XCTAssertTrue(try XCTUnwrap(review.alertTarget(annotation)).hasPrefix("base:0:"))
+            XCTAssertEqual(MarkupLayers.pdfIndex(annotation),1)
+        }
+    }
+
+    private func withReview(basePDF suppliedBase: Data? = nil, response: (@MainActor @Sendable (URLRequest) throws -> Data?)? = nil, _ body: (SharedReviewWindowController, MainViewController) async throws -> Void) async throws {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -246,7 +417,7 @@ import XCTest
             page.setBounds(CGRect(x: 0, y: 0, width: 300, height: 200), for: .mediaBox)
             pdf.insert(page, at: index)
         }
-        let bytes = try XCTUnwrap(pdf.dataRepresentation())
+        let bytes = try suppliedBase ?? XCTUnwrap(pdf.dataRepresentation())
         let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         let document = SharedReviewAPI.Document(id: "replay", name: "Replay.pdf", file_size: bytes.count, file_sha256: hash, folder_id: nil)
         let origin = URL(string: "https://offline.invalid")!
@@ -254,6 +425,7 @@ import XCTest
         try cache.store(bytes)
         var api = SharedReviewAPI(origin: URL(string: "https://offline.invalid")!, token: "test", displayName: "Reviewer", instanceID: "device")
         api.transport = { request in
+            if let data = try response?(request) { return (data, HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!) }
             let data: Data
             switch request.url!.path {
             case "/v1/auth/me": data = Data(#"{"reviewUsernames":true,"creatorOnlyMarkups":true,"reviewUsername":"Reviewer"}"#.utf8)
@@ -274,6 +446,6 @@ import XCTest
         let opened = try await review.open(document, using: api, focusEditor: false)
         XCTAssertTrue(opened)
         // No suspension during assertions/replay: the background empty poll cannot race revision checks.
-        try body(review, editor)
+        try await body(review, editor)
     }
 }

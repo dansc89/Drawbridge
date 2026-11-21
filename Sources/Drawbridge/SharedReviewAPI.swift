@@ -14,7 +14,7 @@ struct SharedReviewError: LocalizedError {
 
 struct SharedReviewAPI: Sendable {
     struct Project: Decodable { let id: String; let name: String }
-    struct Document: Decodable {
+    struct Document: Decodable, Sendable {
         let id: String
         let name: String
         let file_size: Int?
@@ -128,6 +128,7 @@ struct SharedReviewAPI: Sendable {
         }
         deinit { session.invalidateAndCancel() }
     }
+    var sharedIdentityKey: ObjectIdentifier { ObjectIdentifier(lifetime) }
     func invalidate() { lifetime.invalidate() }
     func checkActive() throws { try lifetime.check() }
     // Offline transport seam; live callers retain the normal URLSession path.

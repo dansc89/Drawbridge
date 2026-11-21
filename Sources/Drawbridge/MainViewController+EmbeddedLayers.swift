@@ -43,9 +43,17 @@ final class NativePDFWorkingSource: NSObject, @unchecked Sendable {
 
 extension MainViewController {
     func configureNativePDFLayerControls() {
+        activeReview?.restorePDFLayerPresentation()
+        if let document = pdfView.document { originalDrawingLayers.restore(document: document) }
         let panel = rectangleToolbar.propertiesController.layersView
         panel.onEmbeddedVisibility = { [weak self] layer, visible in
-            self?.requestNativePDFLayerEdit(registryIndex: layer.registryIndex, operation: .visibility(visible))
+            guard let self else { return }
+            if let review = self.activeReview {
+                Task { @MainActor in
+                    do { try await review.setPDFLayerVisible(layer, visible: visible) }
+                    catch { self.runAlert(title: "PDF Layer Not Changed", informativeText: error.localizedDescription, style: .warning) }
+                }
+            } else { self.requestNativePDFLayerEdit(registryIndex: layer.registryIndex, operation: .visibility(visible)) }
         }
         panel.onEmbeddedDelete = { [weak self] layer in
             self?.requestNativePDFLayerEdit(registryIndex: layer.registryIndex, operation: .deleteContent)

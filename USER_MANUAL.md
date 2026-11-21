@@ -102,7 +102,9 @@ Right-click a markup or Snapshot and choose **Assign to Layer**. To assign sever
 
 Use the **Show** checkbox to hide or reveal a layer throughout the PDF. Hidden markups remain in the Markups List, marked **Hidden**, and count toward outstanding review items. Selecting a hidden markup asks whether to show its layer before navigating to it. Hidden layers are excluded from printing and Snapshot captures. Rename changes the layer name; Remove keeps its markups and moves them to Unassigned. Undo/redo applies to these actions. Locked annotations cannot be reassigned.
 
-Save to retain layer definitions, assignments, the active layer, and visibility, including empty layers. Drawbridge writes standard PDF optional-content groups for annotation layers. Other readers may display layer controls differently. Existing drawing-content layers are preserved; this panel manages Drawbridge markup layers, not the original drawing's content layers. Imported annotations already belonging to a foreign optional-content group cannot be reassigned here.
+Save to retain layer definitions, assignments, the active layer, and visibility, including empty layers. Drawbridge writes standard PDF optional-content groups for annotation layers. Other readers may display layer controls differently. Existing PDF layers appear with a **(PDF)** label in assignment menus. Drawbridge markups and Snapshots can be assigned to those existing layers, including in Review. Imported annotations with existing foreign optional-content relationships remain protected.
+
+To assign original vector drawing content, right-click the drawing and choose **Assign Drawing Path to Layer…**. The orange preview identifies the entire painted path, which may contain several connected lines. Choose an existing PDF layer or Unassigned. Shared symbols are changed only at the selected occurrence. Unsupported drawing structures are left unchanged. Undo restores the prior assignment. In Review, assignments sync as small path references; showing or hiding a layer affects your own view. Layer catalog creation and removal remain unavailable in Review.
 
 ## Flatten Existing Markups
 
@@ -133,3 +135,10 @@ Use the **Lock** column in Layers to protect a layer’s markups from moving, ed
 ### Large Snapshots in Review
 
 Snapshot PDF data uploads separately from its position and appearance. Repeated pastes of the same capture within a document reuse that data, and moving or recoloring a Snapshot sends a small update. Lossless transfer compression preserves vectors and original PDF bytes. Pending edits are retained locally for retry. Review participants must update to a version supporting Snapshot assets to receive larger captures.
+
+
+### Review alerts
+
+In a Drawbridge Review, right-click a visible markup and choose **Alert**, then a participant’s name or email. You can alert someone to another reviewer’s markup without gaining permission to edit it. The target markup must finish syncing before an alert can be sent.
+
+The **Notifications** panel appears below Navigation only while a Review document is active. New alerts play an in-app ping. Click an alert to open its document and jump to the page and markup region; alerts remain available when the recipient reconnects. Refresh retries loading alerts, and **Older Alerts** loads earlier entries. Local PDFs never show the Notifications panel. Participants must have signed in to the workspace and have access to the document to appear in the recipient list.

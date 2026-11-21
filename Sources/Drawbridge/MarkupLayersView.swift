@@ -65,7 +65,11 @@ import PDFKit
             }
         }
         newLayerButton.isEnabled = session?.canManageLayers() == true && session?.canEdit() == true && session?.view?.document != nil
-        embeddedLayers = EmbeddedPDFLayers.read(session?.view?.document)
+        embeddedLayers = EmbeddedPDFLayers.read(session?.view?.document).enumerated().map { index, layer in
+            var result = layer
+            if let override = session?.layerState?.pdfVisibility[index] { result.visible = override }
+            return result
+        }
         embeddedNote.isHidden = embeddedLayers.isEmpty
         table.reloadData()
         if row >= 0 && row < numberOfRows(in: table) { table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
@@ -97,7 +101,7 @@ import PDFKit
                 check.generation = presentationGeneration; check.document = presentedDocument; check.embeddedLayer = layer
                 check.allowsMixedState = layer.visible == nil
                 check.state = layer.visible.map { $0 ? NSControl.StateValue.on : .off } ?? .mixed
-                check.isEnabled = layer.visible != nil && onEmbeddedVisibility != nil && session.canManageLayers() && session.canEdit()
+                check.isEnabled = layer.visible != nil && onEmbeddedVisibility != nil && session.canEdit()
                 check.toolTip = layer.visible == nil ? "Visibility depends on an unsupported PDF configuration." : explanation
                 check.setAccessibilityLabel("Show PDF drawing layer " + layer.name)
                 return check
@@ -118,7 +122,7 @@ import PDFKit
         switch column?.identifier.rawValue {
         case "visible":
             let check = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleVisibility(_:)))
-            check.state = layer.visible ? .on : .off; check.tag = row; check.setAccessibilityLabel("Show layer " + layer.name); check.isEnabled = session.canManageLayers() && session.canEdit(); return check
+            check.state = (session.layerState?.markupVisibility[layer.id] ?? layer.visible) ? .on : .off; check.tag = row; check.setAccessibilityLabel("Show layer " + layer.name); check.isEnabled = session.canEdit(); return check
         case "locked":
             let check = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleLock(_:)))
             check.state = layer.locked ? .on : .off; check.tag = row
@@ -131,7 +135,7 @@ import PDFKit
     @objc private func toggleEmbeddedVisibility(_ sender: NativeLayerButton) {
         guard sender.generation == presentationGeneration, let document = sender.document,
               document === presentedDocument, document === session?.view?.document,
-              session?.canManageLayers() == true && session?.canEdit() == true, let layer = sender.embeddedLayer,
+              session?.canEdit() == true, let layer = sender.embeddedLayer,
               embeddedLayers.contains(layer) else { return }
         onEmbeddedVisibility?(layer, sender.state == .on)
         // Dispatch isn't successful adoption: saved state remains authoritative.

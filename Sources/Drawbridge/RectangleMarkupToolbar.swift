@@ -114,6 +114,16 @@ extension MainViewController {
             self?.pdfView.rectangleMarkup.hasActiveDrawingInteraction == true
         }
         let session = pdfView.rectangleMarkup
+        pdfView.reviewForAlerts = { [weak self] in self?.activeReview }
+        session.onDrawingLayerMutation = { [weak self] page in self?.originalDrawingLayers.schedule(on: page) }
+        pdfView.onAssignOriginalDrawingLayer = { [weak self] page, selection, layer in
+            guard let self else { return }
+            Task { @MainActor in
+                do { try await self.originalDrawingLayers.assign(page: page, selection: selection, layer: layer) }
+                catch is CancellationError { }
+                catch { self.runAlert(title: "Drawing Layer Not Changed", informativeText: error.localizedDescription, style: .warning) }
+            }
+        }
         session.reviewScaleIdentity = { [weak self] page in
             page.document.flatMap { self?.sharedReview?.review(for: $0)?.scaleMarkerIdentity(on: page) }
         }

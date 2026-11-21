@@ -126,6 +126,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         pendingSnapshotDetailKeys.removeAll()
         tiledSnapshotPages.removeAllObjects()
         snapshotPreviewPages.removeAllObjects()
+        reviewLayerPresentation.clear()
         onViewportChanged = nil
         NotificationCenter.default.removeObserver(self)
     }
@@ -138,6 +139,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
     // Overriding it here gives the ObjC getter a main-actor assertion and crashes
     // those legitimate framework callbacks on macOS 26.
     func setMarkupDocument(_ document: PDFDocument?) {
+        reviewLayerPresentation.clear()
         onWillReplaceDocument?()
         SnapshotReplayPreparation.shared.update(snapshotReplayViewport.id, sources: [])
         rectangleMarkup.finishTextEditing()
@@ -823,7 +825,7 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         }
     }
 
-    enum AnnotationRefreshReason { case markupChanged, nativeMarkupChanged, snapshotDetailReady, textEditorVisibilityChanged }
+    enum AnnotationRefreshReason { case markupChanged, nativeMarkupChanged, snapshotPresenceChanged, snapshotDetailReady, textEditorVisibilityChanged }
     var annotationRefreshObserver: ((PDFPage, Bool, CGRect?, AnnotationRefreshReason) -> Void)?
 
     func refreshAnnotationRendering(on page: PDFPage, importedAppearanceChanged: Bool = false, region: CGRect? = nil, reason: AnnotationRefreshReason = .markupChanged) {
@@ -833,11 +835,12 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         // this later can leave a deleted Snapshot cached until the next zoom.
         // Detail publication changes pixels, not geometry or viewport demand.
         // Re-entering the mutation path here restarts zoom settling and tiling.
-        if reason == .markupChanged {
+        if reason == .markupChanged || reason == .snapshotPresenceChanged {
             updateSnapshotViewportTiles()
             updateSnapshotPreviewViewports()
         }
-        if importedAppearanceChanged && window?.isVisible == true && (reason == .textEditorVisibilityChanged || !snapshotPreviewPages.contains(page)) {
+        if importedAppearanceChanged && window?.isVisible == true
+            && (reason == .snapshotPresenceChanged || reason == .textEditorVisibilityChanged || !snapshotPreviewPages.contains(page)) {
             // Detached or hidden views have no on-screen tiles to clear.
             // Rotating them queues PDFKit layout work that can outlive the view.
             // PDFKit bakes external AP streams into page tiles. A geometry
@@ -865,12 +868,18 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
             for child in target.subviews { invalidate(child) }
         }
         invalidate(self)
-        if (reason == .markupChanged || reason == .textEditorVisibilityChanged) && hadViewportTiles && window?.isVisible == true {
-            // PDFKit retains a composited high-zoom surface after Stamp removal.
+        if (reason == .snapshotPresenceChanged || ((reason == .markupChanged || reason == .textEditorVisibilityChanged) && hadViewportTiles))
+            && window?.isVisible == true {
+            // PDFKit retains composited Stamp surfaces below the viewport-tile
+            // threshold too. A page that displayed a Snapshot must retire those
+            // surfaces even after its last owner/tile has been removed.
             // Retile at an adjacent scale, then restore the exact scale and anchor.
             // Plain needsDisplay and page rotation do not retire that surface.
-            _ = zoom(by: 0.999)
-            _ = zoom(by: 1 / 0.999)
+            let originalScale = scaleFactor
+            let wasAutoScaling = autoScales
+            _ = zoom(by: originalScale * 0.999 >= minScaleFactor ? 0.999 : 1.001)
+            _ = zoom(by: originalScale / scaleFactor)
+            autoScales = wasAutoScaling
         }
     }
 
@@ -1365,12 +1374,135 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         rectangleMarkup.insertNode(request)
     }
 
+    nonisolated let reviewLayerPresentation = ReviewLayerPresentation()
+    // PDFKit calls this public rendering hook from its tile workers. AppKit's
+    // inherited actor annotation must not move drawing onto the UI thread.
+    nonisolated override func draw(_ page: PDFPage, to context: CGContext) {
+        // PDFKit itself reads this public Objective-C property on tile workers.
+        // Avoid synthesizing an actor-isolated Swift getter override for it.
+        let box = (value(forKey: "displayBox") as? NSNumber).flatMap { PDFDisplayBox(rawValue: $0.intValue) } ?? .cropBox
+        reviewLayerPresentation.draw(page, box: box, to: context)
+    }
+
+    var reviewForAlerts: (() -> SharedReviewWindowController?)?
+    private final class AlertMenuTarget: NSObject {
+        let review: SharedReviewWindowController
+        let markup: String
+        let recipient: String
+        init(review: SharedReviewWindowController, markup: String, recipient: String) {
+            self.review = review; self.markup = markup; self.recipient = recipient
+        }
+    }
+    @objc private func chooseAlertRecipient(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? AlertMenuTarget else { return }
+        Task { @MainActor [weak self] in
+            do { try await target.review.sendAlert(markup: target.markup, recipient: target.recipient) }
+            catch is CancellationError { }
+            catch {
+                let alert = NSAlert(); alert.messageText = "Alert Not Sent"; alert.informativeText = error.localizedDescription
+                if let window = self?.window { _ = await alert.beginSheetModal(for: window) }
+            }
+        }
+    }
+    @objc private func chooseAlertMarkup(_ sender: NSMenuItem) {
+        guard let annotation = sender.representedObject as? PDFAnnotation, let review = reviewForAlerts?(),
+              let markup = review.alertTarget(annotation) else { return }
+        let location = window?.mouseLocationOutsideOfEventStream ?? .zero
+        Task { @MainActor [weak self] in
+            do {
+                let recipients = try await review.alertRecipients()
+                guard let self, self.reviewForAlerts?() === review, review.alertTarget(annotation) == markup else { return }
+                let menu = NSMenu(title: "Alert")
+                for recipient in recipients {
+                    let item = menu.addItem(withTitle: recipient.label, action: #selector(chooseAlertRecipient(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = AlertMenuTarget(review: review, markup: markup, recipient: recipient.id)
+                }
+                if recipients.isEmpty { let item = menu.addItem(withTitle: "No participants available", action: nil, keyEquivalent: ""); item.isEnabled = false }
+                menu.popUp(positioning: nil, at: self.convert(location, from: nil), in: self)
+            } catch {
+                let alert = NSAlert(); alert.messageText = "Participants Unavailable"; alert.informativeText = error.localizedDescription
+                if let window = self?.window { _ = await alert.beginSheetModal(for: window) }
+            }
+        }
+    }
+    var onAssignOriginalDrawingLayer: ((PDFPage, PDFLineworkIndex.NativeSelection, Int?) -> Void)?
+    private let originalDrawingHighlight = CAShapeLayer()
+    @objc private func chooseOriginalDrawingLayer(_ sender: NSMenuItem) {
+        guard let request = sender.representedObject as? OriginalDrawingMenuRequest, let page = request.page,
+              page.document === document, rectangleMarkup.canEdit() else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let source = self.reviewLayerPresentation.selectionSource(for: page)
+            defer { withExtendedLifetime(source?.1) {} }
+            let found = await self.lineworkSnapping.nativeSelection(request.point, on: source?.0 ?? page, tolerance: 8 / max(self.scaleFactor, 0.01))
+            guard page.document === self.document else { return }
+            guard let selection = found else {
+                let alert = NSAlert(); alert.messageText = "No Drawing Path Found"
+                alert.informativeText = "Right-click directly on a vector line. Scanned images and unsupported drawing structures cannot be assigned individually."
+                if let window = self.window { _ = await alert.beginSheetModal(for: window) }
+                return
+            }
+            self.originalDrawingHighlight.strokeColor = NSColor.systemOrange.cgColor
+            self.originalDrawingHighlight.fillColor = NSColor.clear.cgColor
+            self.originalDrawingHighlight.lineWidth = 2
+            self.originalDrawingHighlight.frame = self.bounds; self.originalDrawingHighlight.zPosition = 2200
+            let path = CGMutablePath()
+            for segment in selection.segments {
+                path.move(to: self.convert(segment.a, from: page)); path.addLine(to: self.convert(segment.b, from: page))
+            }
+            if selection.segmentCount > selection.segments.count { path.addRect(self.convert(selection.bounds, from: page)) }
+            self.originalDrawingHighlight.path = path
+            if self.originalDrawingHighlight.superlayer == nil { self.layer?.addSublayer(self.originalDrawingHighlight) }
+            defer { self.originalDrawingHighlight.removeFromSuperlayer() }
+            let menu = NSMenu(title: "Assign Drawing Path to Layer")
+            let existing = page.annotations.first { NativeDrawingAssignment.read($0)?.path == selection.path }
+            for (title, index) in [("Unassigned", Optional<Int>.none)] + (self.rectangleMarkup.layerState?.pdfLayers ?? []).enumerated().map({ ($0.element.name, Optional($0.offset)) }) {
+                let item = NSMenuItem(title: title, action: #selector(self.assignOriginalDrawingLayer(_:)), keyEquivalent: "")
+                item.target = self; item.representedObject = OriginalDrawingAssignmentRequest(page: page, selection: selection, layer: index)
+                item.isEnabled = existing?.isReadOnly != true && self.rectangleMarkup.canEdit()
+                item.state = existing != nil && MarkupLayers.pdfIndex(existing!) == index ? .on : .off
+                menu.addItem(item)
+            }
+            menu.popUp(positioning: nil, at: self.convert(request.point, from: page), in: self)
+        }
+    }
+    @objc private func assignOriginalDrawingLayer(_ sender: NSMenuItem) {
+        guard let request = sender.representedObject as? OriginalDrawingAssignmentRequest, let page = request.page,
+              page.document === document, rectangleMarkup.canEdit() else { return }
+        onAssignOriginalDrawingLayer?(page, request.selection, request.layer)
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         onActivatePane?()
         let menu = NSMenu(title: "PDF")
         let location = convert(event.locationInWindow, from: nil)
         if let page = page(for: location, nearest: false) {
             let point = convert(location, to: page)
+            if let review = reviewForAlerts?(), let annotation = page.annotations.reversed().first(where: {
+                $0.shouldDisplay && rectangleMarkup.layerIsVisible($0) && review.alertTarget($0) != nil &&
+                RectangleMarkupController.hitTest($0, at: point, tolerance: 8 / max(scaleFactor, 0.01))
+            }) {
+                let item = NSMenuItem(title: "Alert", action: nil, keyEquivalent: "")
+                let recipients = NSMenu(title: "Alert")
+                for recipient in review.cachedAlertRecipients {
+                    let child = recipients.addItem(withTitle: recipient.label, action: #selector(chooseAlertRecipient(_:)), keyEquivalent: "")
+                    child.target = self
+                    child.representedObject = AlertMenuTarget(review: review, markup: review.alertTarget(annotation)!, recipient: recipient.id)
+                }
+                if recipients.items.isEmpty {
+                    let child = recipients.addItem(withTitle: "Load Participants…", action: #selector(chooseAlertMarkup(_:)), keyEquivalent: "")
+                    child.target = self; child.representedObject = annotation
+                }
+                item.submenu = recipients; menu.addItem(item)
+                menu.addItem(.separator())
+            }
+            if onAssignOriginalDrawingLayer != nil, rectangleMarkup.canEdit(), !(rectangleMarkup.layerState?.pdfLayers.isEmpty ?? true) {
+                let original = menu.addItem(withTitle: "Assign Drawing Path to Layer…", action: #selector(chooseOriginalDrawingLayer(_:)), keyEquivalent: "")
+                original.target = self; original.representedObject = OriginalDrawingMenuRequest(page: page, point: point)
+                original.toolTip = "Select the original vector path under the pointer. The orange preview shows the whole painted path."
+                menu.addItem(.separator())
+            }
             if let annotation = page.annotations.reversed().first(where: { $0.shouldDisplay && rectangleMarkup.layerIsVisible($0) && rectangleMarkup.canAssignLayer($0) && RectangleMarkupController.hitTest($0, at: point, tolerance: 8 / max(scaleFactor, 0.01)) }) {
                 if !rectangleMarkup.selectedItems.contains(where: { $0 === annotation }) { rectangleMarkup.selectFromList(annotation) }
                 if ownsMarkupInteraction, let request = rectangleMarkup.nodeInsertion(for: annotation, at: point, tolerance: 8 / max(scaleFactor, 0.01)) {
@@ -3482,4 +3614,13 @@ final class MarkupPDFView: PDFView, NSTextFieldDelegate {
         ImageDocumentImport.droppedURL(from: sender.draggingPasteboard)
     }
 
+}
+
+@MainActor private final class OriginalDrawingMenuRequest: NSObject {
+    weak var page: PDFPage?; let point: CGPoint
+    init(page: PDFPage, point: CGPoint) { self.page = page; self.point = point }
+}
+@MainActor private final class OriginalDrawingAssignmentRequest: NSObject {
+    weak var page: PDFPage?; let selection: PDFLineworkIndex.NativeSelection; let layer: Int?
+    init(page: PDFPage, selection: PDFLineworkIndex.NativeSelection, layer: Int?) { self.page = page; self.selection = selection; self.layer = layer }
 }
